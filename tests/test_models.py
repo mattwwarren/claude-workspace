@@ -36,12 +36,12 @@ class TestSessionStatus:
 
 
 class TestSession:
-    def test_auto_id_generation(self) -> None:
+    def test_auto_id_generation(self, tmp_path: object) -> None:
         s = Session(
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/tmp/ws",
+            workspace_path="/dev/null",
         )
         assert len(s.id) == 8
         assert re.match(r"^[0-9a-f]{8}$", s.id)
@@ -52,7 +52,7 @@ class TestSession:
                 name="c/impl",
                 client="c",
                 purpose=SessionPurpose.IMPL,
-                workspace_path="/tmp/ws",
+                workspace_path="/dev/null",
             ).id
             for _ in range(10)
         }
@@ -63,7 +63,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/tmp/ws",
+            workspace_path="/dev/null",
         )
         assert s.status == SessionStatus.ACTIVE
 
@@ -72,7 +72,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/tmp/ws",
+            workspace_path="/dev/null",
         )
         assert s.started_at.tzinfo is not None
         assert s.started_at.tzinfo == UTC
@@ -82,7 +82,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/tmp/ws",
+            workspace_path="/dev/null",
         )
         assert s.worktree_path is None
         assert s.branch is None
@@ -99,7 +99,7 @@ class TestSession:
             client="c",
             purpose=SessionPurpose.IMPL,
             status=SessionStatus.BACKGROUNDED,
-            workspace_path="/tmp/ws",
+            workspace_path="/dev/null",
             started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
             backgrounded_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC),
         )
@@ -117,20 +117,20 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/tmp/ws",
+            workspace_path="/dev/null",
         )
         assert s.id == "custom99"
 
 
 class TestClientConfig:
-    def test_defaults(self) -> None:
-        c = ClientConfig(name="test", workspace_path="/tmp/ws")
+    def test_defaults(self, tmp_path: object) -> None:
+        c = ClientConfig(name="test", workspace_path="/dev/null")
         assert c.default_branch == "main"
         assert c.worktree_base is None
 
     def test_custom_branch(self) -> None:
         c = ClientConfig(
-            name="test", workspace_path="/tmp/ws", default_branch="develop"
+            name="test", workspace_path="/dev/null", default_branch="develop"
         )
         assert c.default_branch == "develop"
 
@@ -174,7 +174,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/tmp/ws",
+                    workspace_path="/dev/null",
                 ),
                 Session(
                     id="new",
@@ -182,7 +182,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.BACKGROUNDED,
-                    workspace_path="/tmp/ws",
+                    workspace_path="/dev/null",
                 ),
             ]
         )
@@ -213,14 +213,14 @@ class TestCwState:
                     name="c/impl",
                     client="c",
                     purpose=SessionPurpose.IMPL,
-                    workspace_path="/tmp/ws",
+                    workspace_path="/dev/null",
                 ),
                 Session(
                     id="second",
                     name="c/impl",
                     client="c",
                     purpose=SessionPurpose.IMPL,
-                    workspace_path="/tmp/ws",
+                    workspace_path="/dev/null",
                 ),
             ]
         )

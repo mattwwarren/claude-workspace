@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from cw import zellij
 from cw.config import get_client, load_state, save_state

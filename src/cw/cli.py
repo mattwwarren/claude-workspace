@@ -9,9 +9,18 @@ from datetime import UTC, datetime
 import click
 from click.shell_completion import CompletionItem
 
-from cw import __version__
+from cw import __version__, zellij
+from cw.config import load_clients, load_state, save_state, show_config
 from cw.exceptions import CwError
 from cw.models import CwState, Session, SessionPurpose, SessionStatus
+from cw.session import (
+    CW_SESSION,
+    background_session,
+    hand_to_session,
+    resume_session,
+    start_session,
+)
+from cw.zellij import go_to_tab
 
 
 def handle_errors[F: Callable[..., object]](fn: F) -> F:
@@ -28,13 +37,11 @@ def handle_errors[F: Callable[..., object]](fn: F) -> F:
 
 
 def _complete_client(
-    ctx: click.Context,
-    param: click.Parameter,
+    _ctx: click.Context,
+    _param: click.Parameter,
     incomplete: str,
 ) -> list[CompletionItem]:
     """Complete client names from config."""
-    from cw.config import load_clients
-
     return [
         CompletionItem(name)
         for name in load_clients()
@@ -43,13 +50,11 @@ def _complete_client(
 
 
 def _complete_session(
-    ctx: click.Context,
-    param: click.Parameter,
+    _ctx: click.Context,
+    _param: click.Parameter,
     incomplete: str,
 ) -> list[CompletionItem]:
     """Complete session names from backgrounded sessions."""
-    from cw.config import load_state
-
     state = load_state()
     return [
         CompletionItem(s.name)
@@ -75,8 +80,6 @@ def main() -> None:
 @handle_errors
 def start(client: str, purpose: str) -> None:
     """Start or resume a Claude Code session for a client."""
-    from cw.session import start_session
-
     start_session(client, purpose)
 
 
@@ -84,8 +87,6 @@ def start(client: str, purpose: str) -> None:
 @handle_errors
 def bg() -> None:
     """Background the current session (auto-handoff)."""
-    from cw.session import background_session
-
     background_session()
 
 
@@ -94,8 +95,6 @@ def bg() -> None:
 @handle_errors
 def resume(session_name: str) -> None:
     """Resume a backgrounded session."""
-    from cw.session import resume_session
-
     resume_session(session_name)
 
 
@@ -111,8 +110,6 @@ def list_sessions() -> None:
 @handle_errors
 def switch(client: str) -> None:
     """Switch to a client's Zellij tab."""
-    from cw.zellij import go_to_tab
-
     go_to_tab(client)
 
 
@@ -142,8 +139,6 @@ def hand(target: str, message: str, source: str | None) -> None:
 
     Example: cw hand debt "Fix the ruff violations in session.py"
     """
-    from cw.session import hand_to_session
-
     hand_to_session(target, message, source_purpose=source)
 
 
@@ -151,8 +146,6 @@ def hand(target: str, message: str, source: str | None) -> None:
 @handle_errors
 def config() -> None:
     """Show current configuration."""
-    from cw.config import show_config
-
     show_config()
 
 
@@ -179,8 +172,6 @@ def _relative_time(dt: datetime | None) -> str:
 
 def _display_sessions() -> None:
     """Display all tracked sessions."""
-    from cw.config import load_state
-
     state = load_state()
 
     if not state.sessions:
@@ -206,10 +197,6 @@ def _display_sessions() -> None:
 
 def _check_and_mark_dead_sessions(state: CwState) -> list[Session]:
     """Check active sessions for dead panes, mark them COMPLETED."""
-    from cw import zellij
-    from cw.config import save_state
-    from cw.session import CW_SESSION
-
     if not zellij.session_exists(CW_SESSION):
         return []
 
@@ -232,8 +219,6 @@ def _check_and_mark_dead_sessions(state: CwState) -> list[Session]:
 
 def _display_status() -> None:
     """Show a summary dashboard across all clients."""
-    from cw.config import load_clients, load_state
-
     state = load_state()
     clients = load_clients()
 

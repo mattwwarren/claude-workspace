@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
-from cw.cli import _complete_client, _complete_session, _display_sessions, _display_status, main
-from cw.config import save_state
+from cw.cli import (
+    _complete_client,
+    _complete_session,
+    _display_sessions,
+    _display_status,
+    main,
+)
+from cw.config import load_state, save_state
+from cw.exceptions import CwError
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 
 class TestCli:
@@ -31,25 +41,25 @@ class TestCli:
 
     def test_start_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.session.start_session") as mock_start:
+        with patch("cw.cli.start_session") as mock_start:
             runner.invoke(main, ["start", "my-client"])
             mock_start.assert_called_once_with("my-client", "impl")
 
     def test_start_with_purpose(self) -> None:
         runner = CliRunner()
-        with patch("cw.session.start_session") as mock_start:
+        with patch("cw.cli.start_session") as mock_start:
             runner.invoke(main, ["start", "--purpose", "review", "my-client"])
             mock_start.assert_called_once_with("my-client", "review")
 
     def test_bg_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.session.background_session") as mock_bg:
+        with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg"])
             mock_bg.assert_called_once_with()
 
     def test_resume_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.session.resume_session") as mock_resume:
+        with patch("cw.cli.resume_session") as mock_resume:
             runner.invoke(main, ["resume", "my-session"])
             mock_resume.assert_called_once_with("my-session")
 
@@ -61,7 +71,7 @@ class TestCli:
 
     def test_switch_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.zellij.go_to_tab") as mock_tab:
+        with patch("cw.cli.go_to_tab") as mock_tab:
             runner.invoke(main, ["switch", "my-client"])
             mock_tab.assert_called_once_with("my-client")
 
@@ -73,16 +83,14 @@ class TestCli:
 
     def test_config_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.config.show_config") as mock_config:
+        with patch("cw.cli.show_config") as mock_config:
             runner.invoke(main, ["config"])
             mock_config.assert_called_once()
 
     def test_error_display(self) -> None:
-        from cw.exceptions import CwError
-
         runner = CliRunner()
         with patch(
-            "cw.session.start_session",
+            "cw.cli.start_session",
             side_effect=CwError("Test error message"),
         ):
             result = runner.invoke(main, ["start", "bad-client"])
@@ -127,12 +135,9 @@ class TestCompleteCallbacks:
         clients_file.write_text(
             "clients:\n"
             "  alpha:\n"
-            "    workspace_path: /tmp/a\n"
-            "  beta:\n"
-            "    workspace_path: /tmp/b\n"
-            "  apricot:\n"
-            "    workspace_path: /tmp/c\n"
-        )
+            "    workspace_path: /tmp/a\n"            "  beta:\n"
+            "    workspace_path: /tmp/b\n"            "  apricot:\n"
+            "    workspace_path: /tmp/c\n"        )
 
         # None ctx/param are fine - callbacks don't use them
         items = _complete_client(None, None, "a")  # type: ignore[arg-type]
@@ -149,10 +154,8 @@ class TestCompleteCallbacks:
         clients_file.write_text(
             "clients:\n"
             "  alpha:\n"
-            "    workspace_path: /tmp/a\n"
-            "  beta:\n"
-            "    workspace_path: /tmp/b\n"
-        )
+            "    workspace_path: /tmp/a\n"            "  beta:\n"
+            "    workspace_path: /tmp/b\n"        )
 
         items = _complete_client(None, None, "")  # type: ignore[arg-type]
         names = [item.value for item in items]
@@ -164,8 +167,6 @@ class TestCompleteCallbacks:
         tmp_config_dir: Path,
         sample_client: ClientConfig,
     ) -> None:
-        from cw.config import save_state
-
         state = CwState(
             sessions=[
                 Session(
@@ -198,8 +199,6 @@ class TestCompleteCallbacks:
         tmp_config_dir: Path,
         sample_client: ClientConfig,
     ) -> None:
-        from cw.config import save_state
-
         state = CwState(
             sessions=[
                 Session(
@@ -302,10 +301,8 @@ class TestShowStatus:
         clients_file.write_text(
             "clients:\n"
             "  test-client:\n"
-            "    workspace_path: /tmp/ws\n"
-            "  other-client:\n"
-            "    workspace_path: /tmp/ws2\n"
-        )
+            "    workspace_path: /tmp/ws\n"            "  other-client:\n"
+            "    workspace_path: /tmp/ws2\n"        )
 
         save_state(sample_state)
 
@@ -347,10 +344,18 @@ class TestShowStatus:
         save_state(state)
 
         # Zellij session exists but impl pane has exited
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
+        monkeypatch.setattr(
+            "cw.zellij.session_exists", lambda _name: True
+        )
+
+        def _mock_check_pane_health(
+            *, session: str | None = None
+        ) -> dict[str, bool]:
+            return {"impl": False, "review": True, "debt": True}
+
         monkeypatch.setattr(
             "cw.zellij.check_pane_health",
-            lambda session=None: {"impl": False, "review": True, "debt": True},
+            _mock_check_pane_health,
         )
 
         _display_status()
@@ -360,7 +365,5 @@ class TestShowStatus:
         assert "Active sessions:    0" in output
 
         # Verify state was persisted
-        from cw.config import load_state
-
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.COMPLETED

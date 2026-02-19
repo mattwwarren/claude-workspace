@@ -47,7 +47,53 @@ target-version = "py313"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+    "N",    # pep8-naming
+    "S",    # flake8-bandit (security)
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "DTZ",  # flake8-datetimez
+    "T20",  # flake8-print
+    "PT",   # flake8-pytest-style
+    "Q",    # flake8-quotes
+    "RSE",  # flake8-raise
+    "RET",  # flake8-return
+    "SLF",  # flake8-self
+    "ARG",  # flake8-unused-arguments
+    "PIE",  # flake8-pie
+    "PLC",  # pylint convention
+    "PLE",  # pylint error
+    "PLW",  # pylint warning
+    "TID",  # flake8-tidy-imports
+    "TCH",  # flake8-type-checking
+    "PERF", # perflint
+    "FURB", # refurb
+]
+ignore = [
+    "T201",  # print() is our UI output mechanism (via click.echo, but also direct)
+    "S603",  # subprocess calls are core to zellij integration
+    "S607",  # partial executable path (zellij) is expected
+    "S701",  # jinja2 autoescape - templates render KDL config, not HTML
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/cw/models.py" = [
+    "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
+]
+"tests/**" = [
+    "S101",   # assert is fine in tests
+    "ARG001", # unused function args common in fixtures/mocks
+    "ARG002", # unused method args common in test classes
+    "SLF001", # private member access is fine in tests
+    "PT004",  # fixture doesn't return anything - not always needed
+]
 
 [tool.mypy]
 python_version = "3.13"

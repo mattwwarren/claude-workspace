@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -18,28 +18,37 @@ from cw.config import (
 from cw.exceptions import CwError
 from cw.models import CwState, Session, SessionPurpose
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 class TestLoadClients:
     def test_missing_file_returns_empty(self, tmp_config_dir: Path) -> None:
         result = load_clients()
         assert result == {}
 
-    def test_valid_yaml_returns_clients(self, tmp_config_dir: Path) -> None:
+    def test_valid_yaml_returns_clients(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        acme_dir = tmp_path / "acme"
+        beta_dir = tmp_path / "beta"
+        acme_dir.mkdir()
+        beta_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
             "  acme:\n"
-            "    workspace_path: /tmp/acme\n"
+            f"    workspace_path: {acme_dir}\n"
             "    default_branch: main\n"
             "  beta:\n"
-            "    workspace_path: /tmp/beta\n"
+            f"    workspace_path: {beta_dir}\n"
         )
         result = load_clients()
         assert len(result) == 2
         assert "acme" in result
         assert "beta" in result
         assert result["acme"].name == "acme"
-        assert result["acme"].workspace_path == Path("/tmp/acme")
+        assert result["acme"].workspace_path == acme_dir
 
     def test_empty_yaml_returns_empty(self, tmp_config_dir: Path) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -55,34 +64,48 @@ class TestLoadClients:
 
 
 class TestGetClient:
-    def test_valid_name_returns_config(self, tmp_config_dir: Path) -> None:
+    def test_valid_name_returns_config(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        acme_dir = tmp_path / "acme"
+        acme_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
             "  acme:\n"
-            "    workspace_path: /tmp/acme\n"
+            f"    workspace_path: {acme_dir}\n"
         )
         result = get_client("acme")
         assert result.name == "acme"
 
-    def test_invalid_name_raises(self, tmp_config_dir: Path) -> None:
+    def test_invalid_name_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        acme_dir = tmp_path / "acme"
+        acme_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
             "  acme:\n"
-            "    workspace_path: /tmp/acme\n"
+            f"    workspace_path: {acme_dir}\n"
         )
         with pytest.raises(CwError, match="Unknown client 'nope'"):
             get_client("nope")
 
-    def test_error_shows_available_clients(self, tmp_config_dir: Path) -> None:
+    def test_error_shows_available_clients(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        alpha_dir = tmp_path / "alpha"
+        beta_dir = tmp_path / "beta"
+        alpha_dir.mkdir()
+        beta_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
             "  alpha:\n"
-            "    workspace_path: /tmp/alpha\n"
+            f"    workspace_path: {alpha_dir}\n"
             "  beta:\n"
-            "    workspace_path: /tmp/beta\n"
+            f"    workspace_path: {beta_dir}\n"
         )
         with pytest.raises(CwError, match="Available: alpha, beta"):
             get_client("nope")
@@ -128,7 +151,11 @@ class TestLoadSaveState:
         state = load_state()
         assert state.sessions == []
 
-    def test_round_trip(self, tmp_config_dir: Path) -> None:
+    def test_round_trip(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
         state = CwState(
             sessions=[
                 Session(
@@ -136,7 +163,7 @@ class TestLoadSaveState:
                     name="c/impl",
                     client="c",
                     purpose=SessionPurpose.IMPL,
-                    workspace_path="/tmp/ws",
+                    workspace_path=ws_dir,
                 )
             ]
         )
@@ -186,32 +213,38 @@ class TestShowConfig:
         assert "No clients configured" in output
 
     def test_with_clients(
-        self, tmp_config_dir: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        acme_dir = tmp_path / "acme"
+        acme_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
             "  acme:\n"
-            "    workspace_path: /tmp/acme\n"
+            f"    workspace_path: {acme_dir}\n"
             "    default_branch: develop\n"
         )
         show_config()
         output = capsys.readouterr().out
         assert "acme:" in output
-        assert "/tmp/acme" in output
+        assert str(acme_dir) in output
         assert "develop" in output
 
     def test_with_worktree(
-        self, tmp_config_dir: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        acme_dir = tmp_path / "acme"
+        worktree_dir = tmp_path / "acme-worktrees"
+        acme_dir.mkdir()
+        worktree_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
             "  acme:\n"
-            "    workspace_path: /tmp/acme\n"
-            "    worktree_base: /tmp/acme-worktrees\n"
+            f"    workspace_path: {acme_dir}\n"
+            f"    worktree_base: {worktree_dir}\n"
         )
         show_config()
         output = capsys.readouterr().out
         assert "worktrees:" in output
-        assert "/tmp/acme-worktrees" in output
+        assert str(worktree_dir) in output

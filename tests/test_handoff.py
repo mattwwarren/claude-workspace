@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cw.handoff import (
     extract_resumption_prompt,
     find_handoffs_newer_than,
     find_latest_handoff,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestFindLatestHandoff:

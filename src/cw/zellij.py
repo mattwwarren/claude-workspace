@@ -7,11 +7,14 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jinja2 import DictLoader, Environment
 
 from cw.exceptions import ZellijError
-from cw.models import ClientConfig
+
+if TYPE_CHECKING:
+    from cw.models import ClientConfig
 
 GENERATED_LAYOUTS_DIR = Path.home() / ".config" / "zellij" / "layouts"
 
@@ -55,6 +58,7 @@ layout {
 _env = Environment(
     loader=DictLoader({"client.kdl.j2": CLIENT_LAYOUT_TEMPLATE}),
     keep_trailing_newline=True,
+    autoescape=False,  # KDL config templates, not HTML - no XSS risk
 )
 
 
@@ -212,7 +216,7 @@ def _get_pane_id_for_name(
         if not in_first_tab:
             continue
         # Match panes with commands (these are terminal panes)
-        if re.search(r'pane\b.*\bcommand=', line):
+        if re.search(r"pane\b.*\bcommand=", line):
             match = re.search(r'name="([^"]+)"', line)
             if match and match.group(1) == pane_name:
                 return f"terminal_{terminal_idx}"
@@ -280,7 +284,7 @@ def check_pane_health(session: str | None = None) -> dict[str, bool]:
             continue
         pane_name = name_match.group(1)
         # A pane with command= and no "exited" marker is alive
-        has_command = bool(re.search(r'\bcommand=', line))
+        has_command = bool(re.search(r"\bcommand=", line))
         is_exited = "exited" in line.lower()
         health[pane_name] = has_command and not is_exited
 

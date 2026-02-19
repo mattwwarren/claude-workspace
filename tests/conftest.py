@@ -10,7 +10,7 @@ import pytest
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
 
 
-@pytest.fixture()
+@pytest.fixture
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect config module paths to tmp_path."""
     config_dir = tmp_path / ".config" / "cw"
@@ -29,13 +29,13 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-@pytest.fixture()
+@pytest.fixture
 def tmp_state_dir(tmp_config_dir: Path) -> Path:
     """Return the state directory within tmp_config_dir."""
     return tmp_config_dir / ".local" / "share" / "cw"
 
 
-@pytest.fixture()
+@pytest.fixture
 def sample_client(tmp_path: Path) -> ClientConfig:
     """A ClientConfig pointing at tmp_path."""
     workspace = tmp_path / "workspace" / "test-project"
@@ -47,7 +47,7 @@ def sample_client(tmp_path: Path) -> ClientConfig:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def sample_session(sample_client: ClientConfig) -> Session:
     """A Session with known values."""
     return Session(
@@ -63,7 +63,7 @@ def sample_session(sample_client: ClientConfig) -> Session:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def sample_state(sample_client: ClientConfig) -> CwState:
     """A CwState with a mix of active/backgrounded/completed sessions."""
     return CwState(
@@ -103,8 +103,10 @@ def sample_state(sample_client: ClientConfig) -> CwState:
     )
 
 
-@pytest.fixture()
-def mock_zellij(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object, ...]]]:
+@pytest.fixture
+def mock_zellij(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> dict[str, list[tuple[object, ...]]]:
     """Patch all cw.zellij functions used by session.py, returning call tracker."""
     calls: dict[str, list[tuple[object, ...]]] = {
         "is_installed": [],
@@ -116,6 +118,7 @@ def mock_zellij(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object,
         "go_to_tab": [],
         "focus_pane": [],
         "write_to_pane": [],
+        "check_pane_health": [],
     }
 
     def _is_installed() -> bool:
@@ -132,7 +135,7 @@ def mock_zellij(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object,
 
     def _generate_layout(c: object, **kwargs: object) -> Path:
         calls["generate_layout"].append((c, kwargs))
-        return Path("/tmp/layout.kdl")
+        return Path(tmp_path / "layout.kdl")
 
     def _create_and_attach(s: str, lp: object) -> None:
         calls["create_and_attach"].append((s, lp))
@@ -148,6 +151,10 @@ def mock_zellij(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object,
 
     def _write_to_pane(t: str, session: str | None = None) -> None:
         calls["write_to_pane"].append((t, session))
+
+    def _check_pane_health(session: str | None = None) -> dict[str, bool]:
+        calls["check_pane_health"].append((session,))
+        return {}
 
     monkeypatch.setattr("cw.zellij.is_installed", _is_installed)
     monkeypatch.setattr(
@@ -172,11 +179,14 @@ def mock_zellij(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object,
     monkeypatch.setattr(
         "cw.zellij.write_to_pane", _write_to_pane
     )
+    monkeypatch.setattr(
+        "cw.zellij.check_pane_health", _check_pane_health
+    )
 
     return calls
 
 
-@pytest.fixture()
+@pytest.fixture
 def sample_handoff_file(tmp_path: Path) -> Path:
     """Create a .handoffs/session-*.md with valid resumption prompt."""
     handoffs_dir = tmp_path / "workspace" / "test-project" / ".handoffs"

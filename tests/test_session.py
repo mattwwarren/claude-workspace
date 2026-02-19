@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cw.config import save_state
+from cw.config import load_state, save_state
 from cw.exceptions import CwError
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.session import background_session, resume_session, start_session
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestStartSession:
@@ -20,8 +23,6 @@ class TestStartSession:
         mock_zellij: dict[str, list[Any]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from cw.config import load_state
-
         # Set up client config
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
@@ -29,8 +30,6 @@ class TestStartSession:
             f"  test-client:\n"
             f"    workspace_path: {sample_client.workspace_path}\n"
         )
-
-        from cw.session import start_session
 
         start_session("test-client", "impl")
 
@@ -78,8 +77,6 @@ class TestStartSession:
         )
         save_state(state)
 
-        from cw.session import start_session
-
         start_session("test-client", "impl")
 
         output = capsys.readouterr().out
@@ -120,8 +117,6 @@ class TestStartSession:
         # Mock Zellij session as running so the active check doesn't clean up
         monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
 
-        from cw.session import start_session
-
         start_session("test-client", "impl")
 
         output = capsys.readouterr().out
@@ -135,8 +130,6 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from cw.config import load_state
-
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -162,12 +155,16 @@ class TestStartSession:
 
         # Zellij session exists but impl pane has crashed
         monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
+
+        def _mock_check_pane_health(
+            *, session: str | None = None
+        ) -> dict[str, bool]:
+            return {"impl": False}
+
         monkeypatch.setattr(
             "cw.zellij.check_pane_health",
-            lambda session=None: {"impl": False},
+            _mock_check_pane_health,
         )
-
-        from cw.session import start_session
 
         start_session("test-client", "impl")
 
@@ -176,7 +173,9 @@ class TestStartSession:
 
         # The crashed session should be marked COMPLETED
         updated = load_state()
-        completed = [s for s in updated.sessions if s.status == SessionStatus.COMPLETED]
+        completed = [
+            s for s in updated.sessions if s.status == SessionStatus.COMPLETED
+        ]
         assert len(completed) >= 1
 
     def test_zellij_not_installed_raises(
@@ -185,8 +184,6 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr("cw.zellij.is_installed", lambda: False)
-
-        from cw.session import start_session
 
         with pytest.raises(CwError, match="not installed"):
             start_session("test-client", "impl")
@@ -200,8 +197,6 @@ class TestBackgroundSession:
         mock_zellij: dict[str, list[Any]],
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from cw.config import load_state
-
         state = CwState(
             sessions=[
                 Session(
@@ -216,8 +211,6 @@ class TestBackgroundSession:
         )
         save_state(state)
 
-        from cw.session import background_session
-
         background_session("test-client/impl")
 
         updated = load_state()
@@ -229,8 +222,6 @@ class TestBackgroundSession:
         sample_client: ClientConfig,
         mock_zellij: dict[str, list[Any]],
     ) -> None:
-        from cw.config import load_state
-
         state = CwState(
             sessions=[
                 Session(
@@ -244,8 +235,6 @@ class TestBackgroundSession:
             ]
         )
         save_state(state)
-
-        from cw.session import background_session
 
         background_session()
 
@@ -280,8 +269,6 @@ class TestBackgroundSession:
         )
         save_state(state)
 
-        from cw.session import background_session
-
         with pytest.raises(CwError, match="Multiple active"):
             background_session()
 
@@ -291,8 +278,6 @@ class TestBackgroundSession:
         mock_zellij: dict[str, list[Any]],
     ) -> None:
         save_state(CwState())
-
-        from cw.session import background_session
 
         with pytest.raises(CwError, match="No active sessions"):
             background_session()
@@ -317,8 +302,6 @@ class TestBackgroundSession:
         )
         save_state(state)
 
-        from cw.session import background_session
-
         with pytest.raises(CwError, match="not active"):
             background_session("c/impl")
 
@@ -329,8 +312,6 @@ class TestBackgroundSession:
         mock_zellij: dict[str, list[Any]],
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from cw.config import load_state
-
         # Create a handoff file
         handoffs_dir = sample_client.workspace_path / ".handoffs"
         handoffs_dir.mkdir(parents=True)
@@ -351,8 +332,6 @@ class TestBackgroundSession:
         )
         save_state(state)
 
-        from cw.session import background_session
-
         background_session("test-client/impl")
 
         updated = load_state()
@@ -367,8 +346,6 @@ class TestBackgroundSession:
     ) -> None:
         save_state(CwState())
 
-        from cw.session import background_session
-
         with pytest.raises(CwError, match="Session not found"):
             background_session("nonexistent")
 
@@ -382,8 +359,6 @@ class TestResumeSession:
         sample_handoff_file: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from cw.config import load_state
-
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -405,8 +380,6 @@ class TestResumeSession:
             ]
         )
         save_state(state)
-
-        from cw.session import resume_session
 
         resume_session("test-client/impl")
 
@@ -445,8 +418,6 @@ class TestResumeSession:
         )
         save_state(state)
 
-        from cw.session import resume_session
-
         resume_session("test-client/impl")
 
         output = capsys.readouterr().out
@@ -479,8 +450,6 @@ class TestResumeSession:
         )
         save_state(state)
 
-        from cw.session import resume_session
-
         with pytest.raises(CwError, match="not backgrounded"):
             resume_session("test-client/impl")
 
@@ -490,8 +459,6 @@ class TestResumeSession:
         mock_zellij: dict[str, list[Any]],
     ) -> None:
         save_state(CwState())
-
-        from cw.session import resume_session
 
         with pytest.raises(CwError, match="Session not found"):
             resume_session("nonexistent")
@@ -526,8 +493,6 @@ class TestResumeSession:
         )
         save_state(state)
 
-        from cw.session import resume_session
-
         resume_session("test-client/impl")
 
         output = capsys.readouterr().out
@@ -545,9 +510,11 @@ class TestResumeSession:
         # Override mock_zellij's in_zellij_session to return True
         monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
         # Mock session_exists to return True (session already running)
-        monkeypatch.setattr("cw.zellij.session_exists", lambda name: True)
+        monkeypatch.setattr(
+            "cw.zellij.session_exists", lambda _name: True
+        )
         # Skip the sleep
-        monkeypatch.setattr("cw.session.time.sleep", lambda s: None)
+        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
 
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
@@ -573,11 +540,7 @@ class TestResumeSession:
         )
         save_state(state)
 
-        from cw.session import resume_session
-
         resume_session("test-client/impl")
 
         # Verify write_to_pane was called (for "claude\n" and prompt)
         assert len(mock_zellij["write_to_pane"]) >= 2
-
-

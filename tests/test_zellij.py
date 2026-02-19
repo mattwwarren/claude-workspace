@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
-
-import pytest
 
 from cw.models import ClientConfig
 from cw.zellij import (
+    check_pane_health,
     current_session_name,
     focus_pane,
     generate_layout,
@@ -20,14 +19,21 @@ from cw.zellij import (
     write_to_pane,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
+
 
 class TestIsInstalled:
     def test_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cw.zellij.shutil.which", lambda cmd: "/usr/bin/zellij")
+        monkeypatch.setattr(
+            "cw.zellij.shutil.which", lambda _cmd: "/usr/bin/zellij"
+        )
         assert is_installed() is True
 
     def test_not_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cw.zellij.shutil.which", lambda cmd: None)
+        monkeypatch.setattr("cw.zellij.shutil.which", lambda _cmd: None)
         assert is_installed() is False
 
 
@@ -36,27 +42,35 @@ class TestListSessions:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "session1 [created ...]\nsession2 [created ...]\n"
-        monkeypatch.setattr("cw.zellij._run_zellij", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
         assert list_sessions() == ["session1", "session2"]
 
     def test_empty_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 1
-        monkeypatch.setattr("cw.zellij._run_zellij", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
         assert list_sessions() == []
 
     def test_empty_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = ""
-        monkeypatch.setattr("cw.zellij._run_zellij", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
         assert list_sessions() == []
 
     def test_strips_whitespace(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "  cw [Created 5h ago]  \n"
-        monkeypatch.setattr("cw.zellij._run_zellij", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
         assert list_sessions() == ["cw"]
 
 
@@ -65,14 +79,18 @@ class TestSessionExists:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "cw [created ...]\n"
-        monkeypatch.setattr("cw.zellij._run_zellij", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
         assert session_exists("cw") is True
 
     def test_not_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "other-session [created ...]\n"
-        monkeypatch.setattr("cw.zellij._run_zellij", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
         assert session_exists("cw") is False
 
 
@@ -93,11 +111,15 @@ class TestGenerateLayout:
         content = result.read_text()
         assert "/home/user/projects/test" in content
 
-    def test_creates_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_creates_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         layouts_dir = tmp_path / "new" / "layouts"
         monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
 
-        client = ClientConfig(name="test", workspace_path="/tmp/ws")
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="test", workspace_path=ws_dir)
         generate_layout(client)
         assert layouts_dir.exists()
 
@@ -107,7 +129,9 @@ class TestGenerateLayout:
         layouts_dir = tmp_path / "layouts"
         monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
 
-        client = ClientConfig(name="proj", workspace_path="/tmp/ws")
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="proj", workspace_path=ws_dir)
         result = generate_layout(client)
         content = result.read_text()
         assert 'name="impl"' in content
@@ -188,6 +212,96 @@ class TestFocusPane:
         focus_calls = [c for c in calls if "focus-next-pane" in c]
         # Should cycle 3 times: review->debt->files->impl
         assert len(focus_calls) == 3
+
+
+class TestCheckPaneHealth:
+    def test_all_panes_alive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        layout = (
+            'tab name="Tab #1" {\n'
+            '  pane command="yazi" name="files" {\n'
+            '  pane command="claude" name="impl" {\n'
+            '  pane command="claude" name="review" {\n'
+            '  pane command="claude" name="debt" {\n'
+        )
+        mock_result = MagicMock(returncode=0, stdout=layout)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        health = check_pane_health()
+        assert health == {
+            "files": True,
+            "impl": True,
+            "review": True,
+            "debt": True,
+        }
+
+    def test_exited_pane_detected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        layout = (
+            'tab name="Tab #1" {\n'
+            '  pane command="yazi" name="files" {\n'
+            '  pane command="claude" name="impl" exited {\n'
+            '  pane command="claude" name="review" {\n'
+            '  pane command="claude" name="debt" exited {\n'
+        )
+        mock_result = MagicMock(returncode=0, stdout=layout)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        health = check_pane_health()
+        assert health["impl"] is False
+        assert health["review"] is True
+        assert health["debt"] is False
+
+    def test_pane_without_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        layout = (
+            'tab name="Tab #1" {\n'
+            '  pane name="shell" {\n'
+        )
+        mock_result = MagicMock(returncode=0, stdout=layout)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        health = check_pane_health()
+        assert health["shell"] is False
+
+    def test_returns_empty_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_result = MagicMock(returncode=1)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        assert check_pane_health() == {}
+
+    def test_only_first_tab(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        layout = (
+            'tab name="Tab #1" {\n'
+            '  pane command="claude" name="impl" {\n'
+            'tab name="Tab #2" {\n'
+            '  pane command="claude" name="extra" {\n'
+        )
+        mock_result = MagicMock(returncode=0, stdout=layout)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        health = check_pane_health()
+        assert "impl" in health
+        assert "extra" not in health
+
+    def test_passes_session_arg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured_args: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, check: bool = True) -> MagicMock:
+            captured_args.append(args)
+            return MagicMock(returncode=0, stdout='tab name="T" {\n')
+
+        monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
+        check_pane_health(session="cw")
+        assert "-s" in captured_args[0]
+        assert "cw" in captured_args[0]
 
 
 class TestInZellijSession:
