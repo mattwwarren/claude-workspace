@@ -37,10 +37,17 @@ class TestStartSession:
         start_session("test-client", "impl")
 
         state = load_state()
-        assert len(state.sessions) == 1
-        assert state.sessions[0].client == "test-client"
-        assert state.sessions[0].purpose == SessionPurpose.IMPL
-        assert state.sessions[0].status == SessionStatus.ACTIVE
+        # Fresh start creates sessions for all purposes (impl, review, debt)
+        assert len(state.sessions) == 3
+        purposes = {s.purpose for s in state.sessions}
+        assert purposes == {
+            SessionPurpose.IMPL,
+            SessionPurpose.REVIEW,
+            SessionPurpose.DEBT,
+        }
+        for s in state.sessions:
+            assert s.client == "test-client"
+            assert s.status == SessionStatus.ACTIVE
 
     def test_existing_backgrounded_triggers_resume(
         self,

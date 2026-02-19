@@ -26,13 +26,19 @@ layout {
         pane split_direction="horizontal" size="80%" {
             pane size="70%" name="impl" focus=true {
                 cwd "{{ workspace_path }}"
+                command "claude"
+                args {{ panes.impl.claude_args }}
             }
             pane split_direction="vertical" size="30%" {
                 pane name="review" {
                     cwd "{{ workspace_path }}"
+                    command "claude"
+                    args {{ panes.review.claude_args }}
                 }
                 pane name="debt" {
                     cwd "{{ workspace_path }}"
+                    command "claude"
+                    args {{ panes.debt.claude_args }}
                 }
             }
         }
@@ -97,15 +103,32 @@ def session_exists(session_name: str) -> bool:
     return session_name in list_sessions()
 
 
-def generate_layout(client: ClientConfig) -> Path:
-    """Render the layout template for a client, returning the output path."""
+def generate_layout(
+    client: ClientConfig,
+    panes: dict[str, dict[str, str]] | None = None,
+) -> Path:
+    """Render the layout template for a client, returning the output path.
+
+    Args:
+        client: Client configuration.
+        panes: Optional per-pane config. Each key is a pane name (impl, review, debt)
+               with a dict containing 'claude_args' (pre-formatted KDL args string).
+    """
     GENERATED_LAYOUTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = GENERATED_LAYOUTS_DIR / f"cw-{client.name}.kdl"
+
+    # Default: fresh claude sessions with no special args
+    if panes is None:
+        panes = {
+            name: {"claude_args": '""'}
+            for name in ("impl", "review", "debt")
+        }
 
     template = _env.get_template("client.kdl.j2")
     rendered = template.render(
         client_name=client.name,
         workspace_path=str(client.workspace_path),
+        panes=panes,
     )
     output_path.write_text(rendered)
     return output_path
@@ -134,24 +157,38 @@ def attach_session(session_name: str) -> None:
     subprocess.run(["zellij", "attach", session_name], check=False)
 
 
-def write_to_pane(text: str) -> None:
+def write_to_pane(text: str, session: str | None = None) -> None:
     """Write text to the currently focused Zellij pane.
 
-    Must be called from within a Zellij session.
+    Args:
+        text: Text to inject as keystrokes.
+        session: Target a specific session by name (for remote control).
+                 If None, targets the current session (must be inside one).
     """
-    _run_zellij("action", "write-chars", text)
+    if session:
+        _run_zellij("-s", session, "action", "write-chars", text)
+    else:
+        _run_zellij("action", "write-chars", text)
 
 
-def go_to_tab(tab_name: str) -> None:
+def go_to_tab(tab_name: str, session: str | None = None) -> None:
     """Switch to a named tab in the current Zellij session."""
-    result = _run_zellij("action", "go-to-tab-name", tab_name, check=False)
+    if session:
+        args = ["-s", session, "action", "go-to-tab-name", tab_name]
+    else:
+        args = ["action", "go-to-tab-name", tab_name]
+    result = _run_zellij(*args, check=False)
     if result.returncode != 0:
         click.echo(f"Could not switch to tab '{tab_name}': {result.stderr.strip()}")
 
 
-def focus_pane(pane_name: str) -> None:
+def focus_pane(pane_name: str, session: str | None = None) -> None:
     """Focus a pane by name in the current Zellij session."""
-    _run_zellij("action", "focus-pane", "--name", pane_name, check=False)
+    if session:
+        args = ["-s", session, "action", "focus-pane", "--name", pane_name]
+    else:
+        args = ["action", "focus-pane", "--name", pane_name]
+    _run_zellij(*args, check=False)
 
 
 def in_zellij_session() -> bool:

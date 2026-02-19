@@ -130,8 +130,8 @@ def mock_zellij(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object,
         calls["session_exists"].append((name,))
         return False
 
-    def _generate_layout(c: object) -> Path:
-        calls["generate_layout"].append((c,))
+    def _generate_layout(c: object, **kwargs: object) -> Path:
+        calls["generate_layout"].append((c, kwargs))
         return Path("/tmp/layout.kdl")
 
     def _create_and_attach(s: str, lp: object) -> None:

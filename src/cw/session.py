@@ -14,7 +14,7 @@ from cw.handoff import (
     find_handoffs_newer_than,
     find_latest_handoff,
 )
-from cw.models import ClientConfig, Session, SessionPurpose, SessionStatus
+from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
 
 CW_SESSION = "cw"
 
@@ -27,14 +27,65 @@ def _ensure_zellij() -> None:
         )
 
 
-def _ensure_session_running(client: ClientConfig) -> bool:
+def _build_pane_args(
+    sessions: dict[str, Session],
+    resume: bool = False,
+) -> dict[str, dict[str, str]]:
+    """Build KDL-formatted claude args for each pane.
+
+    Args:
+        sessions: Map of purpose name to Session with claude_session_id.
+        resume: If True, use --resume instead of --session-id.
+    """
+    panes: dict[str, dict[str, str]] = {}
+    for purpose, session in sessions.items():
+        sid = str(session.claude_session_id)
+        if resume:
+            panes[purpose] = {"claude_args": f'"--resume" "{sid}"'}
+        else:
+            panes[purpose] = {"claude_args": f'"--session-id" "{sid}"'}
+    return panes
+
+
+def _create_all_purpose_sessions(
+    client_name: str,
+    client: ClientConfig,
+    state: CwState,
+    prior_sessions: dict[str, Session] | None = None,
+) -> dict[str, Session]:
+    """Create Session objects for all purposes.
+
+    Reuses prior claude_session_ids when available for resumption.
+    """
+    sessions: dict[str, Session] = {}
+    for purpose in ("impl", "review", "debt"):
+        session = Session(
+            name=f"{client_name}/{purpose}",
+            client=client_name,
+            purpose=SessionPurpose(purpose),
+            workspace_path=client.workspace_path,
+            zellij_pane=purpose,
+            zellij_tab=client_name,
+        )
+        # Carry forward Claude session ID from prior session for resumption
+        if prior_sessions and purpose in prior_sessions:
+            session.claude_session_id = prior_sessions[purpose].claude_session_id
+        sessions[purpose] = session
+        state.sessions.append(session)
+    return sessions
+
+
+def _ensure_session_running(
+    client: ClientConfig,
+    panes: dict[str, dict[str, str]] | None = None,
+) -> bool:
     """Ensure the cw Zellij session exists with this client's tab.
 
     Returns True if we created and attached (caller should stop),
     False if already running.
     """
     if not zellij.session_exists(CW_SESSION):
-        layout_path = zellij.generate_layout(client)
+        layout_path = zellij.generate_layout(client, panes=panes)
         click.echo(f"Launching Zellij session '{CW_SESSION}' for {client.name}...")
         # This will take over the terminal - user lands directly in the session
         zellij.create_and_attach(CW_SESSION, layout_path)
@@ -50,7 +101,6 @@ def start_session(client_name: str, purpose: str) -> None:
 
     # Check for existing backgrounded session
     existing = state.find_session(client_name, purpose)
-    has_prior_session = False
 
     if existing and existing.status == SessionStatus.BACKGROUNDED:
         click.echo(f"Found backgrounded session: {existing.name}")
@@ -68,21 +118,51 @@ def start_session(client_name: str, purpose: str) -> None:
                 click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
                 zellij.attach_session(CW_SESSION)
             return
-        # Zellij session died - mark stale sessions as completed, resume Claude
-        click.echo(f"Zellij session gone. Recovering sessions for {client_name}...")
-        has_prior_session = True
+        # Zellij session died - collect prior sessions for all purposes so we can
+        # resume each Claude session in its correct pane
+        click.echo("Zellij session gone. Recovering sessions...")
+        prior_sessions: dict[str, Session] = {}
         for s in state.sessions:
-            if s.status == SessionStatus.ACTIVE:
+            if s.client == client_name and s.status == SessionStatus.ACTIVE:
+                prior_sessions[s.purpose] = s
                 s.status = SessionStatus.COMPLETED
         save_state(state)
-    elif not existing:
-        # Check if there were any completed sessions for this client+purpose
-        has_prior_session = any(
-            s.client == client_name and s.purpose == purpose
-            for s in state.sessions
-        )
 
-    # Record the session before launching (so it persists even if we exec into zellij)
+        # Create new sessions for all purposes, carrying forward Claude session IDs
+        all_sessions = _create_all_purpose_sessions(
+            client_name, client, state, prior_sessions=prior_sessions,
+        )
+        save_state(state)
+
+        # Build layout with --resume for panes that had prior sessions,
+        # --session-id for fresh ones
+        panes: dict[str, dict[str, str]] = {}
+        for p, s in all_sessions.items():
+            sid = str(s.claude_session_id)
+            if p in prior_sessions:
+                panes[p] = {"claude_args": f'"--resume" "{sid}"'}
+            else:
+                panes[p] = {"claude_args": f'"--session-id" "{sid}"'}
+
+        click.echo("Resuming Claude sessions in new Zellij layout...")
+        _ensure_session_running(client, panes=panes)
+        return  # User is now inside Zellij
+
+    # Fresh start - no existing session for this client
+    if not zellij.session_exists(CW_SESSION):
+        # Create sessions for ALL purposes and bake claude into the layout
+        all_sessions = _create_all_purpose_sessions(client_name, client, state)
+        save_state(state)
+
+        panes = _build_pane_args(all_sessions, resume=False)
+        click.echo(f"Launching Zellij session '{CW_SESSION}' for {client_name}...")
+        for s in all_sessions.values():
+            click.echo(f"  {s.name} (claude session: {s.claude_session_id})")
+        _ensure_session_running(client, panes=panes)
+        return  # User is now inside Zellij
+
+    # Zellij already running - inject claude into panes
+    # Create a single session for the requested purpose
     session = Session(
         name=f"{client_name}/{purpose}",
         client=client_name,
@@ -94,24 +174,18 @@ def start_session(client_name: str, purpose: str) -> None:
     state.sessions.append(session)
     save_state(state)
 
-    # Pick the right claude command - resume prior session if one existed
-    claude_cmd = "claude --continue\n" if has_prior_session else "claude\n"
-
+    claude_cmd = f"claude --session-id {session.claude_session_id}\n"
     click.echo(f"Started session: {session.name} (id: {session.id})")
-    if has_prior_session:
-        click.echo("Resuming previous Claude Code session...")
 
-    # Ensure Zellij is running - if it creates a new session, it attaches and we're done
-    if _ensure_session_running(client):
-        return  # User is now inside Zellij
+    # Inject claude into the pane - works both inside and outside Zellij
+    # by targeting the session explicitly when outside
+    target = None if zellij.in_zellij_session() else CW_SESSION
+    zellij.go_to_tab(client_name, session=target)
+    zellij.focus_pane(purpose, session=target)
+    zellij.write_to_pane(claude_cmd, session=target)
 
-    # Session exists already - navigate within it or tell user how to attach
-    if zellij.in_zellij_session():
-        zellij.go_to_tab(client_name)
-        zellij.focus_pane(purpose)
-        zellij.write_to_pane(claude_cmd)
-    else:
-        click.echo(f"Zellij session '{CW_SESSION}' is running. Attaching...")
+    if not zellij.in_zellij_session():
+        click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
         zellij.attach_session(CW_SESSION)
 
 
@@ -223,8 +297,8 @@ def resume_session(session_name: str) -> None:
         zellij.go_to_tab(session.zellij_tab or session.client)
         zellij.focus_pane(session.zellij_pane or session.purpose)
 
-        # Launch claude and inject resumption prompt
-        zellij.write_to_pane("claude\n")
+        # Resume the exact Claude session by ID, then inject handoff context
+        zellij.write_to_pane(f"claude --resume {session.claude_session_id}\n")
         if prompt:
             time.sleep(2)  # Wait for Claude to initialize
             zellij.write_to_pane(prompt + "\n")

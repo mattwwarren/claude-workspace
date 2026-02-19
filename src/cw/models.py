@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +36,7 @@ class Session(BaseModel):
     branch: str | None = None
     zellij_pane: str | None = None
     zellij_tab: str | None = None
+    claude_session_id: UUID = Field(default_factory=uuid4)
     last_handoff_path: Path | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     backgrounded_at: datetime | None = None
