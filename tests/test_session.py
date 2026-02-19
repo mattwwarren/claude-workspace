@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import click
 import pytest
-from freezegun import freeze_time
 
 from cw.config import save_state
+from cw.exceptions import CwError
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
 
 
@@ -129,6 +127,58 @@ class TestStartSession:
         output = capsys.readouterr().out
         assert "already active" in output.lower()
 
+    def test_crashed_pane_triggers_recovery(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from cw.config import load_state
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="crash002",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="impl",
+                    zellij_tab="test-client",
+                )
+            ]
+        )
+        save_state(state)
+
+        # Zellij session exists but impl pane has crashed
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
+        monkeypatch.setattr(
+            "cw.zellij.check_pane_health",
+            lambda session=None: {"impl": False},
+        )
+
+        from cw.session import start_session
+
+        start_session("test-client", "impl")
+
+        output = capsys.readouterr().out
+        assert "crashed" in output.lower() or "Recovering" in output
+
+        # The crashed session should be marked COMPLETED
+        updated = load_state()
+        completed = [s for s in updated.sessions if s.status == SessionStatus.COMPLETED]
+        assert len(completed) >= 1
+
     def test_zellij_not_installed_raises(
         self,
         tmp_config_dir: Path,
@@ -138,7 +188,7 @@ class TestStartSession:
 
         from cw.session import start_session
 
-        with pytest.raises(click.ClickException, match="not installed"):
+        with pytest.raises(CwError, match="not installed"):
             start_session("test-client", "impl")
 
 
@@ -232,7 +282,7 @@ class TestBackgroundSession:
 
         from cw.session import background_session
 
-        with pytest.raises(click.ClickException, match="Multiple active"):
+        with pytest.raises(CwError, match="Multiple active"):
             background_session()
 
     def test_raises_on_no_active(
@@ -244,7 +294,7 @@ class TestBackgroundSession:
 
         from cw.session import background_session
 
-        with pytest.raises(click.ClickException, match="No active sessions"):
+        with pytest.raises(CwError, match="No active sessions"):
             background_session()
 
     def test_raises_if_not_active_status(
@@ -269,7 +319,7 @@ class TestBackgroundSession:
 
         from cw.session import background_session
 
-        with pytest.raises(click.ClickException, match="not active"):
+        with pytest.raises(CwError, match="not active"):
             background_session("c/impl")
 
     def test_outside_zellij_finds_latest_handoff(
@@ -319,7 +369,7 @@ class TestBackgroundSession:
 
         from cw.session import background_session
 
-        with pytest.raises(click.ClickException, match="Session not found"):
+        with pytest.raises(CwError, match="Session not found"):
             background_session("nonexistent")
 
 
@@ -431,7 +481,7 @@ class TestResumeSession:
 
         from cw.session import resume_session
 
-        with pytest.raises(click.ClickException, match="not backgrounded"):
+        with pytest.raises(CwError, match="not backgrounded"):
             resume_session("test-client/impl")
 
     def test_not_found_raises(
@@ -443,7 +493,7 @@ class TestResumeSession:
 
         from cw.session import resume_session
 
-        with pytest.raises(click.ClickException, match="Session not found"):
+        with pytest.raises(CwError, match="Session not found"):
             resume_session("nonexistent")
 
     def test_outside_zellij_shows_prompt(
@@ -531,97 +581,3 @@ class TestResumeSession:
         assert len(mock_zellij["write_to_pane"]) >= 2
 
 
-class TestListSessions:
-    def test_empty_state(
-        self,
-        tmp_config_dir: Path,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        save_state(CwState())
-
-        from cw.session import list_sessions
-
-        list_sessions()
-
-        output = capsys.readouterr().out
-        assert "No sessions tracked" in output
-
-    def test_filters_completed(
-        self,
-        tmp_config_dir: Path,
-        sample_state: CwState,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        save_state(sample_state)
-
-        from cw.session import list_sessions
-
-        list_sessions()
-
-        output = capsys.readouterr().out
-        # Active and backgrounded should appear, completed should not
-        assert "sess0001" in output
-        assert "sess0002" in output
-        assert "sess0003" not in output
-
-    @freeze_time("2025-01-15 12:00:00", tz_offset=0)
-    def test_formats_table(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        state = CwState(
-            sessions=[
-                Session(
-                    id="fmt00001",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                    started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
-                )
-            ]
-        )
-        save_state(state)
-
-        from cw.session import list_sessions
-
-        list_sessions()
-
-        output = capsys.readouterr().out
-        assert "CLIENT" in output
-        assert "PURPOSE" in output
-        assert "STATUS" in output
-        assert "test-client" in output
-        assert "2h ago" in output
-
-
-class TestShowStatus:
-    @freeze_time("2025-01-15 12:00:00", tz_offset=0)
-    def test_counts_and_formatting(
-        self,
-        tmp_config_dir: Path,
-        sample_state: CwState,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  test-client:\n"
-            "    workspace_path: /tmp/ws\n"
-            "  other-client:\n"
-            "    workspace_path: /tmp/ws2\n"
-        )
-
-        save_state(sample_state)
-
-        from cw.session import show_status
-
-        show_status()
-
-        output = capsys.readouterr().out
-        assert "Clients configured: 2" in output
-        assert "Active sessions:    1" in output
-        assert "Backgrounded:       1" in output

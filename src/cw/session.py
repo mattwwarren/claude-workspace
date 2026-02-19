@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 import click
 
 from cw import zellij
-from cw.config import get_client, load_clients, load_state, save_state
+from cw.config import get_client, load_state, save_state
+from cw.exceptions import CwError
 from cw.handoff import (
     extract_resumption_prompt,
     find_handoffs_newer_than,
@@ -33,9 +35,8 @@ def _navigate_to_pane(session: Session, *, target: str | None = None) -> None:
 def _ensure_zellij() -> None:
     """Verify zellij is installed."""
     if not zellij.is_installed():
-        raise click.ClickException(
-            "Zellij is not installed. Install it: https://zellij.dev/documentation/installation"
-        )
+        msg = "Zellij is not installed. Install it: https://zellij.dev/documentation/installation"
+        raise CwError(msg)
 
 
 def _build_pane_args(
@@ -86,13 +87,13 @@ def _create_all_purpose_sessions(
     return sessions
 
 
-def _ensure_session_running(
+def _create_session_if_needed(
     client: ClientConfig,
     panes: dict[str, dict[str, str]] | None = None,
 ) -> bool:
-    """Ensure the cw Zellij session exists with this client's tab.
+    """Create and attach to the cw Zellij session if it doesn't exist.
 
-    Returns True if we created and attached (caller should stop),
+    Returns True if a new session was created (terminal taken over),
     False if already running.
     """
     if not zellij.session_exists(CW_SESSION):
@@ -121,13 +122,22 @@ def start_session(client_name: str, purpose: str) -> None:
     if existing and existing.status == SessionStatus.ACTIVE:
         # Verify Zellij session is actually running
         if zellij.session_exists(CW_SESSION):
-            click.echo(f"Session already active: {existing.name}")
-            if zellij.in_zellij_session():
-                _navigate_to_pane(existing)
+            # Check if Claude is still alive in the pane
+            health = zellij.check_pane_health(session=CW_SESSION)
+            pane_name = existing.zellij_pane or existing.purpose
+            if health.get(pane_name) is False:
+                click.echo(f"Claude crashed in {existing.name}. Recovering...")
+                existing.status = SessionStatus.COMPLETED
+                save_state(state)
+                # Fall through to fresh start / recovery below
             else:
-                click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
-                zellij.attach_session(CW_SESSION)
-            return
+                click.echo(f"Session already active: {existing.name}")
+                if zellij.in_zellij_session():
+                    _navigate_to_pane(existing)
+                else:
+                    click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
+                    zellij.attach_session(CW_SESSION)
+                return
         # Zellij session died - collect prior sessions for all purposes so we can
         # resume each Claude session in its correct pane
         click.echo("Zellij session gone. Recovering sessions...")
@@ -155,7 +165,7 @@ def start_session(client_name: str, purpose: str) -> None:
                 panes[p] = {"claude_args": f'"--session-id" "{sid}"'}
 
         click.echo("Resuming Claude sessions in new Zellij layout...")
-        _ensure_session_running(client, panes=panes)
+        _create_session_if_needed(client, panes=panes)
         return  # User is now inside Zellij
 
     # Fresh start - no existing session for this client
@@ -168,7 +178,7 @@ def start_session(client_name: str, purpose: str) -> None:
         click.echo(f"Launching Zellij session '{CW_SESSION}' for {client_name}...")
         for s in all_sessions.values():
             click.echo(f"  {s.name} (claude session: {s.claude_session_id})")
-        _ensure_session_running(client, panes=panes)
+        _create_session_if_needed(client, panes=panes)
         return  # User is now inside Zellij
 
     # Zellij already running - inject claude into panes
@@ -198,60 +208,71 @@ def start_session(client_name: str, purpose: str) -> None:
         zellij.attach_session(CW_SESSION)
 
 
+def _resolve_session(state: CwState, session_name: str | None) -> Session:
+    """Resolve which session to operate on.
+
+    Looks up by name/id if given, otherwise auto-detects from active sessions.
+    Raises CwError if the session can't be found or is ambiguous.
+    """
+    if session_name:
+        session = state.find_by_name_or_id(session_name)
+        if session is None:
+            msg = f"Session not found: {session_name}"
+            raise CwError(msg)
+        return session
+
+    active = state.active_sessions()
+    if len(active) == 1:
+        return active[0]
+    if not active:
+        msg = "No active sessions to background."
+        raise CwError(msg)
+    names = ", ".join(s.name for s in active)
+    msg = f"Multiple active sessions. Specify which one: {names}"
+    raise CwError(msg)
+
+
+def _wait_for_handoff(workspace_path: Path, before_mtime: float) -> Path | None:
+    """Poll for a new handoff file created after before_mtime.
+
+    Returns the path to the new handoff, or None on timeout.
+    """
+    for _ in range(HANDOFF_POLL_TIMEOUT_S):
+        time.sleep(HANDOFF_POLL_INTERVAL_S)
+        new_handoffs = find_handoffs_newer_than(workspace_path, before_mtime)
+        if new_handoffs:
+            return new_handoffs[0]
+    return None
+
+
 def background_session(session_name: str | None = None) -> None:
     """Background a session by triggering /session-done and recording the handoff."""
     state = load_state()
-
-    if session_name:
-        session = state.find_by_name_or_id(session_name)
-    else:
-        # Try to detect from current Zellij pane context
-        active = state.active_sessions()
-        if len(active) == 1:
-            session = active[0]
-        elif not active:
-            raise click.ClickException("No active sessions to background.")
-        else:
-            names = ", ".join(s.name for s in active)
-            raise click.ClickException(
-                f"Multiple active sessions. Specify which one: {names}"
-            )
-
-    if session is None:
-        raise click.ClickException(f"Session not found: {session_name}")
+    session = _resolve_session(state, session_name)
 
     if session.status != SessionStatus.ACTIVE:
         msg = f"Session {session.name} is not active (status: {session.status})"
-        raise click.ClickException(msg)
+        raise CwError(msg)
 
     click.echo(f"Backgrounding session: {session.name}...")
 
-    # Record mtime before injection so we can detect new handoffs
     before_mtime = time.time()
 
     if zellij.in_zellij_session():
-        # Inject /session-done into the pane
         _navigate_to_pane(session)
         zellij.write_to_pane("/session-done\n")
 
-        # Poll for handoff file (max 30s)
         click.echo("Waiting for handoff generation...")
-        for _ in range(HANDOFF_POLL_TIMEOUT_S):
-            time.sleep(HANDOFF_POLL_INTERVAL_S)
-            new_handoffs = find_handoffs_newer_than(
-                session.workspace_path, before_mtime
-            )
-            if new_handoffs:
-                session.last_handoff_path = new_handoffs[0]
-                click.echo(f"Handoff saved: {new_handoffs[0]}")
-                break
+        handoff_path = _wait_for_handoff(session.workspace_path, before_mtime)
+        if handoff_path:
+            session.last_handoff_path = handoff_path
+            click.echo(f"Handoff saved: {handoff_path}")
         else:
             click.echo(
                 f"Warning: No handoff detected within {HANDOFF_POLL_TIMEOUT_S}s."
                 " Session marked as backgrounded anyway."
             )
     else:
-        # Not in Zellij - try to find latest handoff
         latest = find_latest_handoff(session.workspace_path)
         if latest:
             session.last_handoff_path = latest
@@ -273,12 +294,12 @@ def resume_session(session_name: str) -> None:
 
     session = state.find_by_name_or_id(session_name)
     if session is None:
-        raise click.ClickException(f"Session not found: {session_name}")
+        msg = f"Session not found: {session_name}"
+        raise CwError(msg)
 
     if session.status != SessionStatus.BACKGROUNDED:
-        raise click.ClickException(
-            f"Session {session.name} is not backgrounded (status: {session.status})"
-        )
+        msg = f"Session {session.name} is not backgrounded (status: {session.status})"
+        raise CwError(msg)
 
     # Extract resumption prompt from handoff
     prompt = None
@@ -293,7 +314,7 @@ def resume_session(session_name: str) -> None:
 
     # Ensure client tab exists
     client = get_client(session.client)
-    _ensure_session_running(client)
+    _create_session_if_needed(client)
 
     session.status = SessionStatus.ACTIVE
     session.resumed_at = datetime.now(UTC)
@@ -316,62 +337,6 @@ def resume_session(session_name: str) -> None:
             click.echo(prompt)
 
 
-def list_sessions() -> None:
-    """Display all tracked sessions."""
-    state = load_state()
-
-    if not state.sessions:
-        click.echo("No sessions tracked.")
-        return
-
-    # Table header
-    click.echo(f"{'CLIENT':<18} {'PURPOSE':<10} {'STATUS':<14} {'ID':<10} {'SINCE'}")
-    click.echo("-" * 70)
-
-    for s in state.sessions:
-        if s.status == SessionStatus.COMPLETED:
-            continue
-
-        if s.status == SessionStatus.ACTIVE:
-            since = _relative_time(s.resumed_at or s.started_at)
-        elif s.status == SessionStatus.BACKGROUNDED:
-            since = _relative_time(s.backgrounded_at or s.started_at)
-        else:
-            since = _relative_time(s.started_at)
-
-        click.echo(f"{s.client:<18} {s.purpose:<10} {s.status:<14} {s.id:<10} {since}")
-
-
-def show_status() -> None:
-    """Show a summary dashboard across all clients."""
-    state = load_state()
-    clients = load_clients()
-
-    active = state.active_sessions()
-    backgrounded = state.backgrounded_sessions()
-
-    click.echo(f"Clients configured: {len(clients)}")
-    click.echo(f"Active sessions:    {len(active)}")
-    click.echo(f"Backgrounded:       {len(backgrounded)}")
-    click.echo()
-
-    if active:
-        click.echo("Active:")
-        for s in active:
-            since = _relative_time(s.resumed_at or s.started_at)
-            click.echo(f"  {s.name} (since {since})")
-
-    if backgrounded:
-        click.echo("Backgrounded:")
-        for s in backgrounded:
-            handoff = (
-                f" handoff: {s.last_handoff_path.name}"
-                if s.last_handoff_path
-                else ""
-            )
-            click.echo(f"  {s.name}{handoff}")
-
-
 def hand_to_session(
     target_purpose: str,
     message: str,
@@ -386,16 +351,16 @@ def hand_to_session(
 
     active = state.active_sessions()
     if not active:
-        raise click.ClickException("No active sessions.")
+        msg = "No active sessions."
+        raise CwError(msg)
 
     # All active sessions should be the same client
     client_name = active[0].client
 
     target = state.find_session(client_name, target_purpose)
     if target is None or target.status != SessionStatus.ACTIVE:
-        raise click.ClickException(
-            f"No active {target_purpose} session for {client_name}."
-        )
+        msg = f"No active {target_purpose} session for {client_name}."
+        raise CwError(msg)
 
     from_label = source_purpose or "user"
 
@@ -420,22 +385,3 @@ def hand_to_session(
     click.echo(f"Delivered to {client_name}/{target_purpose}.")
 
 
-def _relative_time(dt: datetime | None) -> str:
-    """Format a datetime as a relative time string."""
-    if dt is None:
-        return "unknown"
-
-    now = datetime.now(UTC)
-    delta = now - dt
-    seconds = int(delta.total_seconds())
-
-    if seconds < 60:
-        return "just now"
-    if seconds < 3600:
-        m = seconds // 60
-        return f"{m}m ago"
-    if seconds < 86400:
-        h = seconds // 3600
-        return f"{h}h ago"
-    d = seconds // 86400
-    return f"{d}d ago"

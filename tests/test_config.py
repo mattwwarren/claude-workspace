@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import click
 import pytest
 
 from cw.config import (
@@ -16,6 +15,7 @@ from cw.config import (
     save_state,
     show_config,
 )
+from cw.exceptions import CwError
 from cw.models import CwState, Session, SessionPurpose
 
 
@@ -72,7 +72,7 @@ class TestGetClient:
             "  acme:\n"
             "    workspace_path: /tmp/acme\n"
         )
-        with pytest.raises(click.ClickException, match="Unknown client 'nope'"):
+        with pytest.raises(CwError, match="Unknown client 'nope'"):
             get_client("nope")
 
     def test_error_shows_available_clients(self, tmp_config_dir: Path) -> None:
@@ -84,11 +84,11 @@ class TestGetClient:
             "  beta:\n"
             "    workspace_path: /tmp/beta\n"
         )
-        with pytest.raises(click.ClickException, match="Available: alpha, beta"):
+        with pytest.raises(CwError, match="Available: alpha, beta"):
             get_client("nope")
 
     def test_no_clients_shows_none(self, tmp_config_dir: Path) -> None:
-        with pytest.raises(click.ClickException, match=r"\(none configured\)"):
+        with pytest.raises(CwError, match=r"\(none configured\)"):
             get_client("nope")
 
 

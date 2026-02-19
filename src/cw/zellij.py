@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
-import click
 from jinja2 import DictLoader, Environment
 
+from cw.exceptions import ZellijError
 from cw.models import ClientConfig
 
 GENERATED_LAYOUTS_DIR = Path.home() / ".config" / "zellij" / "layouts"
@@ -58,9 +59,13 @@ _env = Environment(
 
 
 def _run_zellij(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    """Run a zellij command, raising on failure if check=True."""
+    """Run a zellij command, raising ZellijError on failure if check=True."""
     cmd = ["zellij", *args]
-    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, check=check)
+    except subprocess.CalledProcessError as e:
+        msg = f"Zellij command failed: {' '.join(cmd)}"
+        raise ZellijError(msg) from e
 
 
 def is_installed() -> bool:
@@ -161,7 +166,8 @@ def go_to_tab(tab_name: str, session: str | None = None) -> None:
         args = ["action", "go-to-tab-name", tab_name]
     result = _run_zellij(*args, check=False)
     if result.returncode != 0:
-        click.echo(f"Could not switch to tab '{tab_name}': {result.stderr.strip()}")
+        msg = f"Could not switch to tab '{tab_name}': {result.stderr.strip()}"
+        raise ZellijError(msg)
 
 
 def _get_focused_pane_id(session: str | None = None) -> str | None:
@@ -187,8 +193,6 @@ def _get_pane_id_for_name(
 
     Only looks at the first tab block (skips new_tab_template).
     """
-    import re
-
     base = ["-s", session] if session else []
     result = _run_zellij(*base, "action", "dump-layout", check=False)
     if result.returncode != 0:
@@ -228,8 +232,8 @@ def focus_pane(pane_name: str, session: str | None = None) -> None:
     """
     target_id = _get_pane_id_for_name(pane_name, session)
     if target_id is None:
-        click.echo(f"Pane '{pane_name}' not found in layout.")
-        return
+        msg = f"Pane '{pane_name}' not found in layout."
+        raise ZellijError(msg)
 
     current_id = _get_focused_pane_id(session)
     if current_id == target_id:
@@ -242,7 +246,45 @@ def focus_pane(pane_name: str, session: str | None = None) -> None:
         if current_id == target_id:
             return
 
-    click.echo(f"Could not focus pane '{pane_name}' after cycling.")
+    msg = f"Could not focus pane '{pane_name}' after cycling."
+    raise ZellijError(msg)
+
+
+def check_pane_health(session: str | None = None) -> dict[str, bool]:
+    """Check which named panes have running commands.
+
+    Parses dump-layout to find panes with active command= processes.
+    Returns a dict mapping pane name to whether its command is still running.
+
+    A pane that exists in the layout with a command= attribute is considered alive.
+    If the command has exited (pane shows as 'exited' or has no command), it's dead.
+    """
+    base = ["-s", session] if session else []
+    result = _run_zellij(*base, "action", "dump-layout", check=False)
+    if result.returncode != 0:
+        return {}
+
+    health: dict[str, bool] = {}
+    in_first_tab = False
+    for line in result.stdout.splitlines():
+        if "tab " in line and "name=" in line:
+            if in_first_tab:
+                break
+            in_first_tab = True
+            continue
+        if not in_first_tab:
+            continue
+        # Match panes with names
+        name_match = re.search(r'name="([^"]+)"', line)
+        if not name_match:
+            continue
+        pane_name = name_match.group(1)
+        # A pane with command= and no "exited" marker is alive
+        has_command = bool(re.search(r'\bcommand=', line))
+        is_exited = "exited" in line.lower()
+        health[pane_name] = has_command and not is_exited
+
+    return health
 
 
 def in_zellij_session() -> bool:

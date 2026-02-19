@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from freezegun import freeze_time
 
-from cw.session import _relative_time
+from cw.cli import _relative_time
 
 
 class TestRelativeTime:

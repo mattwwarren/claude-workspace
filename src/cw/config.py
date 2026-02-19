@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 import yaml
 
+from cw.exceptions import CwError
 from cw.models import ClientConfig, CwState
 
 CONFIG_DIR = Path.home() / ".config" / "cw"
@@ -36,7 +37,8 @@ def get_client(name: str) -> ClientConfig:
     clients = load_clients()
     if name not in clients:
         available = ", ".join(sorted(clients.keys())) or "(none configured)"
-        raise click.ClickException(f"Unknown client '{name}'. Available: {available}")
+        msg = f"Unknown client '{name}'. Available: {available}"
+        raise CwError(msg)
     return clients[name]
 
 
