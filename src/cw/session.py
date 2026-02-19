@@ -372,6 +372,54 @@ def show_status() -> None:
             click.echo(f"  {s.name}{handoff}")
 
 
+def hand_to_session(
+    target_purpose: str,
+    message: str,
+    source_purpose: str | None = None,
+) -> None:
+    """Hand off a message to another session's Claude instance.
+
+    Writes the message to a shared file and injects it into the
+    target pane via keystroke injection.
+    """
+    state = load_state()
+
+    active = state.active_sessions()
+    if not active:
+        raise click.ClickException("No active sessions.")
+
+    # All active sessions should be the same client
+    client_name = active[0].client
+
+    target = state.find_session(client_name, target_purpose)
+    if target is None or target.status != SessionStatus.ACTIVE:
+        raise click.ClickException(
+            f"No active {target_purpose} session for {client_name}."
+        )
+
+    from_label = source_purpose or "user"
+
+    # Persist to shared location for auditability
+    messages_dir = target.workspace_path / ".cw" / "messages"
+    messages_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    msg_file = messages_dir / f"{ts}-{from_label}-to-{target_purpose}.md"
+    msg_file.write_text(
+        f"# Handoff: {from_label} -> {target_purpose}\n\n"
+        f"{message}\n"
+    )
+    click.echo(f"Message saved: {msg_file.name}")
+
+    # Inject into the target pane
+    zellij_target = (
+        None if zellij.in_zellij_session() else CW_SESSION
+    )
+    _navigate_to_pane(target, target=zellij_target)
+    zellij.write_to_pane(message + "\n", session=zellij_target)
+
+    click.echo(f"Delivered to {client_name}/{target_purpose}.")
+
+
 def _relative_time(dt: datetime | None) -> str:
     """Format a datetime as a relative time string."""
     if dt is None:

@@ -72,6 +72,29 @@ def status() -> None:
 
 
 @main.command()
+@click.argument(
+    "target",
+    type=click.Choice([e.value for e in SessionPurpose]),
+)
+@click.argument("message")
+@click.option(
+    "--from",
+    "source",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default=None,
+    help="Source session (for audit trail).",
+)
+def hand(target: str, message: str, source: str | None) -> None:
+    """Hand off a message to another session.
+
+    Example: cw hand debt "Fix the ruff violations in session.py"
+    """
+    from cw.session import hand_to_session
+
+    hand_to_session(target, message, source_purpose=source)
+
+
+@main.command()
 def config() -> None:
     """Show current configuration."""
     from cw.config import show_config
