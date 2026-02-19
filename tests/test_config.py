@@ -16,7 +16,7 @@ from cw.config import (
     show_config,
 )
 from cw.exceptions import CwError
-from cw.models import _DEFAULT_AUTO_PURPOSES, CwState, Session, SessionPurpose
+from cw.models import DEFAULT_AUTO_PURPOSES, CwState, Session, SessionPurpose
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -90,7 +90,7 @@ class TestLoadClients:
             f"    workspace_path: {ws_dir}\n"
         )
         result = load_clients()
-        assert result["acme"].auto_purposes == _DEFAULT_AUTO_PURPOSES
+        assert result["acme"].auto_purposes == DEFAULT_AUTO_PURPOSES
 
 
 class TestGetClient:

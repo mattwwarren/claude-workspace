@@ -142,7 +142,7 @@ def generate_layout(
     num_secondary = len(secondary_panes)
     if num_secondary == 0:
         primary_size = "100%"
-        secondary_size = "0%"
+        secondary_size = ""
     elif num_secondary <= 2:
         primary_size = "70%"
         secondary_size = "30%"

@@ -72,9 +72,9 @@ def create_worktree(
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Check if branch exists remotely or locally
+    # Check if branch exists locally (refs/heads/ avoids matching tags)
     result = _run_git(
-        "rev-parse", "--verify", branch,
+        "rev-parse", "--verify", f"refs/heads/{branch}",
         cwd=client.workspace_path, check=False,
     )
     if result.returncode == 0:

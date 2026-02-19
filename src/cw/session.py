@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -67,9 +68,8 @@ def _build_pane_args(
         extra = ""
         prompt = get_purpose_prompt(purpose, client_overrides)
         if prompt:
-            # Shell-escape single quotes for the bash -c wrapper
-            escaped_prompt = prompt.replace("'", "'\\''")
-            extra = f" --append-system-prompt '{escaped_prompt}'"
+            escaped_prompt = shlex.quote(prompt)
+            extra = f" --append-system-prompt {escaped_prompt}"
 
         # Shell command: try --resume, fall back to --session-id
         cmd = (
@@ -244,9 +244,8 @@ def start_session(
     cmd_parts = [f"claude --session-id {session.claude_session_id}"]
     prompt = get_purpose_prompt(purpose, client.purpose_prompts or None)
     if prompt:
-        # Shell-escape the prompt for injection
-        escaped_prompt = prompt.replace("'", "'\\''")
-        cmd_parts.append(f"--append-system-prompt '{escaped_prompt}'")
+        escaped_prompt = shlex.quote(prompt)
+        cmd_parts.append(f"--append-system-prompt {escaped_prompt}")
     claude_cmd = " ".join(cmd_parts) + "\n"
     click.echo(f"Started session: {session.name} (id: {session.id})")
 

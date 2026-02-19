@@ -6,9 +6,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from cw.models import ClientConfig
-
-if TYPE_CHECKING:
-    from pathlib import Path
 from cw.worktree import (
     create_worktree,
     list_worktrees,
@@ -19,6 +16,8 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 
 
