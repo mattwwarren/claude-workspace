@@ -1,0 +1,24 @@
+clients:
+  personal:
+    workspace_path: /home/matthew/workspace/personal
+    default_branch: main
+
+  lgbtqplus-map:
+    workspace_path: /home/matthew/workspace/lgbtqplus.map
+    default_branch: main
+
+  meta-work:
+    workspace_path: /home/matthew/workspace/meta-work
+    default_branch: main
+
+  sigma:
+    workspace_path: /home/matthew/workspace/sigma
+    default_branch: main
+
+  family:
+    workspace_path: /home/matthew/workspace/family
+    default_branch: main
+
+  contracts:
+    workspace_path: /home/matthew/workspace/contracts
+    default_branch: main
