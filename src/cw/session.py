@@ -20,7 +20,7 @@ from cw.handoff import (
     find_latest_handoff,
 )
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
-from cw.prompts import escape_kdl_string, get_purpose_prompt
+from cw.prompts import get_purpose_prompt
 from cw.worktree import create_worktree, remove_worktree
 
 CW_SESSION = "cw"
@@ -46,31 +46,38 @@ def _ensure_zellij() -> None:
 
 def _build_pane_args(
     sessions: dict[str, Session],
-    resume: bool = False,
     client: ClientConfig | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Build KDL-formatted claude args for each pane.
+    """Build pane data for each session including a resilient claude command.
+
+    The command tries --resume first (reconnects to existing conversation),
+    falling back to --session-id (creates new session). This handles both
+    fresh launches and Zellij restarts after detach/reattach.
 
     Args:
         sessions: Map of purpose name to Session with claude_session_id.
-        resume: If True, use --resume instead of --session-id.
         client: Client config for resolving purpose prompts.
     """
     panes: dict[str, dict[str, str]] = {}
     client_overrides = client.purpose_prompts if client else None
     for purpose, session in sessions.items():
         sid = str(session.claude_session_id)
-        flag = "--resume" if resume else "--session-id"
-        args_parts = [f'"{flag}" "{sid}"']
 
-        # Add purpose-specific system prompt
+        # Build extra flags (e.g. --append-system-prompt)
+        extra = ""
         prompt = get_purpose_prompt(purpose, client_overrides)
         if prompt:
-            escaped = escape_kdl_string(prompt)
-            args_parts.append(f'"--append-system-prompt" "{escaped}"')
+            # Shell-escape single quotes for the bash -c wrapper
+            escaped_prompt = prompt.replace("'", "'\\''")
+            extra = f" --append-system-prompt '{escaped_prompt}'"
 
-        pane_data: dict[str, str] = {"claude_args": " ".join(args_parts)}
-        # Set cwd to worktree path if available, else workspace path
+        # Shell command: try --resume, fall back to --session-id
+        cmd = (
+            f"claude --resume {sid}{extra} 2>/dev/null"
+            f" || claude --session-id {sid}{extra}"
+        )
+        # KDL-quote the whole command for the layout template
+        pane_data: dict[str, str] = {"claude_cmd": f'"{cmd}"'}
         cwd = str(session.worktree_path or session.workspace_path)
         pane_data["cwd"] = cwd
         panes[purpose] = pane_data
@@ -81,14 +88,15 @@ def _create_all_purpose_sessions(
     client_name: str,
     client: ClientConfig,
     state: CwState,
-    prior_sessions: dict[str, Session] | None = None,
     *,
+    prior_sessions: dict[str, Session] | None = None,
     worktree_path: Path | None = None,
     worktree_branch: str | None = None,
 ) -> dict[str, Session]:
     """Create Session objects for all purposes.
 
-    Reuses prior claude_session_ids when available for resumption.
+    When prior_sessions is provided, carries forward their claude_session_ids
+    so that --resume can reconnect to existing Claude conversations.
     worktree_path/branch apply to impl and review purposes.
     """
     # Purposes that get the worktree cwd
@@ -109,7 +117,7 @@ def _create_all_purpose_sessions(
         if worktree_path and purpose in worktree_purposes:
             session.worktree_path = worktree_path
             session.branch = worktree_branch
-        # Carry forward Claude session ID from prior session for resumption
+        # Carry forward Claude session ID for resumption
         if prior_sessions and purpose in prior_sessions:
             session.claude_session_id = prior_sessions[purpose].claude_session_id
         sessions[purpose] = session
@@ -181,8 +189,8 @@ def start_session(
                     click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
                     zellij.attach_session(CW_SESSION)
                 return
-        # Zellij session died - collect prior sessions for all purposes so we can
-        # resume each Claude session in its correct pane
+        # Zellij session died - collect prior sessions so we can resume
+        # each Claude conversation in its correct pane using --resume.
         click.echo("Zellij session gone. Recovering sessions...")
         prior_sessions: dict[str, Session] = {}
         for s in state.sessions:
@@ -191,27 +199,13 @@ def start_session(
                 s.status = SessionStatus.COMPLETED
         save_state(state)
 
-        # Create new sessions for all purposes, carrying forward Claude session IDs
+        # Create new cw sessions, carrying forward Claude session IDs
         all_sessions = _create_all_purpose_sessions(
             client_name, client, state, prior_sessions=prior_sessions,
         )
         save_state(state)
 
-        # Build layout with --resume for panes that had prior sessions,
-        # --session-id for fresh ones
-        panes: dict[str, dict[str, str]] = {}
-        for p, s in all_sessions.items():
-            sid = str(s.claude_session_id)
-            if p in prior_sessions:
-                args_parts = [f'"--resume" "{sid}"']
-            else:
-                args_parts = [f'"--session-id" "{sid}"']
-            prompt = get_purpose_prompt(p, client.purpose_prompts or None)
-            if prompt:
-                escaped = escape_kdl_string(prompt)
-                args_parts.append(f'"--append-system-prompt" "{escaped}"')
-            panes[p] = {"claude_args": " ".join(args_parts)}
-
+        panes = _build_pane_args(all_sessions, client=client)
         click.echo("Resuming Claude sessions in new Zellij layout...")
         _create_session_if_needed(client, panes=panes)
         return  # User is now inside Zellij
@@ -226,7 +220,7 @@ def start_session(
         )
         save_state(state)
 
-        panes = _build_pane_args(all_sessions, resume=False, client=client)
+        panes = _build_pane_args(all_sessions, client=client)
         click.echo(f"Launching Zellij session '{CW_SESSION}' for {client_name}...")
         for s in all_sessions.values():
             click.echo(f"  {s.name} (claude session: {s.claude_session_id})")

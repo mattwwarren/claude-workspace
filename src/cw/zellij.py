@@ -32,15 +32,15 @@ layout {
         pane split_direction="horizontal" size="80%" {
             pane size="{{ primary_size }}" name="{{ primary_pane.name }}" focus=true {
                 cwd "{{ primary_pane.cwd }}"
-                command "claude"
-                args {{ primary_pane.claude_args }}
+                command "bash"
+                args "-c" {{ primary_pane.claude_cmd }}
             }
             pane split_direction="vertical" size="{{ secondary_size }}" {
 {%- for pane in secondary_panes %}
                 pane name="{{ pane.name }}" {
                     cwd "{{ pane.cwd }}"
-                    command "claude"
-                    args {{ pane.claude_args }}
+                    command "bash"
+                    args "-c" {{ pane.claude_cmd }}
                 }
 {%- endfor %}
             }
@@ -48,8 +48,8 @@ layout {
 {%- else %}
         pane size="80%" name="{{ primary_pane.name }}" focus=true {
             cwd "{{ primary_pane.cwd }}"
-            command "claude"
-            args {{ primary_pane.claude_args }}
+            command "bash"
+            args "-c" {{ primary_pane.claude_cmd }}
         }
 {%- endif %}
     }
@@ -109,7 +109,7 @@ def generate_layout(
     Args:
         client: Client configuration.
         panes: Optional per-pane config. Each key is a pane name
-               with a dict containing 'claude_args' and optionally 'cwd'.
+               with a dict containing 'claude_cmd' and optionally 'cwd'.
         purposes: Ordered list of purpose names for panes. First is primary.
                   Defaults to client.auto_purposes values.
     """
@@ -119,20 +119,20 @@ def generate_layout(
     if purposes is None:
         purposes = [p.value for p in client.auto_purposes]
 
-    # Default: fresh claude sessions with no special args
+    # Default: plain claude with no session args
     if panes is None:
-        panes = {name: {"claude_args": '""'} for name in purposes}
+        panes = {name: {"claude_cmd": '"claude"'} for name in purposes}
 
     default_cwd = str(client.workspace_path)
 
     # Build pane context dicts for template
     def _pane_ctx(name: str) -> dict[str, str]:
-        default_pane = {"claude_args": '""'}
+        default_pane = {"claude_cmd": '"claude"'}
         pane_data = panes.get(name, default_pane) if panes else default_pane
         return {
             "name": name,
             "cwd": pane_data.get("cwd", default_cwd),
-            "claude_args": pane_data.get("claude_args", '""'),
+            "claude_cmd": pane_data.get("claude_cmd", '"claude"'),
         }
 
     primary_pane = _pane_ctx(purposes[0])

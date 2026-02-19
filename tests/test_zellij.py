@@ -204,9 +204,9 @@ class TestGenerateLayout:
         client = ClientConfig(name="special", workspace_path=ws_dir)
         panes = {
             "impl": {
-                "claude_args": (
-                    '"--session-id" "abc"'
-                    ' "--append-system-prompt" "say \\"hello\\""'
+                "claude_cmd": (
+                    '"claude --resume abc'
+                    " --append-system-prompt 'say \\\"hello\\\"'\""
                 ),
             },
         }
@@ -225,8 +225,8 @@ class TestGenerateLayout:
         ws_dir.mkdir()
         client = ClientConfig(name="cwdtest", workspace_path=ws_dir)
         panes = {
-            "impl": {"claude_args": '""', "cwd": "/custom/worktree"},
-            "review": {"claude_args": '""'},
+            "impl": {"claude_cmd": '"claude"', "cwd": "/custom/worktree"},
+            "review": {"claude_cmd": '"claude"'},
         }
         result = generate_layout(client, panes=panes, purposes=["impl", "review"])
         content = result.read_text()

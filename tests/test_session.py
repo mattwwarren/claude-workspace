@@ -31,8 +31,8 @@ class TestBuildPaneArgs:
             workspace_path=sample_client.workspace_path,
         )
         panes = _build_pane_args({"impl": session}, client=sample_client)
-        assert "--append-system-prompt" in panes["impl"]["claude_args"]
-        assert "IMPLEMENTATION" in panes["impl"]["claude_args"]
+        assert "--append-system-prompt" in panes["impl"]["claude_cmd"]
+        assert "IMPLEMENTATION" in panes["impl"]["claude_cmd"]
 
     def test_client_override_prompt(self, sample_client: ClientConfig) -> None:
         sample_client.purpose_prompts = {"impl": "Custom impl prompt."}
@@ -43,7 +43,7 @@ class TestBuildPaneArgs:
             workspace_path=sample_client.workspace_path,
         )
         panes = _build_pane_args({"impl": session}, client=sample_client)
-        assert "Custom impl prompt." in panes["impl"]["claude_args"]
+        assert "Custom impl prompt." in panes["impl"]["claude_cmd"]
 
     def test_cwd_from_worktree(self, sample_client: ClientConfig) -> None:
         wt = sample_client.workspace_path.parent / "worktree"
