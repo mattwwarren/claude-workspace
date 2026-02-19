@@ -72,7 +72,9 @@ class CwState(BaseModel):
             and s.purpose == purpose
             and s.status != SessionStatus.COMPLETED
         ]
-        return matches[-1] if matches else None
+        if not matches:
+            return None
+        return max(matches, key=lambda s: s.started_at)
 
     def find_by_name_or_id(self, identifier: str) -> Session | None:
         """Find a session by name (client/purpose) or ID."""

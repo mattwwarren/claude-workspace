@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+HANDOFF_GLOB = "session-*.md"
+
 
 def find_latest_handoff(workspace_path: Path) -> Path | None:
     """Find the most recent session handoff in a workspace's .handoffs/ directory.
@@ -16,11 +18,11 @@ def find_latest_handoff(workspace_path: Path) -> Path | None:
     # Workspace-level handoffs
     handoffs_dir = workspace_path / ".handoffs"
     if handoffs_dir.is_dir():
-        candidates.extend(handoffs_dir.glob("session-*.md"))
+        candidates.extend(handoffs_dir.glob(HANDOFF_GLOB))
 
-    # Sort by mtime, newest first
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0] if candidates else None
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def find_handoffs_newer_than(workspace_path: Path, since_mtime: float) -> list[Path]:
@@ -32,15 +34,15 @@ def find_handoffs_newer_than(workspace_path: Path, since_mtime: float) -> list[P
     if not handoffs_dir.is_dir():
         return []
 
-    return sorted(
-        (
-            p
-            for p in handoffs_dir.glob("session-*.md")
-            if p.stat().st_mtime > since_mtime
-        ),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    # Cache stat results to avoid double stat() per file
+    timed = [
+        (p, p.stat().st_mtime)
+        for p in handoffs_dir.glob(HANDOFF_GLOB)
+    ]
+    return [
+        p for p, mtime in sorted(timed, key=lambda t: t[1], reverse=True)
+        if mtime > since_mtime
+    ]
 
 
 def extract_resumption_prompt(handoff_path: Path) -> str | None:
@@ -49,7 +51,10 @@ def extract_resumption_prompt(handoff_path: Path) -> str | None:
     Looks for the ## Resumption Prompt section and extracts the content
     from the code block within it.
     """
-    content = handoff_path.read_text()
+    try:
+        content = handoff_path.read_text()
+    except OSError:
+        return None
 
     # Find the Resumption Prompt section
     section_pattern = re.compile(

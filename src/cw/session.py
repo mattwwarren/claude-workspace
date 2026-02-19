@@ -18,6 +18,17 @@ from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionSta
 
 CW_SESSION = "cw"
 
+# Timing constants for session lifecycle
+HANDOFF_POLL_TIMEOUT_S = 30
+HANDOFF_POLL_INTERVAL_S = 1
+CLAUDE_INIT_DELAY_S = 2
+
+
+def _navigate_to_pane(session: Session, *, target: str | None = None) -> None:
+    """Navigate to a session's tab and pane in Zellij."""
+    zellij.go_to_tab(session.zellij_tab or session.client, session=target)
+    zellij.focus_pane(session.zellij_pane or session.purpose, session=target)
+
 
 def _ensure_zellij() -> None:
     """Verify zellij is installed."""
@@ -112,8 +123,7 @@ def start_session(client_name: str, purpose: str) -> None:
         if zellij.session_exists(CW_SESSION):
             click.echo(f"Session already active: {existing.name}")
             if zellij.in_zellij_session():
-                zellij.go_to_tab(client_name)
-                zellij.focus_pane(purpose)
+                _navigate_to_pane(existing)
             else:
                 click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
                 zellij.attach_session(CW_SESSION)
@@ -180,8 +190,7 @@ def start_session(client_name: str, purpose: str) -> None:
     # Inject claude into the pane - works both inside and outside Zellij
     # by targeting the session explicitly when outside
     target = None if zellij.in_zellij_session() else CW_SESSION
-    zellij.go_to_tab(client_name, session=target)
-    zellij.focus_pane(purpose, session=target)
+    _navigate_to_pane(session, target=target)
     zellij.write_to_pane(claude_cmd, session=target)
 
     if not zellij.in_zellij_session():
@@ -222,14 +231,13 @@ def background_session(session_name: str | None = None) -> None:
 
     if zellij.in_zellij_session():
         # Inject /session-done into the pane
-        zellij.go_to_tab(session.zellij_tab or session.client)
-        zellij.focus_pane(session.zellij_pane or session.purpose)
+        _navigate_to_pane(session)
         zellij.write_to_pane("/session-done\n")
 
         # Poll for handoff file (max 30s)
         click.echo("Waiting for handoff generation...")
-        for _ in range(30):
-            time.sleep(1)
+        for _ in range(HANDOFF_POLL_TIMEOUT_S):
+            time.sleep(HANDOFF_POLL_INTERVAL_S)
             new_handoffs = find_handoffs_newer_than(
                 session.workspace_path, before_mtime
             )
@@ -239,7 +247,7 @@ def background_session(session_name: str | None = None) -> None:
                 break
         else:
             click.echo(
-                "Warning: No handoff detected within 30s."
+                f"Warning: No handoff detected within {HANDOFF_POLL_TIMEOUT_S}s."
                 " Session marked as backgrounded anyway."
             )
     else:
@@ -294,13 +302,12 @@ def resume_session(session_name: str) -> None:
     click.echo(f"Resumed session: {session.name}")
 
     if zellij.in_zellij_session():
-        zellij.go_to_tab(session.zellij_tab or session.client)
-        zellij.focus_pane(session.zellij_pane or session.purpose)
+        _navigate_to_pane(session)
 
         # Resume the exact Claude session by ID, then inject handoff context
         zellij.write_to_pane(f"claude --resume {session.claude_session_id}\n")
         if prompt:
-            time.sleep(2)  # Wait for Claude to initialize
+            time.sleep(CLAUDE_INIT_DELAY_S)  # Wait for Claude to initialize
             zellij.write_to_pane(prompt + "\n")
     else:
         click.echo(f"Attach with: zellij attach {CW_SESSION}")

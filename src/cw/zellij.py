@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import click
-from jinja2 import BaseLoader, Environment, TemplateNotFound
+from jinja2 import DictLoader, Environment
 
 from cw.models import ClientConfig
 
@@ -50,22 +51,8 @@ layout {
 """
 
 
-class _DictLoader(BaseLoader):
-    """Simple loader from a dict of template name -> source."""
-
-    def __init__(self, templates: dict[str, str]) -> None:
-        self.templates = templates
-
-    def get_source(
-        self, environment: Environment, template: str
-    ) -> tuple[str, str | None, None]:
-        if template in self.templates:
-            return self.templates[template], None, None
-        raise TemplateNotFound(template)
-
-
 _env = Environment(
-    loader=_DictLoader({"client.kdl.j2": CLIENT_LAYOUT_TEMPLATE}),
+    loader=DictLoader({"client.kdl.j2": CLIENT_LAYOUT_TEMPLATE}),
     keep_trailing_newline=True,
 )
 
@@ -79,11 +66,6 @@ def _run_zellij(*args: str, check: bool = True) -> subprocess.CompletedProcess[s
 def is_installed() -> bool:
     """Check if zellij is available on PATH."""
     return shutil.which("zellij") is not None
-
-
-def is_yazi_installed() -> bool:
-    """Check if yazi is available on PATH."""
-    return shutil.which("yazi") is not None
 
 
 def list_sessions() -> list[str]:
@@ -193,13 +175,9 @@ def focus_pane(pane_name: str, session: str | None = None) -> None:
 
 def in_zellij_session() -> bool:
     """Check if we're currently running inside a Zellij session."""
-    import os
-
     return "ZELLIJ_SESSION_NAME" in os.environ
 
 
 def current_session_name() -> str | None:
     """Get the name of the current Zellij session, if inside one."""
-    import os
-
     return os.environ.get("ZELLIJ_SESSION_NAME")

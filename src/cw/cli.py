@@ -5,6 +5,7 @@ from __future__ import annotations
 import click
 
 from cw import __version__
+from cw.models import SessionPurpose
 
 
 @click.group()
@@ -17,7 +18,7 @@ def main() -> None:
 @click.argument("client")
 @click.option(
     "--purpose",
-    type=click.Choice(["impl", "review", "debt", "explore"]),
+    type=click.Choice([e.value for e in SessionPurpose]),
     default="impl",
     help="Session purpose.",
 )

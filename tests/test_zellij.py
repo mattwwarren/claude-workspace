@@ -15,7 +15,6 @@ from cw.zellij import (
     go_to_tab,
     in_zellij_session,
     is_installed,
-    is_yazi_installed,
     list_sessions,
     session_exists,
     write_to_pane,
@@ -30,16 +29,6 @@ class TestIsInstalled:
     def test_not_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("cw.zellij.shutil.which", lambda cmd: None)
         assert is_installed() is False
-
-
-class TestIsYaziInstalled:
-    def test_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cw.zellij.shutil.which", lambda cmd: "/usr/bin/yazi")
-        assert is_yazi_installed() is True
-
-    def test_not_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cw.zellij.shutil.which", lambda cmd: None)
-        assert is_yazi_installed() is False
 
 
 class TestListSessions:

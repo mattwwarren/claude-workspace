@@ -140,14 +140,14 @@ def mock_zellij(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object,
     def _attach(s: str) -> None:
         calls["attach_session"].append((s,))
 
-    def _go_to_tab(t: str) -> None:
-        calls["go_to_tab"].append((t,))
+    def _go_to_tab(t: str, session: str | None = None) -> None:
+        calls["go_to_tab"].append((t, session))
 
-    def _focus_pane(p: str) -> None:
-        calls["focus_pane"].append((p,))
+    def _focus_pane(p: str, session: str | None = None) -> None:
+        calls["focus_pane"].append((p, session))
 
-    def _write_to_pane(t: str) -> None:
-        calls["write_to_pane"].append((t,))
+    def _write_to_pane(t: str, session: str | None = None) -> None:
+        calls["write_to_pane"].append((t, session))
 
     monkeypatch.setattr("cw.zellij.is_installed", _is_installed)
     monkeypatch.setattr(
