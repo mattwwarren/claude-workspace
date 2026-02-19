@@ -20,6 +20,8 @@ from cw.handoff import (
     find_latest_handoff,
 )
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.prompts import escape_kdl_string, get_purpose_prompt
+from cw.worktree import create_worktree, remove_worktree
 
 CW_SESSION = "cw"
 
@@ -45,20 +47,33 @@ def _ensure_zellij() -> None:
 def _build_pane_args(
     sessions: dict[str, Session],
     resume: bool = False,
+    client: ClientConfig | None = None,
 ) -> dict[str, dict[str, str]]:
     """Build KDL-formatted claude args for each pane.
 
     Args:
         sessions: Map of purpose name to Session with claude_session_id.
         resume: If True, use --resume instead of --session-id.
+        client: Client config for resolving purpose prompts.
     """
     panes: dict[str, dict[str, str]] = {}
+    client_overrides = client.purpose_prompts if client else None
     for purpose, session in sessions.items():
         sid = str(session.claude_session_id)
-        if resume:
-            panes[purpose] = {"claude_args": f'"--resume" "{sid}"'}
-        else:
-            panes[purpose] = {"claude_args": f'"--session-id" "{sid}"'}
+        flag = "--resume" if resume else "--session-id"
+        args_parts = [f'"{flag}" "{sid}"']
+
+        # Add purpose-specific system prompt
+        prompt = get_purpose_prompt(purpose, client_overrides)
+        if prompt:
+            escaped = escape_kdl_string(prompt)
+            args_parts.append(f'"--append-system-prompt" "{escaped}"')
+
+        pane_data: dict[str, str] = {"claude_args": " ".join(args_parts)}
+        # Set cwd to worktree path if available, else workspace path
+        cwd = str(session.worktree_path or session.workspace_path)
+        pane_data["cwd"] = cwd
+        panes[purpose] = pane_data
     return panes
 
 
@@ -67,21 +82,33 @@ def _create_all_purpose_sessions(
     client: ClientConfig,
     state: CwState,
     prior_sessions: dict[str, Session] | None = None,
+    *,
+    worktree_path: Path | None = None,
+    worktree_branch: str | None = None,
 ) -> dict[str, Session]:
     """Create Session objects for all purposes.
 
     Reuses prior claude_session_ids when available for resumption.
+    worktree_path/branch apply to impl and review purposes.
     """
+    # Purposes that get the worktree cwd
+    worktree_purposes = {"impl", "review"}
+
     sessions: dict[str, Session] = {}
-    for purpose in ("impl", "review", "debt"):
+    for purpose_enum in client.auto_purposes:
+        purpose = purpose_enum.value
         session = Session(
             name=f"{client_name}/{purpose}",
             client=client_name,
-            purpose=SessionPurpose(purpose),
+            purpose=purpose_enum,
             workspace_path=client.workspace_path,
             zellij_pane=purpose,
             zellij_tab=client_name,
         )
+        # Apply worktree to impl and review panes
+        if worktree_path and purpose in worktree_purposes:
+            session.worktree_path = worktree_path
+            session.branch = worktree_branch
         # Carry forward Claude session ID from prior session for resumption
         if prior_sessions and purpose in prior_sessions:
             session.claude_session_id = prior_sessions[purpose].claude_session_id
@@ -100,7 +127,8 @@ def _create_session_if_needed(
     False if already running.
     """
     if not zellij.session_exists(CW_SESSION):
-        layout_path = zellij.generate_layout(client, panes=panes)
+        purposes = [p.value for p in client.auto_purposes]
+        layout_path = zellij.generate_layout(client, panes=panes, purposes=purposes)
         click.echo(f"Launching Zellij session '{CW_SESSION}' for {client.name}...")
         # This will take over the terminal - user lands directly in the session
         zellij.create_and_attach(CW_SESSION, layout_path)
@@ -108,11 +136,23 @@ def _create_session_if_needed(
     return False
 
 
-def start_session(client_name: str, purpose: str) -> None:
+def start_session(
+    client_name: str,
+    purpose: str,
+    *,
+    worktree: str | None = None,
+) -> None:
     """Start or resume a Claude Code session for a client."""
     _ensure_zellij()
     client = get_client(client_name)
     state = load_state()
+
+    # Create worktree if requested
+    worktree_path: Path | None = None
+    if worktree:
+        click.echo(f"Creating worktree for branch '{worktree}'...")
+        worktree_path = create_worktree(client, worktree)
+        click.echo(f"Worktree ready: {worktree_path}")
 
     # Check for existing backgrounded session
     existing = state.find_session(client_name, purpose)
@@ -163,9 +203,14 @@ def start_session(client_name: str, purpose: str) -> None:
         for p, s in all_sessions.items():
             sid = str(s.claude_session_id)
             if p in prior_sessions:
-                panes[p] = {"claude_args": f'"--resume" "{sid}"'}
+                args_parts = [f'"--resume" "{sid}"']
             else:
-                panes[p] = {"claude_args": f'"--session-id" "{sid}"'}
+                args_parts = [f'"--session-id" "{sid}"']
+            prompt = get_purpose_prompt(p, client.purpose_prompts or None)
+            if prompt:
+                escaped = escape_kdl_string(prompt)
+                args_parts.append(f'"--append-system-prompt" "{escaped}"')
+            panes[p] = {"claude_args": " ".join(args_parts)}
 
         click.echo("Resuming Claude sessions in new Zellij layout...")
         _create_session_if_needed(client, panes=panes)
@@ -174,10 +219,14 @@ def start_session(client_name: str, purpose: str) -> None:
     # Fresh start - no existing session for this client
     if not zellij.session_exists(CW_SESSION):
         # Create sessions for ALL purposes and bake claude into the layout
-        all_sessions = _create_all_purpose_sessions(client_name, client, state)
+        all_sessions = _create_all_purpose_sessions(
+            client_name, client, state,
+            worktree_path=worktree_path,
+            worktree_branch=worktree,
+        )
         save_state(state)
 
-        panes = _build_pane_args(all_sessions, resume=False)
+        panes = _build_pane_args(all_sessions, resume=False, client=client)
         click.echo(f"Launching Zellij session '{CW_SESSION}' for {client_name}...")
         for s in all_sessions.values():
             click.echo(f"  {s.name} (claude session: {s.claude_session_id})")
@@ -197,7 +246,14 @@ def start_session(client_name: str, purpose: str) -> None:
     state.sessions.append(session)
     save_state(state)
 
-    claude_cmd = f"claude --session-id {session.claude_session_id}\n"
+    # Build claude command with optional system prompt
+    cmd_parts = [f"claude --session-id {session.claude_session_id}"]
+    prompt = get_purpose_prompt(purpose, client.purpose_prompts or None)
+    if prompt:
+        # Shell-escape the prompt for injection
+        escaped_prompt = prompt.replace("'", "'\\''")
+        cmd_parts.append(f"--append-system-prompt '{escaped_prompt}'")
+    claude_cmd = " ".join(cmd_parts) + "\n"
     click.echo(f"Started session: {session.name} (id: {session.id})")
 
     # Inject claude into the pane - works both inside and outside Zellij
@@ -338,6 +394,31 @@ def resume_session(session_name: str) -> None:
         if prompt:
             click.echo("\nResumption prompt:")
             click.echo(prompt)
+
+
+def done_session(
+    session_name: str | None = None,
+    *,
+    cleanup: bool = False,
+    force: bool = False,
+) -> None:
+    """Mark a session as completed and optionally remove its worktree."""
+    state = load_state()
+    session = _resolve_session(state, session_name)
+
+    if session.status == SessionStatus.COMPLETED:
+        msg = f"Session {session.name} is already completed."
+        raise CwError(msg)
+
+    session.status = SessionStatus.COMPLETED
+    save_state(state)
+    click.echo(f"Session {session.name} marked as completed.")
+
+    if cleanup and session.worktree_path and session.branch:
+        client = get_client(session.client)
+        click.echo(f"Removing worktree for branch '{session.branch}'...")
+        remove_worktree(client, session.branch, force=force)
+        click.echo("Worktree removed.")
 
 
 def hand_to_session(

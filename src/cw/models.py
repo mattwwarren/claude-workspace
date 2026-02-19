@@ -43,6 +43,13 @@ class Session(BaseModel):
     resumed_at: datetime | None = None
 
 
+_DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
+    SessionPurpose.IMPL,
+    SessionPurpose.REVIEW,
+    SessionPurpose.DEBT,
+]
+
+
 class ClientConfig(BaseModel):
     """Configuration for a client workspace."""
 
@@ -50,6 +57,10 @@ class ClientConfig(BaseModel):
     workspace_path: Path
     default_branch: str = "main"
     worktree_base: Path | None = None
+    auto_purposes: list[SessionPurpose] = Field(
+        default_factory=lambda: list(_DEFAULT_AUTO_PURPOSES),
+    )
+    purpose_prompts: dict[str, str] = Field(default_factory=dict)
 
 
 class CwState(BaseModel):

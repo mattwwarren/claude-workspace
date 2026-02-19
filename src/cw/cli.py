@@ -16,6 +16,7 @@ from cw.models import CwState, Session, SessionPurpose, SessionStatus
 from cw.session import (
     CW_SESSION,
     background_session,
+    done_session,
     hand_to_session,
     resume_session,
     start_session,
@@ -77,10 +78,15 @@ def main() -> None:
     default="impl",
     help="Session purpose.",
 )
+@click.option(
+    "--worktree", "-w",
+    default=None,
+    help="Git branch for worktree isolation (e.g. feat/search).",
+)
 @handle_errors
-def start(client: str, purpose: str) -> None:
+def start(client: str, purpose: str, worktree: str | None) -> None:
     """Start or resume a Claude Code session for a client."""
-    start_session(client, purpose)
+    start_session(client, purpose, worktree=worktree)
 
 
 @main.command()
@@ -140,6 +146,20 @@ def hand(target: str, message: str, source: str | None) -> None:
     Example: cw hand debt "Fix the ruff violations in session.py"
     """
     hand_to_session(target, message, source_purpose=source)
+
+
+@main.command()
+@click.argument("session_name", required=False, default=None,
+                shell_complete=_complete_session)
+@click.option("--cleanup", is_flag=True, help="Remove associated worktree.")
+@click.option("--force", is_flag=True, help="Force worktree removal.")
+@handle_errors
+def done(session_name: str | None, cleanup: bool, force: bool) -> None:
+    """Mark a session as completed (not resumable).
+
+    Optionally removes the associated worktree with --cleanup.
+    """
+    done_session(session_name, cleanup=cleanup, force=force)
 
 
 @main.command()

@@ -9,10 +9,91 @@ import pytest
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
-from cw.session import background_session, resume_session, start_session
+from cw.session import (
+    _build_pane_args,
+    _create_all_purpose_sessions,
+    background_session,
+    done_session,
+    resume_session,
+    start_session,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class TestBuildPaneArgs:
+    def test_includes_system_prompt(self, sample_client: ClientConfig) -> None:
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+        )
+        panes = _build_pane_args({"impl": session}, client=sample_client)
+        assert "--append-system-prompt" in panes["impl"]["claude_args"]
+        assert "IMPLEMENTATION" in panes["impl"]["claude_args"]
+
+    def test_client_override_prompt(self, sample_client: ClientConfig) -> None:
+        sample_client.purpose_prompts = {"impl": "Custom impl prompt."}
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+        )
+        panes = _build_pane_args({"impl": session}, client=sample_client)
+        assert "Custom impl prompt." in panes["impl"]["claude_args"]
+
+    def test_cwd_from_worktree(self, sample_client: ClientConfig) -> None:
+        wt = sample_client.workspace_path.parent / "worktree"
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+            worktree_path=wt,
+        )
+        panes = _build_pane_args({"impl": session})
+        assert panes["impl"]["cwd"] == str(wt)
+
+    def test_cwd_falls_back_to_workspace(self, sample_client: ClientConfig) -> None:
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+        )
+        panes = _build_pane_args({"impl": session})
+        assert panes["impl"]["cwd"] == str(sample_client.workspace_path)
+
+
+class TestCreateAllPurposeSessions:
+    def test_uses_auto_purposes(self, sample_client: ClientConfig) -> None:
+        """_create_all_purpose_sessions iterates client.auto_purposes."""
+        sample_client.auto_purposes = [SessionPurpose.IMPL, SessionPurpose.REVIEW]
+        state = CwState()
+        sessions = _create_all_purpose_sessions(
+            sample_client.name, sample_client, state,
+        )
+        assert set(sessions.keys()) == {"impl", "review"}
+        assert len(state.sessions) == 2
+
+    def test_default_purposes(self, sample_client: ClientConfig) -> None:
+        state = CwState()
+        sessions = _create_all_purpose_sessions(
+            sample_client.name, sample_client, state,
+        )
+        assert set(sessions.keys()) == {"impl", "review", "debt"}
+
+    def test_single_purpose(self, sample_client: ClientConfig) -> None:
+        sample_client.auto_purposes = [SessionPurpose.IMPL]
+        state = CwState()
+        sessions = _create_all_purpose_sessions(
+            sample_client.name, sample_client, state,
+        )
+        assert set(sessions.keys()) == {"impl"}
+        assert len(state.sessions) == 1
 
 
 class TestStartSession:
@@ -177,6 +258,46 @@ class TestStartSession:
             s for s in updated.sessions if s.status == SessionStatus.COMPLETED
         ]
         assert len(completed) >= 1
+
+    def test_start_with_worktree(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        # Mock create_worktree to return a path
+        wt_path = sample_client.workspace_path.parent / ".worktrees" / "feat-search"
+        wt_path.mkdir(parents=True)
+        monkeypatch.setattr(
+            "cw.session.create_worktree",
+            lambda _client, _branch: wt_path,
+        )
+
+        start_session("test-client", "impl", worktree="feat/search")
+
+        state = load_state()
+        # impl and review should have worktree_path set
+        impl_sessions = [
+            s for s in state.sessions if s.purpose == SessionPurpose.IMPL
+        ]
+        review_sessions = [
+            s for s in state.sessions if s.purpose == SessionPurpose.REVIEW
+        ]
+        debt_sessions = [
+            s for s in state.sessions if s.purpose == SessionPurpose.DEBT
+        ]
+        assert impl_sessions[0].worktree_path == wt_path
+        assert impl_sessions[0].branch == "feat/search"
+        assert review_sessions[0].worktree_path == wt_path
+        assert debt_sessions[0].worktree_path is None
 
     def test_zellij_not_installed_raises(
         self,
@@ -544,3 +665,141 @@ class TestResumeSession:
 
         # Verify write_to_pane was called (for "claude\n" and prompt)
         assert len(mock_zellij["write_to_pane"]) >= 2
+
+
+class TestDoneSession:
+    def test_marks_completed(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        done_session("test-client/impl")
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.COMPLETED
+
+    def test_already_completed_raises(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0002",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.COMPLETED,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(CwError, match="already completed"):
+            done_session("test-client/impl")
+
+    def test_cleanup_calls_remove_worktree(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        wt_path = sample_client.workspace_path.parent / ".worktrees" / "feat-done"
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0003",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=wt_path,
+                    branch="feat/done",
+                )
+            ]
+        )
+        save_state(state)
+
+        remove_calls: list[tuple[object, ...]] = []
+        monkeypatch.setattr(
+            "cw.session.remove_worktree",
+            lambda client, branch, force=False: remove_calls.append(
+                (client, branch, force),
+            ),
+        )
+
+        done_session("test-client/impl", cleanup=True)
+
+        assert len(remove_calls) == 1
+        assert remove_calls[0][1] == "feat/done"
+
+    def test_force_passed_through(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        wt_path = sample_client.workspace_path.parent / ".worktrees" / "feat-force"
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0004",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=wt_path,
+                    branch="feat/force",
+                )
+            ]
+        )
+        save_state(state)
+
+        remove_calls: list[tuple[object, ...]] = []
+        monkeypatch.setattr(
+            "cw.session.remove_worktree",
+            lambda client, branch, force=False: remove_calls.append(
+                (client, branch, force),
+            ),
+        )
+
+        done_session("test-client/impl", cleanup=True, force=True)
+
+        assert remove_calls[0][2] is True

@@ -43,13 +43,27 @@ class TestCli:
         runner = CliRunner()
         with patch("cw.cli.start_session") as mock_start:
             runner.invoke(main, ["start", "my-client"])
-            mock_start.assert_called_once_with("my-client", "impl")
+            mock_start.assert_called_once_with(
+                "my-client", "impl", worktree=None,
+            )
 
     def test_start_with_purpose(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.start_session") as mock_start:
             runner.invoke(main, ["start", "--purpose", "review", "my-client"])
-            mock_start.assert_called_once_with("my-client", "review")
+            mock_start.assert_called_once_with(
+                "my-client", "review", worktree=None,
+            )
+
+    def test_start_with_worktree(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.start_session") as mock_start:
+            runner.invoke(
+                main, ["start", "--worktree", "feat/search", "my-client"],
+            )
+            mock_start.assert_called_once_with(
+                "my-client", "impl", worktree="feat/search",
+            )
 
     def test_bg_dispatches(self) -> None:
         runner = CliRunner()
@@ -80,6 +94,30 @@ class TestCli:
         with patch("cw.cli._display_status") as mock_status:
             runner.invoke(main, ["status"])
             mock_status.assert_called_once()
+
+    def test_done_dispatches(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.done_session") as mock_done:
+            runner.invoke(main, ["done", "my-session"])
+            mock_done.assert_called_once_with(
+                "my-session", cleanup=False, force=False,
+            )
+
+    def test_done_with_cleanup(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.done_session") as mock_done:
+            runner.invoke(main, ["done", "my-session", "--cleanup", "--force"])
+            mock_done.assert_called_once_with(
+                "my-session", cleanup=True, force=True,
+            )
+
+    def test_done_no_session_arg(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.done_session") as mock_done:
+            runner.invoke(main, ["done"])
+            mock_done.assert_called_once_with(
+                None, cleanup=False, force=False,
+            )
 
     def test_config_dispatches(self) -> None:
         runner = CliRunner()

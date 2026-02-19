@@ -16,7 +16,7 @@ from cw.config import (
     show_config,
 )
 from cw.exceptions import CwError
-from cw.models import CwState, Session, SessionPurpose
+from cw.models import _DEFAULT_AUTO_PURPOSES, CwState, Session, SessionPurpose
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,6 +61,36 @@ class TestLoadClients:
         clients_file.write_text("something_else: true\n")
         result = load_clients()
         assert result == {}
+
+    def test_auto_purposes_from_yaml(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  sigma:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    auto_purposes: [impl, review]\n"
+        )
+        result = load_clients()
+        assert len(result["sigma"].auto_purposes) == 2
+        assert SessionPurpose.DEBT not in result["sigma"].auto_purposes
+
+    def test_default_auto_purposes_when_not_specified(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+        )
+        result = load_clients()
+        assert result["acme"].auto_purposes == _DEFAULT_AUTO_PURPOSES
 
 
 class TestGetClient:
@@ -229,6 +259,37 @@ class TestShowConfig:
         assert "acme:" in output
         assert str(acme_dir) in output
         assert "develop" in output
+
+    def test_with_custom_purposes(
+        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  sigma:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    auto_purposes: [impl, review]\n"
+        )
+        show_config()
+        output = capsys.readouterr().out
+        assert "purposes: impl, review" in output
+
+    def test_default_purposes_not_shown(
+        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+        )
+        show_config()
+        output = capsys.readouterr().out
+        assert "purposes:" not in output
 
     def test_with_worktree(
         self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]

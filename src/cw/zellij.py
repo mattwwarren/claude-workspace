@@ -28,25 +28,30 @@ layout {
             command "yazi"
             args "{{ workspace_path }}"
         }
+{%- if secondary_panes %}
         pane split_direction="horizontal" size="80%" {
-            pane size="70%" name="impl" focus=true {
-                cwd "{{ workspace_path }}"
+            pane size="{{ primary_size }}" name="{{ primary_pane.name }}" focus=true {
+                cwd "{{ primary_pane.cwd }}"
                 command "claude"
-                args {{ panes.impl.claude_args }}
+                args {{ primary_pane.claude_args }}
             }
-            pane split_direction="vertical" size="30%" {
-                pane name="review" {
-                    cwd "{{ workspace_path }}"
+            pane split_direction="vertical" size="{{ secondary_size }}" {
+{%- for pane in secondary_panes %}
+                pane name="{{ pane.name }}" {
+                    cwd "{{ pane.cwd }}"
                     command "claude"
-                    args {{ panes.review.claude_args }}
+                    args {{ pane.claude_args }}
                 }
-                pane name="debt" {
-                    cwd "{{ workspace_path }}"
-                    command "claude"
-                    args {{ panes.debt.claude_args }}
-                }
+{%- endfor %}
             }
         }
+{%- else %}
+        pane size="80%" name="{{ primary_pane.name }}" focus=true {
+            cwd "{{ primary_pane.cwd }}"
+            command "claude"
+            args {{ primary_pane.claude_args }}
+        }
+{%- endif %}
     }
     pane size=1 borderless=true {
         plugin location="status-bar"
@@ -97,29 +102,62 @@ def session_exists(session_name: str) -> bool:
 def generate_layout(
     client: ClientConfig,
     panes: dict[str, dict[str, str]] | None = None,
+    purposes: list[str] | None = None,
 ) -> Path:
     """Render the layout template for a client, returning the output path.
 
     Args:
         client: Client configuration.
-        panes: Optional per-pane config. Each key is a pane name (impl, review, debt)
-               with a dict containing 'claude_args' (pre-formatted KDL args string).
+        panes: Optional per-pane config. Each key is a pane name
+               with a dict containing 'claude_args' and optionally 'cwd'.
+        purposes: Ordered list of purpose names for panes. First is primary.
+                  Defaults to client.auto_purposes values.
     """
     GENERATED_LAYOUTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = GENERATED_LAYOUTS_DIR / f"cw-{client.name}.kdl"
 
+    if purposes is None:
+        purposes = [p.value for p in client.auto_purposes]
+
     # Default: fresh claude sessions with no special args
     if panes is None:
-        panes = {
-            name: {"claude_args": '""'}
-            for name in ("impl", "review", "debt")
+        panes = {name: {"claude_args": '""'} for name in purposes}
+
+    default_cwd = str(client.workspace_path)
+
+    # Build pane context dicts for template
+    def _pane_ctx(name: str) -> dict[str, str]:
+        default_pane = {"claude_args": '""'}
+        pane_data = panes.get(name, default_pane) if panes else default_pane
+        return {
+            "name": name,
+            "cwd": pane_data.get("cwd", default_cwd),
+            "claude_args": pane_data.get("claude_args", '""'),
         }
+
+    primary_pane = _pane_ctx(purposes[0])
+    secondary_panes = [_pane_ctx(p) for p in purposes[1:]]
+
+    # Layout size rules based on pane count
+    num_secondary = len(secondary_panes)
+    if num_secondary == 0:
+        primary_size = "100%"
+        secondary_size = "0%"
+    elif num_secondary <= 2:
+        primary_size = "70%"
+        secondary_size = "30%"
+    else:  # 3+
+        primary_size = "60%"
+        secondary_size = "40%"
 
     template = _env.get_template("client.kdl.j2")
     rendered = template.render(
         client_name=client.name,
-        workspace_path=str(client.workspace_path),
-        panes=panes,
+        workspace_path=default_cwd,
+        primary_pane=primary_pane,
+        secondary_panes=secondary_panes,
+        primary_size=primary_size,
+        secondary_size=secondary_size,
     )
     output_path.write_text(rendered)
     return output_path

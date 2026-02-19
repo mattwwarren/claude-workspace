@@ -9,7 +9,7 @@ import click
 import yaml
 
 from cw.exceptions import CwError
-from cw.models import ClientConfig, CwState
+from cw.models import _DEFAULT_AUTO_PURPOSES, ClientConfig, CwState
 
 CONFIG_DIR = Path.home() / ".config" / "cw"
 STATE_DIR = Path.home() / ".local" / "share" / "cw"
@@ -97,5 +97,8 @@ def show_config() -> None:
         click.echo(f"  {name}:")
         click.echo(f"    path:   {client.workspace_path}")
         click.echo(f"    branch: {client.default_branch}")
+        if client.auto_purposes != _DEFAULT_AUTO_PURPOSES:
+            purposes_str = ", ".join(p.value for p in client.auto_purposes)
+            click.echo(f"    purposes: {purposes_str}")
         if client.worktree_base:
             click.echo(f"    worktrees: {client.worktree_base}")

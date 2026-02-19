@@ -14,6 +14,7 @@ clients:
   sigma:
     workspace_path: /home/matthew/workspace/sigma
     default_branch: main
+    auto_purposes: [impl, review]  # default: [impl, review, debt]
 
   family:
     workspace_path: /home/matthew/workspace/family

@@ -134,6 +134,41 @@ class TestClientConfig:
         )
         assert c.default_branch == "develop"
 
+    def test_default_auto_purposes(self) -> None:
+        c = ClientConfig(name="test", workspace_path="/dev/null")
+        assert c.auto_purposes == [
+            SessionPurpose.IMPL,
+            SessionPurpose.REVIEW,
+            SessionPurpose.DEBT,
+        ]
+
+    def test_custom_auto_purposes(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path="/dev/null",
+            auto_purposes=[SessionPurpose.IMPL, SessionPurpose.REVIEW],
+        )
+        assert len(c.auto_purposes) == 2
+        assert SessionPurpose.DEBT not in c.auto_purposes
+
+    def test_auto_purposes_instances_are_independent(self) -> None:
+        c1 = ClientConfig(name="a", workspace_path="/dev/null")
+        c2 = ClientConfig(name="b", workspace_path="/dev/null")
+        c1.auto_purposes.append(SessionPurpose.EXPLORE)
+        assert SessionPurpose.EXPLORE not in c2.auto_purposes
+
+    def test_default_purpose_prompts(self) -> None:
+        c = ClientConfig(name="test", workspace_path="/dev/null")
+        assert c.purpose_prompts == {}
+
+    def test_custom_purpose_prompts(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path="/dev/null",
+            purpose_prompts={"review": "Focus on HIPAA compliance."},
+        )
+        assert c.purpose_prompts["review"] == "Focus on HIPAA compliance."
+
 
 class TestCwState:
     def test_empty_state(self) -> None:

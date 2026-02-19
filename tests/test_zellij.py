@@ -139,6 +139,100 @@ class TestGenerateLayout:
         assert 'name="debt"' in content
         assert 'name="files"' in content
 
+    def test_single_purpose_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="solo", workspace_path=ws_dir)
+        result = generate_layout(client, purposes=["impl"])
+        content = result.read_text()
+        assert 'name="impl"' in content
+        assert 'name="review"' not in content
+        assert 'name="debt"' not in content
+        # Single pane should not have split_direction="vertical" secondary area
+        assert "split_direction" not in content.split('name="impl"')[1].split("}")[0]
+
+    def test_two_purpose_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="duo", workspace_path=ws_dir)
+        result = generate_layout(client, purposes=["impl", "review"])
+        content = result.read_text()
+        assert 'name="impl"' in content
+        assert 'name="review"' in content
+        assert 'name="debt"' not in content
+        assert 'size="70%"' in content
+        assert 'size="30%"' in content
+
+    def test_four_purpose_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="quad", workspace_path=ws_dir)
+        result = generate_layout(
+            client, purposes=["impl", "review", "debt", "explore"],
+        )
+        content = result.read_text()
+        assert 'name="impl"' in content
+        assert 'name="review"' in content
+        assert 'name="debt"' in content
+        assert 'name="explore"' in content
+        assert 'size="60%"' in content
+        assert 'size="40%"' in content
+
+    def test_layout_with_prompt_special_chars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="special", workspace_path=ws_dir)
+        panes = {
+            "impl": {
+                "claude_args": (
+                    '"--session-id" "abc"'
+                    ' "--append-system-prompt" "say \\"hello\\""'
+                ),
+            },
+        }
+        result = generate_layout(client, panes=panes, purposes=["impl"])
+        content = result.read_text()
+        # The escaped quotes should be in the output
+        assert "say \\" in content
+
+    def test_per_pane_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="cwdtest", workspace_path=ws_dir)
+        panes = {
+            "impl": {"claude_args": '""', "cwd": "/custom/worktree"},
+            "review": {"claude_args": '""'},
+        }
+        result = generate_layout(client, panes=panes, purposes=["impl", "review"])
+        content = result.read_text()
+        assert 'cwd "/custom/worktree"' in content
+        assert f'cwd "{ws_dir}"' in content
+
 
 class TestWriteToPane:
     def test_calls_zellij(self, monkeypatch: pytest.MonkeyPatch) -> None:
