@@ -50,6 +50,8 @@ def start_session(client_name: str, purpose: str) -> None:
 
     # Check for existing backgrounded session
     existing = state.find_session(client_name, purpose)
+    has_prior_session = False
+
     if existing and existing.status == SessionStatus.BACKGROUNDED:
         click.echo(f"Found backgrounded session: {existing.name}")
         resume_session(existing.name)
@@ -66,12 +68,19 @@ def start_session(client_name: str, purpose: str) -> None:
                 click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
                 zellij.attach_session(CW_SESSION)
             return
-        # Zellij session died - mark stale sessions as completed
-        click.echo(f"Zellij session gone. Cleaning up stale session: {existing.name}")
+        # Zellij session died - mark stale sessions as completed, resume Claude
+        click.echo(f"Zellij session gone. Recovering sessions for {client_name}...")
+        has_prior_session = True
         for s in state.sessions:
             if s.status == SessionStatus.ACTIVE:
                 s.status = SessionStatus.COMPLETED
         save_state(state)
+    elif not existing:
+        # Check if there were any completed sessions for this client+purpose
+        has_prior_session = any(
+            s.client == client_name and s.purpose == purpose
+            for s in state.sessions
+        )
 
     # Record the session before launching (so it persists even if we exec into zellij)
     session = Session(
@@ -85,7 +94,12 @@ def start_session(client_name: str, purpose: str) -> None:
     state.sessions.append(session)
     save_state(state)
 
+    # Pick the right claude command - resume prior session if one existed
+    claude_cmd = "claude --continue\n" if has_prior_session else "claude\n"
+
     click.echo(f"Started session: {session.name} (id: {session.id})")
+    if has_prior_session:
+        click.echo("Resuming previous Claude Code session...")
 
     # Ensure Zellij is running - if it creates a new session, it attaches and we're done
     if _ensure_session_running(client):
@@ -95,7 +109,7 @@ def start_session(client_name: str, purpose: str) -> None:
     if zellij.in_zellij_session():
         zellij.go_to_tab(client_name)
         zellij.focus_pane(purpose)
-        zellij.write_to_pane("claude\n")
+        zellij.write_to_pane(claude_cmd)
     else:
         click.echo(f"Zellij session '{CW_SESSION}' is running. Attaching...")
         zellij.attach_session(CW_SESSION)
