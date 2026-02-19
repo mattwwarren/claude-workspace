@@ -468,17 +468,17 @@ class TestShowStatus:
 
 class TestHandoffCli:
     def test_two_arg_route(self) -> None:
-        src, tgt = _parse_handoff_route("impl", "review", "impl")
+        src, tgt = _parse_handoff_route("impl", "review")
         assert src == "impl"
         assert tgt == "review"
 
     def test_arrow_route(self) -> None:
-        src, tgt = _parse_handoff_route("impl->review", None, "impl->review")
+        src, tgt = _parse_handoff_route("impl->review", None)
         assert src == "impl"
         assert tgt == "review"
 
     def test_arrow_route_with_spaces(self) -> None:
-        src, tgt = _parse_handoff_route("impl -> review", None, "impl -> review")
+        src, tgt = _parse_handoff_route("impl -> review", None)
         assert src == "impl"
         assert tgt == "review"
 
@@ -510,7 +510,7 @@ class TestHandoffCli:
 
     def test_missing_route_raises(self) -> None:
         with pytest.raises(CwError, match="Handoff requires"):
-            _parse_handoff_route("impl", None, "impl")
+            _parse_handoff_route("impl", None)
 
 
 class TestBgNotifyCli:

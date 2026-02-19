@@ -171,20 +171,15 @@ def done(session_name: str | None, cleanup: bool, force: bool) -> None:
 
 
 def _parse_handoff_route(
-    source: str | None,
+    source: str,
     target: str | None,
-    route: str | None,
 ) -> tuple[str, str]:
     """Parse handoff route from positional args or arrow syntax."""
-    if route and "->" in route:
-        parts = route.split("->", 1)
+    if "->" in source:
+        parts = source.split("->", 1)
         return parts[0].strip(), parts[1].strip()
-    if source and target:
+    if target:
         return source, target
-    if route and not target:
-        # Single arg without arrow — treat as source, missing target
-        msg = "Handoff requires source and target: cw handoff impl review"
-        raise CwError(msg)
     msg = "Handoff requires source and target: cw handoff impl review"
     raise CwError(msg)
 
@@ -210,7 +205,7 @@ def handoff(source: str, target: str | None, client: str | None) -> None:
       cw handoff impl->review
       cw handoff impl review --client sigma
     """
-    src, tgt = _parse_handoff_route(source, target, source)
+    src, tgt = _parse_handoff_route(source, target)
     handoff_session(src, tgt, client_name=client)
 
 
@@ -243,7 +238,7 @@ def plan(client: str, show_all: bool) -> None:
             if show_all:
                 click.echo(f"{summary.title} (no tasks)")
             continue
-        pct = int(done / total * 100) if total else 0
+        pct = int(done / total * 100)
         if not show_all and pct == 100:
             continue
         click.echo(f"{summary.title} [{done}/{total}] {pct}%")
