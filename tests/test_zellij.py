@@ -147,17 +147,47 @@ class TestGoToTab:
 
 
 class TestFocusPane:
-    def test_calls_zellij(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_cycles_to_target(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[tuple[str, ...]] = []
+
+        # dump-layout with command= so pane-to-terminal mapping works
+        layout = (
+            'tab name="Tab #1" {\n'
+            '  pane command="yazi" name="files" {\n'
+            '  pane command="claude" name="impl" {\n'
+            '  pane command="claude" name="review" {\n'
+            '  pane command="claude" name="debt" {\n'
+        )
+        # Cycle: start on review (terminal_2), target impl (terminal_1)
+        focused_terminal = ["terminal_2"]
 
         def mock_run(*args: str, check: bool = True) -> MagicMock:
             calls.append(args)
-            return MagicMock(returncode=0)
+            result = MagicMock(returncode=0)
+            if "dump-layout" in args:
+                result.stdout = layout
+            elif "list-clients" in args:
+                result.stdout = (
+                    "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"
+                    f"1         {focused_terminal[0]}     claude\n"
+                )
+            elif "focus-next-pane" in args:
+                # Simulate cycle: 2 -> 3 -> 0 -> 1
+                cycle = {
+                    "terminal_2": "terminal_3",
+                    "terminal_3": "terminal_0",
+                    "terminal_0": "terminal_1",
+                }
+                focused_terminal[0] = cycle.get(
+                    focused_terminal[0], "terminal_0"
+                )
+            return result
 
         monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
-        focus_pane("impl")
-        assert len(calls) == 1
-        assert calls[0] == ("action", "focus-pane", "--name", "impl")
+        focus_pane("impl")  # impl = terminal_1
+        focus_calls = [c for c in calls if "focus-next-pane" in c]
+        # Should cycle 3 times: review->debt->files->impl
+        assert len(focus_calls) == 3
 
 
 class TestInZellijSession:

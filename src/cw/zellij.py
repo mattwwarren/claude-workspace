@@ -164,13 +164,85 @@ def go_to_tab(tab_name: str, session: str | None = None) -> None:
         click.echo(f"Could not switch to tab '{tab_name}': {result.stderr.strip()}")
 
 
+def _get_focused_pane_id(session: str | None = None) -> str | None:
+    """Get the ZELLIJ_PANE_ID of the currently focused pane."""
+    base = ["-s", session] if session else []
+    result = _run_zellij(*base, "action", "list-clients", check=False)
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.strip().splitlines():
+        if line.startswith("CLIENT_ID"):
+            continue
+        parts = line.split(None, 2)
+        if len(parts) >= 2:
+            return parts[1]  # e.g. "terminal_2"
+    return None
+
+
+def _get_pane_id_for_name(
+    pane_name: str,
+    session: str | None = None,
+) -> str | None:
+    """Map a pane name to its terminal_N id via dump-layout.
+
+    Only looks at the first tab block (skips new_tab_template).
+    """
+    import re
+
+    base = ["-s", session] if session else []
+    result = _run_zellij(*base, "action", "dump-layout", check=False)
+    if result.returncode != 0:
+        return None
+
+    # Track terminal index: panes appear in dump-layout in terminal order
+    # terminal_0 = first command pane (files/yazi)
+    # terminal_1 = impl, terminal_2 = review, terminal_3 = debt
+    terminal_idx = 0
+    in_first_tab = False
+    for line in result.stdout.splitlines():
+        if "tab " in line and "name=" in line:
+            if in_first_tab:
+                break  # Hit second tab (new_tab_template), stop
+            in_first_tab = True
+            continue
+        if not in_first_tab:
+            continue
+        # Match panes with commands (these are terminal panes)
+        if re.search(r'pane\b.*\bcommand=', line):
+            match = re.search(r'name="([^"]+)"', line)
+            if match and match.group(1) == pane_name:
+                return f"terminal_{terminal_idx}"
+            terminal_idx += 1
+    return None
+
+
+# Max panes to cycle through before giving up
+_MAX_PANE_CYCLE = 10
+
+
 def focus_pane(pane_name: str, session: str | None = None) -> None:
-    """Focus a pane by name in the current Zellij session."""
-    if session:
-        args = ["-s", session, "action", "focus-pane", "--name", pane_name]
-    else:
-        args = ["action", "focus-pane", "--name", pane_name]
-    _run_zellij(*args, check=False)
+    """Focus a pane by name by cycling focus-next-pane.
+
+    Uses list-clients (reliable source of truth) to check which
+    pane is focused, and dump-layout to map pane names to terminal IDs.
+    """
+    target_id = _get_pane_id_for_name(pane_name, session)
+    if target_id is None:
+        click.echo(f"Pane '{pane_name}' not found in layout.")
+        return
+
+    current_id = _get_focused_pane_id(session)
+    if current_id == target_id:
+        return  # Already there
+
+    base = ["-s", session] if session else []
+    for _ in range(_MAX_PANE_CYCLE):
+        _run_zellij(*base, "action", "focus-next-pane", check=False)
+        current_id = _get_focused_pane_id(session)
+        if current_id == target_id:
+            return
+
+    click.echo(f"Could not focus pane '{pane_name}' after cycling.")
 
 
 def in_zellij_session() -> bool:
