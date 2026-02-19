@@ -8,12 +8,20 @@ import pytest
 
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
-from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.models import (
+    ClientConfig,
+    CompletionReason,
+    CwState,
+    Session,
+    SessionPurpose,
+    SessionStatus,
+)
 from cw.session import (
     _build_pane_args,
     _create_all_purpose_sessions,
     background_session,
     done_session,
+    handoff_session,
     resume_session,
     start_session,
 )
@@ -252,12 +260,18 @@ class TestStartSession:
         output = capsys.readouterr().out
         assert "crashed" in output.lower() or "Recovering" in output
 
-        # The crashed session should be marked COMPLETED
+        # The crashed session should be marked COMPLETED with CRASHED reason
         updated = load_state()
         completed = [
             s for s in updated.sessions if s.status == SessionStatus.COMPLETED
         ]
         assert len(completed) >= 1
+        crashed = [
+            s for s in completed
+            if s.completed_reason == CompletionReason.CRASHED
+        ]
+        assert len(crashed) >= 1
+        assert crashed[0].completed_at is not None
 
     def test_start_with_worktree(
         self,
@@ -803,3 +817,294 @@ class TestDoneSession:
         done_session("test-client/impl", cleanup=True, force=True)
 
         assert remove_calls[0][2] is True
+
+    def test_sets_completed_reason_user(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0005",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        done_session("test-client/impl")
+
+        updated = load_state()
+        assert updated.sessions[0].completed_reason == CompletionReason.USER
+        assert updated.sessions[0].completed_at is not None
+
+
+class TestHandoffSession:
+    def test_backgrounds_source_and_delivers_to_active_target(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="ho_src01",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="ho_tgt01",
+                    name="test-client/review",
+                    client="test-client",
+                    purpose=SessionPurpose.REVIEW,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="review",
+                    zellij_tab="test-client",
+                ),
+            ]
+        )
+        save_state(state)
+
+        handoff_session("impl", "review", client_name="test-client")
+
+        updated = load_state()
+        src = updated.find_by_name_or_id("ho_src01")
+        assert src is not None
+        assert src.status == SessionStatus.COMPLETED
+        assert src.completed_reason == CompletionReason.HANDOFF
+
+        output = capsys.readouterr().out
+        assert "Handoff complete" in output
+
+    def test_delivers_to_backgrounded_target(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="ho_src02",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="ho_tgt02",
+                    name="test-client/review",
+                    client="test-client",
+                    purpose=SessionPurpose.REVIEW,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="review",
+                    zellij_tab="test-client",
+                ),
+            ]
+        )
+        save_state(state)
+
+        # Skip sleep in resume_session
+        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
+
+        handoff_session("impl", "review", client_name="test-client")
+
+        output = capsys.readouterr().out
+        assert "Resuming" in output or "Handoff complete" in output
+
+    def test_raises_if_source_not_active(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="ho_src03",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.COMPLETED,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="ho_tgt03",
+                    name="test-client/review",
+                    client="test-client",
+                    purpose=SessionPurpose.REVIEW,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(CwError, match="No active/backgrounded impl"):
+            handoff_session("impl", "review", client_name="test-client")
+
+    def test_raises_if_target_completed(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="ho_src04",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="ho_tgt04",
+                    name="test-client/review",
+                    client="test-client",
+                    purpose=SessionPurpose.REVIEW,
+                    status=SessionStatus.COMPLETED,
+                    workspace_path=sample_client.workspace_path,
+                ),
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(CwError, match="No active/backgrounded review"):
+            handoff_session("impl", "review", client_name="test-client")
+
+    def test_raises_if_source_equals_target(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        with pytest.raises(CwError, match="Source and target cannot be the same"):
+            handoff_session("impl", "impl", client_name="test-client")
+
+    def test_auto_detects_client(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="ho_src05",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="ho_tgt05",
+                    name="test-client/review",
+                    client="test-client",
+                    purpose=SessionPurpose.REVIEW,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="review",
+                    zellij_tab="test-client",
+                ),
+            ]
+        )
+        save_state(state)
+
+        # No client_name — should auto-detect
+        handoff_session("impl", "review")
+
+        output = capsys.readouterr().out
+        assert "Handoff complete" in output
+
+
+class TestBackgroundNotify:
+    def test_notify_calls_write_to_pane(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="bn_src01",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="bn_tgt01",
+                    name="test-client/review",
+                    client="test-client",
+                    purpose=SessionPurpose.REVIEW,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="review",
+                    zellij_tab="test-client",
+                ),
+            ]
+        )
+        save_state(state)
+
+        background_session("test-client/impl", notify="review")
+
+        output = capsys.readouterr().out
+        assert "Notified" in output
+        # write_to_pane should have been called for the notification
+        assert len(mock_zellij["write_to_pane"]) >= 1
+
+    def test_notify_no_active_target_warns(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="bn_src02",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+            ]
+        )
+        save_state(state)
+
+        background_session("test-client/impl", notify="review")
+
+        output = capsys.readouterr().out
+        assert "No active review session" in output

@@ -23,6 +23,12 @@ class SessionStatus(StrEnum):
     COMPLETED = "completed"
 
 
+class CompletionReason(StrEnum):
+    USER = "user"
+    HANDOFF = "handoff"
+    CRASHED = "crashed"
+
+
 class Session(BaseModel):
     """A tracked Claude Code session."""
 
@@ -41,6 +47,8 @@ class Session(BaseModel):
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
+    completed_reason: CompletionReason | None = None
+    completed_at: datetime | None = None
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
@@ -93,3 +101,26 @@ class CwState(BaseModel):
             if s.name == identifier or s.id == identifier:
                 return s
         return None
+
+    def client_sessions(self, client: str) -> list[Session]:
+        """All sessions for a client, regardless of status."""
+        return [s for s in self.sessions if s.client == client]
+
+    def active_for_client(self, client: str) -> list[Session]:
+        """Active and backgrounded sessions for a client."""
+        return [
+            s
+            for s in self.sessions
+            if s.client == client
+            and s.status in (SessionStatus.ACTIVE, SessionStatus.BACKGROUNDED)
+        ]
+
+    def sibling_sessions(self, session: Session) -> list[Session]:
+        """Non-completed sessions for the same client, excluding the given session."""
+        return [
+            s
+            for s in self.sessions
+            if s.client == session.client
+            and s.id != session.id
+            and s.status != SessionStatus.COMPLETED
+        ]

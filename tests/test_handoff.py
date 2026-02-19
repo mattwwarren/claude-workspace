@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING
 
 from cw.handoff import (
+    build_cross_session_prompt,
     extract_resumption_prompt,
     find_handoffs_newer_than,
     find_latest_handoff,
@@ -155,3 +156,33 @@ class TestExtractResumptionPrompt:
         )
         result = extract_resumption_prompt(f)
         assert result == "Resume the work"
+
+
+class TestBuildCrossSessionPrompt:
+    def test_with_branch_and_prompt(self) -> None:
+        result = build_cross_session_prompt(
+            "impl", "review", "feat/search", "Continue the auth work.",
+        )
+        assert "impl → review" in result
+        assert "feat/search" in result
+        assert "Continue the auth work." in result
+
+    def test_without_branch(self) -> None:
+        result = build_cross_session_prompt(
+            "impl", "review", None, "Some context.",
+        )
+        assert "impl → review" in result
+        assert "branch" not in result.lower()
+        assert "Some context." in result
+
+    def test_without_raw_prompt(self) -> None:
+        result = build_cross_session_prompt(
+            "impl", "review", "feat/search", None,
+        )
+        assert "impl → review" in result
+        assert "No resumption context" in result
+
+    def test_without_branch_or_prompt(self) -> None:
+        result = build_cross_session_prompt("impl", "review", None, None)
+        assert "impl → review" in result
+        assert "No resumption context" in result

@@ -16,11 +16,19 @@ from cw import zellij
 from cw.config import get_client, load_state, save_state
 from cw.exceptions import CwError
 from cw.handoff import (
+    build_cross_session_prompt,
     extract_resumption_prompt,
     find_handoffs_newer_than,
     find_latest_handoff,
 )
-from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.models import (
+    ClientConfig,
+    CompletionReason,
+    CwState,
+    Session,
+    SessionPurpose,
+    SessionStatus,
+)
 from cw.prompts import get_purpose_prompt
 from cw.worktree import create_worktree, remove_worktree
 
@@ -179,6 +187,8 @@ def start_session(
             if health.get(pane_name) is False:
                 click.echo(f"Claude crashed in {existing.name}. Recovering...")
                 existing.status = SessionStatus.COMPLETED
+                existing.completed_reason = CompletionReason.CRASHED
+                existing.completed_at = datetime.now(UTC)
                 save_state(state)
                 # Fall through to fresh start / recovery below
             else:
@@ -297,7 +307,31 @@ def _wait_for_handoff(workspace_path: Path, before_mtime: float) -> Path | None:
     return None
 
 
-def background_session(session_name: str | None = None) -> None:
+def _notify_sibling(state: CwState, source: Session, target_purpose: str) -> None:
+    """Send a short notification to a sibling session after backgrounding."""
+    target = state.find_session(source.client, target_purpose)
+    if target is None or target.status != SessionStatus.ACTIVE:
+        click.echo(
+            f"Warning: No active {target_purpose} session"
+            f" for {source.client} to notify."
+        )
+        return
+
+    message = (
+        f"[cw] {source.purpose} session has been backgrounded."
+        f" Handoff context is available."
+    )
+    zellij_target = None if zellij.in_zellij_session() else CW_SESSION
+    _navigate_to_pane(target, target=zellij_target)
+    zellij.write_to_pane(message + "\n", session=zellij_target)
+    click.echo(f"Notified {target.name}.")
+
+
+def background_session(
+    session_name: str | None = None,
+    *,
+    notify: str | None = None,
+) -> None:
     """Background a session by triggering /session-done and recording the handoff."""
     state = load_state()
     session = _resolve_session(state, session_name)
@@ -337,6 +371,9 @@ def background_session(session_name: str | None = None) -> None:
     session.backgrounded_at = datetime.now(UTC)
     save_state(state)
     click.echo(f"Session {session.name} backgrounded.")
+
+    if notify:
+        _notify_sibling(state, session, notify)
 
 
 def resume_session(session_name: str) -> None:
@@ -404,6 +441,8 @@ def done_session(
         raise CwError(msg)
 
     session.status = SessionStatus.COMPLETED
+    session.completed_reason = CompletionReason.USER
+    session.completed_at = datetime.now(UTC)
     save_state(state)
     click.echo(f"Session {session.name} marked as completed.")
 
@@ -460,5 +499,132 @@ def hand_to_session(
     zellij.write_to_pane(message + "\n", session=zellij_target)
 
     click.echo(f"Delivered to {client_name}/{target_purpose}.")
+
+
+def _resolve_client_for_handoff(
+    state: CwState,
+    client_name: str | None,
+) -> str:
+    """Determine the client name for a handoff operation."""
+    if client_name:
+        return client_name
+
+    active = state.active_sessions()
+    bg = state.backgrounded_sessions()
+    all_live = active + bg
+    if not all_live:
+        msg = "No active or backgrounded sessions."
+        raise CwError(msg)
+
+    clients = {s.client for s in all_live}
+    if len(clients) > 1:
+        names = ", ".join(sorted(clients))
+        msg = f"Multiple clients have sessions. Specify --client: {names}"
+        raise CwError(msg)
+    return clients.pop()
+
+
+def handoff_session(
+    source_purpose: str,
+    target_purpose: str,
+    *,
+    client_name: str | None = None,
+) -> None:
+    """Background source session and deliver cross-session context to target."""
+    if source_purpose == target_purpose:
+        msg = f"Source and target cannot be the same: {source_purpose}"
+        raise CwError(msg)
+
+    state = load_state()
+    resolved_client = _resolve_client_for_handoff(state, client_name)
+
+    source = state.find_session(resolved_client, source_purpose)
+    if source is None or source.status not in (
+        SessionStatus.ACTIVE,
+        SessionStatus.BACKGROUNDED,
+    ):
+        msg = f"No active/backgrounded {source_purpose} session for {resolved_client}."
+        raise CwError(msg)
+
+    target = state.find_session(resolved_client, target_purpose)
+    if target is None or target.status == SessionStatus.COMPLETED:
+        msg = f"No active/backgrounded {target_purpose} session for {resolved_client}."
+        raise CwError(msg)
+
+    # Background source if active
+    raw_prompt: str | None = None
+    if source.status == SessionStatus.ACTIVE:
+        click.echo(f"Backgrounding {source.name}...")
+        background_session(source.name)
+        # Reload state after background_session saved
+        state = load_state()
+        source = state.find_by_name_or_id(source.id)
+        if source is None:
+            msg = "Source session lost after backgrounding."
+            raise CwError(msg)
+
+    # Extract resumption prompt from source handoff
+    if source.last_handoff_path and source.last_handoff_path.exists():
+        raw_prompt = extract_resumption_prompt(source.last_handoff_path)
+
+    # Mark source as completed with HANDOFF reason
+    source.status = SessionStatus.COMPLETED
+    source.completed_reason = CompletionReason.HANDOFF
+    source.completed_at = datetime.now(UTC)
+    save_state(state)
+
+    # Build cross-session prompt
+    prompt = build_cross_session_prompt(
+        source_purpose,
+        target_purpose,
+        source.branch,
+        raw_prompt,
+    )
+
+    # Reload target from updated state
+    target = state.find_session(resolved_client, target_purpose)
+    if target is None:
+        msg = f"Target session {target_purpose} lost."
+        raise CwError(msg)
+
+    # Deliver to target
+    if target.status == SessionStatus.ACTIVE:
+        click.echo(f"Injecting context into {target.name}...")
+        zellij_target = None if zellij.in_zellij_session() else CW_SESSION
+        _navigate_to_pane(target, target=zellij_target)
+        zellij.write_to_pane(prompt + "\n", session=zellij_target)
+    elif target.status == SessionStatus.BACKGROUNDED:
+        click.echo(f"Resuming {target.name} with cross-session context...")
+        # Store prompt so resume_session picks it up
+        target.last_handoff_path = _write_cross_session_handoff(
+            target.workspace_path, source_purpose, target_purpose, prompt,
+        )
+        save_state(state)
+        resume_session(target.name)
+
+    click.echo(
+        f"Handoff complete: {source_purpose} → {target_purpose}"
+        f" ({resolved_client})"
+    )
+
+
+def _write_cross_session_handoff(
+    workspace_path: Path,
+    source_purpose: str,
+    target_purpose: str,
+    prompt: str,
+) -> Path:
+    """Write a cross-session handoff file for resume_session to pick up."""
+    handoffs_dir = workspace_path / ".handoffs"
+    handoffs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    filename = f"session-handoff-{source_purpose}-to-{target_purpose}-{ts}.md"
+    path = handoffs_dir / filename
+    path.write_text(
+        f"# Cross-Session Handoff: {source_purpose} → {target_purpose}\n\n"
+        f"## Resumption Prompt\n\n"
+        f"```\n{prompt}\n```\n"
+    )
+    return path
 
 

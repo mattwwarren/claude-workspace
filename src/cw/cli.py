@@ -10,14 +10,16 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__, zellij
-from cw.config import load_clients, load_state, save_state, show_config
+from cw.config import get_client, load_clients, load_state, save_state, show_config
 from cw.exceptions import CwError
-from cw.models import CwState, Session, SessionPurpose, SessionStatus
+from cw.models import CompletionReason, CwState, Session, SessionPurpose, SessionStatus
+from cw.plan import find_plan_files, parse_plan
 from cw.session import (
     CW_SESSION,
     background_session,
     done_session,
     hand_to_session,
+    handoff_session,
     resume_session,
     start_session,
 )
@@ -90,10 +92,16 @@ def start(client: str, purpose: str, worktree: str | None) -> None:
 
 
 @main.command()
+@click.option(
+    "--notify", "-n",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default=None,
+    help="Notify a sibling session after backgrounding.",
+)
 @handle_errors
-def bg() -> None:
+def bg(notify: str | None) -> None:
     """Background the current session (auto-handoff)."""
-    background_session()
+    background_session(notify=notify)
 
 
 @main.command()
@@ -162,11 +170,89 @@ def done(session_name: str | None, cleanup: bool, force: bool) -> None:
     done_session(session_name, cleanup=cleanup, force=force)
 
 
+def _parse_handoff_route(
+    source: str | None,
+    target: str | None,
+    route: str | None,
+) -> tuple[str, str]:
+    """Parse handoff route from positional args or arrow syntax."""
+    if route and "->" in route:
+        parts = route.split("->", 1)
+        return parts[0].strip(), parts[1].strip()
+    if source and target:
+        return source, target
+    if route and not target:
+        # Single arg without arrow — treat as source, missing target
+        msg = "Handoff requires source and target: cw handoff impl review"
+        raise CwError(msg)
+    msg = "Handoff requires source and target: cw handoff impl review"
+    raise CwError(msg)
+
+
+@main.command()
+@click.argument("source", required=True)
+@click.argument("target", required=False, default=None)
+@click.option(
+    "--client", "-c",
+    default=None,
+    shell_complete=_complete_client,
+    help="Explicit client name (auto-detected if omitted).",
+)
+@handle_errors
+def handoff(source: str, target: str | None, client: str | None) -> None:
+    """Hand off context from one session to another.
+
+    Backgrounds the source and delivers context to the target.
+
+    \b
+    Examples:
+      cw handoff impl review
+      cw handoff impl->review
+      cw handoff impl review --client sigma
+    """
+    src, tgt = _parse_handoff_route(source, target, source)
+    handoff_session(src, tgt, client_name=client)
+
+
 @main.command()
 @handle_errors
 def config() -> None:
     """Show current configuration."""
     show_config()
+
+
+@main.command()
+@click.argument("client", shell_complete=_complete_client)
+@click.option("--all", "show_all", is_flag=True, help="Include completed plans.")
+@handle_errors
+def plan(client: str, show_all: bool) -> None:
+    """Show plan progress for a client workspace.
+
+    Parses .claude/plans/ markdown files for checkbox progress.
+    """
+    client_config = get_client(client)
+    plans = find_plan_files(client_config.workspace_path)
+    if not plans:
+        click.echo(f"No plans found for {client}.")
+        return
+
+    for plan_path in plans:
+        summary = parse_plan(plan_path)
+        done, total = summary.progress
+        if total == 0:
+            if show_all:
+                click.echo(f"{summary.title} (no tasks)")
+            continue
+        pct = int(done / total * 100) if total else 0
+        if not show_all and pct == 100:
+            continue
+        click.echo(f"{summary.title} [{done}/{total}] {pct}%")
+        for phase in summary.phases:
+            p_done, p_total = phase.progress
+            if p_total == 0:
+                continue
+            label = "Done" if p_done == p_total else f"{p_done}/{p_total}"
+            click.echo(f"  {phase.name}: {label}")
 
 
 def _relative_time(dt: datetime | None) -> str:
@@ -225,10 +311,13 @@ def _check_and_mark_dead_sessions(state: CwState) -> list[Session]:
         return []
 
     dead: list[Session] = []
+    now = datetime.now(UTC)
     for s in state.active_sessions():
         pane_name = s.zellij_pane or s.purpose
         if pane_name in health and not health[pane_name]:
             s.status = SessionStatus.COMPLETED
+            s.completed_reason = CompletionReason.CRASHED
+            s.completed_at = now
             dead.append(s)
 
     if dead:
@@ -244,7 +333,7 @@ def _display_status() -> None:
 
     dead = _check_and_mark_dead_sessions(state)
     for s in dead:
-        click.echo(f"Detected crashed session: {s.name} (marked completed)")
+        click.echo(f"Detected crashed session: {s.name} (crashed)")
 
     active = state.active_sessions()
     backgrounded = state.backgrounded_sessions()

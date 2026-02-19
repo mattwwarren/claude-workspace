@@ -48,6 +48,33 @@ def find_handoffs_newer_than(workspace_path: Path, since_mtime: float) -> list[P
     ]
 
 
+def build_cross_session_prompt(
+    source_purpose: str,
+    target_purpose: str,
+    branch: str | None,
+    raw_prompt: str | None,
+) -> str:
+    """Wrap a resumption prompt with cross-session context."""
+    branch_label = f" on branch {branch}" if branch else ""
+    header = (
+        f"Cross-session handoff: {source_purpose} → {target_purpose}"
+        f"{branch_label}."
+    )
+
+    if raw_prompt:
+        return (
+            f"{header}\n"
+            f"The {source_purpose} session completed with this context:\n\n"
+            f"{raw_prompt}"
+        )
+
+    return (
+        f"{header}\n"
+        f"The {source_purpose} session has been backgrounded."
+        f" No resumption context was captured."
+    )
+
+
 def extract_resumption_prompt(handoff_path: Path) -> str | None:
     """Extract the resumption prompt from a handoff document.
 

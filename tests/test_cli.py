@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
@@ -14,16 +15,22 @@ from cw.cli import (
     _complete_session,
     _display_sessions,
     _display_status,
+    _parse_handoff_route,
     main,
 )
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
-from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.models import (
+    ClientConfig,
+    CompletionReason,
+    CwState,
+    Session,
+    SessionPurpose,
+    SessionStatus,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 class TestCli:
@@ -69,7 +76,7 @@ class TestCli:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg"])
-            mock_bg.assert_called_once_with()
+            mock_bg.assert_called_once_with(notify=None)
 
     def test_resume_dispatches(self) -> None:
         runner = CliRunner()
@@ -405,3 +412,169 @@ class TestShowStatus:
         # Verify state was persisted
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.COMPLETED
+
+    def test_crashed_session_shows_reason(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="crash002",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="impl",
+                )
+            ]
+        )
+        save_state(state)
+
+        monkeypatch.setattr(
+            "cw.zellij.session_exists", lambda _name: True
+        )
+
+        def _mock_check_pane_health(
+            *, session: str | None = None
+        ) -> dict[str, bool]:
+            return {"impl": False}
+
+        monkeypatch.setattr(
+            "cw.zellij.check_pane_health",
+            _mock_check_pane_health,
+        )
+
+        _display_status()
+
+        output = capsys.readouterr().out
+        assert "(crashed)" in output
+
+        updated = load_state()
+        assert updated.sessions[0].completed_reason == CompletionReason.CRASHED
+
+
+class TestHandoffCli:
+    def test_two_arg_route(self) -> None:
+        src, tgt = _parse_handoff_route("impl", "review", "impl")
+        assert src == "impl"
+        assert tgt == "review"
+
+    def test_arrow_route(self) -> None:
+        src, tgt = _parse_handoff_route("impl->review", None, "impl->review")
+        assert src == "impl"
+        assert tgt == "review"
+
+    def test_arrow_route_with_spaces(self) -> None:
+        src, tgt = _parse_handoff_route("impl -> review", None, "impl -> review")
+        assert src == "impl"
+        assert tgt == "review"
+
+    def test_handoff_dispatches(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.handoff_session") as mock_handoff:
+            runner.invoke(main, ["handoff", "impl", "review"])
+            mock_handoff.assert_called_once_with(
+                "impl", "review", client_name=None,
+            )
+
+    def test_handoff_arrow_dispatches(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.handoff_session") as mock_handoff:
+            runner.invoke(main, ["handoff", "impl->review"])
+            mock_handoff.assert_called_once_with(
+                "impl", "review", client_name=None,
+            )
+
+    def test_handoff_with_client(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.handoff_session") as mock_handoff:
+            runner.invoke(
+                main, ["handoff", "impl", "review", "--client", "sigma"],
+            )
+            mock_handoff.assert_called_once_with(
+                "impl", "review", client_name="sigma",
+            )
+
+    def test_missing_route_raises(self) -> None:
+        with pytest.raises(CwError, match="Handoff requires"):
+            _parse_handoff_route("impl", None, "impl")
+
+
+class TestBgNotifyCli:
+    def test_bg_with_notify(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.background_session") as mock_bg:
+            runner.invoke(main, ["bg", "--notify", "review"])
+            mock_bg.assert_called_once_with(notify="review")
+
+    def test_bg_with_notify_short(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.background_session") as mock_bg:
+            runner.invoke(main, ["bg", "-n", "review"])
+            mock_bg.assert_called_once_with(notify="review")
+
+
+class TestPlanCli:
+    def test_plan_no_plans(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        ws = tmp_config_dir / "workspace"
+        ws.mkdir()
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {ws}\n"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["plan", "test-client"])
+        assert result.exit_code == 0
+        assert "No plans found" in result.output
+
+    def test_plan_shows_progress(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        ws = tmp_config_dir / "workspace"
+        plans_dir = ws / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {ws}\n"
+        )
+
+        (plans_dir / "test-plan.md").write_text(
+            "# Test Plan\n\n"
+            "## Phase 1\n\n"
+            "- [x] Task A\n"
+            "- [ ] Task B\n"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["plan", "test-client"])
+        assert result.exit_code == 0
+        assert "Test Plan" in result.output
+        assert "1/2" in result.output
+        assert "50%" in result.output
+
+    def test_plan_unknown_client(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["plan", "nonexistent"])
+        assert result.exit_code != 0
