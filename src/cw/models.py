@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 
-class SessionPurpose(str, Enum):
+class SessionPurpose(StrEnum):
     IMPL = "impl"
     REVIEW = "review"
     DEBT = "debt"
     EXPLORE = "explore"
 
 
-class SessionStatus(str, Enum):
+class SessionStatus(StrEnum):
     ACTIVE = "active"
     BACKGROUNDED = "backgrounded"
     COMPLETED = "completed"
@@ -37,7 +37,7 @@ class Session(BaseModel):
     zellij_pane: str | None = None
     zellij_tab: str | None = None
     last_handoff_path: Path | None = None
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
 
@@ -67,7 +67,9 @@ class CwState(BaseModel):
         matches = [
             s
             for s in self.sessions
-            if s.client == client and s.purpose == purpose and s.status != SessionStatus.COMPLETED
+            if s.client == client
+            and s.purpose == purpose
+            and s.status != SessionStatus.COMPLETED
         ]
         return matches[-1] if matches else None
 

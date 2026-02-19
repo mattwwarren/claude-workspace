@@ -18,11 +18,42 @@ Multi-session workspace orchestrator for Claude Code.
 ## Development
 
 ```bash
-uv run cw --help          # Run CLI
-uv run pytest             # Run tests
-uv run ruff check src/    # Lint
-uv run mypy src/          # Type check
+uv run cw --help                    # Run CLI
+uv run pytest tests/ -v             # Run tests
+uv run ruff check src/ tests/       # Lint
+uv run mypy src/                    # Type check
+uv run pytest tests/ --cov=cw      # Coverage report
 ```
+
+## Quality Gates
+
+Before committing, run all three checks:
+
+```bash
+uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest tests/ -v
+```
+
+Pre-commit hooks enforce this automatically (`uv run pre-commit install`).
+
+## Testing
+
+118 tests across 7 test files covering all modules (92% line coverage).
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `test_models.py` | Models, enums, state queries | `models.py` |
+| `test_session_helpers.py` | `_relative_time` with freezegun | `session.py` helpers |
+| `test_config.py` | Config load/save, client lookup | `config.py` |
+| `test_handoff.py` | Handoff parsing, mtime filtering | `handoff.py` |
+| `test_zellij.py` | Zellij wrapper, layout generation | `zellij.py` |
+| `test_session.py` | Session lifecycle (start/bg/resume) | `session.py` |
+| `test_cli.py` | CLI dispatch, Click integration | `cli.py` |
+
+**Patterns:**
+- Monkeypatch `CONFIG_DIR`/`STATE_DIR` to `tmp_path` (see `conftest.py`)
+- Mock `cw.zellij.*` via `mock_zellij` fixture for session tests
+- Use `freezegun` for time-dependent assertions
+- Use Click's `CliRunner` for CLI tests
 
 ## Key Patterns
 

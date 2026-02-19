@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import click
 
 from cw import zellij
 from cw.config import get_client, load_clients, load_state, save_state
-from cw.handoff import extract_resumption_prompt, find_handoffs_newer_than, find_latest_handoff
-from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.handoff import (
+    extract_resumption_prompt,
+    find_handoffs_newer_than,
+    find_latest_handoff,
+)
+from cw.models import ClientConfig, Session, SessionPurpose, SessionStatus
 
 CW_SESSION = "cw"
 
@@ -26,7 +30,8 @@ def _ensure_zellij() -> None:
 def _ensure_session_running(client: ClientConfig) -> bool:
     """Ensure the cw Zellij session exists with this client's tab.
 
-    Returns True if we created and attached (caller should stop), False if already running.
+    Returns True if we created and attached (caller should stop),
+    False if already running.
     """
     if not zellij.session_exists(CW_SESSION):
         layout_path = zellij.generate_layout(client)
@@ -51,13 +56,22 @@ def start_session(client_name: str, purpose: str) -> None:
         return
 
     if existing and existing.status == SessionStatus.ACTIVE:
-        click.echo(f"Session already active: {existing.name}")
-        if zellij.in_zellij_session():
-            zellij.go_to_tab(client_name)
-            zellij.focus_pane(purpose)
-        else:
-            click.echo(f"Attach with: zellij attach {CW_SESSION}")
-        return
+        # Verify Zellij session is actually running
+        if zellij.session_exists(CW_SESSION):
+            click.echo(f"Session already active: {existing.name}")
+            if zellij.in_zellij_session():
+                zellij.go_to_tab(client_name)
+                zellij.focus_pane(purpose)
+            else:
+                click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
+                zellij.attach_session(CW_SESSION)
+            return
+        # Zellij session died - mark stale sessions as completed
+        click.echo(f"Zellij session gone. Cleaning up stale session: {existing.name}")
+        for s in state.sessions:
+            if s.status == SessionStatus.ACTIVE:
+                s.status = SessionStatus.COMPLETED
+        save_state(state)
 
     # Record the session before launching (so it persists even if we exec into zellij)
     session = Session(
@@ -110,12 +124,12 @@ def background_session(session_name: str | None = None) -> None:
         raise click.ClickException(f"Session not found: {session_name}")
 
     if session.status != SessionStatus.ACTIVE:
-        raise click.ClickException(f"Session {session.name} is not active (status: {session.status})")
+        msg = f"Session {session.name} is not active (status: {session.status})"
+        raise click.ClickException(msg)
 
     click.echo(f"Backgrounding session: {session.name}...")
 
     # Record mtime before injection so we can detect new handoffs
-    handoffs_dir = session.workspace_path / ".handoffs"
     before_mtime = time.time()
 
     if zellij.in_zellij_session():
@@ -128,22 +142,30 @@ def background_session(session_name: str | None = None) -> None:
         click.echo("Waiting for handoff generation...")
         for _ in range(30):
             time.sleep(1)
-            new_handoffs = find_handoffs_newer_than(session.workspace_path, before_mtime)
+            new_handoffs = find_handoffs_newer_than(
+                session.workspace_path, before_mtime
+            )
             if new_handoffs:
                 session.last_handoff_path = new_handoffs[0]
                 click.echo(f"Handoff saved: {new_handoffs[0]}")
                 break
         else:
-            click.echo("Warning: No handoff detected within 30s. Session marked as backgrounded anyway.")
+            click.echo(
+                "Warning: No handoff detected within 30s."
+                " Session marked as backgrounded anyway."
+            )
     else:
         # Not in Zellij - try to find latest handoff
         latest = find_latest_handoff(session.workspace_path)
         if latest:
             session.last_handoff_path = latest
-        click.echo("Not inside Zellij session. Marking as backgrounded without /session-done injection.")
+        click.echo(
+            "Not inside Zellij session."
+            " Marking as backgrounded without /session-done injection."
+        )
 
     session.status = SessionStatus.BACKGROUNDED
-    session.backgrounded_at = datetime.now(timezone.utc)
+    session.backgrounded_at = datetime.now(UTC)
     save_state(state)
     click.echo(f"Session {session.name} backgrounded.")
 
@@ -178,7 +200,7 @@ def resume_session(session_name: str) -> None:
     _ensure_session_running(client)
 
     session.status = SessionStatus.ACTIVE
-    session.resumed_at = datetime.now(timezone.utc)
+    session.resumed_at = datetime.now(UTC)
     save_state(state)
 
     click.echo(f"Resumed session: {session.name}")
@@ -241,12 +263,17 @@ def show_status() -> None:
     if active:
         click.echo("Active:")
         for s in active:
-            click.echo(f"  {s.name} (since {_relative_time(s.resumed_at or s.started_at)})")
+            since = _relative_time(s.resumed_at or s.started_at)
+            click.echo(f"  {s.name} (since {since})")
 
     if backgrounded:
         click.echo("Backgrounded:")
         for s in backgrounded:
-            handoff = f" handoff: {s.last_handoff_path.name}" if s.last_handoff_path else ""
+            handoff = (
+                f" handoff: {s.last_handoff_path.name}"
+                if s.last_handoff_path
+                else ""
+            )
             click.echo(f"  {s.name}{handoff}")
 
 
@@ -255,7 +282,7 @@ def _relative_time(dt: datetime | None) -> str:
     if dt is None:
         return "unknown"
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     delta = now - dt
     seconds = int(delta.total_seconds())
 

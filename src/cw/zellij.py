@@ -85,7 +85,11 @@ def list_sessions() -> list[str]:
     result = _run_zellij("list-sessions", "--no-formatting", check=False)
     if result.returncode != 0:
         return []
-    return [line.strip().split()[0] for line in result.stdout.strip().splitlines() if line.strip()]
+    return [
+        line.strip().split()[0]
+        for line in result.stdout.strip().splitlines()
+        if line.strip()
+    ]
 
 
 def session_exists(session_name: str) -> bool:
@@ -114,7 +118,13 @@ def create_and_attach(session_name: str, layout_path: Path) -> None:
     Uses --new-session-with-layout to explicitly create (not attach to existing).
     """
     subprocess.run(
-        ["zellij", "--new-session-with-layout", str(layout_path), "--session", session_name],
+        [
+            "zellij",
+            "--new-session-with-layout",
+            str(layout_path),
+            "--session",
+            session_name,
+        ],
         check=False,
     )
 

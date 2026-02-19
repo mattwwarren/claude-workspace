@@ -33,7 +33,11 @@ def find_handoffs_newer_than(workspace_path: Path, since_mtime: float) -> list[P
         return []
 
     return sorted(
-        (p for p in handoffs_dir.glob("session-*.md") if p.stat().st_mtime > since_mtime),
+        (
+            p
+            for p in handoffs_dir.glob("session-*.md")
+            if p.stat().st_mtime > since_mtime
+        ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )

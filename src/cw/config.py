@@ -71,7 +71,9 @@ def ensure_config() -> None:
     """Create config directory and example file if missing."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not CLIENTS_FILE.exists():
-        example = Path(__file__).parent.parent.parent / "config" / "clients.example.yaml"
+        example = (
+            Path(__file__).parent.parent.parent / "config" / "clients.example.yaml"
+        )
         if example.exists():
             CLIENTS_FILE.write_text(example.read_text())
             click.echo(f"Created default config at {CLIENTS_FILE}")
