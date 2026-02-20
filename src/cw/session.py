@@ -98,7 +98,8 @@ def _build_pane_args(
             workspace_path=workspace_path,
         )
         if prompt:
-            escaped_prompt = shlex.quote(prompt)
+            # Collapse newlines — KDL strings cannot span multiple lines
+            escaped_prompt = shlex.quote(prompt.replace("\n", " "))
             extra = f" --append-system-prompt {escaped_prompt}"
 
         # Shell command: try --resume, fall back to --session-id
