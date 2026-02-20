@@ -22,15 +22,24 @@ def slugify_branch(branch: str) -> str:
     return re.sub(r"[/\\]+", "-", branch).strip("-")
 
 
+def _git_dir(client: ClientConfig) -> Path:
+    """Return the directory to use as git cwd for a client.
+
+    Worktree-mode clients use ``repo_path`` (the real clone);
+    legacy clients use ``workspace_path``.
+    """
+    return client.repo_path or client.workspace_path
+
+
 def resolve_worktree_base(client: ClientConfig) -> Path:
     """Return the worktree base directory for a client.
 
     Uses ``client.worktree_base`` if set, otherwise defaults to
-    ``<workspace_path.parent>/.worktrees/<workspace_name>``.
+    ``<git_dir.parent>/.worktrees/<git_dir.name>``.
     """
     if client.worktree_base:
         return client.worktree_base
-    ws = client.workspace_path
+    ws = _git_dir(client)
     return ws.parent / ".worktrees" / ws.name
 
 
@@ -66,6 +75,7 @@ def create_worktree(
     Returns the worktree path. Idempotent: returns existing path if already created.
     """
     wt_path = worktree_path_for(client, branch)
+    git_cwd = _git_dir(client)
 
     if wt_path.exists():
         return wt_path
@@ -75,7 +85,7 @@ def create_worktree(
     # Check if branch exists locally (refs/heads/ avoids matching tags)
     result = _run_git(
         "rev-parse", "--verify", f"refs/heads/{branch}",
-        cwd=client.workspace_path, check=False,
+        cwd=git_cwd, check=False,
     )
     if result.returncode == 0:
         # Branch exists — create worktree from it
@@ -87,7 +97,15 @@ def create_worktree(
     if force:
         args.insert(2, "--force")
 
-    _run_git(*args, cwd=client.workspace_path)
+    _run_git(*args, cwd=git_cwd)
+
+    # Initialize submodules if the repo uses them
+    if (git_cwd / ".gitmodules").exists():
+        _run_git(
+            "submodule", "update", "--init", "--recursive",
+            cwd=wt_path, check=False,
+        )
+
     return wt_path
 
 
@@ -107,7 +125,7 @@ def remove_worktree(
     if force:
         args.append("--force")
 
-    _run_git(*args, cwd=client.workspace_path)
+    _run_git(*args, cwd=_git_dir(client))
 
 
 def list_worktrees(client: ClientConfig) -> list[dict[str, str]]:
@@ -117,7 +135,7 @@ def list_worktrees(client: ClientConfig) -> list[dict[str, str]]:
     """
     result = _run_git(
         "worktree", "list", "--porcelain",
-        cwd=client.workspace_path, check=False,
+        cwd=_git_dir(client), check=False,
     )
     if result.returncode != 0:
         return []

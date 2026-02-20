@@ -39,6 +39,10 @@ from cw.worktree import create_worktree, remove_worktree
 
 CW_SESSION = "cw"
 
+# Purposes that receive worktree cwd (impl works on the feature branch,
+# review reviews it; debt stays on the main workspace).
+WORKTREE_PURPOSES: frozenset[str] = frozenset({"impl", "review"})
+
 
 def _build_env_prefix(client_name: str, purpose: str) -> str:
     """Build ``CW_CLIENT=… CW_PURPOSE=…`` shell prefix for claude commands."""
@@ -130,9 +134,6 @@ def _create_all_purpose_sessions(
     so that --resume can reconnect to existing Claude conversations.
     worktree_path/branch apply to impl and review purposes.
     """
-    # Purposes that get the worktree cwd
-    worktree_purposes = {"impl", "review"}
-
     sessions: dict[str, Session] = {}
     for purpose_enum in client.auto_purposes:
         purpose = purpose_enum.value
@@ -145,7 +146,7 @@ def _create_all_purpose_sessions(
             zellij_tab=client_name,
         )
         # Apply worktree to impl and review panes
-        if worktree_path and purpose in worktree_purposes:
+        if worktree_path and purpose in WORKTREE_PURPOSES:
             session.worktree_path = worktree_path
             session.branch = worktree_branch
         # Carry forward Claude session ID for resumption
@@ -193,9 +194,21 @@ def start_session(
     client = get_client(client_name)
     state = load_state()
 
-    # Create worktree if requested
+    # Auto-resolve worktree for worktree-mode clients
     worktree_path: Path | None = None
-    if worktree:
+    worktree_branch: str | None = worktree
+    if client.is_worktree_client:
+        branch = client.branch
+        if branch is None:
+            msg = "Worktree client must have branch set"
+            raise CwError(msg)
+        click.echo(f"Creating worktree for branch '{branch}'...")
+        worktree_path = create_worktree(client, branch)
+        worktree_branch = branch
+        # Patch workspace_path to the real worktree path
+        client = client.model_copy(update={"workspace_path": worktree_path})
+        click.echo(f"Worktree ready: {worktree_path}")
+    elif worktree:
         click.echo(f"Creating worktree for branch '{worktree}'...")
         worktree_path = create_worktree(client, worktree)
         click.echo(f"Worktree ready: {worktree_path}")
@@ -212,7 +225,9 @@ def start_session(
         # Verify Zellij session is actually running
         if zellij.session_exists(CW_SESSION):
             # Check if Claude is still alive in the pane
-            health = zellij.check_pane_health(session=CW_SESSION)
+            health = zellij.check_pane_health(
+                session=CW_SESSION, tab_name=client_name,
+            )
             pane_name = existing.zellij_pane or existing.purpose
             if health.get(pane_name) is False:
                 click.echo(f"Claude crashed in {existing.name}. Recovering...")
@@ -244,7 +259,6 @@ def start_session(
             if s.client == client_name and s.status == SessionStatus.ACTIVE:
                 prior_sessions[s.purpose] = s
                 s.status = SessionStatus.COMPLETED
-        save_state(state)
 
         # Create new cw sessions, carrying forward Claude session IDs
         all_sessions = _create_all_purpose_sessions(
@@ -257,65 +271,26 @@ def start_session(
         _create_session_if_needed(client, panes=panes)
         return  # User is now inside Zellij
 
-    # Fresh start - no existing session for this client
-    if not zellij.session_exists(CW_SESSION):
-        # Create sessions for ALL purposes and bake claude into the layout
-        all_sessions = _create_all_purpose_sessions(
-            client_name, client, state,
-            worktree_path=worktree_path,
-            worktree_branch=worktree,
-        )
-        save_state(state)
+    # Create sessions for ALL purposes and build pane layout
+    all_sessions = _create_all_purpose_sessions(
+        client_name, client, state,
+        worktree_path=worktree_path,
+        worktree_branch=worktree_branch,
+    )
+    save_state(state)
+    panes = _build_pane_args(all_sessions, client=client)
 
-        panes = _build_pane_args(all_sessions, client=client)
+    for s in all_sessions.values():
+        click.echo(f"  {s.name} (claude session: {s.claude_session_id})")
+
+    if not zellij.session_exists(CW_SESSION):
         click.echo(f"Launching Zellij session '{CW_SESSION}' for {client_name}...")
-        for s in all_sessions.values():
-            click.echo(f"  {s.name} (claude session: {s.claude_session_id})")
         _create_session_if_needed(client, panes=panes)
         return  # User is now inside Zellij
 
-    # Zellij already running - inject claude into panes
-    # Create a single session for the requested purpose
-    session = Session(
-        name=f"{client_name}/{purpose}",
-        client=client_name,
-        purpose=SessionPurpose(purpose),
-        workspace_path=client.workspace_path,
-        zellij_pane=purpose,
-        zellij_tab=client_name,
-    )
-    state.sessions.append(session)
-    save_state(state)
-    record_event(client_name, HistoryEvent(
-        event_type=EventType.SESSION_STARTED,
-        client=client_name,
-        session_id=session.id,
-        session_name=session.name,
-        purpose=purpose,
-    ))
-
-    # Build claude command with optional system prompt
-    cmd_parts = [
-        _build_env_prefix(client_name, purpose),
-        f"claude --session-id {session.claude_session_id}",
-    ]
-    prompt = get_purpose_prompt(
-        purpose,
-        client.purpose_prompts or None,
-        client_name=client_name,
-        workspace_path=str(client.workspace_path),
-    )
-    if prompt:
-        escaped_prompt = shlex.quote(prompt)
-        cmd_parts.append(f"--append-system-prompt {escaped_prompt}")
-    claude_cmd = " ".join(cmd_parts) + "\n"
-    click.echo(f"Started session: {session.name} (id: {session.id})")
-
-    # Inject claude into the pane - works both inside and outside Zellij
-    # by targeting the session explicitly when outside
-    target = zellij.resolve_session_target(CW_SESSION)
-    _navigate_to_pane(session, target=target)
-    zellij.write_to_pane(claude_cmd, session=target)
+    # Zellij already running — inject a new tab for this client
+    click.echo(f"Adding tab for {client_name} to Zellij session '{CW_SESSION}'...")
+    zellij.new_tab(client, panes=panes, session=CW_SESSION)
 
     if not zellij.in_zellij_session():
         click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")

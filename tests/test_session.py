@@ -282,7 +282,7 @@ class TestStartSession:
         monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
 
         def _mock_check_pane_health(
-            *, session: str | None = None
+            session: str | None = None, tab_name: str | None = None,
         ) -> dict[str, bool]:
             return {"impl": False}
 
@@ -349,14 +349,14 @@ class TestStartSession:
         assert review_sessions[0].worktree_path == wt_path
         assert debt_sessions[0].worktree_path is None
 
-    def test_late_join_includes_env_vars(
+    def test_late_join_creates_new_tab(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
         mock_zellij: dict[str, list[Any]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When Zellij is already running, the injected command has env vars."""
+        """When Zellij is already running, a new tab is injected."""
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -369,11 +369,16 @@ class TestStartSession:
 
         start_session("test-client", "impl")
 
-        # write_to_pane should have been called with a command containing env vars
-        assert len(mock_zellij["write_to_pane"]) >= 1
-        injected_cmd = mock_zellij["write_to_pane"][0][0]
-        assert "CW_CLIENT=test-client" in injected_cmd
-        assert "CW_PURPOSE=impl" in injected_cmd
+        # new_tab should have been called
+        assert len(mock_zellij["new_tab"]) == 1
+        # Sessions for all purposes should be created
+        state = load_state()
+        purposes = {s.purpose for s in state.sessions}
+        assert purposes == {
+            SessionPurpose.IMPL,
+            SessionPurpose.REVIEW,
+            SessionPurpose.DEBT,
+        }
 
     def test_zellij_not_installed_raises(
         self,
@@ -384,6 +389,91 @@ class TestStartSession:
 
         with pytest.raises(CwError, match="not installed"):
             start_session("test-client", "impl")
+
+
+class TestStartWorktreeClient:
+    def test_auto_creates_worktree(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Worktree-mode client auto-creates worktree at start."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  client-a:\n"
+            f"    repo_path: {repo}\n"
+            "    branch: client-a\n"
+        )
+
+        wt_path = tmp_path / "wt" / "client-a"
+        wt_path.mkdir(parents=True)
+        monkeypatch.setattr(
+            "cw.session.create_worktree",
+            lambda _client, _branch: wt_path,
+        )
+
+        start_session("client-a", "impl")
+
+        output = capsys.readouterr().out
+        assert "Creating worktree for branch 'client-a'" in output
+        assert str(wt_path) in output
+
+        state = load_state()
+        # All sessions should exist
+        assert len(state.sessions) == 3
+        # impl and review should have worktree_path
+        impl = next(
+            s for s in state.sessions
+            if s.purpose == SessionPurpose.IMPL
+        )
+        assert impl.worktree_path == wt_path
+        assert impl.branch == "client-a"
+
+    def test_second_worktree_client_creates_tab(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Second client creates a new tab when Zellij is running."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        ws = tmp_path / "personal"
+        ws.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  personal:\n"
+            f"    workspace_path: {ws}\n"
+            "  client-a:\n"
+            f"    repo_path: {repo}\n"
+            "    branch: client-a\n"
+        )
+
+        wt_path = tmp_path / "wt" / "client-a"
+        wt_path.mkdir(parents=True)
+        monkeypatch.setattr(
+            "cw.session.create_worktree",
+            lambda _client, _branch: wt_path,
+        )
+
+        # Zellij session already exists (first client started)
+        monkeypatch.setattr(
+            "cw.zellij.session_exists", lambda _name: True,
+        )
+
+        start_session("client-a", "impl")
+
+        # Should have called new_tab, not create_and_attach
+        assert len(mock_zellij["new_tab"]) == 1
+        assert len(mock_zellij["create_and_attach"]) == 0
 
 
 class TestBackgroundSession:

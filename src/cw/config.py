@@ -66,10 +66,16 @@ def get_client(name: str) -> ClientConfig:
 
 
 def detect_client_from_cwd() -> ClientConfig | None:
-    """Try to detect the client from the current working directory."""
+    """Try to detect the client from the current working directory.
+
+    Skips worktree-mode clients whose ``workspace_path`` is a sentinel
+    (equal to ``repo_path``) — their real path isn't known until start time.
+    """
     cwd = Path.cwd()
     clients = load_clients()
     for client in clients.values():
+        if client.is_worktree_client:
+            continue
         try:
             cwd.relative_to(client.workspace_path)
             return client
@@ -118,8 +124,12 @@ def show_config() -> None:
     click.echo(f"Config: {CLIENTS_FILE}\n")
     for name, client in sorted(clients.items()):
         click.echo(f"  {name}:")
-        click.echo(f"    path:   {client.workspace_path}")
-        click.echo(f"    branch: {client.default_branch}")
+        if client.is_worktree_client:
+            click.echo(f"    repo:   {client.repo_path}")
+            click.echo(f"    branch: {client.branch}")
+        else:
+            click.echo(f"    path:   {client.workspace_path}")
+            click.echo(f"    branch: {client.default_branch}")
         if client.auto_purposes != DEFAULT_AUTO_PURPOSES:
             purposes_str = ", ".join(p.value for p in client.auto_purposes)
             click.echo(f"    purposes: {purposes_str}")

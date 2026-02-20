@@ -38,7 +38,6 @@ from cw.session import (
     resume_session,
     start_session,
 )
-from cw.zellij import go_to_tab
 
 
 def handle_errors[F: Callable[..., object]](fn: F) -> F:
@@ -142,14 +141,6 @@ def resume(session_name: str) -> None:
 def list_sessions() -> None:
     """List all sessions across clients."""
     _display_sessions()
-
-
-@main.command()
-@click.argument("client", shell_complete=_complete_client)
-@handle_errors
-def switch(client: str) -> None:
-    """Switch to a client's Zellij tab."""
-    go_to_tab(client)
 
 
 @main.command()
@@ -376,17 +367,25 @@ def _display_sessions() -> None:
 
 
 def _check_and_mark_dead_sessions(state: CwState) -> list[Session]:
-    """Check active sessions for dead panes, mark them COMPLETED."""
-    if not zellij.session_exists(CW_SESSION):
-        return []
+    """Check active sessions for dead panes, mark them COMPLETED.
 
-    health = zellij.check_pane_health(session=CW_SESSION)
-    if not health:
+    Inspects each client's tab individually so multi-tab sessions
+    are checked correctly.
+    """
+    if not zellij.session_exists(CW_SESSION):
         return []
 
     dead: list[Session] = []
     now = datetime.now(UTC)
+    # Cache health per client tab to avoid repeated dump-layout calls
+    tab_health: dict[str, dict[str, bool]] = {}
     for s in state.active_sessions():
+        tab = s.zellij_tab or s.client
+        if tab not in tab_health:
+            tab_health[tab] = zellij.check_pane_health(
+                session=CW_SESSION, tab_name=tab,
+            )
+        health = tab_health[tab]
         pane_name = s.zellij_pane or s.purpose
         if pane_name in health and not health[pane_name]:
             s.status = SessionStatus.COMPLETED

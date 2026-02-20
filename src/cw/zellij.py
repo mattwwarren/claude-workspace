@@ -20,39 +20,47 @@ GENERATED_LAYOUTS_DIR = Path.home() / ".config" / "zellij" / "layouts"
 
 CLIENT_LAYOUT_TEMPLATE = """\
 layout {
+{%- if session_mode %}
     pane size=1 borderless=true {
         plugin location="tab-bar"
     }
-    pane split_direction="vertical" {
-        pane size="20%" name="files" {
-            command "yazi"
-            args "{{ workspace_path }}"
-        }
+{%- endif %}
+    tab name="{{ client_name }}" {
+        pane split_direction="vertical" {
+            pane size="20%" name="files" {
+                command "yazi"
+                args "{{ workspace_path }}"
+            }
 {%- if secondary_panes %}
-        pane split_direction="horizontal" size="80%" {
-            pane size="{{ primary_size }}" name="{{ primary_pane.name }}" focus=true {
+            pane split_direction="horizontal" size="80%" {
+                pane size="{{ primary_size }}" \
+name="{{ primary_pane.name }}" focus=true {
+                    cwd "{{ primary_pane.cwd }}"
+                    command "bash"
+                    args "-c" {{ primary_pane.claude_cmd }}
+                }
+                pane split_direction="vertical" \
+size="{{ secondary_size }}" {
+{%- for pane in secondary_panes %}
+                    pane name="{{ pane.name }}" {
+                        cwd "{{ pane.cwd }}"
+                        command "bash"
+                        args "-c" {{ pane.claude_cmd }}
+                    }
+{%- endfor %}
+                }
+            }
+{%- else %}
+            pane size="80%" \
+name="{{ primary_pane.name }}" focus=true {
                 cwd "{{ primary_pane.cwd }}"
                 command "bash"
                 args "-c" {{ primary_pane.claude_cmd }}
             }
-            pane split_direction="vertical" size="{{ secondary_size }}" {
-{%- for pane in secondary_panes %}
-                pane name="{{ pane.name }}" {
-                    cwd "{{ pane.cwd }}"
-                    command "bash"
-                    args "-c" {{ pane.claude_cmd }}
-                }
-{%- endfor %}
-            }
-        }
-{%- else %}
-        pane size="80%" name="{{ primary_pane.name }}" focus=true {
-            cwd "{{ primary_pane.cwd }}"
-            command "bash"
-            args "-c" {{ primary_pane.claude_cmd }}
-        }
 {%- endif %}
+        }
     }
+{%- if session_mode %}
 {%- if cw_plugin_path %}
     pane size=1 borderless=true {
         plugin location="file:{{ cw_plugin_path }}"
@@ -61,6 +69,7 @@ layout {
     pane size=1 borderless=true {
         plugin location="status-bar"
     }
+{%- endif %}
 }
 """
 
@@ -110,6 +119,8 @@ def generate_layout(
     client: ClientConfig,
     panes: dict[str, dict[str, str]] | None = None,
     purposes: list[str] | None = None,
+    *,
+    session_mode: bool = True,
 ) -> Path:
     """Render the layout template for a client, returning the output path.
 
@@ -119,6 +130,9 @@ def generate_layout(
                with a dict containing 'claude_cmd' and optionally 'cwd'.
         purposes: Ordered list of purpose names for panes. First is primary.
                   Defaults to client.auto_purposes values.
+        session_mode: If True (default), include tab-bar and status-bar
+                      plugins for initial session creation. If False,
+                      emit only the tab content for ``new-tab`` injection.
     """
     GENERATED_LAYOUTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = GENERATED_LAYOUTS_DIR / f"cw-{client.name}.kdl"
@@ -169,6 +183,7 @@ def generate_layout(
         primary_size=primary_size,
         secondary_size=secondary_size,
         cw_plugin_path=cw_plugin_path,
+        session_mode=session_mode,
     )
     output_path.write_text(rendered)
     return output_path
@@ -190,6 +205,24 @@ def create_and_attach(session_name: str, layout_path: Path) -> None:
         ],
         check=False,
     )
+
+
+def new_tab(
+    client: ClientConfig,
+    panes: dict[str, dict[str, str]] | None = None,
+    purposes: list[str] | None = None,
+    session: str | None = None,
+) -> None:
+    """Inject a new tab into a running Zellij session.
+
+    Generates a tab-only layout (``session_mode=False``) and uses
+    ``zellij action new-tab --layout`` to add it.
+    """
+    layout_path = generate_layout(
+        client, panes=panes, purposes=purposes, session_mode=False,
+    )
+    base = ["-s", session] if session else []
+    _run_zellij(*base, "action", "new-tab", "--layout", str(layout_path))
 
 
 def attach_session(session_name: str) -> None:
@@ -238,35 +271,57 @@ def _get_focused_pane_id(session: str | None = None) -> str | None:
     return None
 
 
-def _get_pane_id_for_name(
-    pane_name: str,
-    session: str | None = None,
-) -> str | None:
-    """Map a pane name to its terminal_N id via dump-layout.
+_RE_NAME = re.compile(r'name="([^"]+)"')
+_RE_PANE_COMMAND = re.compile(r"pane\b.*\bcommand=")
 
-    Only looks at the first tab block (skips new_tab_template).
+
+def _iter_tab_pane_lines(
+    session: str | None = None,
+    tab_name: str | None = None,
+) -> list[str]:
+    """Return dump-layout lines belonging to a single tab.
+
+    When *tab_name* is given, returns lines from the matching tab.
+    Otherwise returns lines from the first tab (legacy behaviour).
     """
     base = ["-s", session] if session else []
     result = _run_zellij(*base, "action", "dump-layout", check=False)
     if result.returncode != 0:
-        return None
+        return []
 
+    lines: list[str] = []
+    in_target_tab = False
+    for line in result.stdout.splitlines():
+        if "tab " in line and "name=" in line:
+            if in_target_tab:
+                break  # Hit next tab, stop
+            tab_match = _RE_NAME.search(line)
+            current_tab = tab_match.group(1) if tab_match else None
+            if tab_name is None or current_tab == tab_name:
+                in_target_tab = True
+            continue
+        if in_target_tab:
+            lines.append(line)
+    return lines
+
+
+def _get_pane_id_for_name(
+    pane_name: str,
+    session: str | None = None,
+    tab_name: str | None = None,
+) -> str | None:
+    """Map a pane name to its terminal_N id via dump-layout.
+
+    When *tab_name* is given, only inspects the matching tab.
+    Otherwise looks at the first tab block (legacy behaviour).
+    """
     # Track terminal index: panes appear in dump-layout in terminal order
     # terminal_0 = first command pane (files/yazi)
     # terminal_1 = impl, terminal_2 = review, terminal_3 = debt
     terminal_idx = 0
-    in_first_tab = False
-    for line in result.stdout.splitlines():
-        if "tab " in line and "name=" in line:
-            if in_first_tab:
-                break  # Hit second tab (new_tab_template), stop
-            in_first_tab = True
-            continue
-        if not in_first_tab:
-            continue
-        # Match panes with commands (these are terminal panes)
-        if re.search(r"pane\b.*\bcommand=", line):
-            match = re.search(r'name="([^"]+)"', line)
+    for line in _iter_tab_pane_lines(session, tab_name):
+        if _RE_PANE_COMMAND.search(line):
+            match = _RE_NAME.search(line)
             if match and match.group(1) == pane_name:
                 return f"terminal_{terminal_idx}"
             terminal_idx += 1
@@ -303,40 +358,27 @@ def focus_pane(pane_name: str, session: str | None = None) -> None:
     raise ZellijError(msg)
 
 
-def check_pane_health(session: str | None = None) -> dict[str, bool]:
+def check_pane_health(
+    session: str | None = None,
+    tab_name: str | None = None,
+) -> dict[str, bool]:
     """Check which named panes have running commands.
 
     Parses dump-layout to find panes with active command= processes.
     Returns a dict mapping pane name to whether its command is still running.
 
-    A pane that exists in the layout with a command= attribute is considered alive.
-    If the command has exited (pane shows as 'exited' or has no command), it's dead.
+    When *tab_name* is given, only inspects the matching tab.
+    Otherwise inspects the first tab (legacy behaviour).
     """
-    base = ["-s", session] if session else []
-    result = _run_zellij(*base, "action", "dump-layout", check=False)
-    if result.returncode != 0:
-        return {}
-
     health: dict[str, bool] = {}
-    in_first_tab = False
-    for line in result.stdout.splitlines():
-        if "tab " in line and "name=" in line:
-            if in_first_tab:
-                break
-            in_first_tab = True
-            continue
-        if not in_first_tab:
-            continue
-        # Match panes with names
-        name_match = re.search(r'name="([^"]+)"', line)
+    for line in _iter_tab_pane_lines(session, tab_name):
+        name_match = _RE_NAME.search(line)
         if not name_match:
             continue
         pane_name = name_match.group(1)
-        # A pane with command= and no "exited" marker is alive
         has_command = bool(re.search(r"\bcommand=", line))
         is_exited = "exited" in line.lower()
         health[pane_name] = has_command and not is_exited
-
     return health
 
 

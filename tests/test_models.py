@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
 
 from cw.models import (
     ClientConfig,
@@ -171,6 +174,45 @@ class TestClientConfig:
             purpose_prompts={"review": "Focus on HIPAA compliance."},
         )
         assert c.purpose_prompts["review"] == "Focus on HIPAA compliance."
+
+    def test_worktree_mode_valid(self) -> None:
+        c = ClientConfig(
+            name="test",
+            repo_path="/home/user/repo",
+            branch="client-a",
+        )
+        assert c.is_worktree_client is True
+        # workspace_path auto-set to repo_path as sentinel
+        assert c.workspace_path == c.repo_path
+
+    def test_legacy_mode_not_worktree(self) -> None:
+        c = ClientConfig(name="test", workspace_path="/dev/null")
+        assert c.is_worktree_client is False
+        assert c.repo_path is None
+        assert c.branch is None
+
+    def test_missing_both_raises(self) -> None:
+        with pytest.raises(ValueError, match="workspace_path or both"):
+            ClientConfig(name="test")
+
+    def test_repo_path_without_branch_raises(self) -> None:
+        with pytest.raises(ValueError, match="workspace_path or both"):
+            ClientConfig(name="test", repo_path="/home/user/repo")
+
+    def test_branch_without_repo_path_raises(self) -> None:
+        with pytest.raises(ValueError, match="workspace_path or both"):
+            ClientConfig(name="test", branch="client-a")
+
+    def test_explicit_workspace_overrides_sentinel(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path="/explicit/path",
+            repo_path="/home/user/repo",
+            branch="client-a",
+        )
+        assert c.is_worktree_client is True
+        # Explicit workspace_path is preserved
+        assert c.workspace_path == Path("/explicit/path")
 
 
 class TestCwState:

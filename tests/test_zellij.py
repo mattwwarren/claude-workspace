@@ -15,6 +15,7 @@ from cw.zellij import (
     in_zellij_session,
     is_installed,
     list_sessions,
+    new_tab,
     session_exists,
     write_to_pane,
 )
@@ -416,3 +417,124 @@ class TestCurrentSessionName:
     def test_no_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
         assert current_session_name() is None
+
+
+class TestLayoutSessionMode:
+    def test_session_mode_true_has_bars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="proj", workspace_path=ws_dir)
+        result = generate_layout(client, session_mode=True)
+        content = result.read_text()
+        assert "tab-bar" in content
+        assert "status-bar" in content
+        assert 'tab name="proj"' in content
+
+    def test_session_mode_false_no_bars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="proj", workspace_path=ws_dir)
+        result = generate_layout(client, session_mode=False)
+        content = result.read_text()
+        assert "tab-bar" not in content
+        assert "status-bar" not in content
+        assert 'tab name="proj"' in content
+
+    def test_tab_name_in_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="my-client", workspace_path=ws_dir)
+        result = generate_layout(client)
+        content = result.read_text()
+        assert 'tab name="my-client"' in content
+
+
+class TestNewTab:
+    def test_calls_zellij_action(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        calls: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, check: bool = True) -> MagicMock:
+            calls.append(args)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="proj", workspace_path=ws_dir)
+        new_tab(client, session="cw")
+
+        assert len(calls) == 1
+        assert calls[0][:2] == ("-s", "cw")
+        assert "new-tab" in calls[0]
+        assert "--layout" in calls[0]
+
+
+class TestCheckPaneHealthTabScoped:
+    def test_specific_tab(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        layout = (
+            'tab name="client-a" {\n'
+            '  pane command="claude" name="impl" {\n'
+            'tab name="client-b" {\n'
+            '  pane command="claude" name="impl" exited {\n'
+        )
+        mock_result = MagicMock(returncode=0, stdout=layout)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        health_a = check_pane_health(tab_name="client-a")
+        assert health_a == {"impl": True}
+
+    def test_second_tab(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        layout = (
+            'tab name="client-a" {\n'
+            '  pane command="claude" name="impl" {\n'
+            'tab name="client-b" {\n'
+            '  pane command="claude" name="impl" exited {\n'
+        )
+        mock_result = MagicMock(returncode=0, stdout=layout)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        health_b = check_pane_health(tab_name="client-b")
+        assert health_b == {"impl": False}
+
+    def test_no_tab_name_uses_first(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        layout = (
+            'tab name="first" {\n'
+            '  pane command="claude" name="impl" {\n'
+            'tab name="second" {\n'
+            '  pane command="claude" name="extra" {\n'
+        )
+        mock_result = MagicMock(returncode=0, stdout=layout)
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+
+        health = check_pane_health()
+        assert "impl" in health
+        assert "extra" not in health

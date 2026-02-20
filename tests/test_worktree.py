@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from cw.models import ClientConfig
 from cw.worktree import (
+    _git_dir,
     create_worktree,
     list_worktrees,
     remove_worktree,
@@ -36,6 +37,20 @@ class TestSlugifyBranch:
 
     def test_trailing_slash_stripped(self) -> None:
         assert slugify_branch("feat/") == "feat"
+
+
+class TestGitDir:
+    def test_legacy_client(self, tmp_path: Path) -> None:
+        client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
+        assert _git_dir(client) == tmp_path / "ws"
+
+    def test_worktree_client(self, tmp_path: Path) -> None:
+        client = ClientConfig(
+            name="test",
+            repo_path=tmp_path / "repo",
+            branch="client-a",
+        )
+        assert _git_dir(client) == tmp_path / "repo"
 
 
 class TestResolveWorktreeBase:
@@ -137,6 +152,109 @@ class TestCreateWorktree:
         create_worktree(client, "feat/existing")
         add_call = git_calls[-1]
         assert "-b" not in add_call
+
+
+class TestSubmoduleInit:
+    def test_submodule_init_when_gitmodules_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        # Create .gitmodules to trigger submodule init
+        (ws / ".gitmodules").write_text("[submodule]\n")
+
+        client = ClientConfig(
+            name="test", workspace_path=ws,
+            worktree_base=tmp_path / "wt",
+        )
+        git_calls: list[tuple[str, ...]] = []
+
+        def mock_run(
+            *args: str, cwd: object, check: bool = True,
+        ) -> MagicMock:
+            git_calls.append(args)
+            result = MagicMock(stderr="")
+            if "rev-parse" in args:
+                result.returncode = 128  # branch doesn't exist
+            else:
+                result.returncode = 0
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        create_worktree(client, "feat/new")
+
+        # Should have: rev-parse, worktree add, submodule update
+        submodule_calls = [
+            c for c in git_calls if "submodule" in c
+        ]
+        assert len(submodule_calls) == 1
+        assert "update" in submodule_calls[0]
+        assert "--init" in submodule_calls[0]
+        assert "--recursive" in submodule_calls[0]
+
+    def test_no_submodule_init_without_gitmodules(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        # No .gitmodules file
+
+        client = ClientConfig(
+            name="test", workspace_path=ws,
+            worktree_base=tmp_path / "wt",
+        )
+        git_calls: list[tuple[str, ...]] = []
+
+        def mock_run(
+            *args: str, cwd: object, check: bool = True,
+        ) -> MagicMock:
+            git_calls.append(args)
+            result = MagicMock(stderr="")
+            if "rev-parse" in args:
+                result.returncode = 128
+            else:
+                result.returncode = 0
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        create_worktree(client, "feat/new")
+
+        submodule_calls = [
+            c for c in git_calls if "submodule" in c
+        ]
+        assert len(submodule_calls) == 0
+
+    def test_worktree_client_uses_repo_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Worktree-mode client uses repo_path for git cwd."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        client = ClientConfig(
+            name="test",
+            repo_path=repo,
+            branch="client-a",
+            worktree_base=tmp_path / "wt",
+        )
+        git_cwds: list[object] = []
+
+        def mock_run(
+            *args: str, cwd: object, check: bool = True,
+        ) -> MagicMock:
+            git_cwds.append(cwd)
+            result = MagicMock(stderr="")
+            if "rev-parse" in args:
+                result.returncode = 128
+            else:
+                result.returncode = 0
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        create_worktree(client, "client-a")
+
+        # All git commands should use repo_path, not workspace_path
+        for cwd in git_cwds:
+            assert str(cwd) == str(repo)
 
 
 class TestRemoveWorktree:

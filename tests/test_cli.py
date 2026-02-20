@@ -98,12 +98,6 @@ class TestCli:
             runner.invoke(main, ["list"])
             mock_list.assert_called_once()
 
-    def test_switch_dispatches(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.go_to_tab") as mock_tab:
-            runner.invoke(main, ["switch", "my-client"])
-            mock_tab.assert_called_once_with("my-client")
-
     def test_status_dispatches(self) -> None:
         runner = CliRunner()
         with patch("cw.cli._display_status") as mock_status:
@@ -402,7 +396,7 @@ class TestShowStatus:
         )
 
         def _mock_check_pane_health(
-            *, session: str | None = None
+            session: str | None = None, tab_name: str | None = None,
         ) -> dict[str, bool]:
             return {"impl": False, "review": True, "debt": True}
 
@@ -456,7 +450,7 @@ class TestShowStatus:
         )
 
         def _mock_check_pane_health(
-            *, session: str | None = None
+            session: str | None = None, tab_name: str | None = None,
         ) -> dict[str, bool]:
             return {"impl": False}
 

@@ -121,6 +121,49 @@ class TestLoadClients:
         assert result["acme"].auto_purposes == DEFAULT_AUTO_PURPOSES
 
 
+class TestLoadWorktreeClients:
+    def test_worktree_client_from_yaml(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        repo = tmp_path / "meta-work"
+        repo.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  client-a:\n"
+            f"    repo_path: {repo}\n"
+            "    branch: client-a\n"
+        )
+        result = load_clients()
+        assert len(result) == 1
+        c = result["client-a"]
+        assert c.is_worktree_client is True
+        assert c.repo_path == repo
+        assert c.branch == "client-a"
+        # workspace_path sentinel = repo_path
+        assert c.workspace_path == repo
+
+    def test_mixed_legacy_and_worktree(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        repo = tmp_path / "meta-work"
+        ws = tmp_path / "personal"
+        repo.mkdir()
+        ws.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  client-a:\n"
+            f"    repo_path: {repo}\n"
+            "    branch: client-a\n"
+            "  personal:\n"
+            f"    workspace_path: {ws}\n"
+        )
+        result = load_clients()
+        assert result["client-a"].is_worktree_client is True
+        assert result["personal"].is_worktree_client is False
+
+
 class TestGetClient:
     def test_valid_name_returns_config(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -200,6 +243,23 @@ class TestDetectClientFromCwd:
             "    workspace_path: /nowhere/special\n"
         )
         monkeypatch.chdir(tmp_config_dir)
+        result = detect_client_from_cwd()
+        assert result is None
+
+    def test_skips_worktree_clients(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Worktree clients have sentinel workspace_path and should be skipped."""
+        repo = tmp_config_dir / "repo"
+        repo.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  wt-client:\n"
+            f"    repo_path: {repo}\n"
+            f"    branch: wt-branch\n"
+        )
+        monkeypatch.chdir(repo)
         result = detect_client_from_cwd()
         assert result is None
 
@@ -318,6 +378,26 @@ class TestShowConfig:
         show_config()
         output = capsys.readouterr().out
         assert "purposes:" not in output
+
+    def test_worktree_client_display(
+        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        repo = tmp_path / "meta-work"
+        repo.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  client-a:\n"
+            f"    repo_path: {repo}\n"
+            "    branch: client-a\n"
+        )
+        show_config()
+        output = capsys.readouterr().out
+        assert "repo:" in output
+        assert str(repo) in output
+        assert "branch: client-a" in output
+        # Should NOT show "path:" for worktree clients
+        assert "path:" not in output
 
     def test_with_worktree(
         self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
