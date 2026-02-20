@@ -15,7 +15,7 @@ from cw import zellij
 from cw.config import DAEMONS_DIR, get_client
 from cw.exceptions import CwError
 from cw.handoff import build_task_prompt
-from cw.models import QueueItem, SessionPurpose
+from cw.models import ClientConfig, QueueItem, SessionPurpose
 from cw.queue import claim_next, complete_item, fail_item
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 def _pid_path(client: str, purpose: str) -> Path:
-    return DAEMONS_DIR / f"{client}-{purpose}.pid"
+    return DAEMONS_DIR / f"{client}__{purpose}.pid"
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -93,7 +93,7 @@ def start_daemon(
 
 
 def _run_delegated_task(
-    client_config: object,
+    client_config: ClientConfig,
     item: QueueItem,
     *,
     review: bool = False,
@@ -104,9 +104,9 @@ def _run_delegated_task(
     """
     prompt = build_task_prompt(item.task)
     escaped = shlex.quote(prompt)
-    cmd = f"claude --append-system-prompt {escaped} --print"
+    cmd = f"claude --prompt {escaped} --print"
     pane_name = f"daemon-{item.id}"
-    cwd = str(getattr(client_config, "workspace_path", "."))
+    cwd = str(client_config.workspace_path)
 
     zellij.new_pane(
         cmd,
@@ -125,11 +125,14 @@ def _run_delegated_task(
             input()
 
 
+_PANE_INIT_DELAY_S = 0.5
+
+
 def _wait_for_pane_exit(pane_name: str, timeout: int = 600) -> None:
     """Poll Zellij health to detect when a pane's command exits."""
     start = time.time()
     # Give the pane a moment to appear
-    time.sleep(2)
+    time.sleep(_PANE_INIT_DELAY_S)
     while time.time() - start < timeout:
         health = zellij.check_pane_health()
         if pane_name not in health or not health[pane_name]:
@@ -185,7 +188,7 @@ def daemon_status(client: str | None = None) -> list[dict[str, object]]:
     DAEMONS_DIR.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, object]] = []
     for pid_file in sorted(DAEMONS_DIR.glob("*.pid")):
-        parts = pid_file.stem.rsplit("-", 1)
+        parts = pid_file.stem.split("__", 1)
         if len(parts) != 2:
             continue
         d_client, d_purpose = parts
@@ -196,6 +199,8 @@ def daemon_status(client: str | None = None) -> list[dict[str, object]]:
         except (ValueError, OSError):
             continue
         alive = _is_process_alive(pid)
+        if not alive:
+            pid_file.unlink(missing_ok=True)
         results.append({
             "client": d_client,
             "purpose": d_purpose,

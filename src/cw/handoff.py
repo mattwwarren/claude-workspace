@@ -122,13 +122,14 @@ def write_structured_handoff(
     handoffs_dir = workspace_path / ".handoffs"
     handoffs_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    now = datetime.now(UTC)
+    ts = now.strftime("%Y%m%dT%H%M%S")
     sidecar_path = handoffs_dir / f"session-structured-{ts}.json"
 
     payload = {
         "version": 1,
         "source_session": source_session,
-        "timestamp": datetime.now(UTC).isoformat(),
+        "timestamp": now.isoformat(),
         "tasks": [t.model_dump(mode="json") for t in tasks],
         "context": {
             "branch": branch,

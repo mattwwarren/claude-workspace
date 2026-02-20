@@ -25,6 +25,7 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
+    QueueItem,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -32,7 +33,7 @@ from cw.models import (
     TaskSpec,
 )
 from cw.prompts import get_purpose_prompt
-from cw.queue import add_item, claim_next
+from cw.queue import add_item, claim_next, load_queue, save_queue
 from cw.worktree import create_worktree, remove_worktree
 
 CW_SESSION = "cw"
@@ -616,6 +617,15 @@ def handoff_session(
     )
 
 
+def _persist_queue_assignment(client: str, item: QueueItem) -> None:
+    """Save the assigned_session_id back to the queue file."""
+    store = load_queue(client)
+    stored = store.find_item(item.id)
+    if stored is not None:
+        stored.assigned_session_id = item.assigned_session_id
+        save_queue(client, store)
+
+
 def delegate_task(
     client_name: str,
     description: str,
@@ -663,6 +673,7 @@ def delegate_task(
         zellij_pane=f"delegate-{claimed.id}",
     )
     claimed.assigned_session_id = session.id
+    _persist_queue_assignment(client_name, claimed)
     state.sessions.append(session)
     save_state(state)
 

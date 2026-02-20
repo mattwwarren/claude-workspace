@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from typing import TYPE_CHECKING
 
 import click
@@ -12,6 +13,8 @@ from cw.exceptions import CwError
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_SAFE_CLIENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 CONTEXT_CHECK_SCRIPT = """\
 #!/usr/bin/env bash
@@ -51,11 +54,22 @@ def _turn_count_path(client: str) -> Path:
     return HOOKS_DIR / f".turn-count-{client}"
 
 
+def _validate_client_name(client: str) -> None:
+    """Reject client names with shell metacharacters."""
+    if not _SAFE_CLIENT_RE.match(client):
+        msg = (
+            f"Unsafe client name: {client!r}. "
+            "Use only alphanumeric characters, hyphens, dots, and underscores."
+        )
+        raise CwError(msg)
+
+
 def install_context_hook(client: str, threshold: int) -> Path:
     """Install a PostToolUse hook script for context monitoring.
 
     Returns the path to the installed script.
     """
+    _validate_client_name(client)
     HOOKS_DIR.mkdir(parents=True, exist_ok=True)
     script_path = _hook_script_path(client)
     script_content = CONTEXT_CHECK_SCRIPT.format(

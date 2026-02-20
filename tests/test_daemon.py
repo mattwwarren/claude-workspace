@@ -35,11 +35,11 @@ def tmp_daemons_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 class TestPidPath:
     def test_returns_correct_path(self, tmp_daemons_dir: Path) -> None:
         result = _pid_path("acme", "debt")
-        assert result == tmp_daemons_dir / "acme-debt.pid"
+        assert result == tmp_daemons_dir / "acme__debt.pid"
 
     def test_includes_client_and_purpose_in_name(self, tmp_daemons_dir: Path) -> None:
         result = _pid_path("my-client", "review")
-        assert result.name == "my-client-review.pid"
+        assert result.name == "my-client__review.pid"
         assert result.parent == tmp_daemons_dir
 
     def test_different_clients_produce_different_paths(
@@ -85,7 +85,7 @@ class TestEnsureNotRunning:
         _ensure_not_running("acme", "debt")
 
     def test_raises_when_daemon_is_running(self, tmp_daemons_dir: Path) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text(str(os.getpid()))
 
         with pytest.raises(CwError, match="Daemon already running for acme/debt"):
@@ -93,14 +93,14 @@ class TestEnsureNotRunning:
 
     def test_error_message_includes_pid(self, tmp_daemons_dir: Path) -> None:
         current_pid = os.getpid()
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text(str(current_pid))
 
         with pytest.raises(CwError, match=str(current_pid)):
             _ensure_not_running("acme", "debt")
 
     def test_cleans_stale_pid_file(self, tmp_daemons_dir: Path) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         # Write a PID for a process that doesn't exist
         with patch("cw.daemon._is_process_alive", return_value=False):
             pid_file.write_text("99999")
@@ -109,7 +109,7 @@ class TestEnsureNotRunning:
         assert not pid_file.exists()
 
     def test_cleans_corrupt_pid_file(self, tmp_daemons_dir: Path) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text("not-a-number")
 
         # Should not raise; corrupt file gets cleaned up
@@ -117,7 +117,7 @@ class TestEnsureNotRunning:
         assert not pid_file.exists()
 
     def test_cleans_empty_pid_file(self, tmp_daemons_dir: Path) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text("")
 
         _ensure_not_running("acme", "debt")
@@ -136,7 +136,7 @@ class TestStopDaemon:
             stop_daemon("my-client", "review")
 
     def test_sends_sigterm_to_running_process(self, tmp_daemons_dir: Path) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         fake_pid = 12345
         pid_file.write_text(str(fake_pid))
 
@@ -157,7 +157,7 @@ class TestStopDaemon:
     def test_cleans_stale_pid_file_without_killing(
         self, tmp_daemons_dir: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text("99999")
 
         with patch("cw.daemon._is_process_alive", return_value=False):
@@ -173,7 +173,7 @@ class TestStopDaemon:
             stop_daemon("acme")
 
     def test_raises_on_invalid_pid_file_content(self, tmp_daemons_dir: Path) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text("not-a-number")
 
         with pytest.raises(CwError, match="Invalid PID file"):
@@ -188,7 +188,7 @@ class TestDaemonStatus:
     def test_returns_empty_when_client_filter_has_no_match(
         self, tmp_daemons_dir: Path
     ) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text(str(os.getpid()))
 
         result = daemon_status(client="other-client")
@@ -196,7 +196,7 @@ class TestDaemonStatus:
 
     def test_returns_daemon_info_from_pid_file(self, tmp_daemons_dir: Path) -> None:
         current_pid = os.getpid()
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text(str(current_pid))
 
         result = daemon_status()
@@ -209,7 +209,7 @@ class TestDaemonStatus:
         assert entry["alive"] is True
 
     def test_alive_false_for_dead_process(self, tmp_daemons_dir: Path) -> None:
-        pid_file = tmp_daemons_dir / "acme-debt.pid"
+        pid_file = tmp_daemons_dir / "acme__debt.pid"
         pid_file.write_text("99999")
 
         with patch("cw.daemon._is_process_alive", return_value=False):
@@ -219,8 +219,8 @@ class TestDaemonStatus:
         assert result[0]["alive"] is False
 
     def test_filters_by_client(self, tmp_daemons_dir: Path) -> None:
-        (tmp_daemons_dir / "acme-debt.pid").write_text(str(os.getpid()))
-        (tmp_daemons_dir / "beta-debt.pid").write_text(str(os.getpid()))
+        (tmp_daemons_dir / "acme__debt.pid").write_text(str(os.getpid()))
+        (tmp_daemons_dir / "beta__debt.pid").write_text(str(os.getpid()))
 
         result = daemon_status(client="acme")
 
@@ -228,8 +228,8 @@ class TestDaemonStatus:
         assert result[0]["client"] == "acme"
 
     def test_returns_all_clients_when_no_filter(self, tmp_daemons_dir: Path) -> None:
-        (tmp_daemons_dir / "acme-debt.pid").write_text(str(os.getpid()))
-        (tmp_daemons_dir / "beta-review.pid").write_text(str(os.getpid()))
+        (tmp_daemons_dir / "acme__debt.pid").write_text(str(os.getpid()))
+        (tmp_daemons_dir / "beta__review.pid").write_text(str(os.getpid()))
 
         result = daemon_status()
 
@@ -238,7 +238,7 @@ class TestDaemonStatus:
         assert clients == {"acme", "beta"}
 
     def test_skips_malformed_pid_files(self, tmp_daemons_dir: Path) -> None:
-        (tmp_daemons_dir / "acme-debt.pid").write_text("not-a-pid")
+        (tmp_daemons_dir / "acme__debt.pid").write_text("not-a-pid")
 
         result = daemon_status()
 
@@ -247,8 +247,8 @@ class TestDaemonStatus:
     def test_skips_pid_files_with_malformed_stem(
         self, tmp_daemons_dir: Path
     ) -> None:
-        # A file whose stem can't be split into exactly two parts
-        (tmp_daemons_dir / "nodash.pid").write_text(str(os.getpid()))
+        # A file whose stem can't be split by __ into exactly two parts
+        (tmp_daemons_dir / "noseparator.pid").write_text(str(os.getpid()))
 
         result = daemon_status()
 
@@ -256,8 +256,8 @@ class TestDaemonStatus:
 
     def test_multiple_daemons_same_client(self, tmp_daemons_dir: Path) -> None:
         current_pid = os.getpid()
-        (tmp_daemons_dir / "acme-debt.pid").write_text(str(current_pid))
-        (tmp_daemons_dir / "acme-review.pid").write_text(str(current_pid))
+        (tmp_daemons_dir / "acme__debt.pid").write_text(str(current_pid))
+        (tmp_daemons_dir / "acme__review.pid").write_text(str(current_pid))
 
         result = daemon_status(client="acme")
 
