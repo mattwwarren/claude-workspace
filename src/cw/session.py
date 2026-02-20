@@ -619,6 +619,9 @@ def _cleanup_cross_session_handoff(session: Session) -> None:
     Only deletes files with the session-handoff-* prefix (created by
     _write_cross_session_handoff). Regular /session-done handoffs are
     preserved for audit.
+
+    Note: Mutates ``session.last_handoff_path`` but does **not** call
+    ``save_state`` itself.  Caller must persist state afterward.
     """
     path = session.last_handoff_path
     if path is None or not path.exists():
@@ -628,8 +631,8 @@ def _cleanup_cross_session_handoff(session: Session) -> None:
     try:
         path.unlink()
         session.last_handoff_path = None
-    except OSError:
-        pass  # Best-effort cleanup
+    except OSError as exc:
+        click.echo(f"Warning: failed to clean up handoff file {path}: {exc}", err=True)
 
 
 def _write_cross_session_handoff(
