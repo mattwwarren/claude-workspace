@@ -177,3 +177,77 @@ def build_task_prompt(task: TaskSpec) -> str:
     lines.append("Instructions:")
     lines.append(task.prompt)
     return "\n".join(lines)
+
+
+def parse_handoff_reason(handoff_path: Path) -> str | None:
+    """Extract the reason field from handoff frontmatter, if present.
+
+    Returns 'context', 'debug-fork', 'scope', or None (normal completion).
+    Normal /session-done handoffs lack frontmatter with a reason field.
+    Abnormal /handoff handoffs include reason: in YAML frontmatter.
+    """
+    try:
+        content = handoff_path.read_text()
+    except OSError:
+        return None
+
+    # Check for YAML frontmatter delimited by ---
+    if not content.startswith("---"):
+        return None
+
+    end = content.find("---", 3)
+    if end == -1:
+        return None
+
+    frontmatter = content[3:end]
+    match = re.search(r"^reason:\s*(.+)$", frontmatter, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+_DAEMON_WORKFLOW_TEMPLATE = (
+    "You have been assigned a task by the daemon queue system."
+    " Complete it autonomously.\n"
+    "\n"
+    "## Task\n"
+    "\n"
+    "{task_prompt}\n"
+    "\n"
+    "## Workflow\n"
+    "\n"
+    "1. **Assess**: Read relevant code. If the task is complex"
+    " (multi-file, architectural),"
+    " plan your approach before implementing.\n"
+    "2. **Implement**: Write the code changes.\n"
+    "3. **Quality gates**: Run `ruff check src/ tests/`,"
+    " `mypy src/`, and `pytest tests/ -v`."
+    " Fix any issues before proceeding.\n"
+    "4. **Review**: Spawn review agents using the Task tool"
+    " to review your changes."
+    " Use Code Quality Reviewer and Architecture Reviewer"
+    " at minimum. Fix all HIGH and MEDIUM findings."
+    " Do NOT review inline — always delegate to agents"
+    " to protect your context window.\n"
+    "5. **Commit**: Create a git commit with a clear message.\n"
+    "6. **Signal completion**: Run /session-done to generate"
+    " a handoff and signal you are finished.\n"
+    "\n"
+    "## Important\n"
+    "\n"
+    "- If you run out of context or hit a blocker you cannot"
+    " resolve after 2 attempts,"
+    " use `/handoff --reason context` instead of"
+    " `/session-done`. The daemon will detect this"
+    " and pause for human intervention.\n"
+    "- Stay focused on this single task."
+    " Do not expand scope.\n"
+    "- Keep your context lean: delegate reviews to agents,"
+    " don't read unnecessary files.\n"
+)
+
+
+def build_daemon_workflow_prompt(task: TaskSpec) -> str:
+    """Wrap a TaskSpec in autonomous workflow instructions for daemon execution."""
+    task_prompt = build_task_prompt(task)
+    return _DAEMON_WORKFLOW_TEMPLATE.format(task_prompt=task_prompt)

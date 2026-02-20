@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
-import shlex
 import signal
 import time
 from typing import TYPE_CHECKING
@@ -12,12 +10,18 @@ from typing import TYPE_CHECKING
 import click
 
 from cw import zellij
-from cw.config import DAEMONS_DIR, get_client
+from cw.config import DAEMONS_DIR, get_client, load_state, save_state
 from cw.exceptions import CwError
-from cw.handoff import build_task_prompt
+from cw.handoff import (
+    build_daemon_workflow_prompt,
+    find_handoffs_newer_than,
+    parse_handoff_reason,
+)
 from cw.history import EventType, HistoryEvent, record_event
-from cw.models import ClientConfig, QueueItem, SessionPurpose
+from cw.models import ClientConfig, QueueItem, SessionPurpose, SessionStatus
+from cw.notify import send_notification
 from cw.queue import claim_next, complete_item, fail_item
+from cw.session import CLAUDE_INIT_DELAY_S, CW_SESSION
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -87,7 +91,33 @@ def start_daemon(
             )
 
             try:
-                _run_delegated_task(client_config, item, review=review)
+                before_mtime = time.time()
+                _inject_into_session(client_config, item, purpose)
+
+                handoff_path = _wait_for_completion(
+                    client_config.workspace_path,
+                    before_mtime,
+                    timeout=1800,
+                )
+
+                if handoff_path is None:
+                    fail_item(client, item.id, "Timed out after 1800s")
+                    click.echo(f"Timed out: {item.id}")
+                    continue
+
+                reason = parse_handoff_reason(handoff_path)
+                if reason:
+                    click.echo(
+                        f"Session ended abnormally (reason: {reason}). Pausing daemon."
+                    )
+                    send_notification(
+                        "Daemon Paused",
+                        f"Queue item {item.id}: {reason}",
+                        urgency="critical",
+                    )
+                    fail_item(client, item.id, f"Session handoff: {reason}")
+                    break
+
                 complete_item(client, item.id, "Completed by daemon")
                 click.echo(f"Completed: {item.id}")
             except Exception as exc:
@@ -104,54 +134,74 @@ def start_daemon(
         click.echo("Daemon stopped.")
 
 
-def _run_delegated_task(
+def _inject_into_session(
     client_config: ClientConfig,
     item: QueueItem,
-    *,
-    review: bool = False,
+    purpose: str,
 ) -> None:
-    """Spawn Claude in a sub-pane and wait for completion.
+    """Resume the debt session and inject a workflow prompt.
 
-    Uses --print mode for non-interactive processing.
+    The debt pane must already exist (created by ``cw start``) and the
+    session must be BACKGROUNDED.  The daemon resumes Claude in that pane
+    and injects the full workflow prompt via keystroke injection.
     """
-    prompt = build_task_prompt(item.task)
-    escaped = shlex.quote(prompt)
-    cmd = f"claude --prompt {escaped} --print"
-    pane_name = f"daemon-{item.id}"
-    cwd = str(client_config.workspace_path)
+    state = load_state()
+    session = state.find_session(client_config.name, purpose)
 
-    zellij.new_pane(
-        cmd,
-        name=pane_name,
-        cwd=cwd,
-        close_on_exit=True,
+    if session is None:
+        msg = f"No {purpose} session for {client_config.name}. Run `cw start` first."
+        raise CwError(msg)
+
+    if session.status != SessionStatus.BACKGROUNDED:
+        msg = (
+            f"Session {session.name} is not backgrounded"
+            f" (status: {session.status}). Cannot inject."
+        )
+        raise CwError(msg)
+
+    workflow_prompt = build_daemon_workflow_prompt(item.task)
+
+    # Determine Zellij target: use CW_SESSION when not inside Zellij
+    zellij_target = None if zellij.in_zellij_session() else CW_SESSION
+
+    # Navigate and resume
+    zellij.go_to_tab(session.zellij_tab or session.client, session=zellij_target)
+    zellij.focus_pane(session.zellij_pane or purpose, session=zellij_target)
+    zellij.write_to_pane(
+        f"claude --resume {session.claude_session_id}\n",
+        session=zellij_target,
     )
+    time.sleep(CLAUDE_INIT_DELAY_S)
+    zellij.write_to_pane(workflow_prompt + "\n", session=zellij_target)
 
-    # Poll for pane completion
-    _wait_for_pane_exit(pane_name, timeout=600)
+    # Update session status
+    session.status = SessionStatus.ACTIVE
+    save_state(state)
 
-    if review:
-        click.echo(f"Review required for {item.id}. Pausing...")
-        click.echo("Press Enter to continue...")
-        with contextlib.suppress(EOFError):
-            input()
+    record_event(client_config.name, HistoryEvent(
+        event_type=EventType.SESSION_RESUMED,
+        client=client_config.name,
+        session_id=session.id,
+        session_name=session.name,
+        purpose=purpose,
+    ))
 
 
-_PANE_INIT_DELAY_S = 0.5
-
-
-def _wait_for_pane_exit(pane_name: str, timeout: int = 600) -> None:
-    """Poll Zellij health to detect when a pane's command exits."""
+def _wait_for_completion(
+    workspace_path: Path,
+    before_mtime: float,
+    *,
+    timeout: int = 600,
+    poll_interval: int = 10,
+) -> Path | None:
+    """Poll until a new handoff file appears, indicating session-done ran."""
     start = time.time()
-    # Give the pane a moment to appear
-    time.sleep(_PANE_INIT_DELAY_S)
     while time.time() - start < timeout:
-        health = zellij.check_pane_health()
-        if pane_name not in health or not health[pane_name]:
-            return
-        time.sleep(5)
-    msg = f"Pane '{pane_name}' did not exit within {timeout}s"
-    raise TimeoutError(msg)
+        time.sleep(poll_interval)
+        newer = find_handoffs_newer_than(workspace_path, before_mtime)
+        if newer:
+            return newer[0]  # Most recent
+    return None  # Timeout
 
 
 def _ensure_not_running(client: str, purpose: str) -> None:

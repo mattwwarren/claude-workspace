@@ -7,10 +7,13 @@ from typing import TYPE_CHECKING
 
 from cw.handoff import (
     build_cross_session_prompt,
+    build_daemon_workflow_prompt,
     extract_resumption_prompt,
     find_handoffs_newer_than,
     find_latest_handoff,
+    parse_handoff_reason,
 )
+from cw.models import SessionPurpose, TaskSpec
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -186,3 +189,105 @@ class TestBuildCrossSessionPrompt:
         result = build_cross_session_prompt("impl", "review", None, None)
         assert "impl → review" in result
         assert "No resumption context" in result
+
+
+class TestParseHandoffReason:
+    def test_normal_session_done_returns_none(self, tmp_path: Path) -> None:
+        """Normal /session-done handoffs lack frontmatter with a reason field."""
+        f = tmp_path / "session-done.md"
+        f.write_text(
+            "# Session Handoff\n\n"
+            "## Summary\n\n"
+            "Work is complete.\n"
+        )
+        assert parse_handoff_reason(f) is None
+
+    def test_context_reason(self, tmp_path: Path) -> None:
+        f = tmp_path / "session-context.md"
+        f.write_text(
+            "---\n"
+            "reason: context\n"
+            "---\n"
+            "# Handoff\n\n"
+            "Context exhausted.\n"
+        )
+        assert parse_handoff_reason(f) == "context"
+
+    def test_debug_fork_reason(self, tmp_path: Path) -> None:
+        f = tmp_path / "session-debug.md"
+        f.write_text(
+            "---\n"
+            "reason: debug-fork\n"
+            "---\n"
+            "# Handoff\n"
+        )
+        assert parse_handoff_reason(f) == "debug-fork"
+
+    def test_scope_reason(self, tmp_path: Path) -> None:
+        f = tmp_path / "session-scope.md"
+        f.write_text(
+            "---\n"
+            "reason: scope\n"
+            "---\n"
+            "# Handoff\n"
+        )
+        assert parse_handoff_reason(f) == "scope"
+
+    def test_frontmatter_without_reason_returns_none(self, tmp_path: Path) -> None:
+        f = tmp_path / "session-no-reason.md"
+        f.write_text(
+            "---\n"
+            "title: Some handoff\n"
+            "---\n"
+            "# Handoff\n"
+        )
+        assert parse_handoff_reason(f) is None
+
+    def test_nonexistent_file_returns_none(self, tmp_path: Path) -> None:
+        f = tmp_path / "does-not-exist.md"
+        assert parse_handoff_reason(f) is None
+
+    def test_reason_with_extra_whitespace(self, tmp_path: Path) -> None:
+        f = tmp_path / "session-ws.md"
+        f.write_text(
+            "---\n"
+            "reason:   context  \n"
+            "---\n"
+            "# Handoff\n"
+        )
+        assert parse_handoff_reason(f) == "context"
+
+
+class TestBuildDaemonWorkflowPrompt:
+    def _make_task(self) -> TaskSpec:
+        return TaskSpec(
+            description="Fix ruff violations in session.py",
+            purpose=SessionPurpose.DEBT,
+            prompt="Run ruff check and fix all violations.",
+        )
+
+    def test_wraps_task_in_workflow(self) -> None:
+        task = self._make_task()
+        result = build_daemon_workflow_prompt(task)
+        assert "Fix ruff violations in session.py" in result
+        assert "Run ruff check and fix all violations." in result
+
+    def test_includes_workflow_steps(self) -> None:
+        task = self._make_task()
+        result = build_daemon_workflow_prompt(task)
+        assert "/session-done" in result
+        assert "/handoff --reason context" in result
+        assert "Code Quality Reviewer" in result
+        assert "Architecture Reviewer" in result
+
+    def test_includes_quality_gates(self) -> None:
+        task = self._make_task()
+        result = build_daemon_workflow_prompt(task)
+        assert "ruff check" in result
+        assert "mypy" in result
+        assert "pytest" in result
+
+    def test_includes_daemon_header(self) -> None:
+        task = self._make_task()
+        result = build_daemon_workflow_prompt(task)
+        assert "daemon queue system" in result

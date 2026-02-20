@@ -4,22 +4,34 @@ from __future__ import annotations
 
 import os
 import signal
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 from cw.daemon import (
     _ensure_not_running,
+    _inject_into_session,
     _is_process_alive,
     _pid_path,
+    _wait_for_completion,
     daemon_status,
     stop_daemon,
 )
 from cw.exceptions import CwError
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from cw.models import (
+    ClientConfig,
+    CwState,
+    QueueItem,
+    Session,
+    SessionPurpose,
+    SessionStatus,
+    TaskSpec,
+)
 
 
 @pytest.fixture
@@ -275,3 +287,164 @@ class TestDaemonStatus:
 
         assert daemons_dir.exists()
         assert result == []
+
+
+def _make_queue_item(client: str = "test-client") -> QueueItem:
+    """Create a QueueItem for testing."""
+    return QueueItem(
+        id="item01",
+        client=client,
+        task=TaskSpec(
+            description="Fix lint issues",
+            purpose=SessionPurpose.DEBT,
+            prompt="Run ruff and fix violations.",
+        ),
+    )
+
+
+def _make_client(tmp_path: Path) -> ClientConfig:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return ClientConfig(name="test-client", workspace_path=workspace)
+
+
+def _make_session(
+    workspace_path: Path,
+    client: str = "test-client",
+    purpose: SessionPurpose = SessionPurpose.DEBT,
+    status: SessionStatus = SessionStatus.BACKGROUNDED,
+) -> Session:
+    return Session(
+        id="sess-debt",
+        name=f"{client}/{purpose.value}",
+        client=client,
+        purpose=purpose,
+        status=status,
+        workspace_path=workspace_path,
+        zellij_pane=purpose.value,
+        zellij_tab=client,
+    )
+
+
+class TestInjectIntoSession:
+    def test_requires_backgrounded_session(
+        self, tmp_path: Path, tmp_config_dir: Path, mock_zellij: object,
+    ) -> None:
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.ACTIVE,
+        )
+        state = CwState(sessions=[session])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            pytest.raises(CwError, match="not backgrounded"),
+        ):
+            _inject_into_session(client_config, _make_queue_item(), "debt")
+
+    def test_no_session_raises(
+        self, tmp_path: Path, tmp_config_dir: Path, mock_zellij: object,
+    ) -> None:
+        client_config = _make_client(tmp_path)
+        state = CwState(sessions=[])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            pytest.raises(CwError, match="No debt session"),
+        ):
+            _inject_into_session(client_config, _make_queue_item(), "debt")
+
+    def test_writes_to_pane(
+        self,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_zellij: dict[str, list[tuple[object, ...]]],
+    ) -> None:
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.BACKGROUNDED,
+        )
+        state = CwState(sessions=[session])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state"),
+            patch("cw.daemon.record_event"),
+            patch("cw.daemon.time.sleep"),
+        ):
+            _inject_into_session(client_config, _make_queue_item(), "debt")
+
+        # Should have written twice: resume command + workflow prompt
+        assert len(mock_zellij["write_to_pane"]) == 2
+        resume_call = mock_zellij["write_to_pane"][0][0]
+        assert "claude --resume" in resume_call
+        workflow_call = mock_zellij["write_to_pane"][1][0]
+        assert "daemon queue system" in workflow_call
+
+    def test_updates_session_status_to_active(
+        self,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_zellij: object,
+    ) -> None:
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.BACKGROUNDED,
+        )
+        state = CwState(sessions=[session])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state"),
+            patch("cw.daemon.record_event"),
+            patch("cw.daemon.time.sleep"),
+        ):
+            _inject_into_session(client_config, _make_queue_item(), "debt")
+
+        assert session.status == SessionStatus.ACTIVE
+
+    def test_completed_session_raises(
+        self, tmp_path: Path, tmp_config_dir: Path, mock_zellij: object,
+    ) -> None:
+        """find_session filters out COMPLETED sessions, so they appear as missing."""
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.COMPLETED,
+        )
+        state = CwState(sessions=[session])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            pytest.raises(CwError, match="No debt session"),
+        ):
+            _inject_into_session(client_config, _make_queue_item(), "debt")
+
+
+class TestWaitForCompletion:
+    def test_returns_handoff_when_found(self, tmp_path: Path) -> None:
+        handoffs_dir = tmp_path / ".handoffs"
+        handoffs_dir.mkdir()
+
+        before = time.time()
+        time.sleep(0.05)
+        handoff = handoffs_dir / "session-test.md"
+        handoff.write_text("# Handoff\n")
+
+        result = _wait_for_completion(
+            tmp_path, before, timeout=5, poll_interval=0,
+        )
+        assert result is not None
+        assert result.name == "session-test.md"
+
+    def test_returns_none_on_timeout(self, tmp_path: Path) -> None:
+        handoffs_dir = tmp_path / ".handoffs"
+        handoffs_dir.mkdir()
+
+        result = _wait_for_completion(
+            tmp_path, time.time() + 9999, timeout=0, poll_interval=0,
+        )
+        assert result is None
