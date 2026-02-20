@@ -9,6 +9,7 @@ from cw.models import ClientConfig
 from cw.zellij import (
     check_pane_health,
     current_session_name,
+    delete_exited_session,
     focus_pane,
     generate_layout,
     go_to_tab,
@@ -107,6 +108,42 @@ class TestSessionExists:
             "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
         )
         assert session_exists("cw") is False
+
+
+class TestDeleteExitedSession:
+    def test_deletes_exited(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, check: bool = True) -> MagicMock:
+            calls.append(args)
+            result = MagicMock(returncode=0)
+            result.stdout = "cw [Created 1d ago] (EXITED - attach to resurrect)\n"
+            return result
+
+        monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
+        assert delete_exited_session("cw") is True
+        assert any("delete-session" in c for c in calls)
+
+    def test_ignores_active(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, check: bool = True) -> MagicMock:
+            calls.append(args)
+            result = MagicMock(returncode=0)
+            result.stdout = "cw [Created 2h ago]\n"
+            return result
+
+        monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
+        assert delete_exited_session("cw") is False
+        assert not any("delete-session" in c for c in calls)
+
+    def test_no_matching_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_result = MagicMock(returncode=0)
+        mock_result.stdout = "other [Created 1d ago] (EXITED)\n"
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+        assert delete_exited_session("cw") is False
 
 
 class TestGenerateLayout:

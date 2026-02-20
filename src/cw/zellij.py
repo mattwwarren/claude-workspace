@@ -115,6 +115,22 @@ def session_exists(session_name: str) -> bool:
     return session_name in list_sessions()
 
 
+def delete_exited_session(session_name: str) -> bool:
+    """Delete a Zellij session if it exists in EXITED state.
+
+    Returns True if a session was deleted, False otherwise.
+    """
+    result = _run_zellij("list-sessions", "--no-formatting", check=False)
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.strip().splitlines():
+        parts = line.strip().split()
+        if parts and parts[0] == session_name and "EXITED" in line:
+            _run_zellij("delete-session", session_name, check=False)
+            return True
+    return False
+
+
 def generate_layout(
     client: ClientConfig,
     panes: dict[str, dict[str, str]] | None = None,

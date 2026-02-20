@@ -191,6 +191,9 @@ def start_session(
 ) -> None:
     """Start or resume a Claude Code session for a client."""
     _ensure_zellij()
+    # Clean up stale EXITED Zellij session so we don't try to inject into it
+    if zellij.delete_exited_session(CW_SESSION):
+        click.echo(f"Cleaned up exited Zellij session '{CW_SESSION}'.")
     client = get_client(client_name)
     state = load_state()
 
