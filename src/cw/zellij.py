@@ -38,9 +38,16 @@ layout {
 {%- endif %}
     tab name="{{ client_name }}" {
         pane split_direction="vertical" {
-            pane size="20%" name="files" {
-                command "yazi"
-                args "{{ workspace_path }}"
+            pane split_direction="horizontal" size="20%" {
+                pane name="files" {
+                    command "yazi"
+                    args "{{ workspace_path }}"
+                }
+                pane size=6 name="daemon" {
+                    cwd "{{ workspace_path }}"
+                    command "bash"
+                    args "-c" "cw daemon start"
+                }
             }
 {%- if secondary_panes %}
             pane split_direction="horizontal" size="80%" {
