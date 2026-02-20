@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
 from typing import TYPE_CHECKING
 
 import click
 
 from cw import zellij
-from cw.config import DAEMONS_DIR, get_client, load_state, save_state
+from cw.config import DAEMONS_DIR, get_client, load_clients, load_state, save_state
 from cw.exceptions import CwError
 from cw.handoff import (
     build_daemon_workflow_prompt,
@@ -70,11 +71,10 @@ def start_daemon(
     DAEMONS_DIR.mkdir(parents=True, exist_ok=True)
     pid_file.write_text(str(os.getpid()))
 
-    shutdown_requested = False
+    shutdown_event = threading.Event()
 
     def _handle_signal(_signum: int, _frame: object) -> None:
-        nonlocal shutdown_requested
-        shutdown_requested = True
+        shutdown_event.set()
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -90,10 +90,10 @@ def start_daemon(
     ))
 
     try:
-        while not shutdown_requested:
+        while not shutdown_event.is_set():
             item = claim_next(client, SessionPurpose(purpose))
             if item is None:
-                time.sleep(poll_interval)
+                shutdown_event.wait(poll_interval)
                 continue
 
             click.echo(
@@ -108,6 +108,7 @@ def start_daemon(
                     client_config.workspace_path,
                     before_mtime,
                     timeout=_DAEMON_TASK_TIMEOUT_S,
+                    shutdown_event=shutdown_event,
                 )
 
                 # Re-background the session so next iteration can inject
@@ -155,6 +156,122 @@ def start_daemon(
             purpose=purpose,
         ))
         click.echo("Daemon stopped.")
+
+
+def start_daemon_all(
+    *,
+    poll_interval: int = 30,
+    review: bool = False,
+) -> None:
+    """Run a daemon that monitors all client queues.
+
+    Iterates over every configured client each poll cycle, claiming
+    any pending item regardless of purpose.  The purpose is determined
+    from the claimed item's task spec.
+    """
+    _ensure_not_running("_all", "_all")
+
+    pid_file = _pid_path("_all", "_all")
+    DAEMONS_DIR.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
+    shutdown_event = threading.Event()
+
+    def _handle_signal(_signum: int, _frame: object) -> None:
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    click.echo(f"Daemon started: all queues (pid {os.getpid()})")
+    click.echo(f"Poll interval: {poll_interval}s, Review mode: {review}")
+
+    try:
+        while not shutdown_event.is_set():
+            processed = _poll_all_queues(shutdown_event)
+            if not processed:
+                shutdown_event.wait(poll_interval)
+    finally:
+        if pid_file.exists():
+            pid_file.unlink()
+        click.echo("Daemon stopped.")
+
+
+def _poll_all_queues(shutdown_event: threading.Event) -> bool:
+    """Scan all clients for pending work, process one item if found.
+
+    Returns ``True`` if an item was processed (success or failure),
+    ``False`` if no work was available.
+    """
+    clients = load_clients()
+    for client_name in clients:
+        if shutdown_event.is_set():
+            return False
+
+        item = claim_next(client_name, purpose=None)
+        if item is None:
+            continue
+
+        purpose = item.task.purpose
+        client_config = get_client(client_name)
+
+        click.echo(
+            f"Processing: {client_name}/{purpose}"
+            f" — {item.task.description} (id: {item.id})"
+        )
+
+        try:
+            before_mtime = time.time()
+            _inject_into_session(client_config, item, purpose)
+
+            handoff_path = _wait_for_completion(
+                client_config.workspace_path,
+                before_mtime,
+                timeout=_DAEMON_TASK_TIMEOUT_S,
+                shutdown_event=shutdown_event,
+            )
+
+            _rebackground_session(client_config.name, purpose)
+
+            if shutdown_event.is_set():
+                fail_item(client_name, item.id, "Shutdown requested")
+                return True
+
+            if handoff_path is None:
+                fail_item(
+                    client_name, item.id,
+                    f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s",
+                )
+                click.echo(f"Timed out: {item.id}")
+                return True
+
+            reason = parse_handoff_reason(handoff_path)
+            if reason:
+                click.echo(
+                    f"Session ended abnormally (reason: {reason})."
+                    " Skipping item."
+                )
+                send_notification(
+                    "Daemon Item Failed",
+                    f"Queue item {item.id}: {reason}",
+                    urgency="critical",
+                )
+                fail_item(
+                    client_name, item.id,
+                    f"Session handoff: {reason}",
+                )
+                return True
+
+            complete_item(client_name, item.id, "Completed by daemon")
+            click.echo(f"Completed: {item.id}")
+        except Exception as exc:
+            _rebackground_session(client_config.name, purpose)
+            fail_item(client_name, item.id, str(exc))
+            click.echo(f"Failed: {item.id} — {exc}")
+
+        return True
+
+    return False
 
 
 def _get_backgrounded_session(
@@ -268,18 +385,24 @@ def _wait_for_completion(
     *,
     timeout: int = 600,
     poll_interval: int = 10,
+    shutdown_event: threading.Event | None = None,
 ) -> Path | None:
     """Poll until a new handoff file appears, indicating session-done ran.
 
     Returns the most recent handoff file newer than *before_mtime*,
-    or ``None`` on timeout.
+    or ``None`` on timeout or if *shutdown_event* is set.
     """
     start = time.time()
     while time.time() - start < timeout:
+        if shutdown_event is not None and shutdown_event.is_set():
+            return None
         newer = find_handoffs_newer_than(workspace_path, before_mtime)
         if newer:
             return newer[0]
-        time.sleep(poll_interval)
+        if shutdown_event is not None:
+            shutdown_event.wait(poll_interval)
+        else:
+            time.sleep(poll_interval)
     return None
 
 

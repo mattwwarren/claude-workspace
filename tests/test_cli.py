@@ -76,7 +76,15 @@ class TestCli:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg"])
-            mock_bg.assert_called_once_with(notify=None, auto=False)
+            mock_bg.assert_called_once_with(None, notify=None, auto=False)
+
+    def test_bg_with_session_name(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.background_session") as mock_bg:
+            runner.invoke(main, ["bg", "personal/debt"])
+            mock_bg.assert_called_once_with(
+                "personal/debt", notify=None, auto=False,
+            )
 
     def test_resume_dispatches(self) -> None:
         runner = CliRunner()
@@ -518,13 +526,13 @@ class TestBgNotifyCli:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg", "--notify", "review"])
-            mock_bg.assert_called_once_with(notify="review", auto=False)
+            mock_bg.assert_called_once_with(None, notify="review", auto=False)
 
     def test_bg_with_notify_short(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg", "-n", "review"])
-            mock_bg.assert_called_once_with(notify="review", auto=False)
+            mock_bg.assert_called_once_with(None, notify="review", auto=False)
 
 
 class TestPlanCli:
@@ -578,3 +586,34 @@ class TestPlanCli:
         runner = CliRunner()
         result = runner.invoke(main, ["plan", "nonexistent"])
         assert result.exit_code != 0
+
+
+class TestDaemonCli:
+    def test_daemon_start_with_client(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.start_daemon") as mock_start:
+            runner.invoke(main, ["daemon", "start", "my-client"])
+            mock_start.assert_called_once_with(
+                "my-client", "debt",
+                poll_interval=30, review=False,
+            )
+
+    def test_daemon_start_no_args_calls_all(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.start_daemon_all") as mock_all:
+            runner.invoke(main, ["daemon", "start"])
+            mock_all.assert_called_once_with(
+                poll_interval=30, review=False,
+            )
+
+    def test_daemon_stop_with_client(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.stop_daemon") as mock_stop:
+            runner.invoke(main, ["daemon", "stop", "my-client"])
+            mock_stop.assert_called_once_with("my-client", "debt")
+
+    def test_daemon_stop_no_args_stops_all(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.stop_daemon") as mock_stop:
+            runner.invoke(main, ["daemon", "stop"])
+            mock_stop.assert_called_once_with("_all", "_all")

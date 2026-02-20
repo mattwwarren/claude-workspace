@@ -12,7 +12,7 @@ from click.shell_completion import CompletionItem
 from cw import __version__, zellij
 from cw.config import get_client, load_clients, load_state, save_state, show_config
 from cw.daemon import daemon_status as _daemon_status_fn
-from cw.daemon import start_daemon, stop_daemon
+from cw.daemon import start_daemon, start_daemon_all, stop_daemon
 from cw.exceptions import CwError
 from cw.history import EventType, load_history
 from cw.hooks import hook_status as _hook_status_fn
@@ -107,6 +107,8 @@ def start(client: str, purpose: str, worktree: str | None) -> None:
 
 
 @main.command()
+@click.argument("session_name", required=False, default=None,
+                shell_complete=_complete_session)
 @click.option(
     "--notify", "-n",
     type=click.Choice([e.value for e in SessionPurpose]),
@@ -118,9 +120,13 @@ def start(client: str, purpose: str, worktree: str | None) -> None:
     help="Mark as auto-backgrounded (used by hooks).",
 )
 @handle_errors
-def bg(notify: str | None, auto: bool) -> None:
-    """Background the current session (auto-handoff)."""
-    background_session(notify=notify, auto=auto)
+def bg(session_name: str | None, notify: str | None, auto: bool) -> None:
+    """Background the current session (auto-handoff).
+
+    Optionally specify SESSION_NAME to background a specific session
+    remotely (e.g. 'personal/debt' or a session ID).
+    """
+    background_session(session_name, notify=notify, auto=auto)
 
 
 @main.command()
@@ -608,7 +614,8 @@ def daemon() -> None:
 
 
 @daemon.command(name="start")
-@click.argument("client", shell_complete=_complete_client)
+@click.argument("client", required=False, default=None,
+                shell_complete=_complete_client)
 @click.option(
     "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
     default="debt", help="Purpose to process.",
@@ -617,28 +624,42 @@ def daemon() -> None:
 @click.option("--review", is_flag=True, help="Pause after each item for review.")
 @handle_errors
 def daemon_start(
-    client: str,
+    client: str | None,
     purpose: str,
     poll_interval: int,
     review: bool,
 ) -> None:
     """Start the daemon to process queued tasks.
 
+    With no arguments, monitors all client queues.
+    With CLIENT, monitors a specific client/purpose.
+
     Runs in the foreground — designed to be spawned in a Zellij pane.
     """
-    start_daemon(client, purpose, poll_interval=poll_interval, review=review)
+    if client is None:
+        start_daemon_all(poll_interval=poll_interval, review=review)
+    else:
+        start_daemon(client, purpose, poll_interval=poll_interval, review=review)
 
 
 @daemon.command(name="stop")
-@click.argument("client", shell_complete=_complete_client)
+@click.argument("client", required=False, default=None,
+                shell_complete=_complete_client)
 @click.option(
     "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
     default="debt", help="Purpose daemon to stop.",
 )
 @handle_errors
-def daemon_stop(client: str, purpose: str) -> None:
-    """Stop a running daemon."""
-    stop_daemon(client, purpose)
+def daemon_stop(client: str | None, purpose: str) -> None:
+    """Stop a running daemon.
+
+    With no arguments, stops the all-queue daemon.
+    With CLIENT, stops the daemon for that client/purpose.
+    """
+    if client is None:
+        stop_daemon("_all", "_all")
+    else:
+        stop_daemon(client, purpose)
 
 
 @daemon.command(name="status")

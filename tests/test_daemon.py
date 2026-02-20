@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -20,6 +21,7 @@ from cw.daemon import (
     _inject_into_session,
     _is_process_alive,
     _pid_path,
+    _poll_all_queues,
     _rebackground_session,
     _wait_for_completion,
     daemon_status,
@@ -514,3 +516,104 @@ class TestWaitForCompletion:
             tmp_path, time.time() + 9999, timeout=0, poll_interval=0,
         )
         assert result is None
+
+    def test_returns_none_when_shutdown_event_pre_set(
+        self, tmp_path: Path,
+    ) -> None:
+        handoffs_dir = tmp_path / ".handoffs"
+        handoffs_dir.mkdir()
+
+        event = threading.Event()
+        event.set()
+
+        result = _wait_for_completion(
+            tmp_path, 0, timeout=60, poll_interval=1,
+            shutdown_event=event,
+        )
+        assert result is None
+
+    def test_returns_promptly_when_event_set_mid_wait(
+        self, tmp_path: Path,
+    ) -> None:
+        handoffs_dir = tmp_path / ".handoffs"
+        handoffs_dir.mkdir()
+
+        event = threading.Event()
+
+        def _set_after_delay() -> None:
+            time.sleep(0.1)
+            event.set()
+
+        t = threading.Thread(target=_set_after_delay)
+        t.start()
+
+        start = time.time()
+        result = _wait_for_completion(
+            tmp_path, time.time() + 9999, timeout=30, poll_interval=30,
+            shutdown_event=event,
+        )
+        elapsed = time.time() - start
+        t.join()
+
+        assert result is None
+        assert elapsed < 5, f"Took {elapsed}s — should have returned promptly"
+
+
+class TestPollAllQueues:
+    def test_returns_false_when_no_work(self, tmp_path: Path) -> None:
+        event = threading.Event()
+        with (
+            patch("cw.daemon.load_clients", return_value={"acme": {}}),
+            patch("cw.daemon.claim_next", return_value=None),
+        ):
+            result = _poll_all_queues(event)
+        assert result is False
+
+    def test_returns_false_when_shutdown_set(self) -> None:
+        event = threading.Event()
+        event.set()
+        with patch("cw.daemon.load_clients", return_value={"acme": {}}):
+            result = _poll_all_queues(event)
+        assert result is False
+
+    def test_processes_claimed_item(
+        self, tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_zellij: dict[str, list[tuple[object, ...]]],
+    ) -> None:
+        event = threading.Event()
+        item = _make_queue_item()
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.BACKGROUNDED,
+        )
+        state = CwState(sessions=[session])
+
+        handoffs_dir = tmp_path / "workspace" / ".handoffs"
+        handoffs_dir.mkdir(parents=True)
+        handoff_file = handoffs_dir / "session-done.md"
+        handoff_file.write_text("# Done\n")
+
+        with (
+            patch("cw.daemon.load_clients", return_value={"test-client": {}}),
+            patch("cw.daemon.claim_next", side_effect=[item, None]),
+            patch("cw.daemon.get_client", return_value=client_config),
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state"),
+            patch("cw.daemon.record_event"),
+            patch("cw.daemon.time.sleep"),
+            patch(
+                "cw.daemon.find_handoffs_newer_than",
+                return_value=[handoff_file],
+            ),
+            patch("cw.daemon.parse_handoff_reason", return_value=None),
+            patch("cw.daemon.complete_item") as mock_complete,
+            patch("cw.daemon._rebackground_session"),
+        ):
+            result = _poll_all_queues(event)
+
+        assert result is True
+        mock_complete.assert_called_once_with(
+            "test-client", "item01", "Completed by daemon",
+        )
