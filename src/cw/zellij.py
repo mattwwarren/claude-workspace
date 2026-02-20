@@ -99,14 +99,14 @@ def is_installed() -> bool:
 
 
 def list_sessions() -> list[str]:
-    """List running Zellij sessions."""
+    """List running Zellij sessions (excludes EXITED sessions)."""
     result = _run_zellij("list-sessions", "--no-formatting", check=False)
     if result.returncode != 0:
         return []
     return [
         line.strip().split()[0]
         for line in result.stdout.strip().splitlines()
-        if line.strip()
+        if line.strip() and "EXITED" not in line
     ]
 
 

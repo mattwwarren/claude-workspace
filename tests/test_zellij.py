@@ -74,6 +74,20 @@ class TestListSessions:
         )
         assert list_sessions() == ["cw"]
 
+    def test_excludes_exited_sessions(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = (
+            "active-session [Created 2h ago]\n"
+            "dead-session [Created 1d ago] (EXITED - attach to resurrect)\n"
+        )
+        monkeypatch.setattr(
+            "cw.zellij._run_zellij", lambda *_a, **_kw: mock_result
+        )
+        assert list_sessions() == ["active-session"]
+
 
 class TestSessionExists:
     def test_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
