@@ -134,6 +134,7 @@ class ClientConfig(BaseModel):
     )
     purpose_prompts: dict[str, str] = Field(default_factory=dict)
     auto_background_threshold: int | None = None
+    notifications: bool = False
 
 
 class CwState(BaseModel):

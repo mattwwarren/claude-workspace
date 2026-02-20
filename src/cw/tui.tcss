@@ -1,0 +1,46 @@
+/* TUI Dashboard stylesheet for claude-workspace */
+
+Screen {
+    layout: vertical;
+}
+
+Horizontal {
+    height: 1fr;
+}
+
+Header {
+    dock: top;
+}
+
+Footer {
+    dock: bottom;
+}
+
+ClientList {
+    width: 20%;
+    border-right: solid $primary;
+    height: 100%;
+}
+
+ClientList > ListItem {
+    padding: 0 1;
+}
+
+SessionTable {
+    width: 50%;
+    height: 100%;
+}
+
+ActivityFeed {
+    width: 30%;
+    border-left: solid $primary;
+    height: 100%;
+}
+
+StatusLine {
+    dock: bottom;
+    height: 1;
+    background: $surface;
+    color: $text-muted;
+    padding: 0 1;
+}

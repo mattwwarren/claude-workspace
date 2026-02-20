@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import click
 from click.shell_completion import CompletionItem
@@ -14,6 +14,7 @@ from cw.config import get_client, load_clients, load_state, save_state, show_con
 from cw.daemon import daemon_status as _daemon_status_fn
 from cw.daemon import start_daemon, stop_daemon
 from cw.exceptions import CwError
+from cw.history import EventType, load_history
 from cw.hooks import hook_status as _hook_status_fn
 from cw.hooks import install_context_hook, uninstall_context_hook
 from cw.models import (
@@ -266,6 +267,60 @@ def plan(client: str, show_all: bool) -> None:
                 continue
             label = "Done" if p_done == p_total else f"{p_done}/{p_total}"
             click.echo(f"  {phase.name}: {label}")
+
+
+def _parse_since(since: str | None) -> datetime | None:
+    """Parse a relative time string like '2h', '1d', '7d' into a datetime."""
+    if since is None:
+        return None
+
+    now = datetime.now(UTC)
+    value = since[:-1]
+    unit = since[-1]
+    try:
+        n = int(value)
+    except ValueError:
+        msg = f"Invalid --since value: {since} (expected e.g. 2h, 1d, 7d)"
+        raise CwError(msg) from None
+    if unit == "h":
+        return now - timedelta(hours=n)
+    if unit == "d":
+        return now - timedelta(days=n)
+    msg = f"Invalid --since unit: {unit} (expected h or d)"
+    raise CwError(msg)
+
+
+@main.command()
+@click.argument("client", shell_complete=_complete_client)
+@click.option("--limit", "-n", type=int, default=20, help="Max events to show.")
+@click.option("--since", default=None, help="Filter by time (e.g. 2h, 1d, 7d).")
+@click.option("--type", "event_type", default=None, help="Comma-separated event types.")
+@handle_errors
+def history(client: str, limit: int, since: str | None, event_type: str | None) -> None:
+    """Show event history for a client.
+
+    \b
+    Examples:
+      cw history my-client
+      cw history my-client --limit 50
+      cw history my-client --since 2h
+      cw history my-client --type session_started,session_completed
+    """
+    since_dt = _parse_since(since)
+    type_filter = None
+    if event_type:
+        type_filter = [EventType(t.strip()) for t in event_type.split(",")]
+
+    events = load_history(client, since=since_dt, event_types=type_filter, limit=limit)
+    if not events:
+        click.echo(f"No history events for {client}.")
+        return
+
+    for event in events:
+        ts = _relative_time(event.timestamp)
+        detail = f" - {event.detail}" if event.detail else ""
+        session = f" [{event.session_name}]" if event.session_name else ""
+        click.echo(f"{ts:<12} {event.event_type:<24}{session}{detail}")
 
 
 def _relative_time(dt: datetime | None) -> str:
@@ -605,6 +660,20 @@ def daemon_status_cmd(client: str | None) -> None:
             f"{d['client']:<18} {d['purpose']:<10}"
             f" {pid_str:<8} {status_label}"
         )
+
+
+@main.command()
+@handle_errors
+def dashboard() -> None:
+    """Launch the interactive TUI dashboard.
+
+    Shows sessions, activity feed, and status across all clients.
+    Keys: r=Resume, b=Background, d=Done, q=Quit.
+    """
+    # Lazy: avoid loading Textual for non-TUI commands
+    from cw.tui import run_dashboard
+
+    run_dashboard()
 
 
 _COMPLETION_SCRIPTS = {

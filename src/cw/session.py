@@ -21,6 +21,7 @@ from cw.handoff import (
     find_handoffs_newer_than,
     find_latest_handoff,
 )
+from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -134,6 +135,13 @@ def _create_all_purpose_sessions(
             session.claude_session_id = prior_sessions[purpose].claude_session_id
         sessions[purpose] = session
         state.sessions.append(session)
+        record_event(client_name, HistoryEvent(
+            event_type=EventType.SESSION_STARTED,
+            client=client_name,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=purpose,
+        ))
     return sessions
 
 
@@ -194,6 +202,13 @@ def start_session(
                 existing.completed_reason = CompletionReason.CRASHED
                 existing.completed_at = datetime.now(UTC)
                 save_state(state)
+                record_event(client_name, HistoryEvent(
+                    event_type=EventType.SESSION_CRASHED,
+                    client=client_name,
+                    session_id=existing.id,
+                    session_name=existing.name,
+                    purpose=existing.purpose,
+                ))
                 # Fall through to fresh start / recovery below
             else:
                 click.echo(f"Session already active: {existing.name}")
@@ -253,6 +268,13 @@ def start_session(
     )
     state.sessions.append(session)
     save_state(state)
+    record_event(client_name, HistoryEvent(
+        event_type=EventType.SESSION_STARTED,
+        client=client_name,
+        session_id=session.id,
+        session_name=session.name,
+        purpose=purpose,
+    ))
 
     # Build claude command with optional system prompt
     cmd_parts = [f"claude --session-id {session.claude_session_id}"]
@@ -378,6 +400,13 @@ def background_session(
     if auto:
         session.auto_backgrounded = True
     save_state(state)
+    record_event(session.client, HistoryEvent(
+        event_type=EventType.SESSION_BACKGROUNDED,
+        client=session.client,
+        session_id=session.id,
+        session_name=session.name,
+        purpose=session.purpose,
+    ))
     click.echo(f"Session {session.name} backgrounded.")
 
     if notify:
@@ -420,6 +449,13 @@ def resume_session(session_name: str) -> None:
     session.status = SessionStatus.ACTIVE
     session.resumed_at = datetime.now(UTC)
     save_state(state)
+    record_event(session.client, HistoryEvent(
+        event_type=EventType.SESSION_RESUMED,
+        client=session.client,
+        session_id=session.id,
+        session_name=session.name,
+        purpose=session.purpose,
+    ))
 
     click.echo(f"Resumed session: {session.name}")
 
@@ -456,6 +492,13 @@ def done_session(
     session.completed_reason = CompletionReason.USER
     session.completed_at = datetime.now(UTC)
     save_state(state)
+    record_event(session.client, HistoryEvent(
+        event_type=EventType.SESSION_COMPLETED,
+        client=session.client,
+        session_id=session.id,
+        session_name=session.name,
+        purpose=session.purpose,
+    ))
     click.echo(f"Session {session.name} marked as completed.")
 
     if cleanup and session.worktree_path and session.branch:
@@ -591,6 +634,14 @@ def handoff_session(
     source.status = SessionStatus.COMPLETED
     source.completed_reason = CompletionReason.HANDOFF
     source.completed_at = datetime.now(UTC)
+    record_event(resolved_client, HistoryEvent(
+        event_type=EventType.SESSION_HANDOFF,
+        client=resolved_client,
+        session_id=source.id,
+        session_name=source.name,
+        purpose=source.purpose,
+        detail=f"{source_purpose} -> {target_purpose}",
+    ))
 
     # For backgrounded targets, write handoff file and set path
     # before saving — avoids a second save_state round-trip

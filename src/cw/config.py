@@ -16,6 +16,7 @@ STATE_DIR = Path.home() / ".local" / "share" / "cw"
 QUEUES_DIR = STATE_DIR / "queues"
 DAEMONS_DIR = STATE_DIR / "daemons"
 HOOKS_DIR = STATE_DIR / "hooks"
+HISTORY_DIR = STATE_DIR / "history"
 CLIENTS_FILE = CONFIG_DIR / "clients.yaml"
 STATE_FILE = STATE_DIR / "sessions.json"
 
@@ -29,9 +30,24 @@ def load_clients() -> dict[str, ClientConfig]:
     if not raw or "clients" not in raw:
         return {}
 
+    # Read global notification default
+    global_notifications = bool(raw.get("notifications", False))
+
+    # Lazy: break circular dep config -> notify -> config
+    from cw.notify import set_notifications_enabled
+
+    set_notifications_enabled(global_notifications)
+
     clients: dict[str, ClientConfig] = {}
     for name, data in raw["clients"].items():
-        clients[name] = ClientConfig(name=name, **data)
+        # Per-client notification override
+        client_notif = data.pop("notifications", None)
+        client = ClientConfig(name=name, **data)
+        if client_notif is not None:
+            client.notifications = bool(client_notif)
+        elif global_notifications:
+            client.notifications = True
+        clients[name] = client
     return clients
 
 

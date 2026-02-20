@@ -15,6 +15,7 @@ from cw import zellij
 from cw.config import DAEMONS_DIR, get_client
 from cw.exceptions import CwError
 from cw.handoff import build_task_prompt
+from cw.history import EventType, HistoryEvent, record_event
 from cw.models import ClientConfig, QueueItem, SessionPurpose
 from cw.queue import claim_next, complete_item, fail_item
 
@@ -67,6 +68,12 @@ def start_daemon(
     client_config = get_client(client)
     click.echo(f"Daemon started: {client}/{purpose} (pid {os.getpid()})")
     click.echo(f"Poll interval: {poll_interval}s, Review mode: {review}")
+    record_event(client, HistoryEvent(
+        event_type=EventType.DAEMON_STARTED,
+        client=client,
+        purpose=purpose,
+        metadata={"pid": str(os.getpid())},
+    ))
 
     try:
         while not shutdown_requested:
@@ -89,6 +96,11 @@ def start_daemon(
     finally:
         if pid_file.exists():
             pid_file.unlink()
+        record_event(client, HistoryEvent(
+            event_type=EventType.DAEMON_STOPPED,
+            client=client,
+            purpose=purpose,
+        ))
         click.echo("Daemon stopped.")
 
 

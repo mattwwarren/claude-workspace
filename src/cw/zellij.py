@@ -53,11 +53,18 @@ layout {
         }
 {%- endif %}
     }
+{%- if cw_plugin_path %}
+    pane size=1 borderless=true {
+        plugin location="file:{{ cw_plugin_path }}"
+    }
+{%- endif %}
     pane size=1 borderless=true {
         plugin location="status-bar"
     }
 }
 """
+
+CW_PLUGIN_PATH = Path.home() / ".config" / "zellij" / "plugins" / "cw_status.wasm"
 
 
 _env = Environment(
@@ -150,6 +157,9 @@ def generate_layout(
         primary_size = "60%"
         secondary_size = "40%"
 
+    # Include cw-status plugin if WASM is installed
+    cw_plugin_path = str(CW_PLUGIN_PATH) if CW_PLUGIN_PATH.exists() else None
+
     template = _env.get_template("client.kdl.j2")
     rendered = template.render(
         client_name=client.name,
@@ -158,6 +168,7 @@ def generate_layout(
         secondary_panes=secondary_panes,
         primary_size=primary_size,
         secondary_size=secondary_size,
+        cw_plugin_path=cw_plugin_path,
     )
     output_path.write_text(rendered)
     return output_path

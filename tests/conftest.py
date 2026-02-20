@@ -21,10 +21,18 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     clients_file = config_dir / "clients.yaml"
     state_file = state_dir / "sessions.json"
 
+    history_dir = state_dir / "history"
+    history_dir.mkdir(parents=True)
+    queues_dir = state_dir / "queues"
+    queues_dir.mkdir(parents=True)
+
     monkeypatch.setattr("cw.config.CONFIG_DIR", config_dir)
     monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
     monkeypatch.setattr("cw.config.CLIENTS_FILE", clients_file)
     monkeypatch.setattr("cw.config.STATE_FILE", state_file)
+    monkeypatch.setattr("cw.config.HISTORY_DIR", history_dir)
+    # Also patch history module's imported reference
+    monkeypatch.setattr("cw.history.HISTORY_DIR", history_dir)
 
     return tmp_path
 

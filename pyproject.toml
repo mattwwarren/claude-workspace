@@ -12,6 +12,7 @@ dependencies = [
     "jinja2>=3.1.6",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
+    "textual>=1.0.0",
 ]
 
 [project.scripts]
@@ -21,6 +22,7 @@ cw = "cw.cli:main"
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
+    "pytest-asyncio>=0.24",
     "freezegun>=1.2",
     "pre-commit>=3.6",
     "ruff>=0.8",
@@ -86,6 +88,15 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "src/cw/models.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
+]
+"src/cw/history.py" = [
+    "PLC0415",  # Lazy import to break circular dep: history -> notify -> history
+]
+"src/cw/config.py" = [
+    "PLC0415",  # Lazy import to break circular dep: config -> notify -> config
+]
+"src/cw/cli.py" = [
+    "PLC0415",  # Lazy import of cw.tui to avoid loading Textual for non-TUI commands
 ]
 "tests/**" = [
     "S101",   # assert is fine in tests
