@@ -112,8 +112,10 @@ def _build_pane_args(
             f"{env_prefix}claude --resume {sid}{extra} 2>/dev/null"
             f" || {env_prefix}claude --session-id {sid}{extra}"
         )
-        # KDL-quote the whole command for the layout template
-        pane_data: dict[str, str] = {"claude_cmd": f'"{cmd}"'}
+        # KDL-quote the whole command for the layout template.
+        # Escape backslashes and double quotes so the KDL string is valid.
+        kdl_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
+        pane_data: dict[str, str] = {"claude_cmd": f'"{kdl_cmd}"'}
         cwd = str(session.worktree_path or session.workspace_path)
         pane_data["cwd"] = cwd
         panes[purpose] = pane_data
