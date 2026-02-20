@@ -379,3 +379,13 @@ def in_zellij_session() -> bool:
 def current_session_name() -> str | None:
     """Get the name of the current Zellij session, if inside one."""
     return os.environ.get("ZELLIJ_SESSION_NAME")
+
+
+def resolve_session_target(default_session: str) -> str | None:
+    """Return the Zellij session name to target, or None if already inside one.
+
+    When running inside a Zellij session, actions target the current session
+    implicitly (return None).  When outside, return ``default_session`` so
+    callers can pass ``session=`` to Zellij action wrappers.
+    """
+    return None if in_zellij_session() else default_session

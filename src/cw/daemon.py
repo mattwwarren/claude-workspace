@@ -18,13 +18,23 @@ from cw.handoff import (
     parse_handoff_reason,
 )
 from cw.history import EventType, HistoryEvent, record_event
-from cw.models import ClientConfig, QueueItem, SessionPurpose, SessionStatus
+from cw.models import (
+    ClientConfig,
+    CwState,
+    QueueItem,
+    Session,
+    SessionPurpose,
+    SessionStatus,
+)
 from cw.notify import send_notification
 from cw.queue import claim_next, complete_item, fail_item
 from cw.session import CLAUDE_INIT_DELAY_S, CW_SESSION
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+# Default timeout for a daemon-driven task (30 minutes).
+_DAEMON_TASK_TIMEOUT_S = 1800
 
 
 def _pid_path(client: str, purpose: str) -> Path:
@@ -52,7 +62,7 @@ def start_daemon(
 
     This function blocks and runs in the foreground (designed to be
     spawned in a Zellij pane). It polls the queue, claims items,
-    spawns Claude in sub-panes, and reports results.
+    injects work into the existing session pane, and reports results.
     """
     _ensure_not_running(client, purpose)
 
@@ -97,30 +107,43 @@ def start_daemon(
                 handoff_path = _wait_for_completion(
                     client_config.workspace_path,
                     before_mtime,
-                    timeout=1800,
+                    timeout=_DAEMON_TASK_TIMEOUT_S,
                 )
 
+                # Re-background the session so next iteration can inject
+                _rebackground_session(client_config.name, purpose)
+
                 if handoff_path is None:
-                    fail_item(client, item.id, "Timed out after 1800s")
+                    fail_item(
+                        client, item.id,
+                        f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s",
+                    )
                     click.echo(f"Timed out: {item.id}")
                     continue
 
                 reason = parse_handoff_reason(handoff_path)
                 if reason:
                     click.echo(
-                        f"Session ended abnormally (reason: {reason}). Pausing daemon."
+                        f"Session ended abnormally (reason: {reason})."
+                        " Pausing daemon."
                     )
                     send_notification(
                         "Daemon Paused",
                         f"Queue item {item.id}: {reason}",
                         urgency="critical",
                     )
-                    fail_item(client, item.id, f"Session handoff: {reason}")
+                    fail_item(
+                        client, item.id,
+                        f"Session handoff: {reason}",
+                    )
                     break
 
                 complete_item(client, item.id, "Completed by daemon")
                 click.echo(f"Completed: {item.id}")
             except Exception as exc:
+                # Best-effort re-background on failure so session
+                # is available for the next iteration.
+                _rebackground_session(client_config.name, purpose)
                 fail_item(client, item.id, str(exc))
                 click.echo(f"Failed: {item.id} — {exc}")
     finally:
@@ -134,6 +157,63 @@ def start_daemon(
         click.echo("Daemon stopped.")
 
 
+def _get_backgrounded_session(
+    client_name: str,
+    purpose: str,
+) -> tuple[Session, CwState]:
+    """Load state and find a BACKGROUNDED session.
+
+    Returns ``(session, state)`` so callers can mutate and save.
+    Raises :class:`CwError` if no suitable session exists.
+    """
+    state = load_state()
+    session = state.find_session(client_name, purpose)
+
+    if session is None:
+        msg = (
+            f"No {purpose} session for {client_name}."
+            " Run `cw start` first."
+        )
+        raise CwError(msg)
+
+    if session.status != SessionStatus.BACKGROUNDED:
+        msg = (
+            f"Session {session.name} is not backgrounded"
+            f" (status: {session.status}). Cannot inject."
+        )
+        raise CwError(msg)
+
+    return session, state
+
+
+def _resume_claude_in_pane(
+    session: Session,
+    workflow_prompt: str,
+    purpose: str,
+) -> None:
+    """Navigate to the session pane and inject resume + workflow prompt."""
+    zellij_target = zellij.resolve_session_target(CW_SESSION)
+
+    zellij.go_to_tab(
+        session.zellij_tab or session.client, session=zellij_target,
+    )
+    zellij.focus_pane(
+        session.zellij_pane or purpose, session=zellij_target,
+    )
+    zellij.write_to_pane(
+        f"claude --resume {session.claude_session_id}\n",
+        session=zellij_target,
+    )
+
+    # Mark ACTIVE immediately after resume command is sent so that
+    # a failure during workflow prompt injection leaves an accurate
+    # status (Claude *is* running even if we fail to inject the prompt).
+    # Callers must re-background on error.
+
+    time.sleep(CLAUDE_INIT_DELAY_S)
+    zellij.write_to_pane(workflow_prompt + "\n", session=zellij_target)
+
+
 def _inject_into_session(
     client_config: ClientConfig,
     item: QueueItem,
@@ -144,39 +224,20 @@ def _inject_into_session(
     The debt pane must already exist (created by ``cw start``) and the
     session must be BACKGROUNDED.  The daemon resumes Claude in that pane
     and injects the full workflow prompt via keystroke injection.
+
+    On success the session status is set to ACTIVE.  On failure after
+    the resume command has been sent, the session is still marked ACTIVE
+    (Claude is running) — the caller is responsible for re-backgrounding.
     """
-    state = load_state()
-    session = state.find_session(client_config.name, purpose)
-
-    if session is None:
-        msg = f"No {purpose} session for {client_config.name}. Run `cw start` first."
-        raise CwError(msg)
-
-    if session.status != SessionStatus.BACKGROUNDED:
-        msg = (
-            f"Session {session.name} is not backgrounded"
-            f" (status: {session.status}). Cannot inject."
-        )
-        raise CwError(msg)
-
+    session, state = _get_backgrounded_session(client_config.name, purpose)
     workflow_prompt = build_daemon_workflow_prompt(item.task)
 
-    # Determine Zellij target: use CW_SESSION when not inside Zellij
-    zellij_target = None if zellij.in_zellij_session() else CW_SESSION
-
-    # Navigate and resume
-    zellij.go_to_tab(session.zellij_tab or session.client, session=zellij_target)
-    zellij.focus_pane(session.zellij_pane or purpose, session=zellij_target)
-    zellij.write_to_pane(
-        f"claude --resume {session.claude_session_id}\n",
-        session=zellij_target,
-    )
-    time.sleep(CLAUDE_INIT_DELAY_S)
-    zellij.write_to_pane(workflow_prompt + "\n", session=zellij_target)
-
-    # Update session status
+    # Mark ACTIVE before Zellij IO — after the resume command is sent
+    # Claude is running regardless of whether the prompt injection succeeds.
     session.status = SessionStatus.ACTIVE
     save_state(state)
+
+    _resume_claude_in_pane(session, workflow_prompt, purpose)
 
     record_event(client_config.name, HistoryEvent(
         event_type=EventType.SESSION_RESUMED,
@@ -187,6 +248,20 @@ def _inject_into_session(
     ))
 
 
+def _rebackground_session(client_name: str, purpose: str) -> None:
+    """Set the session back to BACKGROUNDED so the daemon can reuse it.
+
+    No-op if the session is not ACTIVE (e.g. already backgrounded by
+    Claude running /session-done).
+    """
+    state = load_state()
+    session = state.find_session(client_name, purpose)
+    if session is None or session.status != SessionStatus.ACTIVE:
+        return
+    session.status = SessionStatus.BACKGROUNDED
+    save_state(state)
+
+
 def _wait_for_completion(
     workspace_path: Path,
     before_mtime: float,
@@ -194,14 +269,18 @@ def _wait_for_completion(
     timeout: int = 600,
     poll_interval: int = 10,
 ) -> Path | None:
-    """Poll until a new handoff file appears, indicating session-done ran."""
+    """Poll until a new handoff file appears, indicating session-done ran.
+
+    Returns the most recent handoff file newer than *before_mtime*,
+    or ``None`` on timeout.
+    """
     start = time.time()
     while time.time() - start < timeout:
-        time.sleep(poll_interval)
         newer = find_handoffs_newer_than(workspace_path, before_mtime)
         if newer:
-            return newer[0]  # Most recent
-    return None  # Timeout
+            return newer[0]
+        time.sleep(poll_interval)
+    return None
 
 
 def _ensure_not_running(client: str, purpose: str) -> None:

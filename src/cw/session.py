@@ -287,7 +287,7 @@ def start_session(
 
     # Inject claude into the pane - works both inside and outside Zellij
     # by targeting the session explicitly when outside
-    target = None if zellij.in_zellij_session() else CW_SESSION
+    target = zellij.resolve_session_target(CW_SESSION)
     _navigate_to_pane(session, target=target)
     zellij.write_to_pane(claude_cmd, session=target)
 
@@ -348,7 +348,7 @@ def _notify_sibling(client_name: str, source_purpose: str, target_purpose: str) 
         f"\n[cw] {source_purpose} session has been backgrounded."
         f" Handoff context is available."
     )
-    zellij_target = None if zellij.in_zellij_session() else CW_SESSION
+    zellij_target = zellij.resolve_session_target(CW_SESSION)
     _navigate_to_pane(target, target=zellij_target)
     zellij.write_to_pane(message + "\n", session=zellij_target)
     click.echo(f"Notified {target.name}.")
@@ -547,9 +547,7 @@ def hand_to_session(
     click.echo(f"Message saved: {msg_file.name}")
 
     # Inject into the target pane
-    zellij_target = (
-        None if zellij.in_zellij_session() else CW_SESSION
-    )
+    zellij_target = zellij.resolve_session_target(CW_SESSION)
     _navigate_to_pane(target, target=zellij_target)
     zellij.write_to_pane(message + "\n", session=zellij_target)
 
@@ -655,7 +653,7 @@ def handoff_session(
     # Deliver to target
     if target.status == SessionStatus.ACTIVE:
         click.echo(f"Injecting context into {target.name}...")
-        zellij_target = None if zellij.in_zellij_session() else CW_SESSION
+        zellij_target = zellij.resolve_session_target(CW_SESSION)
         _navigate_to_pane(target, target=zellij_target)
         zellij.write_to_pane(prompt + "\n", session=zellij_target)
     elif target.status == SessionStatus.BACKGROUNDED:

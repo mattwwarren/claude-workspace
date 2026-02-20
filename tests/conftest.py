@@ -119,6 +119,7 @@ def mock_zellij(
     calls: dict[str, list[tuple[object, ...]]] = {
         "is_installed": [],
         "in_zellij_session": [],
+        "resolve_session_target": [],
         "session_exists": [],
         "generate_layout": [],
         "create_and_attach": [],
@@ -137,6 +138,11 @@ def mock_zellij(
     def _in_zellij() -> bool:
         calls["in_zellij_session"].append(())
         return False
+
+    def _resolve_session_target(default: str) -> str | None:
+        calls["resolve_session_target"].append((default,))
+        # Mock is "outside zellij" by default, so return the default
+        return default
 
     def _session_exists(name: str) -> bool:
         calls["session_exists"].append((name,))
@@ -174,6 +180,9 @@ def mock_zellij(
     monkeypatch.setattr("cw.zellij.is_installed", _is_installed)
     monkeypatch.setattr(
         "cw.zellij.in_zellij_session", _in_zellij
+    )
+    monkeypatch.setattr(
+        "cw.zellij.resolve_session_target", _resolve_session_target
     )
     monkeypatch.setattr(
         "cw.zellij.session_exists", _session_exists

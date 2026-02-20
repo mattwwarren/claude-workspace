@@ -14,10 +14,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from cw.daemon import (
+    _DAEMON_TASK_TIMEOUT_S,
     _ensure_not_running,
+    _get_backgrounded_session,
     _inject_into_session,
     _is_process_alive,
     _pid_path,
+    _rebackground_session,
     _wait_for_completion,
     daemon_status,
     stop_daemon,
@@ -326,10 +329,23 @@ def _make_session(
     )
 
 
-class TestInjectIntoSession:
-    def test_requires_backgrounded_session(
-        self, tmp_path: Path, tmp_config_dir: Path, mock_zellij: object,
-    ) -> None:
+class TestGetBackgroundedSession:
+    def test_returns_session_and_state(self, tmp_path: Path) -> None:
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.BACKGROUNDED,
+        )
+        state = CwState(sessions=[session])
+
+        with patch("cw.daemon.load_state", return_value=state):
+            found, returned_state = _get_backgrounded_session(
+                "test-client", "debt",
+            )
+        assert found is session
+        assert returned_state is state
+
+    def test_raises_on_active(self, tmp_path: Path) -> None:
         client_config = _make_client(tmp_path)
         session = _make_session(
             client_config.workspace_path,
@@ -341,20 +357,34 @@ class TestInjectIntoSession:
             patch("cw.daemon.load_state", return_value=state),
             pytest.raises(CwError, match="not backgrounded"),
         ):
-            _inject_into_session(client_config, _make_queue_item(), "debt")
+            _get_backgrounded_session("test-client", "debt")
 
-    def test_no_session_raises(
-        self, tmp_path: Path, tmp_config_dir: Path, mock_zellij: object,
-    ) -> None:
-        client_config = _make_client(tmp_path)
+    def test_raises_on_missing(self, tmp_path: Path) -> None:
         state = CwState(sessions=[])
 
         with (
             patch("cw.daemon.load_state", return_value=state),
             pytest.raises(CwError, match="No debt session"),
         ):
-            _inject_into_session(client_config, _make_queue_item(), "debt")
+            _get_backgrounded_session("test-client", "debt")
 
+    def test_raises_on_completed(self, tmp_path: Path) -> None:
+        """find_session filters out COMPLETED, so they appear as missing."""
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.COMPLETED,
+        )
+        state = CwState(sessions=[session])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            pytest.raises(CwError, match="No debt session"),
+        ):
+            _get_backgrounded_session("test-client", "debt")
+
+
+class TestInjectIntoSession:
     def test_writes_to_pane(
         self,
         tmp_path: Path,
@@ -383,7 +413,7 @@ class TestInjectIntoSession:
         workflow_call = mock_zellij["write_to_pane"][1][0]
         assert "daemon queue system" in workflow_call
 
-    def test_updates_session_status_to_active(
+    def test_sets_active_before_zellij_io(
         self,
         tmp_path: Path,
         tmp_config_dir: Path,
@@ -396,32 +426,68 @@ class TestInjectIntoSession:
         )
         state = CwState(sessions=[session])
 
+        saved_statuses: list[str] = []
+
+        def capture_save(_s: object) -> None:
+            saved_statuses.append(session.status)
+
         with (
             patch("cw.daemon.load_state", return_value=state),
-            patch("cw.daemon.save_state"),
+            patch("cw.daemon.save_state", side_effect=capture_save),
             patch("cw.daemon.record_event"),
             patch("cw.daemon.time.sleep"),
         ):
             _inject_into_session(client_config, _make_queue_item(), "debt")
 
-        assert session.status == SessionStatus.ACTIVE
+        # Status was saved as ACTIVE (before Zellij IO)
+        assert saved_statuses[0] == SessionStatus.ACTIVE
 
-    def test_completed_session_raises(
-        self, tmp_path: Path, tmp_config_dir: Path, mock_zellij: object,
-    ) -> None:
-        """find_session filters out COMPLETED sessions, so they appear as missing."""
+
+class TestRebackgroundSession:
+    def test_rebackgrounds_active_session(self, tmp_path: Path) -> None:
         client_config = _make_client(tmp_path)
         session = _make_session(
             client_config.workspace_path,
-            status=SessionStatus.COMPLETED,
+            status=SessionStatus.ACTIVE,
         )
         state = CwState(sessions=[session])
 
         with (
             patch("cw.daemon.load_state", return_value=state),
-            pytest.raises(CwError, match="No debt session"),
+            patch("cw.daemon.save_state"),
         ):
-            _inject_into_session(client_config, _make_queue_item(), "debt")
+            _rebackground_session("test-client", "debt")
+
+        assert session.status == SessionStatus.BACKGROUNDED
+
+    def test_noop_if_already_backgrounded(self, tmp_path: Path) -> None:
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.BACKGROUNDED,
+        )
+        state = CwState(sessions=[session])
+
+        save_calls: list[object] = []
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state", side_effect=save_calls.append),
+        ):
+            _rebackground_session("test-client", "debt")
+
+        assert session.status == SessionStatus.BACKGROUNDED
+        assert len(save_calls) == 0
+
+    def test_noop_if_no_session(self, tmp_path: Path) -> None:
+        state = CwState(sessions=[])
+        with patch("cw.daemon.load_state", return_value=state):
+            _rebackground_session("test-client", "debt")  # No error
+
+
+class TestDaemonTaskTimeout:
+    def test_constant_is_1800(self) -> None:
+        assert _DAEMON_TASK_TIMEOUT_S == 1800
 
 
 class TestWaitForCompletion:

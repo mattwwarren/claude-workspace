@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cw.models import TaskSpec
+from cw.models import HandoffReason, TaskSpec
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -179,12 +179,13 @@ def build_task_prompt(task: TaskSpec) -> str:
     return "\n".join(lines)
 
 
-def parse_handoff_reason(handoff_path: Path) -> str | None:
+def parse_handoff_reason(handoff_path: Path) -> HandoffReason | None:
     """Extract the reason field from handoff frontmatter, if present.
 
-    Returns 'context', 'debug-fork', 'scope', or None (normal completion).
+    Returns a :class:`HandoffReason` member or ``None`` (normal completion).
     Normal /session-done handoffs lack frontmatter with a reason field.
-    Abnormal /handoff handoffs include reason: in YAML frontmatter.
+    Abnormal /handoff handoffs include ``reason:`` in YAML frontmatter.
+    Unrecognised reason values are ignored (returns ``None``).
     """
     try:
         content = handoff_path.read_text()
@@ -201,9 +202,15 @@ def parse_handoff_reason(handoff_path: Path) -> str | None:
 
     frontmatter = content[3:end]
     match = re.search(r"^reason:\s*(.+)$", frontmatter, re.MULTILINE)
-    if match:
-        return match.group(1).strip()
-    return None
+    if not match:
+        return None
+
+    raw = match.group(1).strip()
+    try:
+        return HandoffReason(raw)
+    except ValueError:
+        _log.warning("Unknown handoff reason %r, treating as normal", raw)
+        return None
 
 
 _DAEMON_WORKFLOW_TEMPLATE = (

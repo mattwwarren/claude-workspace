@@ -13,7 +13,7 @@ from cw.handoff import (
     find_latest_handoff,
     parse_handoff_reason,
 )
-from cw.models import SessionPurpose, TaskSpec
+from cw.models import HandoffReason, SessionPurpose, TaskSpec
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -211,7 +211,7 @@ class TestParseHandoffReason:
             "# Handoff\n\n"
             "Context exhausted.\n"
         )
-        assert parse_handoff_reason(f) == "context"
+        assert parse_handoff_reason(f) is HandoffReason.CONTEXT
 
     def test_debug_fork_reason(self, tmp_path: Path) -> None:
         f = tmp_path / "session-debug.md"
@@ -221,7 +221,7 @@ class TestParseHandoffReason:
             "---\n"
             "# Handoff\n"
         )
-        assert parse_handoff_reason(f) == "debug-fork"
+        assert parse_handoff_reason(f) is HandoffReason.DEBUG_FORK
 
     def test_scope_reason(self, tmp_path: Path) -> None:
         f = tmp_path / "session-scope.md"
@@ -231,7 +231,18 @@ class TestParseHandoffReason:
             "---\n"
             "# Handoff\n"
         )
-        assert parse_handoff_reason(f) == "scope"
+        assert parse_handoff_reason(f) is HandoffReason.SCOPE
+
+    def test_unknown_reason_returns_none(self, tmp_path: Path) -> None:
+        """Unrecognised reason values are ignored (treated as normal)."""
+        f = tmp_path / "session-typo.md"
+        f.write_text(
+            "---\n"
+            "reason: contxt\n"
+            "---\n"
+            "# Handoff\n"
+        )
+        assert parse_handoff_reason(f) is None
 
     def test_frontmatter_without_reason_returns_none(self, tmp_path: Path) -> None:
         f = tmp_path / "session-no-reason.md"
@@ -255,7 +266,7 @@ class TestParseHandoffReason:
             "---\n"
             "# Handoff\n"
         )
-        assert parse_handoff_reason(f) == "context"
+        assert parse_handoff_reason(f) is HandoffReason.CONTEXT
 
 
 class TestBuildDaemonWorkflowPrompt:
