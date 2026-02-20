@@ -393,14 +393,18 @@ def resume_session(session_name: str) -> None:
 
     # Extract resumption prompt from handoff
     prompt = None
-    if session.last_handoff_path and session.last_handoff_path.exists():
-        prompt = extract_resumption_prompt(session.last_handoff_path)
+    handoff_path = session.last_handoff_path
+    if handoff_path and handoff_path.exists():
+        prompt = extract_resumption_prompt(handoff_path)
         if prompt:
-            click.echo(f"Loaded resumption context from: {session.last_handoff_path}")
+            click.echo(f"Loaded resumption context from: {handoff_path}")
         else:
             click.echo("Warning: Could not extract resumption prompt from handoff.")
     else:
         click.echo("No handoff file available. Starting fresh session.")
+
+    # Clean up cross-session handoff files after extracting prompt
+    _cleanup_cross_session_handoff(session)
 
     # Ensure client tab exists
     client = get_client(session.client)
@@ -606,6 +610,28 @@ def handoff_session(
     )
 
 
+CROSS_SESSION_HANDOFF_PREFIX = "session-handoff-"
+
+
+def _cleanup_cross_session_handoff(session: Session) -> None:
+    """Delete a cross-session handoff file after resume_session consumes it.
+
+    Only deletes files with the session-handoff-* prefix (created by
+    _write_cross_session_handoff). Regular /session-done handoffs are
+    preserved for audit.
+    """
+    path = session.last_handoff_path
+    if path is None or not path.exists():
+        return
+    if not path.name.startswith(CROSS_SESSION_HANDOFF_PREFIX):
+        return
+    try:
+        path.unlink()
+        session.last_handoff_path = None
+    except OSError:
+        pass  # Best-effort cleanup
+
+
 def _write_cross_session_handoff(
     workspace_path: Path,
     source_purpose: str,
@@ -614,8 +640,7 @@ def _write_cross_session_handoff(
 ) -> Path:
     """Write a cross-session handoff file for resume_session to pick up.
 
-    TODO(v4): These files accumulate in .handoffs/ and are never cleaned up
-    after resume_session consumes them. Add cleanup or expiry.
+    Cleaned up by _cleanup_cross_session_handoff after consumption.
     """
     handoffs_dir = workspace_path / ".handoffs"
     handoffs_dir.mkdir(parents=True, exist_ok=True)

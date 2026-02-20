@@ -680,6 +680,90 @@ class TestResumeSession:
         # Verify write_to_pane was called (for "claude\n" and prompt)
         assert len(mock_zellij["write_to_pane"]) >= 2
 
+    def test_cross_session_handoff_cleaned_up(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        # Create a cross-session handoff file (session-handoff-* prefix)
+        handoffs_dir = sample_client.workspace_path / ".handoffs"
+        handoffs_dir.mkdir(parents=True)
+        handoff = handoffs_dir / "session-handoff-impl-to-review-20260219.md"
+        handoff.write_text(
+            "# Cross-Session Handoff\n\n"
+            "## Resumption Prompt\n\n"
+            "```\nResume review.\n```\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="cleanup1",
+                    name="test-client/review",
+                    client="test-client",
+                    purpose=SessionPurpose.REVIEW,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    last_handoff_path=handoff,
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/review")
+
+        # Cross-session handoff file should be deleted
+        assert not handoff.exists()
+        # last_handoff_path should be cleared in state
+        updated = load_state()
+        assert updated.sessions[0].last_handoff_path is None
+
+    def test_regular_handoff_not_cleaned_up(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        sample_handoff_file: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="cleanup2",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    last_handoff_path=sample_handoff_file,
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl")
+
+        # Regular session-*.md handoffs should be preserved
+        assert sample_handoff_file.exists()
+        updated = load_state()
+        assert updated.sessions[0].last_handoff_path is not None
+
 
 class TestDoneSession:
     def test_marks_completed(
