@@ -57,8 +57,13 @@ CLAUDE_INIT_DELAY_S = 2
 
 def _navigate_to_pane(session: Session, *, target: str | None = None) -> None:
     """Navigate to a session's tab and pane in Zellij."""
-    zellij.go_to_tab(session.zellij_tab or session.client, session=target)
-    zellij.focus_pane(session.zellij_pane or session.purpose, session=target)
+    tab = session.zellij_tab or session.client
+    zellij.go_to_tab(tab, session=target)
+    zellij.focus_pane(
+        session.zellij_pane or session.purpose,
+        session=target,
+        tab_name=tab,
+    )
 
 
 def _ensure_zellij() -> None:

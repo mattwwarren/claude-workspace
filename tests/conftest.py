@@ -162,8 +162,10 @@ def mock_zellij(
     def _go_to_tab(t: str, session: str | None = None) -> None:
         calls["go_to_tab"].append((t, session))
 
-    def _focus_pane(p: str, session: str | None = None) -> None:
-        calls["focus_pane"].append((p, session))
+    def _focus_pane(
+        p: str, session: str | None = None, tab_name: str | None = None,
+    ) -> None:
+        calls["focus_pane"].append((p, session, tab_name))
 
     def _write_to_pane(t: str, session: str | None = None) -> None:
         calls["write_to_pane"].append((t, session))

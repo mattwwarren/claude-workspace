@@ -356,13 +356,20 @@ def _get_pane_id_for_name(
 _MAX_PANE_CYCLE = 10
 
 
-def focus_pane(pane_name: str, session: str | None = None) -> None:
+def focus_pane(
+    pane_name: str,
+    session: str | None = None,
+    tab_name: str | None = None,
+) -> None:
     """Focus a pane by name by cycling focus-next-pane.
 
     Uses list-clients (reliable source of truth) to check which
     pane is focused, and dump-layout to map pane names to terminal IDs.
+
+    When *tab_name* is given, only inspects that tab when resolving
+    the pane name to a terminal ID.
     """
-    target_id = _get_pane_id_for_name(pane_name, session)
+    target_id = _get_pane_id_for_name(pane_name, session, tab_name=tab_name)
     if target_id is None:
         msg = f"Pane '{pane_name}' not found in layout."
         raise ZellijError(msg)

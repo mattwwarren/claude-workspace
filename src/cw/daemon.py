@@ -311,11 +311,12 @@ def _resume_claude_in_pane(
     """Navigate to the session pane and inject resume + workflow prompt."""
     zellij_target = zellij.resolve_session_target(CW_SESSION)
 
-    zellij.go_to_tab(
-        session.zellij_tab or session.client, session=zellij_target,
-    )
+    tab = session.zellij_tab or session.client
+    zellij.go_to_tab(tab, session=zellij_target)
     zellij.focus_pane(
-        session.zellij_pane or purpose, session=zellij_target,
+        session.zellij_pane or purpose,
+        session=zellij_target,
+        tab_name=tab,
     )
     zellij.write_to_pane(
         f"claude --resume {session.claude_session_id}\n",
