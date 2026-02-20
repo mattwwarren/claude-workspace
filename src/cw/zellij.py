@@ -341,7 +341,7 @@ def _get_pane_id_for_name(
     """
     # Track terminal index: panes appear in dump-layout in terminal order
     # terminal_0 = first command pane (files/yazi)
-    # terminal_1 = impl, terminal_2 = review, terminal_3 = debt
+    # terminal_1 = impl, terminal_2 = idea, terminal_3 = debt
     terminal_idx = 0
     for line in _iter_tab_pane_lines(session, tab_name):
         if _RE_PANE_COMMAND.search(line):

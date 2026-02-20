@@ -2,7 +2,7 @@
 
 Multi-session workspace orchestrator for Claude Code.
 
-Manage multiple Claude Code sessions across clients and purposes (implementation, review, debt paydown, exploration) with the ability to background, switch, and resume without losing context.
+Manage multiple Claude Code sessions across clients and purposes (implementation, ideation, debt paydown, exploration) with the ability to background, switch, and resume without losing context.
 
 ## Quick Start
 
@@ -15,10 +15,10 @@ vim ~/.config/cw/clients.yaml
 
 # Start working
 cw start personal              # Start impl session for 'personal' client
-cw start sigma --purpose review # Start review session for 'sigma'
+cw start sigma --purpose idea   # Start idea session for 'sigma'
 cw bg                          # Background current session (auto-handoff)
 cw switch personal             # Switch to personal tab
-cw resume sigma/review         # Resume backgrounded session
+cw resume sigma/idea           # Resume backgrounded session
 cw list                        # See all sessions
 cw status                      # Dashboard view
 ```
@@ -33,7 +33,7 @@ cw status                      # Dashboard view
 
 `cw` manages two things:
 
-1. **Zellij layouts** - tabs per client, panes per purpose (impl, review, debt, explore)
+1. **Zellij layouts** - tabs per client, panes per purpose (impl, idea, debt, explore)
 2. **Session lifecycle** - start, background (with auto-handoff), and resume Claude Code sessions
 
 Claude Code stays native in every terminal pane. `cw` just orchestrates around it.

@@ -55,8 +55,8 @@ class TestPidPath:
         assert result == tmp_daemons_dir / "acme__debt.pid"
 
     def test_includes_client_and_purpose_in_name(self, tmp_daemons_dir: Path) -> None:
-        result = _pid_path("my-client", "review")
-        assert result.name == "my-client__review.pid"
+        result = _pid_path("my-client", "idea")
+        assert result.name == "my-client__idea.pid"
         assert result.parent == tmp_daemons_dir
 
     def test_different_clients_produce_different_paths(
@@ -70,8 +70,8 @@ class TestPidPath:
         self, tmp_daemons_dir: Path
     ) -> None:
         path_debt = _pid_path("acme", "debt")
-        path_review = _pid_path("acme", "review")
-        assert path_debt != path_review
+        path_idea = _pid_path("acme", "idea")
+        assert path_debt != path_idea
 
 
 class TestIsProcessAlive:
@@ -149,8 +149,8 @@ class TestStopDaemon:
     def test_raises_with_correct_client_and_purpose(
         self, tmp_daemons_dir: Path
     ) -> None:
-        with pytest.raises(CwError, match="No daemon running for my-client/review"):
-            stop_daemon("my-client", "review")
+        with pytest.raises(CwError, match="No daemon running for my-client/idea"):
+            stop_daemon("my-client", "idea")
 
     def test_sends_sigterm_to_running_process(self, tmp_daemons_dir: Path) -> None:
         pid_file = tmp_daemons_dir / "acme__debt.pid"
@@ -246,7 +246,7 @@ class TestDaemonStatus:
 
     def test_returns_all_clients_when_no_filter(self, tmp_daemons_dir: Path) -> None:
         (tmp_daemons_dir / "acme__debt.pid").write_text(str(os.getpid()))
-        (tmp_daemons_dir / "beta__review.pid").write_text(str(os.getpid()))
+        (tmp_daemons_dir / "beta__idea.pid").write_text(str(os.getpid()))
 
         result = daemon_status()
 
@@ -274,13 +274,13 @@ class TestDaemonStatus:
     def test_multiple_daemons_same_client(self, tmp_daemons_dir: Path) -> None:
         current_pid = os.getpid()
         (tmp_daemons_dir / "acme__debt.pid").write_text(str(current_pid))
-        (tmp_daemons_dir / "acme__review.pid").write_text(str(current_pid))
+        (tmp_daemons_dir / "acme__idea.pid").write_text(str(current_pid))
 
         result = daemon_status(client="acme")
 
         assert len(result) == 2
         purposes = {entry["purpose"] for entry in result}
-        assert purposes == {"debt", "review"}
+        assert purposes == {"debt", "idea"}
 
     def test_creates_daemons_dir_if_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

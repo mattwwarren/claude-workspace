@@ -40,8 +40,8 @@ from cw.worktree import create_worktree, remove_worktree
 CW_SESSION = "cw"
 
 # Purposes that receive worktree cwd (impl works on the feature branch,
-# review reviews it; debt stays on the main workspace).
-WORKTREE_PURPOSES: frozenset[str] = frozenset({"impl", "review"})
+# idea brainstorms within it; debt stays on the main workspace).
+WORKTREE_PURPOSES: frozenset[str] = frozenset({"impl", "idea"})
 
 
 def _build_env_prefix(client_name: str, purpose: str) -> str:
@@ -140,7 +140,7 @@ def _create_all_purpose_sessions(
 
     When prior_sessions is provided, carries forward their claude_session_ids
     so that --resume can reconnect to existing Claude conversations.
-    worktree_path/branch apply to impl and review purposes.
+    worktree_path/branch apply to impl and idea purposes.
     """
     sessions: dict[str, Session] = {}
     for purpose_enum in client.auto_purposes:
@@ -153,7 +153,7 @@ def _create_all_purpose_sessions(
             zellij_pane=purpose,
             zellij_tab=client_name,
         )
-        # Apply worktree to impl and review panes
+        # Apply worktree to impl and idea panes
         if worktree_path and purpose in WORKTREE_PURPOSES:
             session.worktree_path = worktree_path
             session.branch = worktree_branch

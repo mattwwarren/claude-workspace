@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class SessionPurpose(StrEnum):
     IMPL = "impl"
-    REVIEW = "review"
+    IDEA = "idea"
     DEBT = "debt"
     EXPLORE = "explore"
 
@@ -125,7 +125,7 @@ class Session(BaseModel):
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
     SessionPurpose.IMPL,
-    SessionPurpose.REVIEW,
+    SessionPurpose.IDEA,
     SessionPurpose.DEBT,
 ]
 

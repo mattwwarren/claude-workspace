@@ -18,10 +18,10 @@ class TestGetPurposePrompt:
         assert prompt is not None
         assert "IMPLEMENTATION" in prompt
 
-    def test_default_review_prompt(self) -> None:
-        prompt = get_purpose_prompt("review")
+    def test_default_idea_prompt(self) -> None:
+        prompt = get_purpose_prompt("idea")
         assert prompt is not None
-        assert "REVIEW" in prompt
+        assert "IDEA" in prompt
 
     def test_default_debt_prompt(self) -> None:
         prompt = get_purpose_prompt("debt")
@@ -37,16 +37,16 @@ class TestGetPurposePrompt:
         assert get_purpose_prompt("unknown") is None
 
     def test_client_override_takes_precedence(self) -> None:
-        overrides = {"review": "Review with HIPAA focus."}
-        prompt = get_purpose_prompt("review", overrides)
-        assert prompt == "Review with HIPAA focus."
+        overrides = {"idea": "Idea with HIPAA focus."}
+        prompt = get_purpose_prompt("idea", overrides)
+        assert prompt == "Idea with HIPAA focus."
 
     def test_client_override_none_falls_through(self) -> None:
         prompt = get_purpose_prompt("impl", None)
         assert prompt == PURPOSE_PROMPTS["impl"]
 
     def test_client_override_only_for_specified_purpose(self) -> None:
-        overrides = {"review": "Custom review."}
+        overrides = {"idea": "Custom idea."}
         # impl should still use default
         prompt = get_purpose_prompt("impl", overrides)
         assert prompt == PURPOSE_PROMPTS["impl"]
@@ -69,16 +69,16 @@ class TestGetPurposePrompt:
         assert prompt == PURPOSE_PROMPTS["impl"]
 
     def test_client_context_with_override(self) -> None:
-        overrides = {"review": "HIPAA review."}
+        overrides = {"idea": "HIPAA idea."}
         prompt = get_purpose_prompt(
-            "review",
+            "idea",
             overrides,
             client_name="health",
             workspace_path="/opt/health",
         )
         assert prompt is not None
         assert "[cw identity]" in prompt
-        assert "HIPAA review." in prompt
+        assert "HIPAA idea." in prompt
 
     def test_unknown_purpose_with_context_still_none(self) -> None:
         prompt = get_purpose_prompt(
@@ -98,11 +98,11 @@ class TestGetPurposePrompt:
 
 class TestBuildSessionContext:
     def test_returns_expected_format(self) -> None:
-        result = build_session_context("personal", "/home/user/ws", "review")
+        result = build_session_context("personal", "/home/user/ws", "idea")
         assert "[cw identity]" in result
         assert "Client: 'personal'" in result
         assert "Workspace: /home/user/ws" in result
-        assert "Purpose: review" in result
+        assert "Purpose: idea" in result
         assert "cw queue add personal" in result
 
     def test_client_name_in_usage_hint(self) -> None:

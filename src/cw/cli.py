@@ -196,7 +196,7 @@ def _parse_handoff_route(
         return parts[0].strip(), parts[1].strip()
     if target:
         return source, target
-    msg = "Handoff requires source and target: cw handoff impl review"
+    msg = "Handoff requires source and target: cw handoff impl idea"
     raise CwError(msg)
 
 
@@ -217,9 +217,9 @@ def handoff(source: str, target: str | None, client: str | None) -> None:
 
     \b
     Examples:
-      cw handoff impl review
-      cw handoff impl->review
-      cw handoff impl review --client sigma
+      cw handoff impl idea
+      cw handoff impl->idea
+      cw handoff impl idea --client sigma
     """
     src, tgt = _parse_handoff_route(source, target)
     handoff_session(src, tgt, client_name=client)

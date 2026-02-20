@@ -381,9 +381,9 @@ class TestDelegateTaskSessionOrigin:
     ) -> None:
         client = delegate_setup["client"]
 
-        session = delegate_task(client.name, "Review the PR", purpose="review")
+        session = delegate_task(client.name, "Brainstorm ideas", purpose="idea")
 
-        assert session.purpose == SessionPurpose.REVIEW
+        assert session.purpose == SessionPurpose.IDEA
 
 
 class TestDelegateTaskOutsideZellijError:

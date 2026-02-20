@@ -49,9 +49,9 @@ def _make_state() -> CwState:
             ),
             Session(
                 id="s2",
-                name="alpha/review",
+                name="alpha/idea",
                 client="alpha",
-                purpose=SessionPurpose.REVIEW,
+                purpose=SessionPurpose.IDEA,
                 status=SessionStatus.BACKGROUNDED,
                 workspace_path="/home/test/alpha",
                 started_at=datetime(2025, 6, 1, 10, 0, 0, tzinfo=UTC),
@@ -141,9 +141,9 @@ def test_session_time_prefers_backgrounded_at() -> None:
     bg_time = datetime.now(UTC)
     session = Session(
         id="s2",
-        name="test/review",
+        name="test/idea",
         client="test",
-        purpose=SessionPurpose.REVIEW,
+        purpose=SessionPurpose.IDEA,
         status=SessionStatus.BACKGROUNDED,
         workspace_path="/home/test/workspace",
         started_at=old_start,
@@ -209,10 +209,10 @@ def test_format_event_no_detail_with_session() -> None:
         timestamp=datetime.now(UTC),
         event_type=EventType.SESSION_BACKGROUNDED,
         client="alpha",
-        session_name="alpha/review",
+        session_name="alpha/idea",
     )
     result = _format_event(event)
-    assert "[alpha/review]" in result
+    assert "[alpha/idea]" in result
     assert " - " not in result
 
 
@@ -285,9 +285,9 @@ async def test_session_table_excludes_completed(tmp_config_dir: Path) -> None:
             ),
             Session(
                 id="done1",
-                name="alpha/review",
+                name="alpha/idea",
                 client="alpha",
-                purpose=SessionPurpose.REVIEW,
+                purpose=SessionPurpose.IDEA,
                 status=SessionStatus.COMPLETED,
                 workspace_path="/home/test/alpha",
                 started_at=datetime(2025, 6, 1, 10, 0, 0, tzinfo=UTC),

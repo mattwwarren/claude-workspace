@@ -57,9 +57,9 @@ class TestCli:
     def test_start_with_purpose(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.start_session") as mock_start:
-            runner.invoke(main, ["start", "--purpose", "review", "my-client"])
+            runner.invoke(main, ["start", "--purpose", "idea", "my-client"])
             mock_start.assert_called_once_with(
-                "my-client", "review", worktree=None,
+                "my-client", "idea", worktree=None,
             )
 
     def test_start_with_worktree(self) -> None:
@@ -226,9 +226,9 @@ class TestCompleteCallbacks:
                 ),
                 Session(
                     id="comp0002",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.COMPLETED,
                     workspace_path=sample_client.workspace_path,
                 ),
@@ -239,7 +239,7 @@ class TestCompleteCallbacks:
         items = _complete_session(None, None, "")  # type: ignore[arg-type]
         names = [item.value for item in items]
         assert "test-client/impl" in names
-        assert "test-client/review" not in names
+        assert "test-client/idea" not in names
 
     def test_complete_session_prefix_filter(
         self,
@@ -398,7 +398,7 @@ class TestShowStatus:
         def _mock_check_pane_health(
             session: str | None = None, tab_name: str | None = None,
         ) -> dict[str, bool]:
-            return {"impl": False, "review": True, "debt": True}
+            return {"impl": False, "idea": True, "debt": True}
 
         monkeypatch.setattr(
             "cw.zellij.check_pane_health",
@@ -470,44 +470,44 @@ class TestShowStatus:
 
 class TestHandoffCli:
     def test_two_arg_route(self) -> None:
-        src, tgt = _parse_handoff_route("impl", "review")
+        src, tgt = _parse_handoff_route("impl", "idea")
         assert src == "impl"
-        assert tgt == "review"
+        assert tgt == "idea"
 
     def test_arrow_route(self) -> None:
-        src, tgt = _parse_handoff_route("impl->review", None)
+        src, tgt = _parse_handoff_route("impl->idea", None)
         assert src == "impl"
-        assert tgt == "review"
+        assert tgt == "idea"
 
     def test_arrow_route_with_spaces(self) -> None:
-        src, tgt = _parse_handoff_route("impl -> review", None)
+        src, tgt = _parse_handoff_route("impl -> idea", None)
         assert src == "impl"
-        assert tgt == "review"
+        assert tgt == "idea"
 
     def test_handoff_dispatches(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.handoff_session") as mock_handoff:
-            runner.invoke(main, ["handoff", "impl", "review"])
+            runner.invoke(main, ["handoff", "impl", "idea"])
             mock_handoff.assert_called_once_with(
-                "impl", "review", client_name=None,
+                "impl", "idea", client_name=None,
             )
 
     def test_handoff_arrow_dispatches(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.handoff_session") as mock_handoff:
-            runner.invoke(main, ["handoff", "impl->review"])
+            runner.invoke(main, ["handoff", "impl->idea"])
             mock_handoff.assert_called_once_with(
-                "impl", "review", client_name=None,
+                "impl", "idea", client_name=None,
             )
 
     def test_handoff_with_client(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.handoff_session") as mock_handoff:
             runner.invoke(
-                main, ["handoff", "impl", "review", "--client", "sigma"],
+                main, ["handoff", "impl", "idea", "--client", "sigma"],
             )
             mock_handoff.assert_called_once_with(
-                "impl", "review", client_name="sigma",
+                "impl", "idea", client_name="sigma",
             )
 
     def test_missing_route_raises(self) -> None:
@@ -519,14 +519,14 @@ class TestBgNotifyCli:
     def test_bg_with_notify(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
-            runner.invoke(main, ["bg", "--notify", "review"])
-            mock_bg.assert_called_once_with(None, notify="review", auto=False)
+            runner.invoke(main, ["bg", "--notify", "idea"])
+            mock_bg.assert_called_once_with(None, notify="idea", auto=False)
 
     def test_bg_with_notify_short(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
-            runner.invoke(main, ["bg", "-n", "review"])
-            mock_bg.assert_called_once_with(None, notify="review", auto=False)
+            runner.invoke(main, ["bg", "-n", "idea"])
+            mock_bg.assert_called_once_with(None, notify="idea", auto=False)
 
 
 class TestPlanCli:

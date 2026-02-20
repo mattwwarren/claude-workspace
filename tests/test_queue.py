@@ -301,22 +301,22 @@ class TestClaimNextWithPurposeFilter:
     def test_purpose_filter_skips_non_matching(
         self, tmp_queues_dir: Path
     ) -> None:
-        add_item("c", _make_task(purpose=SessionPurpose.REVIEW))
+        add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         result = claim_next("c", purpose=SessionPurpose.IMPL)
         assert result is None
 
     def test_purpose_filter_none_claims_any(self, tmp_queues_dir: Path) -> None:
-        add_item("c", _make_task(purpose=SessionPurpose.REVIEW))
+        add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         result = claim_next("c", purpose=None)
         assert result is not None
 
     def test_purpose_filter_selects_correct_among_mixed(
         self, tmp_queues_dir: Path
     ) -> None:
-        review_task = _make_task(
-            description="review task", purpose=SessionPurpose.REVIEW,
+        idea_task = _make_task(
+            description="idea task", purpose=SessionPurpose.IDEA,
         )
-        add_item("c", review_task)
+        add_item("c", idea_task)
         impl_item = add_item(
             "c", _make_task(description="impl task", purpose=SessionPurpose.IMPL)
         )
@@ -327,8 +327,8 @@ class TestClaimNextWithPurposeFilter:
     def test_purpose_filter_skips_earlier_wrong_purpose(
         self, tmp_queues_dir: Path
     ) -> None:
-        # Add review first so it would be the "oldest"
-        add_item("c", _make_task(description="review", purpose=SessionPurpose.REVIEW))
+        # Add idea first so it would be the "oldest"
+        add_item("c", _make_task(description="idea", purpose=SessionPurpose.IDEA))
         impl = add_item(
             "c", _make_task(description="impl", purpose=SessionPurpose.IMPL)
         )
@@ -470,7 +470,7 @@ class TestRemoveItem:
 class TestClearQueue:
     def test_clear_all_no_filters(self, tmp_queues_dir: Path) -> None:
         add_item("c", _make_task(purpose=SessionPurpose.IMPL))
-        add_item("c", _make_task(purpose=SessionPurpose.REVIEW))
+        add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         removed = clear_queue("c")
         assert removed == 2
         assert load_queue("c").items == []
@@ -489,12 +489,12 @@ class TestClearQueue:
     def test_clear_with_purpose_filter(self, tmp_queues_dir: Path) -> None:
         add_item("c", _make_task(purpose=SessionPurpose.IMPL))
         add_item("c", _make_task(purpose=SessionPurpose.IMPL))
-        review_item = add_item("c", _make_task(purpose=SessionPurpose.REVIEW))
+        idea_item = add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         removed = clear_queue("c", purpose=SessionPurpose.IMPL)
         assert removed == 2
         store = load_queue("c")
         assert len(store.items) == 1
-        assert store.items[0].id == review_item.id
+        assert store.items[0].id == idea_item.id
 
     def test_clear_with_status_filter(self, tmp_queues_dir: Path) -> None:
         pending_item = add_item("c", _make_task())
@@ -512,7 +512,7 @@ class TestClearQueue:
 
     def test_clear_with_both_filters(self, tmp_queues_dir: Path) -> None:
         impl_pending = add_item("c", _make_task(purpose=SessionPurpose.IMPL))
-        review_pending = add_item("c", _make_task(purpose=SessionPurpose.REVIEW))
+        idea_pending = add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         impl_running = add_item("c", _make_task(purpose=SessionPurpose.IMPL))
         # Set third to running
         store = load_queue("c")
@@ -527,20 +527,20 @@ class TestClearQueue:
         reloaded = load_queue("c")
         remaining_ids = {i.id for i in reloaded.items}
         assert impl_pending.id not in remaining_ids
-        assert review_pending.id in remaining_ids
+        assert idea_pending.id in remaining_ids
         assert impl_running.id in remaining_ids
 
     def test_clear_purpose_filter_no_match_returns_zero(
         self, tmp_queues_dir: Path
     ) -> None:
-        add_item("c", _make_task(purpose=SessionPurpose.REVIEW))
+        add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         removed = clear_queue("c", purpose=SessionPurpose.IMPL)
         assert removed == 0
         assert len(load_queue("c").items) == 1
 
     def test_clear_persists_remaining_items(self, tmp_queues_dir: Path) -> None:
         add_item("c", _make_task(purpose=SessionPurpose.IMPL))
-        keep = add_item("c", _make_task(purpose=SessionPurpose.REVIEW))
+        keep = add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         clear_queue("c", purpose=SessionPurpose.IMPL)
         reloaded = load_queue("c")
         assert len(reloaded.items) == 1
@@ -564,10 +564,10 @@ class TestQueueStoreMethods:
             task=_make_task(description="impl running", purpose=SessionPurpose.IMPL),
             status=QueueItemStatus.RUNNING,
         )
-        review_pending = QueueItem(
+        idea_pending = QueueItem(
             client="c",
             task=_make_task(
-                description="review pending", purpose=SessionPurpose.REVIEW
+                description="idea pending", purpose=SessionPurpose.IDEA
             ),
             status=QueueItemStatus.PENDING,
         )
@@ -576,7 +576,7 @@ class TestQueueStoreMethods:
             task=_make_task(description="failed", purpose=SessionPurpose.DEBT),
             status=QueueItemStatus.FAILED,
         )
-        return QueueStore(items=[impl_pending, impl_running, review_pending, failed])
+        return QueueStore(items=[impl_pending, impl_running, idea_pending, failed])
 
     def test_pending_returns_only_pending(self) -> None:
         store = self._store_with_items()
@@ -682,7 +682,7 @@ class TestEdgeCases:
     ) -> None:
         task = TaskSpec(
             description="full task",
-            purpose=SessionPurpose.REVIEW,
+            purpose=SessionPurpose.IDEA,
             prompt="review everything",
             context_files=["src/main.py", "tests/test_main.py"],
             success_criteria="No regressions",

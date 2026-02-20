@@ -187,7 +187,7 @@ class TestGenerateLayout:
         result = generate_layout(client)
         content = result.read_text()
         assert 'name="impl"' in content
-        assert 'name="review"' in content
+        assert 'name="idea"' in content
         assert 'name="debt"' in content
         assert 'name="files"' in content
 
@@ -203,7 +203,7 @@ class TestGenerateLayout:
         result = generate_layout(client, purposes=["impl"])
         content = result.read_text()
         assert 'name="impl"' in content
-        assert 'name="review"' not in content
+        assert 'name="idea"' not in content
         assert 'name="debt"' not in content
         # Single pane should not have split_direction="vertical" secondary area
         assert "split_direction" not in content.split('name="impl"')[1].split("}")[0]
@@ -217,10 +217,10 @@ class TestGenerateLayout:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
         client = ClientConfig(name="duo", workspace_path=ws_dir)
-        result = generate_layout(client, purposes=["impl", "review"])
+        result = generate_layout(client, purposes=["impl", "idea"])
         content = result.read_text()
         assert 'name="impl"' in content
-        assert 'name="review"' in content
+        assert 'name="idea"' in content
         assert 'name="debt"' not in content
         assert 'size="70%"' in content
         assert 'size="30%"' in content
@@ -235,11 +235,11 @@ class TestGenerateLayout:
         ws_dir.mkdir()
         client = ClientConfig(name="quad", workspace_path=ws_dir)
         result = generate_layout(
-            client, purposes=["impl", "review", "debt", "explore"],
+            client, purposes=["impl", "idea", "debt", "explore"],
         )
         content = result.read_text()
         assert 'name="impl"' in content
-        assert 'name="review"' in content
+        assert 'name="idea"' in content
         assert 'name="debt"' in content
         assert 'name="explore"' in content
         assert 'size="60%"' in content
@@ -278,9 +278,9 @@ class TestGenerateLayout:
         client = ClientConfig(name="cwdtest", workspace_path=ws_dir)
         panes = {
             "impl": {"claude_cmd": '"claude"', "cwd": "/custom/worktree"},
-            "review": {"claude_cmd": '"claude"'},
+            "idea": {"claude_cmd": '"claude"'},
         }
-        result = generate_layout(client, panes=panes, purposes=["impl", "review"])
+        result = generate_layout(client, panes=panes, purposes=["impl", "idea"])
         content = result.read_text()
         assert 'cwd "/custom/worktree"' in content
         assert f'cwd "{ws_dir}"' in content
@@ -325,10 +325,10 @@ class TestFocusPane:
             'tab name="Tab #1" {\n'
             '  pane command="yazi" name="files" {\n'
             '  pane command="claude" name="impl" {\n'
-            '  pane command="claude" name="review" {\n'
+            '  pane command="claude" name="idea" {\n'
             '  pane command="claude" name="debt" {\n'
         )
-        # Cycle: start on review (terminal_2), target impl (terminal_1)
+        # Cycle: start on idea (terminal_2), target impl (terminal_1)
         focused_terminal = ["terminal_2"]
 
         def mock_run(*args: str, check: bool = True) -> MagicMock:
@@ -356,7 +356,7 @@ class TestFocusPane:
         monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
         focus_pane("impl")  # impl = terminal_1
         focus_calls = [c for c in calls if "focus-next-pane" in c]
-        # Should cycle 3 times: review->debt->files->impl
+        # Should cycle 3 times: idea->debt->files->impl
         assert len(focus_calls) == 3
 
 
@@ -366,7 +366,7 @@ class TestCheckPaneHealth:
             'tab name="Tab #1" {\n'
             '  pane command="yazi" name="files" {\n'
             '  pane command="claude" name="impl" {\n'
-            '  pane command="claude" name="review" {\n'
+            '  pane command="claude" name="idea" {\n'
             '  pane command="claude" name="debt" {\n'
         )
         mock_result = MagicMock(returncode=0, stdout=layout)
@@ -378,7 +378,7 @@ class TestCheckPaneHealth:
         assert health == {
             "files": True,
             "impl": True,
-            "review": True,
+            "idea": True,
             "debt": True,
         }
 
@@ -387,7 +387,7 @@ class TestCheckPaneHealth:
             'tab name="Tab #1" {\n'
             '  pane command="yazi" name="files" {\n'
             '  pane command="claude" name="impl" exited {\n'
-            '  pane command="claude" name="review" {\n'
+            '  pane command="claude" name="idea" {\n'
             '  pane command="claude" name="debt" exited {\n'
         )
         mock_result = MagicMock(returncode=0, stdout=layout)
@@ -397,7 +397,7 @@ class TestCheckPaneHealth:
 
         health = check_pane_health()
         assert health["impl"] is False
-        assert health["review"] is True
+        assert health["idea"] is True
         assert health["debt"] is False
 
     def test_pane_without_command(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -123,7 +123,7 @@ Completions provide:
 ### Full session lifecycle
 
 ```bash
-# Start a new session (launches Zellij with impl/review/debt panes)
+# Start a new session (launches Zellij with impl/idea/debt panes)
 cw start my-client
 
 # Background when done (triggers /session-done, waits for handoff)

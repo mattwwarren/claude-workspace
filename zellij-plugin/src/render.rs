@@ -4,7 +4,7 @@ use crate::state::CwState;
 
 /// Render a single-line status bar string.
 ///
-/// Format: `cw: client1[impl:active review:bg] | client2[impl:active] | 2 queued`
+/// Format: `cw: client1[impl:active idea:bg] | client2[impl:active] | 2 queued`
 pub fn render_status(state: &CwState, max_cols: usize) -> String {
     let clients = state.active_clients();
     if clients.is_empty() {
@@ -68,9 +68,9 @@ mod tests {
                     branch: None,
                 },
                 Session {
-                    name: "sigma/review".into(),
+                    name: "sigma/idea".into(),
                     client: "sigma".into(),
-                    purpose: "review".into(),
+                    purpose: "idea".into(),
                     status: "backgrounded".into(),
                     branch: None,
                 },
@@ -79,7 +79,7 @@ mod tests {
         let output = render_status(&state, 80);
         assert!(output.contains("sigma["));
         assert!(output.contains("impl:active"));
-        assert!(output.contains("review:bg"));
+        assert!(output.contains("idea:bg"));
     }
 
     #[test]

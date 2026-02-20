@@ -87,9 +87,9 @@ def sample_state(sample_client: ClientConfig) -> CwState:
             ),
             Session(
                 id="sess0002",
-                name="test-client/review",
+                name="test-client/idea",
                 client="test-client",
-                purpose=SessionPurpose.REVIEW,
+                purpose=SessionPurpose.IDEA,
                 status=SessionStatus.BACKGROUNDED,
                 workspace_path=sample_client.workspace_path,
                 started_at=datetime(2025, 1, 15, 9, 0, 0, tzinfo=UTC),

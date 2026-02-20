@@ -164,30 +164,30 @@ class TestExtractResumptionPrompt:
 class TestBuildCrossSessionPrompt:
     def test_with_branch_and_prompt(self) -> None:
         result = build_cross_session_prompt(
-            "impl", "review", "feat/search", "Continue the auth work.",
+            "impl", "idea", "feat/search", "Continue the auth work.",
         )
-        assert "impl → review" in result
+        assert "impl → idea" in result
         assert "feat/search" in result
         assert "Continue the auth work." in result
 
     def test_without_branch(self) -> None:
         result = build_cross_session_prompt(
-            "impl", "review", None, "Some context.",
+            "impl", "idea", None, "Some context.",
         )
-        assert "impl → review" in result
+        assert "impl → idea" in result
         assert "branch" not in result.lower()
         assert "Some context." in result
 
     def test_without_raw_prompt(self) -> None:
         result = build_cross_session_prompt(
-            "impl", "review", "feat/search", None,
+            "impl", "idea", "feat/search", None,
         )
-        assert "impl → review" in result
+        assert "impl → idea" in result
         assert "No resumption context" in result
 
     def test_without_branch_or_prompt(self) -> None:
-        result = build_cross_session_prompt("impl", "review", None, None)
-        assert "impl → review" in result
+        result = build_cross_session_prompt("impl", "idea", None, None)
+        assert "impl → idea" in result
         assert "No resumption context" in result
 
 

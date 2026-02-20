@@ -115,12 +115,12 @@ class TestBuildPaneArgs:
 class TestCreateAllPurposeSessions:
     def test_uses_auto_purposes(self, sample_client: ClientConfig) -> None:
         """_create_all_purpose_sessions iterates client.auto_purposes."""
-        sample_client.auto_purposes = [SessionPurpose.IMPL, SessionPurpose.REVIEW]
+        sample_client.auto_purposes = [SessionPurpose.IMPL, SessionPurpose.IDEA]
         state = CwState()
         sessions = _create_all_purpose_sessions(
             sample_client.name, sample_client, state,
         )
-        assert set(sessions.keys()) == {"impl", "review"}
+        assert set(sessions.keys()) == {"impl", "idea"}
         assert len(state.sessions) == 2
 
     def test_default_purposes(self, sample_client: ClientConfig) -> None:
@@ -128,7 +128,7 @@ class TestCreateAllPurposeSessions:
         sessions = _create_all_purpose_sessions(
             sample_client.name, sample_client, state,
         )
-        assert set(sessions.keys()) == {"impl", "review", "debt"}
+        assert set(sessions.keys()) == {"impl", "idea", "debt"}
 
     def test_single_purpose(self, sample_client: ClientConfig) -> None:
         sample_client.auto_purposes = [SessionPurpose.IMPL]
@@ -159,12 +159,12 @@ class TestStartSession:
         start_session("test-client", "impl")
 
         state = load_state()
-        # Fresh start creates sessions for all purposes (impl, review, debt)
+        # Fresh start creates sessions for all purposes (impl, idea, debt)
         assert len(state.sessions) == 3
         purposes = {s.purpose for s in state.sessions}
         assert purposes == {
             SessionPurpose.IMPL,
-            SessionPurpose.REVIEW,
+            SessionPurpose.IDEA,
             SessionPurpose.DEBT,
         }
         for s in state.sessions:
@@ -334,19 +334,19 @@ class TestStartSession:
         start_session("test-client", "impl", worktree="feat/search")
 
         state = load_state()
-        # impl and review should have worktree_path set
+        # impl and idea should have worktree_path set
         impl_sessions = [
             s for s in state.sessions if s.purpose == SessionPurpose.IMPL
         ]
-        review_sessions = [
-            s for s in state.sessions if s.purpose == SessionPurpose.REVIEW
+        idea_sessions = [
+            s for s in state.sessions if s.purpose == SessionPurpose.IDEA
         ]
         debt_sessions = [
             s for s in state.sessions if s.purpose == SessionPurpose.DEBT
         ]
         assert impl_sessions[0].worktree_path == wt_path
         assert impl_sessions[0].branch == "feat/search"
-        assert review_sessions[0].worktree_path == wt_path
+        assert idea_sessions[0].worktree_path == wt_path
         assert debt_sessions[0].worktree_path is None
 
     def test_late_join_creates_new_tab(
@@ -376,7 +376,7 @@ class TestStartSession:
         purposes = {s.purpose for s in state.sessions}
         assert purposes == {
             SessionPurpose.IMPL,
-            SessionPurpose.REVIEW,
+            SessionPurpose.IDEA,
             SessionPurpose.DEBT,
         }
 
@@ -427,7 +427,7 @@ class TestStartWorktreeClient:
         state = load_state()
         # All sessions should exist
         assert len(state.sessions) == 3
-        # impl and review should have worktree_path
+        # impl and idea should have worktree_path
         impl = next(
             s for s in state.sessions
             if s.purpose == SessionPurpose.IMPL
@@ -546,9 +546,9 @@ class TestBackgroundSession:
                 ),
                 Session(
                     id="multi002",
-                    name="c/review",
+                    name="c/idea",
                     client="c",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                 ),
@@ -849,20 +849,20 @@ class TestResumeSession:
         # Create a cross-session handoff file (session-handoff-* prefix)
         handoffs_dir = sample_client.workspace_path / ".handoffs"
         handoffs_dir.mkdir(parents=True)
-        handoff = handoffs_dir / "session-handoff-impl-to-review-20260219.md"
+        handoff = handoffs_dir / "session-handoff-impl-to-idea-20260219.md"
         handoff.write_text(
             "# Cross-Session Handoff\n\n"
             "## Resumption Prompt\n\n"
-            "```\nResume review.\n```\n"
+            "```\nResume idea.\n```\n"
         )
 
         state = CwState(
             sessions=[
                 Session(
                     id="cleanup1",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
                     last_handoff_path=handoff,
@@ -871,7 +871,7 @@ class TestResumeSession:
         )
         save_state(state)
 
-        resume_session("test-client/review")
+        resume_session("test-client/idea")
 
         # Cross-session handoff file should be deleted
         assert not handoff.exists()
@@ -1233,19 +1233,19 @@ class TestHandoffSession:
                 ),
                 Session(
                     id="ho_tgt01",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="review",
+                    zellij_pane="idea",
                     zellij_tab="test-client",
                 ),
             ]
         )
         save_state(state)
 
-        handoff_session("impl", "review", client_name="test-client")
+        handoff_session("impl", "idea", client_name="test-client")
 
         updated = load_state()
         src = updated.find_by_name_or_id("ho_src01")
@@ -1283,12 +1283,12 @@ class TestHandoffSession:
                 ),
                 Session(
                     id="ho_tgt02",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="review",
+                    zellij_pane="idea",
                     zellij_tab="test-client",
                 ),
             ]
@@ -1298,7 +1298,7 @@ class TestHandoffSession:
         # Skip sleep in resume_session
         monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
 
-        handoff_session("impl", "review", client_name="test-client")
+        handoff_session("impl", "idea", client_name="test-client")
 
         output = capsys.readouterr().out
         assert "Resuming" in output or "Handoff complete" in output
@@ -1321,9 +1321,9 @@ class TestHandoffSession:
                 ),
                 Session(
                     id="ho_tgt03",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                 ),
@@ -1332,7 +1332,7 @@ class TestHandoffSession:
         save_state(state)
 
         with pytest.raises(CwError, match="No active/backgrounded impl"):
-            handoff_session("impl", "review", client_name="test-client")
+            handoff_session("impl", "idea", client_name="test-client")
 
     def test_raises_if_target_completed(
         self,
@@ -1352,9 +1352,9 @@ class TestHandoffSession:
                 ),
                 Session(
                     id="ho_tgt04",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.COMPLETED,
                     workspace_path=sample_client.workspace_path,
                 ),
@@ -1362,8 +1362,8 @@ class TestHandoffSession:
         )
         save_state(state)
 
-        with pytest.raises(CwError, match="No active/backgrounded review"):
-            handoff_session("impl", "review", client_name="test-client")
+        with pytest.raises(CwError, match="No active/backgrounded idea"):
+            handoff_session("impl", "idea", client_name="test-client")
 
     def test_raises_if_source_equals_target(
         self,
@@ -1393,12 +1393,12 @@ class TestHandoffSession:
                 ),
                 Session(
                     id="ho_tgt05",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="review",
+                    zellij_pane="idea",
                     zellij_tab="test-client",
                 ),
             ]
@@ -1406,7 +1406,7 @@ class TestHandoffSession:
         save_state(state)
 
         # No client_name — should auto-detect
-        handoff_session("impl", "review")
+        handoff_session("impl", "idea")
 
         output = capsys.readouterr().out
         assert "Handoff complete" in output
@@ -1432,19 +1432,19 @@ class TestBackgroundNotify:
                 ),
                 Session(
                     id="bn_tgt01",
-                    name="test-client/review",
+                    name="test-client/idea",
                     client="test-client",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="review",
+                    zellij_pane="idea",
                     zellij_tab="test-client",
                 ),
             ]
         )
         save_state(state)
 
-        background_session("test-client/impl", notify="review")
+        background_session("test-client/impl", notify="idea")
 
         output = capsys.readouterr().out
         assert "Notified" in output
@@ -1472,7 +1472,7 @@ class TestBackgroundNotify:
         )
         save_state(state)
 
-        background_session("test-client/impl", notify="review")
+        background_session("test-client/impl", notify="idea")
 
         output = capsys.readouterr().out
-        assert "No active review session" in output
+        assert "No active idea session" in output

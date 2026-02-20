@@ -83,7 +83,7 @@ class TestWriteStructuredHandoff:
     def test_multiple_tasks_written(self, tmp_path: Path) -> None:
         tasks = [
             _make_task(description="Task A", purpose=SessionPurpose.IMPL),
-            _make_task(description="Task B", purpose=SessionPurpose.REVIEW),
+            _make_task(description="Task B", purpose=SessionPurpose.IDEA),
             _make_task(description="Task C", purpose=SessionPurpose.DEBT),
         ]
         path = write_structured_handoff(tmp_path, "sess-multi", tasks)
@@ -279,7 +279,7 @@ class TestWriteParseRoundtrip:
             ),
             _make_task(
                 description="Task B",
-                purpose=SessionPurpose.REVIEW,
+                purpose=SessionPurpose.IDEA,
                 prompt="Review B.",
             ),
             _make_task(

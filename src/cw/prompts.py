@@ -9,11 +9,11 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "If you notice quality issues (linting, types, duplication, docs), "
         "note them for the debt session but stay focused on implementation."
     ),
-    "review": (
-        "You are in the REVIEW session. "
-        "Review code for bugs, security issues, and design problems. "
-        "Report findings clearly but do not fix them yourself. "
-        "Focus on what matters most, not style nitpicks."
+    "idea": (
+        "You are in the IDEA session. "
+        "Brainstorm approaches, explore design options, and prototype solutions. "
+        "Think creatively about architecture and features. "
+        "Document ideas clearly for the implementation session to pick up."
     ),
     "debt": (
         "You are in the TECH DEBT session. "

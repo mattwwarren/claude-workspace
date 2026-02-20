@@ -100,7 +100,7 @@ class TestLoadClients:
             "clients:\n"
             "  sigma:\n"
             f"    workspace_path: {ws_dir}\n"
-            "    auto_purposes: [impl, review]\n"
+            "    auto_purposes: [impl, idea]\n"
         )
         result = load_clients()
         assert len(result["sigma"].auto_purposes) == 2
@@ -358,11 +358,11 @@ class TestShowConfig:
             "clients:\n"
             "  sigma:\n"
             f"    workspace_path: {ws_dir}\n"
-            "    auto_purposes: [impl, review]\n"
+            "    auto_purposes: [impl, idea]\n"
         )
         show_config()
         output = capsys.readouterr().out
-        assert "purposes: impl, review" in output
+        assert "purposes: impl, idea" in output
 
     def test_default_purposes_not_shown(
         self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],

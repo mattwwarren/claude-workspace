@@ -21,7 +21,7 @@ from cw.models import (
 class TestSessionPurpose:
     def test_enum_values(self) -> None:
         assert SessionPurpose.IMPL == "impl"
-        assert SessionPurpose.REVIEW == "review"
+        assert SessionPurpose.IDEA == "idea"
         assert SessionPurpose.DEBT == "debt"
         assert SessionPurpose.EXPLORE == "explore"
 
@@ -144,7 +144,7 @@ class TestClientConfig:
         c = ClientConfig(name="test", workspace_path="/dev/null")
         assert c.auto_purposes == [
             SessionPurpose.IMPL,
-            SessionPurpose.REVIEW,
+            SessionPurpose.IDEA,
             SessionPurpose.DEBT,
         ]
 
@@ -152,7 +152,7 @@ class TestClientConfig:
         c = ClientConfig(
             name="test",
             workspace_path="/dev/null",
-            auto_purposes=[SessionPurpose.IMPL, SessionPurpose.REVIEW],
+            auto_purposes=[SessionPurpose.IMPL, SessionPurpose.IDEA],
         )
         assert len(c.auto_purposes) == 2
         assert SessionPurpose.DEBT not in c.auto_purposes
@@ -171,9 +171,9 @@ class TestClientConfig:
         c = ClientConfig(
             name="test",
             workspace_path="/dev/null",
-            purpose_prompts={"review": "Focus on HIPAA compliance."},
+            purpose_prompts={"idea": "Focus on HIPAA compliance."},
         )
-        assert c.purpose_prompts["review"] == "Focus on HIPAA compliance."
+        assert c.purpose_prompts["idea"] == "Focus on HIPAA compliance."
 
     def test_worktree_mode_valid(self) -> None:
         c = ClientConfig(
@@ -278,7 +278,7 @@ class TestCwState:
     def test_find_by_id(self, sample_state: CwState) -> None:
         result = sample_state.find_by_name_or_id("sess0002")
         assert result is not None
-        assert result.name == "test-client/review"
+        assert result.name == "test-client/idea"
 
     def test_find_by_name_or_id_returns_none(self, sample_state: CwState) -> None:
         result = sample_state.find_by_name_or_id("nonexistent")
@@ -326,9 +326,9 @@ class TestCwState:
                 ),
                 Session(
                     id="a2",
-                    name="c/review",
+                    name="c/idea",
                     client="c",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.COMPLETED,
                     workspace_path="/dev/null",
                 ),
@@ -367,7 +367,7 @@ class TestCwState:
         source = sample_state.sessions[0]  # test-client/impl ACTIVE
         siblings = sample_state.sibling_sessions(source)
         assert len(siblings) == 1
-        assert siblings[0].id == "sess0002"  # test-client/review BACKGROUNDED
+        assert siblings[0].id == "sess0002"  # test-client/idea BACKGROUNDED
 
     def test_sibling_sessions_excludes_completed(self) -> None:
         state = CwState(
@@ -382,9 +382,9 @@ class TestCwState:
                 ),
                 Session(
                     id="s2",
-                    name="c/review",
+                    name="c/idea",
                     client="c",
-                    purpose=SessionPurpose.REVIEW,
+                    purpose=SessionPurpose.IDEA,
                     status=SessionStatus.COMPLETED,
                     workspace_path="/dev/null",
                 ),
