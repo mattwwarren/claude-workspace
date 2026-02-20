@@ -39,6 +39,12 @@ from cw.worktree import create_worktree, remove_worktree
 
 CW_SESSION = "cw"
 
+
+def _build_env_prefix(client_name: str, purpose: str) -> str:
+    """Build ``CW_CLIENT=… CW_PURPOSE=…`` shell prefix for claude commands."""
+    return f"CW_CLIENT={client_name} CW_PURPOSE={purpose}"
+
+
 # Timing constants for session lifecycle
 HANDOFF_POLL_TIMEOUT_S = 30
 HANDOFF_POLL_INTERVAL_S = 1
@@ -93,9 +99,10 @@ def _build_pane_args(
 
         # Shell command: try --resume, fall back to --session-id
         # Prefix with env vars so tools can detect identity
-        env_prefix = ""
         if client_name:
-            env_prefix = f"CW_CLIENT={client_name} CW_PURPOSE={purpose} "
+            env_prefix = f"{_build_env_prefix(client_name, purpose)} "
+        else:
+            env_prefix = ""
         cmd = (
             f"{env_prefix}claude --resume {sid}{extra} 2>/dev/null"
             f" || {env_prefix}claude --session-id {sid}{extra}"
@@ -289,7 +296,7 @@ def start_session(
 
     # Build claude command with optional system prompt
     cmd_parts = [
-        f"CW_CLIENT={client_name} CW_PURPOSE={purpose}",
+        _build_env_prefix(client_name, purpose),
         f"claude --session-id {session.claude_session_id}",
     ]
     prompt = get_purpose_prompt(
@@ -490,7 +497,10 @@ def resume_session(session_name: str) -> None:
         _navigate_to_pane(session)
 
         # Resume the exact Claude session by ID, then inject handoff context
-        zellij.write_to_pane(f"claude --resume {session.claude_session_id}\n")
+        env_prefix = _build_env_prefix(session.client, session.purpose)
+        zellij.write_to_pane(
+            f"{env_prefix} claude --resume {session.claude_session_id}\n"
+        )
         if prompt:
             time.sleep(CLAUDE_INIT_DELAY_S)  # Wait for Claude to initialize
             zellij.write_to_pane(prompt + "\n")
@@ -756,7 +766,7 @@ def delegate_task(
     # Build claude command with identity env vars
     escaped_prompt = shlex.quote(task_prompt)
     sid = str(session.claude_session_id)
-    env_prefix = f"CW_CLIENT={client_name} CW_PURPOSE={purpose}"
+    env_prefix = _build_env_prefix(client_name, purpose)
     if interactive:
         cmd = (
             f"{env_prefix} claude --session-id {sid}"

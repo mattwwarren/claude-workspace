@@ -64,7 +64,14 @@ def get_purpose_prompt(
     When *client_name* and *workspace_path* are provided, the resolved
     prompt is prefixed with a ``[cw identity]`` block so the LLM knows
     which client/purpose it belongs to.
+
+    Raises ValueError if only one of *client_name* / *workspace_path*
+    is provided.
     """
+    if bool(client_name) != bool(workspace_path):
+        msg = "client_name and workspace_path must both be provided or both omitted"
+        raise ValueError(msg)
+
     if client_overrides and purpose in client_overrides:
         prompt: str | None = client_overrides[purpose]
     else:

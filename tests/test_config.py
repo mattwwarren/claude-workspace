@@ -50,6 +50,34 @@ class TestLoadClients:
         assert result["acme"].name == "acme"
         assert result["acme"].workspace_path == acme_dir
 
+    def test_invalid_client_name_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        ws = tmp_path / "bad"
+        ws.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  'bad;name':\n"
+            f"    workspace_path: {ws}\n"
+        )
+        with pytest.raises(CwError, match="Invalid client name"):
+            load_clients()
+
+    def test_valid_client_name_patterns(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        ws = tmp_path / "ok"
+        ws.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  my-project.v2:\n"
+            f"    workspace_path: {ws}\n"
+        )
+        result = load_clients()
+        assert "my-project.v2" in result
+
     def test_empty_yaml_returns_empty(self, tmp_config_dir: Path) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text("")

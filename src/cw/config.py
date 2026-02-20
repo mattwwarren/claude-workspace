@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import click
@@ -10,6 +11,11 @@ import yaml
 
 from cw.exceptions import CwError
 from cw.models import DEFAULT_AUTO_PURPOSES, ClientConfig, CwState
+
+# Client names appear unquoted in shell commands (env var prefixes),
+# filesystem paths (queue dirs, history dirs), and Zellij tab names.
+# Restrict to safe characters to prevent injection.
+_SAFE_CLIENT_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 CONFIG_DIR = Path.home() / ".config" / "cw"
 STATE_DIR = Path.home() / ".local" / "share" / "cw"
@@ -35,6 +41,12 @@ def load_clients() -> dict[str, ClientConfig]:
 
     clients: dict[str, ClientConfig] = {}
     for name, data in raw["clients"].items():
+        if not _SAFE_CLIENT_NAME.match(name):
+            msg = (
+                f"Invalid client name '{name}':"
+                " must match [a-zA-Z0-9][a-zA-Z0-9._-]*"
+            )
+            raise CwError(msg)
         client = ClientConfig(name=name, **data)
         # Apply global notification default if not set per-client
         if "notifications" not in data and global_notifications:

@@ -75,6 +75,18 @@ class TestBuildPaneArgs:
         panes = _build_pane_args({"impl": session})
         assert panes["impl"]["cwd"] == str(sample_client.workspace_path)
 
+    def test_no_client_omits_env_vars(self, sample_client: ClientConfig) -> None:
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+        )
+        panes = _build_pane_args({"impl": session})
+        cmd = panes["impl"]["claude_cmd"]
+        assert "CW_CLIENT" not in cmd
+        assert "CW_PURPOSE" not in cmd
+
     def test_env_var_prefix_in_command(self, sample_client: ClientConfig) -> None:
         session = Session(
             name="test-client/impl",
@@ -776,6 +788,91 @@ class TestResumeSession:
         # last_handoff_path should be cleared in state
         updated = load_state()
         assert updated.sessions[0].last_handoff_path is None
+
+    def test_resume_no_handoff_injects_context_only(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without a handoff, resumed session still gets [cw identity] context."""
+        monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
+        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="nohnd001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="impl",
+                    zellij_tab="test-client",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl")
+
+        # Should still inject context-only prompt
+        assert len(mock_zellij["write_to_pane"]) >= 2
+        injected_prompt = mock_zellij["write_to_pane"][1][0]
+        assert "[cw identity]" in injected_prompt
+        assert "Client: 'test-client'" in injected_prompt
+
+    def test_resume_command_includes_env_vars(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The claude --resume command has CW_CLIENT/CW_PURPOSE env vars."""
+        monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
+        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="envres01",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    zellij_pane="impl",
+                    zellij_tab="test-client",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl")
+
+        # First write_to_pane is the claude --resume command
+        resume_cmd = mock_zellij["write_to_pane"][0][0]
+        assert "CW_CLIENT=test-client" in resume_cmd
+        assert "CW_PURPOSE=impl" in resume_cmd
 
     def test_resume_injects_client_context(
         self,

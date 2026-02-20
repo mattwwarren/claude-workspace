@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from cw.prompts import (
     PURPOSE_PROMPTS,
     build_session_context,
@@ -85,6 +87,13 @@ class TestGetPurposePrompt:
             workspace_path="/opt/test",
         )
         assert prompt is None
+
+    def test_partial_kwargs_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="both be provided"):
+            get_purpose_prompt("impl", client_name="foo")
+
+        with pytest.raises(ValueError, match="both be provided"):
+            get_purpose_prompt("impl", workspace_path="/opt/foo")
 
 
 class TestBuildSessionContext:

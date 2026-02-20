@@ -223,6 +223,33 @@ class TestDelegateTaskCommandConstruction:
         assert isinstance(command, str)
         assert "--print" not in command
 
+    def test_command_includes_env_var_prefix(
+        self,
+        delegate_setup: dict[str, Any],
+    ) -> None:
+        client = delegate_setup["client"]
+        new_pane_calls = delegate_setup["new_pane_calls"]
+
+        delegate_task(client.name, "Fix lint violations")
+
+        command = new_pane_calls[0][0]
+        assert isinstance(command, str)
+        assert f"CW_CLIENT={client.name}" in command
+        assert "CW_PURPOSE=debt" in command
+
+    def test_interactive_command_includes_env_var_prefix(
+        self,
+        delegate_setup: dict[str, Any],
+    ) -> None:
+        client = delegate_setup["client"]
+        new_pane_calls = delegate_setup["new_pane_calls"]
+
+        delegate_task(client.name, "Debug test", interactive=True)
+
+        command = new_pane_calls[0][0]
+        assert isinstance(command, str)
+        assert f"CW_CLIENT={client.name}" in command
+
     def test_command_includes_session_id_flag(
         self,
         delegate_setup: dict[str, Any],
