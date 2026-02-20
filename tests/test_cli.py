@@ -76,7 +76,7 @@ class TestCli:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg"])
-            mock_bg.assert_called_once_with(notify=None)
+            mock_bg.assert_called_once_with(notify=None, auto=False)
 
     def test_resume_dispatches(self) -> None:
         runner = CliRunner()
@@ -518,13 +518,13 @@ class TestBgNotifyCli:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg", "--notify", "review"])
-            mock_bg.assert_called_once_with(notify="review")
+            mock_bg.assert_called_once_with(notify="review", auto=False)
 
     def test_bg_with_notify_short(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg", "-n", "review"])
-            mock_bg.assert_called_once_with(notify="review")
+            mock_bg.assert_called_once_with(notify="review", auto=False)
 
 
 class TestPlanCli:

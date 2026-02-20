@@ -329,6 +329,37 @@ def check_pane_health(session: str | None = None) -> dict[str, bool]:
     return health
 
 
+def new_pane(
+    command: str,
+    *,
+    name: str | None = None,
+    cwd: str | None = None,
+    direction: str = "down",
+    close_on_exit: bool = True,
+    session: str | None = None,
+) -> None:
+    """Open a new Zellij pane running a command.
+
+    Args:
+        command: Shell command to run in the new pane.
+        name: Optional pane name.
+        cwd: Working directory for the new pane.
+        direction: Split direction (down, right, up, left).
+        close_on_exit: Whether the pane closes when the command exits.
+        session: Target a specific session by name (for remote control).
+    """
+    base = ["-s", session] if session else []
+    args = [*base, "action", "new-pane", "--direction", direction]
+    if name:
+        args.extend(["--name", name])
+    if cwd:
+        args.extend(["--cwd", cwd])
+    if close_on_exit:
+        args.append("--close-on-exit")
+    args.extend(["--", "bash", "-c", command])
+    _run_zellij(*args)
+
+
 def in_zellij_session() -> bool:
     """Check if we're currently running inside a Zellij session."""
     return "ZELLIJ_SESSION_NAME" in os.environ

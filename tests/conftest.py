@@ -119,6 +119,7 @@ def mock_zellij(
         "focus_pane": [],
         "write_to_pane": [],
         "check_pane_health": [],
+        "new_pane": [],
     }
 
     def _is_installed() -> bool:
@@ -156,6 +157,12 @@ def mock_zellij(
         calls["check_pane_health"].append((session,))
         return {}
 
+    def _new_pane(
+        command: str, **kwargs: object,
+    ) -> None:
+        calls["new_pane"].append((command, kwargs))
+
+    monkeypatch.setattr("cw.zellij.new_pane", _new_pane)
     monkeypatch.setattr("cw.zellij.is_installed", _is_installed)
     monkeypatch.setattr(
         "cw.zellij.in_zellij_session", _in_zellij

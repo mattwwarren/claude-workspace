@@ -13,6 +13,9 @@ from cw.models import DEFAULT_AUTO_PURPOSES, ClientConfig, CwState
 
 CONFIG_DIR = Path.home() / ".config" / "cw"
 STATE_DIR = Path.home() / ".local" / "share" / "cw"
+QUEUES_DIR = STATE_DIR / "queues"
+DAEMONS_DIR = STATE_DIR / "daemons"
+HOOKS_DIR = STATE_DIR / "hooks"
 CLIENTS_FILE = CONFIG_DIR / "clients.yaml"
 STATE_FILE = STATE_DIR / "sessions.json"
 

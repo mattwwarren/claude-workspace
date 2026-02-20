@@ -26,10 +26,13 @@ from cw.models import (
     CompletionReason,
     CwState,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    TaskSpec,
 )
 from cw.prompts import get_purpose_prompt
+from cw.queue import add_item, claim_next
 from cw.worktree import create_worktree, remove_worktree
 
 CW_SESSION = "cw"
@@ -332,6 +335,7 @@ def background_session(
     session_name: str | None = None,
     *,
     notify: str | None = None,
+    auto: bool = False,
 ) -> None:
     """Background a session by triggering /session-done and recording the handoff."""
     state = load_state()
@@ -370,6 +374,8 @@ def background_session(
 
     session.status = SessionStatus.BACKGROUNDED
     session.backgrounded_at = datetime.now(UTC)
+    if auto:
+        session.auto_backgrounded = True
     save_state(state)
     click.echo(f"Session {session.name} backgrounded.")
 
@@ -608,6 +614,79 @@ def handoff_session(
         f"Handoff complete: {source_purpose} → {target_purpose}"
         f" ({resolved_client})"
     )
+
+
+def delegate_task(
+    client_name: str,
+    description: str,
+    *,
+    purpose: str = "debt",
+    prompt: str | None = None,
+    context_files: list[str] | None = None,
+    interactive: bool = False,
+) -> Session:
+    """Delegate a task to a new Zellij pane running Claude.
+
+    Creates a queue item for tracking, claims it immediately,
+    spawns a new session in a dynamic Zellij pane.
+    """
+    _ensure_zellij()
+    if not zellij.in_zellij_session():
+        msg = "Must be inside a Zellij session to delegate."
+        raise CwError(msg)
+
+    client = get_client(client_name)
+    state = load_state()
+
+    task_prompt = prompt or description
+    task = TaskSpec(
+        description=description,
+        purpose=SessionPurpose(purpose),
+        prompt=task_prompt,
+        context_files=context_files or [],
+    )
+
+    # Add to queue and claim immediately
+    add_item(client_name, task)
+    claimed = claim_next(client_name, SessionPurpose(purpose))
+    if claimed is None:
+        msg = "Failed to claim queue item."
+        raise CwError(msg)
+
+    # Create session
+    session = Session(
+        name=f"{client_name}/delegate-{claimed.id}",
+        client=client_name,
+        purpose=SessionPurpose(purpose),
+        origin=SessionOrigin.DELEGATE,
+        workspace_path=client.workspace_path,
+        zellij_pane=f"delegate-{claimed.id}",
+    )
+    claimed.assigned_session_id = session.id
+    state.sessions.append(session)
+    save_state(state)
+
+    # Build claude command
+    escaped_prompt = shlex.quote(task_prompt)
+    sid = str(session.claude_session_id)
+    if interactive:
+        cmd = (
+            f"claude --session-id {sid}"
+            f" --append-system-prompt {escaped_prompt}"
+        )
+    else:
+        cmd = (
+            f"claude --session-id {sid}"
+            f" --append-system-prompt {escaped_prompt}"
+            f" --print"
+        )
+
+    cwd = str(client.workspace_path)
+    pane_name = f"delegate-{claimed.id}"
+    zellij.new_pane(cmd, name=pane_name, cwd=cwd, close_on_exit=not interactive)
+
+    click.echo(f"Delegated: {description} (pane: {pane_name}, queue: {claimed.id})")
+    return session
 
 
 CROSS_SESSION_HANDOFF_PREFIX = "session-handoff-"
