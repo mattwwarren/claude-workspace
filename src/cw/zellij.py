@@ -21,8 +21,19 @@ GENERATED_LAYOUTS_DIR = Path.home() / ".config" / "zellij" / "layouts"
 CLIENT_LAYOUT_TEMPLATE = """\
 layout {
 {%- if session_mode %}
-    pane size=1 borderless=true {
-        plugin location="tab-bar"
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+{%- if cw_plugin_path %}
+        pane size=1 borderless=true {
+            plugin location="file:{{ cw_plugin_path }}"
+        }
+{%- endif %}
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
     }
 {%- endif %}
     tab name="{{ client_name }}" {
@@ -60,16 +71,6 @@ name="{{ primary_pane.name }}" focus=true {
 {%- endif %}
         }
     }
-{%- if session_mode %}
-{%- if cw_plugin_path %}
-    pane size=1 borderless=true {
-        plugin location="file:{{ cw_plugin_path }}"
-    }
-{%- endif %}
-    pane size=1 borderless=true {
-        plugin location="status-bar"
-    }
-{%- endif %}
 }
 """
 
