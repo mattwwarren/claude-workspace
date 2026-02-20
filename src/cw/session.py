@@ -33,7 +33,7 @@ from cw.models import (
     SessionStatus,
     TaskSpec,
 )
-from cw.prompts import get_purpose_prompt
+from cw.prompts import build_session_context, get_purpose_prompt
 from cw.queue import add_item, claim_next, load_queue, save_queue
 from cw.worktree import create_worktree, remove_worktree
 
@@ -74,20 +74,31 @@ def _build_pane_args(
     """
     panes: dict[str, dict[str, str]] = {}
     client_overrides = client.purpose_prompts if client else None
+    client_name = client.name if client else None
+    workspace_path = str(client.workspace_path) if client else None
     for purpose, session in sessions.items():
         sid = str(session.claude_session_id)
 
         # Build extra flags (e.g. --append-system-prompt)
         extra = ""
-        prompt = get_purpose_prompt(purpose, client_overrides)
+        prompt = get_purpose_prompt(
+            purpose,
+            client_overrides,
+            client_name=client_name,
+            workspace_path=workspace_path,
+        )
         if prompt:
             escaped_prompt = shlex.quote(prompt)
             extra = f" --append-system-prompt {escaped_prompt}"
 
         # Shell command: try --resume, fall back to --session-id
+        # Prefix with env vars so tools can detect identity
+        env_prefix = ""
+        if client_name:
+            env_prefix = f"CW_CLIENT={client_name} CW_PURPOSE={purpose} "
         cmd = (
-            f"claude --resume {sid}{extra} 2>/dev/null"
-            f" || claude --session-id {sid}{extra}"
+            f"{env_prefix}claude --resume {sid}{extra} 2>/dev/null"
+            f" || {env_prefix}claude --session-id {sid}{extra}"
         )
         # KDL-quote the whole command for the layout template
         pane_data: dict[str, str] = {"claude_cmd": f'"{cmd}"'}
@@ -277,8 +288,16 @@ def start_session(
     ))
 
     # Build claude command with optional system prompt
-    cmd_parts = [f"claude --session-id {session.claude_session_id}"]
-    prompt = get_purpose_prompt(purpose, client.purpose_prompts or None)
+    cmd_parts = [
+        f"CW_CLIENT={client_name} CW_PURPOSE={purpose}",
+        f"claude --session-id {session.claude_session_id}",
+    ]
+    prompt = get_purpose_prompt(
+        purpose,
+        client.purpose_prompts or None,
+        client_name=client_name,
+        workspace_path=str(client.workspace_path),
+    )
     if prompt:
         escaped_prompt = shlex.quote(prompt)
         cmd_parts.append(f"--append-system-prompt {escaped_prompt}")
@@ -444,6 +463,14 @@ def resume_session(session_name: str) -> None:
 
     # Ensure client tab exists
     client = get_client(session.client)
+
+    # Prepend client identity so resumed sessions know who they are
+    context = build_session_context(
+        session.client,
+        str(client.workspace_path),
+        session.purpose,
+    )
+    prompt = f"{context}\n\n{prompt}" if prompt else context
     _create_session_if_needed(client)
 
     session.status = SessionStatus.ACTIVE
@@ -726,17 +753,18 @@ def delegate_task(
     state.sessions.append(session)
     save_state(state)
 
-    # Build claude command
+    # Build claude command with identity env vars
     escaped_prompt = shlex.quote(task_prompt)
     sid = str(session.claude_session_id)
+    env_prefix = f"CW_CLIENT={client_name} CW_PURPOSE={purpose}"
     if interactive:
         cmd = (
-            f"claude --session-id {sid}"
+            f"{env_prefix} claude --session-id {sid}"
             f" --append-system-prompt {escaped_prompt}"
         )
     else:
         cmd = (
-            f"claude --session-id {sid}"
+            f"{env_prefix} claude --session-id {sid}"
             f" --append-system-prompt {escaped_prompt}"
             f" --print"
         )

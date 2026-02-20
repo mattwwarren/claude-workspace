@@ -75,6 +75,30 @@ class TestBuildPaneArgs:
         panes = _build_pane_args({"impl": session})
         assert panes["impl"]["cwd"] == str(sample_client.workspace_path)
 
+    def test_env_var_prefix_in_command(self, sample_client: ClientConfig) -> None:
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+        )
+        panes = _build_pane_args({"impl": session}, client=sample_client)
+        cmd = panes["impl"]["claude_cmd"]
+        assert "CW_CLIENT=test-client" in cmd
+        assert "CW_PURPOSE=impl" in cmd
+
+    def test_client_identity_in_prompt(self, sample_client: ClientConfig) -> None:
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+        )
+        panes = _build_pane_args({"impl": session}, client=sample_client)
+        cmd = panes["impl"]["claude_cmd"]
+        assert "[cw identity]" in cmd
+        assert "test-client" in cmd
+
 
 class TestCreateAllPurposeSessions:
     def test_uses_auto_purposes(self, sample_client: ClientConfig) -> None:
@@ -312,6 +336,32 @@ class TestStartSession:
         assert impl_sessions[0].branch == "feat/search"
         assert review_sessions[0].worktree_path == wt_path
         assert debt_sessions[0].worktree_path is None
+
+    def test_late_join_includes_env_vars(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When Zellij is already running, the injected command has env vars."""
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        # Zellij session already exists
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
+
+        start_session("test-client", "impl")
+
+        # write_to_pane should have been called with a command containing env vars
+        assert len(mock_zellij["write_to_pane"]) >= 1
+        injected_cmd = mock_zellij["write_to_pane"][0][0]
+        assert "CW_CLIENT=test-client" in injected_cmd
+        assert "CW_PURPOSE=impl" in injected_cmd
 
     def test_zellij_not_installed_raises(
         self,
@@ -726,6 +776,53 @@ class TestResumeSession:
         # last_handoff_path should be cleared in state
         updated = load_state()
         assert updated.sessions[0].last_handoff_path is None
+
+    def test_resume_injects_client_context(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        sample_handoff_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Resumed session gets [cw identity] prepended to handoff prompt."""
+        monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
+        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="ctx00001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    last_handoff_path=sample_handoff_file,
+                    zellij_pane="impl",
+                    zellij_tab="test-client",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl")
+
+        # The second write_to_pane call is the prompt injection
+        assert len(mock_zellij["write_to_pane"]) >= 2
+        injected_prompt = mock_zellij["write_to_pane"][1][0]
+        assert "[cw identity]" in injected_prompt
+        assert "Client: 'test-client'" in injected_prompt
+        # Original handoff content still present
+        assert "auth feature" in injected_prompt
 
     def test_regular_handoff_not_cleaned_up(
         self,

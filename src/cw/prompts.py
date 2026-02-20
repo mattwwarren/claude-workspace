@@ -30,18 +30,51 @@ PURPOSE_PROMPTS: dict[str, str] = {
 }
 
 
+def build_session_context(
+    client_name: str,
+    workspace_path: str,
+    purpose: str,
+) -> str:
+    """Build an identity preamble for Claude sessions.
+
+    Returns a short block that tells the LLM which client and purpose it
+    belongs to, so ``cw`` commands use the correct client argument.
+    """
+    return (
+        f"[cw identity] Client: '{client_name}'"
+        f" | Workspace: {workspace_path}"
+        f" | Purpose: {purpose}\n"
+        f"Use '{client_name}' as the client argument"
+        f" for all cw commands (e.g. cw queue add {client_name} ...)."
+    )
+
+
 def get_purpose_prompt(
     purpose: str,
     client_overrides: dict[str, str] | None = None,
+    *,
+    client_name: str | None = None,
+    workspace_path: str | None = None,
 ) -> str | None:
     """Resolve the system prompt for a given purpose.
 
     Client overrides take precedence over defaults.
     Returns None if no prompt is defined for the purpose.
+
+    When *client_name* and *workspace_path* are provided, the resolved
+    prompt is prefixed with a ``[cw identity]`` block so the LLM knows
+    which client/purpose it belongs to.
     """
     if client_overrides and purpose in client_overrides:
-        return client_overrides[purpose]
-    return PURPOSE_PROMPTS.get(purpose)
+        prompt: str | None = client_overrides[purpose]
+    else:
+        prompt = PURPOSE_PROMPTS.get(purpose)
+
+    if prompt is not None and client_name and workspace_path:
+        context = build_session_context(client_name, workspace_path, purpose)
+        prompt = f"{context}\n\n{prompt}"
+
+    return prompt
 
 
 def escape_kdl_string(text: str) -> str:
