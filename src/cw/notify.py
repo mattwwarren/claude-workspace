@@ -24,15 +24,6 @@ _EVENT_NOTIFICATIONS: dict[EventType, tuple[str, str]] = {
     EventType.DAEMON_STOPPED: ("Daemon Stopped", "{client}/{purpose}"),
 }
 
-# Global flag set by record_event when notifications are enabled
-_notifications_enabled: bool = False
-
-
-def set_notifications_enabled(enabled: bool) -> None:
-    """Set the global notification flag (called during config loading)."""
-    global _notifications_enabled  # noqa: PLW0603
-    _notifications_enabled = enabled
-
 
 def send_notification(
     title: str,
@@ -52,8 +43,9 @@ def send_notification(
             ["notify-send", f"--urgency={urgency}", "--app-name=cw", title, body],
             check=False,
             capture_output=True,
+            timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return False
     return True
 
@@ -77,9 +69,3 @@ def notify_event(event: HistoryEvent) -> None:
 
     urgency = "critical" if event.event_type == EventType.SESSION_CRASHED else "normal"
     send_notification(title, body, urgency=urgency)
-
-
-def maybe_notify_event(event: HistoryEvent) -> None:
-    """Send a notification if notifications are globally enabled."""
-    if _notifications_enabled:
-        notify_event(event)

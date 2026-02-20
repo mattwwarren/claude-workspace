@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import subprocess
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
 
 from textual import work
@@ -20,6 +19,7 @@ from textual.widgets import (
     Static,
 )
 
+from cw.cli import _relative_time as relative_time
 from cw.config import load_clients, load_state
 from cw.history import load_history
 from cw.models import SessionStatus
@@ -91,7 +91,25 @@ class CwDashboard(App[None]):
     """Interactive dashboard for claude-workspace."""
 
     TITLE = "cw dashboard"
-    CSS_PATH = "tui.tcss"
+    # Inlined to avoid packaging issues with uv tool install (same
+    # pattern as zellij.py's CLIENT_LAYOUT_TEMPLATE).
+    DEFAULT_CSS = """
+    Screen { layout: vertical; }
+    Horizontal { height: 1fr; }
+    Header { dock: top; }
+    Footer { dock: bottom; }
+    ClientList { width: 20%; border-right: solid $primary; height: 100%; }
+    ClientList > ListItem { padding: 0 1; }
+    SessionTable { width: 50%; height: 100%; }
+    ActivityFeed { width: 30%; border-left: solid $primary; height: 100%; }
+    StatusLine {
+        dock: bottom;
+        height: 1;
+        background: $surface;
+        color: $text-muted;
+        padding: 0 1;
+    }
+    """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("q", "quit", "Quit"),
@@ -153,7 +171,7 @@ class CwDashboard(App[None]):
 
         for s in self._sessions:
             status_display = _format_status(s.status)
-            since = _relative_time(s)
+            since = _session_time(s)
             branch = s.branch or ""
             table.add_row(s.purpose, status_display, since, branch, key=s.id)
 
@@ -193,9 +211,14 @@ class CwDashboard(App[None]):
     def _get_selected_session(self) -> Session | None:
         """Get the session selected in the table."""
         table = self.query_one(SessionTable)
-        if table.cursor_row is None or table.cursor_row >= len(self._sessions):
+        if table.cursor_row >= len(self._sessions):
             return None
         return self._sessions[table.cursor_row]
+
+    # Actions shell out to `cw` CLI rather than calling functions directly.
+    # This avoids entangling the TUI with session internals and click.echo
+    # output that would corrupt the terminal. Acceptable cost: one subprocess
+    # per user-initiated action.
 
     @work(thread=True)
     def action_resume_session(self) -> None:
@@ -254,46 +277,18 @@ def _format_status(status: str) -> str:
     return colors.get(status, status)
 
 
-def _relative_time(session: Session) -> str:
-    """Format session time as relative string."""
+def _session_time(session: Session) -> str:
+    """Pick the best timestamp for a session and format as relative string."""
     dt = session.resumed_at or session.backgrounded_at or session.started_at
-    if dt is None:
-        return ""
-
-    now = datetime.now(UTC)
-    delta = now - dt
-    seconds = int(delta.total_seconds())
-
-    if seconds < 60:
-        return "just now"
-    if seconds < 3600:
-        return f"{seconds // 60}m ago"
-    if seconds < 86400:
-        return f"{seconds // 3600}h ago"
-    return f"{seconds // 86400}d ago"
+    return relative_time(dt)
 
 
 def _format_event(event: HistoryEvent) -> str:
     """Format a history event for the activity feed."""
-    ts = _event_relative_time(event)
+    ts = relative_time(event.timestamp)
     detail = f" - {event.detail}" if event.detail else ""
     session = f" [{event.session_name}]" if event.session_name else ""
     return f"{ts} {event.event_type}{session}{detail}"
-
-
-def _event_relative_time(event: HistoryEvent) -> str:
-    """Format event timestamp as relative string."""
-    now = datetime.now(UTC)
-    delta = now - event.timestamp
-    seconds = int(delta.total_seconds())
-
-    if seconds < 60:
-        return "just now"
-    if seconds < 3600:
-        return f"{seconds // 60}m ago"
-    if seconds < 86400:
-        return f"{seconds // 3600}h ago"
-    return f"{seconds // 86400}d ago"
 
 
 def run_dashboard() -> None:

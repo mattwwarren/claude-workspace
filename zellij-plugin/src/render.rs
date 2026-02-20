@@ -33,9 +33,11 @@ pub fn render_status(state: &CwState, max_cols: usize) -> String {
 
     let output = format!("cw: {}", parts.join(" | "));
 
-    // Truncate if too long for the status bar
+    // Truncate if too long for the status bar (safe for multi-byte UTF-8)
     if output.len() > max_cols {
-        format!("{}...", &output[..max_cols.saturating_sub(3)])
+        let truncate_at = max_cols.saturating_sub(3);
+        let truncated: String = output.chars().take(truncate_at).collect();
+        format!("{}...", truncated)
     } else {
         output
     }

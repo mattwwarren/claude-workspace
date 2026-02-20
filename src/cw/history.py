@@ -65,7 +65,8 @@ def _history_lock(client: str) -> Iterator[None]:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
 
 
@@ -86,6 +87,10 @@ def load_history(
     limit: int | None = None,
 ) -> list[HistoryEvent]:
     """Load history events for a client, filtered and reverse-chronological.
+
+    Reads and parses the entire JSONL file on each call. Acceptable for
+    current scale (lifecycle events are infrequent, files stay small).
+    If history files grow large, consider tail-based reading or an index.
 
     Args:
         client: Client name.
@@ -124,11 +129,16 @@ def record_event(client: str, event: HistoryEvent) -> None:
     """Append an event and optionally fire a desktop notification.
 
     This is the main entry point for recording events. It appends the
-    event to the JSONL history and delegates to the notification system.
+    event to the JSONL history and fires a notification if enabled for
+    the client.
     """
     append_event(client, event)
 
-    # Lazy: break circular dep history -> notify -> history
-    from cw.notify import maybe_notify_event
+    # Check if notifications are enabled for this client
+    from cw.config import load_clients
+    from cw.notify import notify_event
 
-    maybe_notify_event(event)
+    clients = load_clients()
+    client_config = clients.get(client)
+    if client_config and client_config.notifications:
+        notify_event(event)

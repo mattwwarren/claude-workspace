@@ -33,19 +33,11 @@ def load_clients() -> dict[str, ClientConfig]:
     # Read global notification default
     global_notifications = bool(raw.get("notifications", False))
 
-    # Lazy: break circular dep config -> notify -> config
-    from cw.notify import set_notifications_enabled
-
-    set_notifications_enabled(global_notifications)
-
     clients: dict[str, ClientConfig] = {}
     for name, data in raw["clients"].items():
-        # Per-client notification override
-        client_notif = data.pop("notifications", None)
         client = ClientConfig(name=name, **data)
-        if client_notif is not None:
-            client.notifications = bool(client_notif)
-        elif global_notifications:
+        # Apply global notification default if not set per-client
+        if "notifications" not in data and global_notifications:
             client.notifications = True
         clients[name] = client
     return clients

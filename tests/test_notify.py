@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import patch
 
 from cw.history import EventType, HistoryEvent
-from cw.notify import (
-    maybe_notify_event,
-    notify_event,
-    send_notification,
-    set_notifications_enabled,
-)
+from cw.notify import notify_event, send_notification
 
 
 def test_send_notification_no_notify_send() -> None:
@@ -39,6 +35,18 @@ def test_send_notification_os_error() -> None:
     with (
         patch("cw.notify.shutil.which", return_value="/usr/bin/notify-send"),
         patch("cw.notify.subprocess.run", side_effect=OSError("fail")),
+    ):
+        assert send_notification("Title", "Body") is False
+
+
+def test_send_notification_timeout() -> None:
+    """Returns False on subprocess timeout."""
+    with (
+        patch("cw.notify.shutil.which", return_value="/usr/bin/notify-send"),
+        patch(
+            "cw.notify.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("notify-send", 5),
+        ),
     ):
         assert send_notification("Title", "Body") is False
 
@@ -80,34 +88,6 @@ def test_notify_event_skips_session_started() -> None:
     with patch("cw.notify.send_notification") as mock_send:
         notify_event(event)
         mock_send.assert_not_called()
-
-
-def test_maybe_notify_disabled() -> None:
-    """No notification when globally disabled."""
-    set_notifications_enabled(False)
-    event = HistoryEvent(
-        event_type=EventType.SESSION_CRASHED,
-        client="test",
-        session_name="test/impl",
-    )
-    with patch("cw.notify.send_notification") as mock_send:
-        maybe_notify_event(event)
-        mock_send.assert_not_called()
-
-
-def test_maybe_notify_enabled() -> None:
-    """Notification fires when globally enabled."""
-    set_notifications_enabled(True)
-    event = HistoryEvent(
-        event_type=EventType.SESSION_CRASHED,
-        client="test",
-        session_name="test/impl",
-    )
-    with patch("cw.notify.send_notification") as mock_send:
-        maybe_notify_event(event)
-        mock_send.assert_called_once()
-    # Reset global state
-    set_notifications_enabled(False)
 
 
 def test_notify_event_daemon_format() -> None:
