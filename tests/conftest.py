@@ -130,6 +130,7 @@ def mock_zellij(
         "check_pane_health": [],
         "new_pane": [],
         "new_tab": [],
+        "rename_tab": [],
     }
 
     def _is_installed() -> bool:
@@ -186,8 +187,14 @@ def mock_zellij(
     ) -> None:
         calls["new_tab"].append((client, kwargs))
 
+    def _rename_tab(
+        new_name: str, session: str | None = None,
+    ) -> None:
+        calls["rename_tab"].append((new_name, session))
+
     monkeypatch.setattr("cw.zellij.new_pane", _new_pane)
     monkeypatch.setattr("cw.zellij.new_tab", _new_tab)
+    monkeypatch.setattr("cw.zellij.rename_tab", _rename_tab)
     monkeypatch.setattr("cw.zellij.is_installed", _is_installed)
     monkeypatch.setattr(
         "cw.zellij.in_zellij_session", _in_zellij

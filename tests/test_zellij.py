@@ -17,6 +17,7 @@ from cw.zellij import (
     is_installed,
     list_sessions,
     new_tab,
+    rename_tab,
     session_exists,
     write_to_pane,
 )
@@ -598,6 +599,43 @@ class TestNewTab:
         assert calls[0][:2] == ("-s", "cw")
         assert "new-tab" in calls[0]
         assert "--layout" in calls[0]
+
+
+class TestRenameTab:
+    def test_calls_zellij_action(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, check: bool = True) -> MagicMock:
+            calls.append(args)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
+
+        rename_tab("proj [bg]")
+
+        assert len(calls) == 1
+        assert "rename-tab" in calls[0]
+        assert "proj [bg]" in calls[0]
+
+    def test_with_session(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, check: bool = True) -> MagicMock:
+            calls.append(args)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
+
+        rename_tab("proj", session="cw")
+
+        assert len(calls) == 1
+        assert calls[0][:2] == ("-s", "cw")
+        assert "rename-tab" in calls[0]
+        assert "proj" in calls[0]
 
 
 class TestCheckPaneHealthTabScoped:

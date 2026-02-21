@@ -235,6 +235,20 @@ def new_tab(
     _run_zellij(*base, "action", "new-tab", "--layout", str(layout_path))
 
 
+def rename_tab(
+    new_name: str, session: str | None = None,
+) -> None:
+    """Rename the currently focused Zellij tab.
+
+    Args:
+        new_name: New tab name to display.
+        session: Target a specific session by name.
+                 If None, targets the current session.
+    """
+    base = ["-s", session] if session else []
+    _run_zellij(*base, "action", "rename-tab", new_name, check=False)
+
+
 def attach_session(session_name: str) -> None:
     """Attach to an existing Zellij session (takes over terminal)."""
     subprocess.run(["zellij", "attach", session_name], check=False)

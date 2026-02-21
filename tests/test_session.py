@@ -1476,3 +1476,106 @@ class TestBackgroundNotify:
 
         output = capsys.readouterr().out
         assert "No active idea session" in output
+
+
+class TestRenameTabOnTransition:
+    """Verify rename_tab is called on background/resume when inside Zellij."""
+
+    def test_background_renames_tab(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Override in_zellij_session to return True
+        monkeypatch.setattr(
+            "cw.zellij.in_zellij_session", lambda: True,
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rntab001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        background_session("test-client/impl")
+
+        assert len(mock_zellij["rename_tab"]) == 1
+        name_arg = mock_zellij["rename_tab"][0][0]
+        assert "test-client" in name_arg
+        assert "[bg]" in name_arg
+
+    def test_background_no_rename_outside_zellij(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        # Default mock_zellij returns False for in_zellij_session
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rntab002",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        background_session("test-client/impl")
+
+        assert len(mock_zellij["rename_tab"]) == 0
+
+    def test_resume_renames_tab(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Override in_zellij_session to return True
+        monkeypatch.setattr(
+            "cw.zellij.in_zellij_session", lambda: True,
+        )
+
+        clients_file = (
+            tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        )
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rntab003",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl")
+
+        assert len(mock_zellij["rename_tab"]) == 1
+        name_arg = mock_zellij["rename_tab"][0][0]
+        assert name_arg == "test-client"

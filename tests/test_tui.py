@@ -7,21 +7,34 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from textual.widgets import ListItem, Static
 
 from cw.history import EventType, HistoryEvent
 from cw.models import (
     ClientConfig,
     CwState,
+    QueueItem,
+    QueueItemStatus,
+    QueueStore,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    TaskSpec,
 )
 from cw.plan import PlanPhase, PlanSummary, PlanTask
 from cw.tui import (
+    ClientList,
+    ConfirmScreen,
     CwDashboard,
     PlanPanel,
+    QueuePanel,
+    SessionDetailScreen,
+    SessionTable,
     _format_event,
+    _format_origin,
     _format_plan_summary,
+    _format_queue_status,
     _format_status,
     _session_time,
 )
@@ -454,3 +467,311 @@ async def test_refresh_plans_shows_active_plans(tmp_config_dir: Path) -> None:
             content = str(panel.render())
             assert "My Plan" in content
             assert "1/2" in content
+
+
+# --- Queue panel tests ---
+
+
+def _make_queue_store() -> QueueStore:
+    """Build a QueueStore with mixed status items."""
+    return QueueStore(
+        items=[
+            QueueItem(
+                id="q1",
+                client="alpha",
+                task=TaskSpec(
+                    description="Fix ruff violations",
+                    purpose=SessionPurpose.DEBT,
+                    prompt="Run ruff --fix",
+                ),
+                status=QueueItemStatus.PENDING,
+            ),
+            QueueItem(
+                id="q2",
+                client="alpha",
+                task=TaskSpec(
+                    description="Review PR #42",
+                    purpose=SessionPurpose.DEBT,
+                    prompt="Review the PR",
+                ),
+                status=QueueItemStatus.RUNNING,
+            ),
+            QueueItem(
+                id="q3",
+                client="alpha",
+                task=TaskSpec(
+                    description="Old completed task",
+                    purpose=SessionPurpose.DEBT,
+                    prompt="Done",
+                ),
+                status=QueueItemStatus.COMPLETED,
+            ),
+        ]
+    )
+
+
+def test_format_queue_status() -> None:
+    """Queue status formatting includes color markup."""
+    assert "[yellow]" in _format_queue_status("pending")
+    assert "[green]" in _format_queue_status("running")
+    assert "[dim]" in _format_queue_status("completed")
+    assert "[red]" in _format_queue_status("failed")
+    assert _format_queue_status("unknown") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_queue_panel_shows_pending_and_running(
+    tmp_config_dir: Path,
+) -> None:
+    """QueuePanel shows PENDING and RUNNING items, not COMPLETED."""
+    store = _make_queue_store()
+
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=_make_state()),
+        patch("cw.tui.load_history", return_value=[]),
+        patch("cw.tui.load_queue", return_value=store),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._clients = _make_clients()
+            app._selected_client = "alpha"
+            app._refresh_queue()
+            await pilot.pause()
+
+            queue_table = app.query_one(QueuePanel)
+            # 2 active items (pending + running), not 3
+            assert queue_table.row_count == 2
+
+
+@pytest.mark.asyncio
+async def test_queue_panel_empty_when_no_client(
+    tmp_config_dir: Path,
+) -> None:
+    """QueuePanel is empty when no client is selected."""
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+        patch("cw.tui.load_queue", return_value=QueueStore()),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_client = None
+            app._refresh_queue()
+            await pilot.pause()
+
+            queue_table = app.query_one(QueuePanel)
+            assert queue_table.row_count == 0
+
+
+# --- Confirm dialog tests ---
+
+
+@pytest.mark.asyncio
+async def test_confirm_screen_dismiss_on_cancel(
+    tmp_config_dir: Path,
+) -> None:
+    """ConfirmScreen dismisses with False on Cancel."""
+    results: list[bool | None] = []
+
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            def on_result(result: bool | None) -> None:
+                results.append(result)
+
+            app.push_screen(
+                ConfirmScreen("Test?"), on_result,
+            )
+            await pilot.pause()
+            await pilot.click("#confirm-no")
+            await pilot.pause()
+
+            assert results == [False]
+
+
+@pytest.mark.asyncio
+async def test_confirm_screen_dismiss_on_confirm(
+    tmp_config_dir: Path,
+) -> None:
+    """ConfirmScreen dismisses with True on Confirm."""
+    results: list[bool | None] = []
+
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            def on_result(result: bool | None) -> None:
+                results.append(result)
+
+            app.push_screen(
+                ConfirmScreen("Test?"), on_result,
+            )
+            await pilot.pause()
+            await pilot.click("#confirm-yes")
+            await pilot.pause()
+
+            assert results == [True]
+
+
+# --- Session detail tests ---
+
+
+@pytest.mark.asyncio
+async def test_session_detail_screen_shows_fields(
+    tmp_config_dir: Path,
+) -> None:
+    """SessionDetailScreen shows session fields."""
+    session = Session(
+        id="s1",
+        name="alpha/impl",
+        client="alpha",
+        purpose=SessionPurpose.IMPL,
+        status=SessionStatus.ACTIVE,
+        origin=SessionOrigin.DELEGATE,
+        workspace_path="/home/test/alpha",
+        branch="feat/search",
+        started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
+    )
+
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(SessionDetailScreen(session))
+            await pilot.pause()
+
+            # The detail screen should be the active screen
+            screen = app.screen
+            assert isinstance(screen, SessionDetailScreen)
+
+
+@pytest.mark.asyncio
+async def test_expand_key_with_no_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Pressing 'e' with no session selected does nothing."""
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # No sessions loaded, pressing 'e' should not crash
+            await pilot.press("e")
+            await pilot.pause()
+
+
+# --- Phase 2: Origin column and sidebar badge tests ---
+
+
+def test_format_origin_delegate() -> None:
+    """Delegate origin shows cyan badge."""
+    assert "[cyan]" in _format_origin("delegate")
+    assert "[delegate]" in _format_origin("delegate")
+
+
+def test_format_origin_daemon() -> None:
+    """Daemon origin shows magenta badge."""
+    assert "[magenta]" in _format_origin("daemon")
+    assert "[daemon]" in _format_origin("daemon")
+
+
+def test_format_origin_user_is_empty() -> None:
+    """User origin returns empty string (no badge needed)."""
+    assert _format_origin("user") == ""
+
+
+@pytest.mark.asyncio
+async def test_session_table_has_origin_column(
+    tmp_config_dir: Path,
+) -> None:
+    """Session table includes Origin column."""
+    state = CwState(
+        sessions=[
+            Session(
+                id="s1",
+                name="alpha/impl",
+                client="alpha",
+                purpose=SessionPurpose.IMPL,
+                status=SessionStatus.ACTIVE,
+                origin=SessionOrigin.DELEGATE,
+                workspace_path="/home/test/alpha",
+                started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
+            ),
+        ]
+    )
+
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=state),
+        patch("cw.tui.load_history", return_value=[]),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._clients = _make_clients()
+            app._selected_client = "alpha"
+            app._refresh_sessions()
+            await pilot.pause()
+
+            table = app.query_one(SessionTable)
+            # Table should have 6 columns now
+            assert len(table.columns) == 6
+
+
+@pytest.mark.asyncio
+async def test_sidebar_badge_update(
+    tmp_config_dir: Path,
+) -> None:
+    """_refresh_sidebar updates ListItem labels with session counts."""
+    clients = _make_clients()
+    state = _make_state()  # alpha: 1 active, 1 backgrounded
+
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+    ):
+        # Construct dashboard with clients pre-loaded so compose
+        # creates sidebar items.
+        app = CwDashboard()
+        app._clients = clients
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Now set state and refresh sidebar
+            app._state = state
+            app._refresh_sidebar()
+            await pilot.pause()
+
+            sidebar = app.query_one(ClientList)
+            found_alpha = False
+            for item in sidebar.query(ListItem):
+                static = item.query_one(Static)
+                content = str(static.render())
+                if "alpha" in content:
+                    found_alpha = True
+                    assert "A:1" in content
+                    assert "B:1" in content
+
+            assert found_alpha, "alpha client not found in sidebar"

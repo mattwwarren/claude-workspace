@@ -60,14 +60,15 @@ Core workflow: start → work → background → switch client → resume.
 
 ---
 
-## v5: Dashboard & Visibility
+## v5: Dashboard & Visibility (Current — mostly complete)
 
 **Theme:** See everything at a glance.
 
-- ⚠ `cw status` as a rich TUI (like lazygit but for sessions): clients on left, sessions in center, recent handoffs on right — basic Textual TUI exists with client list, session table, activity feed, key bindings; needs polish and richer features
-- ✗ Zellij plugin (Rust/WASM): live status bar showing all session states, context usage, recent activity
+- ✓ `cw dashboard` rich TUI: client sidebar with session count badges, session table with Origin/Handoff columns, queue panel, plan progress in status line, confirm dialogs, session detail expand (`e` key)
+- ✓ Zellij tab rename: tabs show `[bg]` suffix when sessions are backgrounded, restored on resume
+- ✗ Zellij plugin (Rust/WASM): live status bar showing all session states, queue counts — scaffolding exists in `zellij-plugin/`, needs build fix and completion
 - ✓ Desktop notifications via `notify-send`: "sigma/review found 3 issues in PR #89"
-- ✗ Cost tracking: aggregate Claude Code token usage per client/purpose
+- ✗ Cost tracking: dropped — no feasible data source for Claude Code token usage
 - ✓ Session history: `cw history client` - timeline of all sessions, handoffs, and outcomes
 
 ---

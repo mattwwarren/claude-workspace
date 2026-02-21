@@ -421,6 +421,10 @@ def background_session(
     ))
     click.echo(f"Session {session.name} backgrounded.")
 
+    # Update Zellij tab name to indicate backgrounded state
+    if zellij.in_zellij_session():
+        zellij.rename_tab(f"{session.client} [bg]")
+
     if notify:
         _notify_sibling(session.client, session.purpose, notify)
 
@@ -480,6 +484,8 @@ def resume_session(session_name: str) -> None:
     click.echo(f"Resumed session: {session.name}")
 
     if zellij.in_zellij_session():
+        # Restore tab name (remove [bg] suffix)
+        zellij.rename_tab(session.client)
         _navigate_to_pane(session)
 
         # Resume the exact Claude session by ID, then inject handoff context
