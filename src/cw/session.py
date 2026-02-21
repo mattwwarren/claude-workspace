@@ -517,7 +517,7 @@ def resume_session(session_name: str) -> None:
         zellij.rename_tab(session.client)
         _navigate_to_pane(session)
 
-        # Resume the exact Claude session by ID, then inject handoff context
+        # Resume the exact Claude session by ID
         env_prefix = _build_env_prefix(session.client, session.purpose)
         zellij.write_to_pane(
             f"{env_prefix} claude --resume {session.claude_session_id}\n"
