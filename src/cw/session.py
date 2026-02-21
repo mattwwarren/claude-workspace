@@ -107,15 +107,16 @@ def _build_pane_args(
             escaped_prompt = shlex.quote(prompt.replace("\n", " "))
             extra = f" --append-system-prompt {escaped_prompt}"
 
-        # Shell command: try --resume, fall back to --session-id
-        # Prefix with env vars so tools can detect identity
+        # Shell command: try --resume if a prior session exists, otherwise
+        # start fresh.  --session-id no longer creates new sessions in
+        # recent Claude Code versions, so fresh launches omit it entirely.
         if client_name:
             env_prefix = f"{_build_env_prefix(client_name, purpose)} "
         else:
             env_prefix = ""
         cmd = (
             f"{env_prefix}claude --resume {sid}{extra} 2>/dev/null"
-            f" || {env_prefix}claude --session-id {sid}{extra}"
+            f" || {env_prefix}claude{extra}"
         )
         # KDL-quote the whole command for the layout template.
         # Escape backslashes and double quotes so the KDL string is valid.
@@ -801,16 +802,15 @@ def delegate_task(
 
     # Build claude command with identity env vars
     escaped_prompt = shlex.quote(task_prompt)
-    sid = str(session.claude_session_id)
     env_prefix = _build_env_prefix(client_name, purpose)
     if interactive:
         cmd = (
-            f"{env_prefix} claude --session-id {sid}"
+            f"{env_prefix} claude"
             f" --append-system-prompt {escaped_prompt}"
         )
     else:
         cmd = (
-            f"{env_prefix} claude --session-id {sid}"
+            f"{env_prefix} claude"
             f" --append-system-prompt {escaped_prompt}"
             f" --print"
         )

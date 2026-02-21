@@ -250,19 +250,19 @@ class TestDelegateTaskCommandConstruction:
         assert isinstance(command, str)
         assert f"CW_CLIENT={client.name}" in command
 
-    def test_command_includes_session_id_flag(
+    def test_command_omits_session_id_flag(
         self,
         delegate_setup: dict[str, Any],
     ) -> None:
         client = delegate_setup["client"]
         new_pane_calls = delegate_setup["new_pane_calls"]
 
-        session = delegate_task(client.name, "Update dependencies")
+        delegate_task(client.name, "Update dependencies")
 
         command = new_pane_calls[0][0]
         assert isinstance(command, str)
-        assert "--session-id" in command
-        assert str(session.claude_session_id) in command
+        assert "--session-id" not in command
+        assert "claude" in command
 
     def test_command_includes_append_system_prompt(
         self,
