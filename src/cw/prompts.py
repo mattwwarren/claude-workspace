@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+CW_COMMAND_REFERENCE = """\
+[cw commands]
+- cw hand <purpose> "message" — send message to an active sibling session
+- cw delegate <client> "task" --purpose <purpose> — spawn autonomous task in new pane
+- cw queue add <client> "task" — queue work for daemon pickup
+- cw bg — background current session (runs /session-done first)
+- cw handoff <source> <target> — full context transfer between sessions
+- cw status — show all sessions and their states"""
+
 PURPOSE_PROMPTS: dict[str, str] = {
     "impl": (
         "You are in the IMPLEMENTATION session. "
@@ -40,13 +49,14 @@ def build_session_context(
     Returns a short block that tells the LLM which client and purpose it
     belongs to, so ``cw`` commands use the correct client argument.
     """
-    return (
+    identity = (
         f"[cw identity] Client: '{client_name}'"
         f" | Workspace: {workspace_path}"
         f" | Purpose: {purpose}\n"
         f"Use '{client_name}' as the client argument"
-        f" for all cw commands (e.g. cw queue add {client_name} ...)."
+        f" for all cw commands."
     )
+    return f"{identity}\n\n{CW_COMMAND_REFERENCE}"
 
 
 def get_purpose_prompt(

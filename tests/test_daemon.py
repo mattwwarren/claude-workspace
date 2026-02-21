@@ -617,3 +617,69 @@ class TestPollAllQueues:
         mock_complete.assert_called_once_with(
             "test-client", "item01", "Completed by daemon",
         )
+
+    def test_sends_notification_on_injection_failure(
+        self, tmp_path: Path,
+    ) -> None:
+        event = threading.Event()
+        item = _make_queue_item()
+        client_config = _make_client(tmp_path)
+
+        with (
+            patch("cw.daemon.load_clients", return_value={"test-client": {}}),
+            patch("cw.daemon.claim_next", return_value=item),
+            patch("cw.daemon.get_client", return_value=client_config),
+            patch(
+                "cw.daemon._inject_into_session",
+                side_effect=CwError("No debt session"),
+            ),
+            patch("cw.daemon._rebackground_session"),
+            patch("cw.daemon.fail_item"),
+            patch("cw.daemon.send_notification") as mock_notify,
+        ):
+            result = _poll_all_queues(event)
+
+        assert result is True
+        mock_notify.assert_called_once()
+        call_args = mock_notify.call_args
+        assert call_args[0][0] == "Daemon Item Failed"
+        assert "No debt session" in call_args[0][1]
+        assert call_args[1]["urgency"] == "critical"
+
+    def test_sends_notification_on_timeout(
+        self, tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_zellij: dict[str, list[tuple[object, ...]]],
+    ) -> None:
+        event = threading.Event()
+        item = _make_queue_item()
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.BACKGROUNDED,
+        )
+        state = CwState(sessions=[session])
+
+        with (
+            patch("cw.daemon.load_clients", return_value={"test-client": {}}),
+            patch("cw.daemon.claim_next", return_value=item),
+            patch("cw.daemon.get_client", return_value=client_config),
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state"),
+            patch("cw.daemon.record_event"),
+            patch("cw.daemon.time.sleep"),
+            patch(
+                "cw.daemon.find_handoffs_newer_than",
+                return_value=[],
+            ),
+            patch("cw.daemon._wait_for_completion", return_value=None),
+            patch("cw.daemon._rebackground_session"),
+            patch("cw.daemon.fail_item") as mock_fail,
+            patch("cw.daemon.send_notification") as mock_notify,
+        ):
+            result = _poll_all_queues(event)
+
+        assert result is True
+        mock_fail.assert_called_once()
+        mock_notify.assert_called_once()
+        assert "Timed Out" in mock_notify.call_args[0][0]

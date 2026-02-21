@@ -115,9 +115,12 @@ def start_daemon(
                 _rebackground_session(client_config.name, purpose)
 
                 if handoff_path is None:
-                    fail_item(
-                        client, item.id,
-                        f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s",
+                    timeout_msg = f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s"
+                    fail_item(client, item.id, timeout_msg)
+                    send_notification(
+                        "Daemon Item Timed Out",
+                        f"Queue item {item.id}: {timeout_msg}",
+                        urgency="critical",
                     )
                     click.echo(f"Timed out: {item.id}")
                     continue
@@ -146,6 +149,11 @@ def start_daemon(
                 # is available for the next iteration.
                 _rebackground_session(client_config.name, purpose)
                 fail_item(client, item.id, str(exc))
+                send_notification(
+                    "Daemon Item Failed",
+                    f"Queue item {item.id}: {exc}",
+                    urgency="critical",
+                )
                 click.echo(f"Failed: {item.id} — {exc}")
     finally:
         if pid_file.exists():
@@ -238,9 +246,12 @@ def _poll_all_queues(shutdown_event: threading.Event) -> bool:
                 return True
 
             if handoff_path is None:
-                fail_item(
-                    client_name, item.id,
-                    f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s",
+                timeout_msg = f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s"
+                fail_item(client_name, item.id, timeout_msg)
+                send_notification(
+                    "Daemon Item Timed Out",
+                    f"{client_name}/{purpose} {item.id}: {timeout_msg}",
+                    urgency="critical",
                 )
                 click.echo(f"Timed out: {item.id}")
                 return True
@@ -267,6 +278,11 @@ def _poll_all_queues(shutdown_event: threading.Event) -> bool:
         except Exception as exc:
             _rebackground_session(client_config.name, purpose)
             fail_item(client_name, item.id, str(exc))
+            send_notification(
+                "Daemon Item Failed",
+                f"{client_name}/{purpose} {item.id}: {exc}",
+                urgency="critical",
+            )
             click.echo(f"Failed: {item.id} — {exc}")
 
         return True

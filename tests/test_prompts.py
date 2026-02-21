@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from cw.prompts import (
+    CW_COMMAND_REFERENCE,
     PURPOSE_PROMPTS,
     build_session_context,
     escape_kdl_string,
@@ -103,11 +104,25 @@ class TestBuildSessionContext:
         assert "Client: 'personal'" in result
         assert "Workspace: /home/user/ws" in result
         assert "Purpose: idea" in result
-        assert "cw queue add personal" in result
+        assert "[cw commands]" in result
 
     def test_client_name_in_usage_hint(self) -> None:
         result = build_session_context("my-proj", "/opt/proj", "impl")
-        assert "cw queue add my-proj" in result
+        assert "my-proj" in result
+
+    def test_includes_command_reference(self) -> None:
+        result = build_session_context("personal", "/home/user/ws", "impl")
+        assert "[cw commands]" in result
+        assert "cw hand" in result
+        assert "cw delegate" in result
+        assert "cw queue add" in result
+        assert "cw bg" in result
+        assert "cw handoff" in result
+        assert "cw status" in result
+
+    def test_command_reference_constant_not_empty(self) -> None:
+        assert CW_COMMAND_REFERENCE
+        assert "cw hand" in CW_COMMAND_REFERENCE
 
 
 class TestEscapeKdlString:

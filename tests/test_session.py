@@ -21,6 +21,7 @@ from cw.session import (
     _create_all_purpose_sessions,
     background_session,
     done_session,
+    hand_to_session,
     handoff_session,
     resume_session,
     start_session,
@@ -1579,3 +1580,73 @@ class TestRenameTabOnTransition:
         assert len(mock_zellij["rename_tab"]) == 1
         name_arg = mock_zellij["rename_tab"][0][0]
         assert name_arg == "test-client"
+
+
+class TestHandToSession:
+    def test_raises_when_no_active_sessions(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        state = CwState(sessions=[])
+        save_state(state)
+
+        with pytest.raises(CwError, match="No active sessions"):
+            hand_to_session("debt", "Fix lint")
+
+    def test_raises_with_suggestion_when_target_missing(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="h001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(CwError, match="cw delegate") as exc_info:
+            hand_to_session("debt", "Fix lint")
+        assert "cw queue add" in str(exc_info.value)
+
+    def test_raises_with_suggestion_when_target_backgrounded(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="h001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="h002",
+                    name="test-client/debt",
+                    client="test-client",
+                    purpose=SessionPurpose.DEBT,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                ),
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(CwError, match=r"backgrounded.*not active") as exc_info:
+            hand_to_session("debt", "Fix lint", source_purpose="impl")
+        assert "cw handoff" in str(exc_info.value)
+        assert "cw delegate" in str(exc_info.value)

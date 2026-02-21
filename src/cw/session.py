@@ -558,8 +558,23 @@ def hand_to_session(
     client_name = active[0].client
 
     target = state.find_session(client_name, target_purpose)
-    if target is None or target.status != SessionStatus.ACTIVE:
-        msg = f"No active {target_purpose} session for {client_name}."
+    if target is None:
+        msg = (
+            f"No {target_purpose} session for {client_name}."
+            f' Try: cw delegate {client_name} "<task>"'
+            f" --purpose {target_purpose}"
+            f' or: cw queue add {client_name} "<task>"'
+        )
+        raise CwError(msg)
+    if target.status != SessionStatus.ACTIVE:
+        msg = (
+            f"Session {client_name}/{target_purpose} is"
+            f" {target.status.value}, not active."
+            f" Try: cw handoff {source_purpose or 'impl'}"
+            f" {target_purpose}"
+            f' or: cw delegate {client_name} "<task>"'
+            f" --purpose {target_purpose}"
+        )
         raise CwError(msg)
 
     from_label = source_purpose or "user"
