@@ -589,7 +589,7 @@ class TestDaemonCli:
             runner.invoke(main, ["daemon", "start", "my-client"])
             mock_start.assert_called_once_with(
                 "my-client", "debt",
-                poll_interval=30, review=False,
+                poll_interval=30,
                 auto_bootstrap=True,
             )
 
@@ -598,7 +598,7 @@ class TestDaemonCli:
         with patch("cw.cli.start_daemon_all") as mock_all:
             runner.invoke(main, ["daemon", "start"])
             mock_all.assert_called_once_with(
-                poll_interval=30, review=False,
+                poll_interval=30,
             )
 
     def test_daemon_stop_with_client(self) -> None:

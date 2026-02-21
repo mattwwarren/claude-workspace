@@ -714,7 +714,6 @@ def daemon() -> None:
     default="debt", help="Purpose to process.",
 )
 @click.option("--poll-interval", type=int, default=30, help="Seconds between polls.")
-@click.option("--review", is_flag=True, help="Pause after each item for review.")
 @click.option(
     "--no-bootstrap", is_flag=True, default=False,
     help="Don't auto-start sessions when none exist.",
@@ -724,7 +723,6 @@ def daemon_start(
     client: str | None,
     purpose: str,
     poll_interval: int,
-    review: bool,
     no_bootstrap: bool,
 ) -> None:
     """Start the daemon to process queued tasks.
@@ -735,12 +733,11 @@ def daemon_start(
     Runs in the foreground — designed to be spawned in a Zellij pane.
     """
     if client is None:
-        start_daemon_all(poll_interval=poll_interval, review=review)
+        start_daemon_all(poll_interval=poll_interval)
     else:
         start_daemon(
             client, purpose,
             poll_interval=poll_interval,
-            review=review,
             auto_bootstrap=not no_bootstrap,
         )
 

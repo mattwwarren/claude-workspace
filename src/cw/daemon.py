@@ -59,7 +59,6 @@ def start_daemon(
     purpose: str = "debt",
     *,
     poll_interval: int = 30,
-    review: bool = False,
     auto_bootstrap: bool = True,
 ) -> None:
     """Run the daemon loop — claims and processes queue items.
@@ -84,7 +83,7 @@ def start_daemon(
 
     client_config = get_client(client)
     click.echo(f"Daemon started: {client}/{purpose} (pid {os.getpid()})")
-    click.echo(f"Poll interval: {poll_interval}s, Review mode: {review}")
+    click.echo(f"Poll interval: {poll_interval}s")
     record_event(client, HistoryEvent(
         event_type=EventType.DAEMON_STARTED,
         client=client,
@@ -175,22 +174,18 @@ def start_daemon(
 def start_daemon_all(
     *,
     poll_interval: int = 30,
-    review: bool = False,
 ) -> None:
     """Run a daemon that monitors all client queues.
 
     Items for different (client, purpose) pairs are processed concurrently
     via asyncio tasks, so debt and impl sessions can work in parallel.
     """
-    asyncio.run(_start_daemon_all_async(
-        poll_interval=poll_interval, review=review,
-    ))
+    asyncio.run(_start_daemon_all_async(poll_interval=poll_interval))
 
 
 async def _start_daemon_all_async(
     *,
     poll_interval: int = 30,
-    review: bool = False,
 ) -> None:
     """Async main loop for the all-queues daemon."""
     _ensure_not_running("_all", "_all")
@@ -206,7 +201,7 @@ async def _start_daemon_all_async(
         loop.add_signal_handler(sig, shutdown_event.set)
 
     click.echo(f"Daemon started: all queues (pid {os.getpid()})")
-    click.echo(f"Poll interval: {poll_interval}s, Review mode: {review}")
+    click.echo(f"Poll interval: {poll_interval}s")
 
     # Track one task per (client, purpose) pair.
     active_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
