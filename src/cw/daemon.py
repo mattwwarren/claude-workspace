@@ -29,7 +29,7 @@ from cw.models import (
 )
 from cw.notify import send_notification
 from cw.queue import claim_next, complete_item, fail_item
-from cw.session import CLAUDE_INIT_DELAY_S, CW_SESSION
+from cw.session import CLAUDE_INIT_DELAY_S, CW_SESSION, start_session
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,6 +58,7 @@ def start_daemon(
     *,
     poll_interval: int = 30,
     review: bool = False,
+    auto_bootstrap: bool = True,
 ) -> None:
     """Run the daemon loop — claims and processes queue items.
 
@@ -102,7 +103,10 @@ def start_daemon(
 
             try:
                 before_mtime = time.time()
-                _inject_into_session(client_config, item, purpose)
+                _inject_into_session(
+                    client_config, item, purpose,
+                    auto_bootstrap=auto_bootstrap,
+                )
 
                 handoff_path = _wait_for_completion(
                     client_config.workspace_path,
@@ -290,24 +294,41 @@ def _poll_all_queues(shutdown_event: threading.Event) -> bool:
     return False
 
 
+# Bootstrap polling constants
+_BOOTSTRAP_POLL_INTERVAL_S = 2
+_BOOTSTRAP_TIMEOUT_S = 60
+
+
 def _get_backgrounded_session(
     client_name: str,
     purpose: str,
+    *,
+    auto_bootstrap: bool = False,
 ) -> tuple[Session, CwState]:
     """Load state and find a BACKGROUNDED session.
 
     Returns ``(session, state)`` so callers can mutate and save.
-    Raises :class:`CwError` if no suitable session exists.
+    When *auto_bootstrap* is ``True`` and no session exists, starts
+    a new session and polls until it reaches BACKGROUNDED status.
+    Raises :class:`CwError` if no suitable session exists (or
+    bootstrap times out).
     """
     state = load_state()
     session = state.find_session(client_name, purpose)
 
     if session is None:
-        msg = (
-            f"No {purpose} session for {client_name}."
-            " Run `cw start` first."
-        )
-        raise CwError(msg)
+        if not auto_bootstrap:
+            msg = (
+                f"No {purpose} session for {client_name}."
+                " Run `cw start` first."
+            )
+            raise CwError(msg)
+        # Bootstrap a new session
+        click.echo(f"Bootstrapping {purpose} session for {client_name}...")
+        start_session(client_name, purpose)
+        session = _poll_for_backgrounded(client_name, purpose)
+        state = load_state()
+        return session, state
 
     if session.status != SessionStatus.BACKGROUNDED:
         msg = (
@@ -317,6 +338,26 @@ def _get_backgrounded_session(
         raise CwError(msg)
 
     return session, state
+
+
+def _poll_for_backgrounded(
+    client_name: str,
+    purpose: str,
+) -> Session:
+    """Poll state until a session becomes BACKGROUNDED or timeout."""
+    elapsed = 0
+    while elapsed < _BOOTSTRAP_TIMEOUT_S:
+        time.sleep(_BOOTSTRAP_POLL_INTERVAL_S)
+        elapsed += _BOOTSTRAP_POLL_INTERVAL_S
+        state = load_state()
+        session = state.find_session(client_name, purpose)
+        if session is not None and session.status == SessionStatus.BACKGROUNDED:
+            return session
+    msg = (
+        f"Timed out waiting for {client_name}/{purpose}"
+        f" to reach BACKGROUNDED state ({_BOOTSTRAP_TIMEOUT_S}s)."
+    )
+    raise CwError(msg)
 
 
 def _resume_claude_in_pane(
@@ -352,6 +393,8 @@ def _inject_into_session(
     client_config: ClientConfig,
     item: QueueItem,
     purpose: str,
+    *,
+    auto_bootstrap: bool = False,
 ) -> None:
     """Resume the debt session and inject a workflow prompt.
 
@@ -359,11 +402,16 @@ def _inject_into_session(
     session must be BACKGROUNDED.  The daemon resumes Claude in that pane
     and injects the full workflow prompt via keystroke injection.
 
+    When *auto_bootstrap* is ``True``, automatically starts a session if
+    none exists.
+
     On success the session status is set to ACTIVE.  On failure after
     the resume command has been sent, the session is still marked ACTIVE
     (Claude is running) — the caller is responsible for re-backgrounding.
     """
-    session, state = _get_backgrounded_session(client_config.name, purpose)
+    session, state = _get_backgrounded_session(
+        client_config.name, purpose, auto_bootstrap=auto_bootstrap,
+    )
     workflow_prompt = build_daemon_workflow_prompt(item.task)
 
     # Mark ACTIVE before Zellij IO — after the resume command is sent

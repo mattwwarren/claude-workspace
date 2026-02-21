@@ -727,6 +727,57 @@ def _persist_queue_assignment(client: str, item: QueueItem) -> None:
         save_queue(client, store)
 
 
+def _route_to_existing_session(
+    client_name: str,
+    purpose: str,
+    task_prompt: str,
+    claimed: QueueItem,
+) -> Session | None:
+    """Try to route a delegated task to an existing backgrounded session.
+
+    Returns the session if routing succeeded, None if no suitable session
+    exists and the caller should fall through to spawning a new pane.
+    """
+    state = load_state()
+    session = state.find_session(client_name, purpose)
+    if session is None or session.status != SessionStatus.BACKGROUNDED:
+        return None
+
+    # Resume the backgrounded session and inject the task
+    session.status = SessionStatus.ACTIVE
+    session.resumed_at = datetime.now(UTC)
+    claimed.assigned_session_id = session.id
+    _persist_queue_assignment(client_name, claimed)
+    save_state(state)
+
+    zellij_target = zellij.resolve_session_target(CW_SESSION)
+    tab = session.zellij_tab or session.client
+    zellij.go_to_tab(tab, session=zellij_target)
+    zellij.focus_pane(
+        session.zellij_pane or purpose,
+        session=zellij_target,
+        tab_name=tab,
+    )
+    env_prefix = _build_env_prefix(client_name, purpose)
+    zellij.write_to_pane(
+        f"{env_prefix} claude --resume\n",
+        session=zellij_target,
+    )
+    time.sleep(CLAUDE_INIT_DELAY_S)
+    zellij.write_to_pane(task_prompt + "\n", session=zellij_target)
+
+    record_event(client_name, HistoryEvent(
+        event_type=EventType.SESSION_RESUMED,
+        client=client_name,
+        session_id=session.id,
+        session_name=session.name,
+        purpose=purpose,
+        detail=f"Routed delegate: {claimed.task.description}",
+    ))
+    click.echo(f"Routed to existing session: {session.name}")
+    return session
+
+
 def delegate_task(
     client_name: str,
     description: str,
@@ -735,11 +786,13 @@ def delegate_task(
     prompt: str | None = None,
     context_files: list[str] | None = None,
     interactive: bool = False,
+    priority: int = 0,
 ) -> Session:
-    """Delegate a task to a new Zellij pane running Claude.
+    """Delegate a task to a Zellij pane running Claude.
 
-    Creates a queue item for tracking, claims it immediately,
-    spawns a new session in a dynamic Zellij pane.
+    First checks for an existing backgrounded session with the matching
+    purpose; if found, routes the task there.  Otherwise creates a queue
+    item, claims it, and spawns a new session in a dynamic Zellij pane.
     """
     _ensure_zellij()
     if not zellij.in_zellij_session():
@@ -755,6 +808,7 @@ def delegate_task(
         purpose=SessionPurpose(purpose),
         prompt=task_prompt,
         context_files=context_files or [],
+        priority=priority,
     )
 
     # Add to queue and claim immediately
@@ -764,7 +818,14 @@ def delegate_task(
         msg = "Failed to claim queue item."
         raise CwError(msg)
 
-    # Create session
+    # Try routing to an existing backgrounded session
+    routed = _route_to_existing_session(
+        client_name, purpose, task_prompt, claimed,
+    )
+    if routed is not None:
+        return routed
+
+    # Create new session in a dynamic pane
     session = Session(
         name=f"{client_name}/delegate-{claimed.id}",
         client=client_name,

@@ -590,6 +590,7 @@ class TestDaemonCli:
             mock_start.assert_called_once_with(
                 "my-client", "debt",
                 poll_interval=30, review=False,
+                auto_bootstrap=True,
             )
 
     def test_daemon_start_no_args_calls_all(self) -> None:

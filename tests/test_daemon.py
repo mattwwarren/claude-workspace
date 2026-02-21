@@ -385,6 +385,70 @@ class TestGetBackgroundedSession:
         ):
             _get_backgrounded_session("test-client", "debt")
 
+    def test_auto_bootstrap_false_raises_on_missing(
+        self, tmp_path: Path,
+    ) -> None:
+        state = CwState(sessions=[])
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            pytest.raises(CwError, match="No debt session"),
+        ):
+            _get_backgrounded_session(
+                "test-client", "debt", auto_bootstrap=False,
+            )
+
+    def test_auto_bootstrap_calls_start_session(
+        self, tmp_path: Path,
+    ) -> None:
+        """When auto_bootstrap=True and no session exists,
+        start_session is called and we poll for BACKGROUNDED."""
+        bg_session = _make_session(
+            tmp_path / "workspace",
+            status=SessionStatus.BACKGROUNDED,
+        )
+        state_empty = CwState(sessions=[])
+        state_with_bg = CwState(sessions=[bg_session])
+
+        # load_state is called: 1) initial check, 2) poll iteration,
+        # 3) final reload after bootstrap returns
+        def _load_state_side_effect() -> CwState:
+            if _load_state_side_effect.call_count == 0:
+                _load_state_side_effect.call_count += 1
+                return state_empty
+            return state_with_bg
+
+        _load_state_side_effect.call_count = 0  # type: ignore[attr-defined]
+
+        with (
+            patch(
+                "cw.daemon.load_state",
+                side_effect=_load_state_side_effect,
+            ),
+            patch("cw.daemon.start_session") as mock_start,
+            patch("cw.daemon.time.sleep"),
+        ):
+            session, _state = _get_backgrounded_session(
+                "test-client", "debt", auto_bootstrap=True,
+            )
+            mock_start.assert_called_once_with("test-client", "debt")
+            assert session.status == SessionStatus.BACKGROUNDED
+
+    def test_auto_bootstrap_timeout_raises(
+        self, tmp_path: Path,
+    ) -> None:
+        """When bootstrapped session never becomes BACKGROUNDED, timeout."""
+        state_empty = CwState(sessions=[])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state_empty),
+            patch("cw.daemon.start_session"),
+            patch("cw.daemon.time.sleep"),
+            pytest.raises(CwError, match="Timed out"),
+        ):
+            _get_backgrounded_session(
+                "test-client", "debt", auto_bootstrap=True,
+            )
+
 
 class TestInjectIntoSession:
     def test_writes_to_pane(

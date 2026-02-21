@@ -15,6 +15,7 @@ from cw.models import (
     CwState,
     QueueItemStatus,
     QueueStore,
+    Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
@@ -517,3 +518,116 @@ def _load_queue_from_dir(queues_dir: Path, client: str) -> QueueStore:
     if not path.exists():
         return QueueStore()
     return QueueStore.model_validate(json.loads(path.read_text()))
+
+
+# ---------------------------------------------------------------------------
+# Tests for routing to existing backgrounded sessions
+# ---------------------------------------------------------------------------
+
+
+class TestDelegateRoutesToExistingSession:
+    """When a backgrounded session exists, delegate should route to it
+    instead of spawning a new pane."""
+
+    @pytest.fixture
+    def delegate_with_bg_session(
+        self,
+        delegate_setup: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Add a backgrounded debt session to the state."""
+        client = delegate_setup["client"]
+        bg_session = Session(
+            id="bg-debt-01",
+            name=f"{client.name}/debt",
+            client=client.name,
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.BACKGROUNDED,
+            workspace_path=client.workspace_path,
+            zellij_pane="debt",
+            zellij_tab=client.name,
+        )
+        state = load_state()
+        state.sessions.append(bg_session)
+        save_state(state)
+        delegate_setup["bg_session"] = bg_session
+        return delegate_setup
+
+    def test_routes_to_backgrounded_session(
+        self,
+        delegate_with_bg_session: dict[str, Any],
+    ) -> None:
+        client = delegate_with_bg_session["client"]
+        new_pane_calls = delegate_with_bg_session["new_pane_calls"]
+
+        session = delegate_task(client.name, "Fix ruff violations")
+
+        # Should NOT spawn a new pane
+        assert len(new_pane_calls) == 0
+        # Should return the existing session
+        assert session.id == "bg-debt-01"
+
+    def test_existing_session_marked_active(
+        self,
+        delegate_with_bg_session: dict[str, Any],
+    ) -> None:
+        client = delegate_with_bg_session["client"]
+
+        delegate_task(client.name, "Fix ruff violations")
+
+        state = load_state()
+        session = state.find_by_name_or_id("bg-debt-01")
+        assert session is not None
+        assert session.status == SessionStatus.ACTIVE
+
+    def test_injects_resume_and_prompt(
+        self,
+        delegate_with_bg_session: dict[str, Any],
+    ) -> None:
+        client = delegate_with_bg_session["client"]
+        calls = delegate_with_bg_session["calls"]
+
+        delegate_task(client.name, "Fix ruff violations")
+
+        write_calls = calls["write_to_pane"]
+        # Should have at least 2 writes: resume command and task prompt
+        assert len(write_calls) >= 2
+        resume_text = write_calls[0][0]
+        assert "claude --resume" in resume_text
+
+    def test_spawns_new_pane_when_no_bg_session(
+        self,
+        delegate_setup: dict[str, Any],
+    ) -> None:
+        client = delegate_setup["client"]
+        new_pane_calls = delegate_setup["new_pane_calls"]
+
+        delegate_task(client.name, "Fix ruff violations")
+
+        # Should spawn a new pane since no backgrounded session exists
+        assert len(new_pane_calls) == 1
+
+
+class TestDelegateWithPriority:
+    def test_priority_stored_in_task_spec(
+        self,
+        delegate_setup: dict[str, Any],
+    ) -> None:
+        client = delegate_setup["client"]
+        queues_dir = delegate_setup["queues_dir"]
+
+        delegate_task(client.name, "Urgent fix", priority=10)
+
+        store = _load_queue_from_dir(queues_dir, client.name)
+        assert store.items[0].task.priority == 10
+
+    def test_default_priority_is_zero(
+        self,
+        delegate_setup: dict[str, Any],
+    ) -> None:
+        client = delegate_setup["client"]
+        queues_dir = delegate_setup["queues_dir"]
+
+        delegate_task(client.name, "Regular task")
+
+        store = _load_queue_from_dir(queues_dir, client.name)
+        assert store.items[0].task.priority == 0

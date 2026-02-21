@@ -142,3 +142,8 @@ def record_event(client: str, event: HistoryEvent) -> None:
     client_config = clients.get(client)
     if client_config and client_config.notifications:
         notify_event(event)
+
+    # Dispatch user-defined event hooks (fire-and-forget)
+    from cw.hooks import dispatch_event_hooks
+
+    dispatch_event_hooks(client, event.event_type, event.metadata)

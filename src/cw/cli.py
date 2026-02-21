@@ -15,8 +15,14 @@ from cw.daemon import daemon_status as _daemon_status_fn
 from cw.daemon import start_daemon, start_daemon_all, stop_daemon
 from cw.exceptions import CwError
 from cw.history import EventType, load_history
+from cw.hooks import (
+    add_event_hook,
+    install_context_hook,
+    list_event_hooks,
+    remove_event_hook,
+    uninstall_context_hook,
+)
 from cw.hooks import hook_status as _hook_status_fn
-from cw.hooks import install_context_hook, uninstall_context_hook
 from cw.models import (
     CompletionReason,
     CwState,
@@ -463,13 +469,21 @@ def queue() -> None:
     default="debt", help="Queue purpose.",
 )
 @click.option("--prompt", default=None, help="Exact prompt for Claude.")
+@click.option("--priority", type=int, default=0, help="Priority (higher = sooner).")
 @handle_errors
-def queue_add(client: str, description: str, purpose: str, prompt: str | None) -> None:
+def queue_add(
+    client: str,
+    description: str,
+    purpose: str,
+    prompt: str | None,
+    priority: int,
+) -> None:
     """Add a work item to the queue."""
     task = TaskSpec(
         description=description,
         purpose=SessionPurpose(purpose),
         prompt=prompt or description,
+        priority=priority,
     )
     item = add_item(client, task)
     click.echo(f"Added queue item: {item.id} ({description})")
@@ -552,6 +566,7 @@ def queue_clear(client: str, purpose: str | None, completed: bool) -> None:
     "--context-files", default=None,
     help="Comma-separated file paths for context.",
 )
+@click.option("--priority", type=int, default=0, help="Priority (higher = sooner).")
 @handle_errors
 def delegate(
     client: str,
@@ -560,19 +575,25 @@ def delegate(
     prompt: str | None,
     interactive: bool,
     context_files: str | None,
+    priority: int,
 ) -> None:
     """Delegate a task to a new Zellij pane running Claude.
+
+    Routes to an existing backgrounded session if one is available,
+    otherwise spawns a new pane.
 
     \b
     Examples:
       cw delegate my-client "Fix ruff violations" --purpose debt
       cw delegate my-client "Run pytest" --purpose impl --interactive
+      cw delegate my-client "Urgent fix" --priority 10
     """
     files = context_files.split(",") if context_files else None
     delegate_task(
         client, description,
         purpose=purpose, prompt=prompt,
         context_files=files, interactive=interactive,
+        priority=priority,
     )
 
 
@@ -620,6 +641,64 @@ def hook_status(client: str) -> None:
     click.echo(f"Turns:     {info['turn_count']}")
 
 
+@hook.command(name="add")
+@click.argument("client", shell_complete=_complete_client)
+@click.argument(
+    "event_type",
+    type=click.Choice([e.value for e in EventType]),
+)
+@click.argument("command")
+@click.option("--description", "-d", default="", help="Human-readable description.")
+@handle_errors
+def hook_add(
+    client: str,
+    event_type: str,
+    command: str,
+    description: str,
+) -> None:
+    """Add an event hook that runs a shell command on lifecycle events.
+
+    \b
+    Examples:
+      cw hook add personal session_backgrounded "echo bg >> /tmp/cw.log"
+      cw hook add personal queue_item_completed "notify-send 'Done!'"
+    """
+    rule = add_event_hook(client, event_type, command, description=description)
+    click.echo(f"Added hook: {rule.event_type} -> {rule.command}")
+
+
+@hook.command(name="remove")
+@click.argument("client", shell_complete=_complete_client)
+@click.argument(
+    "event_type",
+    type=click.Choice([e.value for e in EventType]),
+)
+@handle_errors
+def hook_remove(client: str, event_type: str) -> None:
+    """Remove all event hooks for a given event type."""
+    removed = remove_event_hook(client, event_type)
+    if removed == 0:
+        click.echo(f"No hooks found for event type '{event_type}'.")
+    else:
+        click.echo(f"Removed {removed} hook(s) for '{event_type}'.")
+
+
+@hook.command(name="list")
+@click.argument("client", shell_complete=_complete_client)
+@handle_errors
+def hook_list(client: str) -> None:
+    """List all event hooks for a client."""
+    rules = list_event_hooks(client)
+    if not rules:
+        click.echo("No event hooks configured.")
+        return
+
+    click.echo(f"{'EVENT TYPE':<28} {'COMMAND'}")
+    click.echo("-" * 60)
+    for rule in rules:
+        click.echo(f"{rule.event_type:<28} {rule.command}")
+
+
 # --- Daemon command group ---
 
 @main.group()
@@ -636,12 +715,17 @@ def daemon() -> None:
 )
 @click.option("--poll-interval", type=int, default=30, help="Seconds between polls.")
 @click.option("--review", is_flag=True, help="Pause after each item for review.")
+@click.option(
+    "--no-bootstrap", is_flag=True, default=False,
+    help="Don't auto-start sessions when none exist.",
+)
 @handle_errors
 def daemon_start(
     client: str | None,
     purpose: str,
     poll_interval: int,
     review: bool,
+    no_bootstrap: bool,
 ) -> None:
     """Start the daemon to process queued tasks.
 
@@ -653,7 +737,12 @@ def daemon_start(
     if client is None:
         start_daemon_all(poll_interval=poll_interval, review=review)
     else:
-        start_daemon(client, purpose, poll_interval=poll_interval, review=review)
+        start_daemon(
+            client, purpose,
+            poll_interval=poll_interval,
+            review=review,
+            auto_bootstrap=not no_bootstrap,
+        )
 
 
 @daemon.command(name="stop")

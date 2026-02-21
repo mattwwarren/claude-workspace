@@ -81,6 +81,8 @@ def claim_next(
     """Claim the next pending item, optionally filtered by purpose.
 
     Returns the claimed item (now RUNNING), or None if queue is empty.
+    Items are sorted by priority (highest first), then by insertion
+    order (FIFO within the same priority tier).
 
     Note: This uses file-level locking (``fcntl.flock``) to prevent
     concurrent processes from claiming the same item.  When *purpose*
@@ -89,16 +91,21 @@ def claim_next(
     """
     with _queue_lock(client):
         store = load_queue(client)
-        for item in store.items:
-            if item.status != QueueItemStatus.PENDING:
-                continue
-            if purpose is not None and item.task.purpose != purpose:
-                continue
-            item.status = QueueItemStatus.RUNNING
-            item.started_at = datetime.now(UTC)
-            save_queue(client, store)
-            return item
-    return None
+        candidates = [
+            (idx, item)
+            for idx, item in enumerate(store.items)
+            if item.status == QueueItemStatus.PENDING
+            and (purpose is None or item.task.purpose == purpose)
+        ]
+        if not candidates:
+            return None
+        # Sort by priority descending, then original index ascending (FIFO)
+        candidates.sort(key=lambda pair: (-pair[1].task.priority, pair[0]))
+        _, best = candidates[0]
+        best.status = QueueItemStatus.RUNNING
+        best.started_at = datetime.now(UTC)
+        save_queue(client, store)
+        return best
 
 
 def complete_item(client: str, item_id: str, result: str) -> None:

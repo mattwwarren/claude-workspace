@@ -704,3 +704,120 @@ class TestEdgeCases:
         item = add_item("c", _make_task())
         assert item.created_at.tzinfo is not None
         assert item.created_at.tzinfo == UTC
+
+
+# ---------------------------------------------------------------------------
+# TestPrioritySorting
+# ---------------------------------------------------------------------------
+
+
+class TestPrioritySorting:
+    def test_higher_priority_claimed_first(self, tmp_queues_dir: Path) -> None:
+        add_item(
+            "c", _make_task(description="low", purpose=SessionPurpose.DEBT),
+        )
+        high = add_item(
+            "c",
+            TaskSpec(
+                description="high",
+                purpose=SessionPurpose.DEBT,
+                prompt="high priority",
+                priority=10,
+            ),
+        )
+        claimed = claim_next("c")
+        assert claimed is not None
+        assert claimed.id == high.id
+
+    def test_fifo_within_same_priority(self, tmp_queues_dir: Path) -> None:
+        first = add_item("c", _make_task(description="first"))
+        add_item("c", _make_task(description="second"))
+        claimed = claim_next("c")
+        assert claimed is not None
+        assert claimed.id == first.id
+
+    def test_priority_zero_is_default(self, tmp_queues_dir: Path) -> None:
+        item = add_item("c", _make_task())
+        assert item.task.priority == 0
+
+    def test_multiple_priority_tiers(self, tmp_queues_dir: Path) -> None:
+        low = add_item(
+            "c",
+            TaskSpec(
+                description="low", purpose=SessionPurpose.DEBT,
+                prompt="low", priority=1,
+            ),
+        )
+        mid = add_item(
+            "c",
+            TaskSpec(
+                description="mid", purpose=SessionPurpose.DEBT,
+                prompt="mid", priority=5,
+            ),
+        )
+        high = add_item(
+            "c",
+            TaskSpec(
+                description="high", purpose=SessionPurpose.DEBT,
+                prompt="high", priority=10,
+            ),
+        )
+        first = claim_next("c")
+        second = claim_next("c")
+        third = claim_next("c")
+        assert first is not None
+        assert first.id == high.id
+        assert second is not None
+        assert second.id == mid.id
+        assert third is not None
+        assert third.id == low.id
+
+    def test_priority_with_purpose_filter(self, tmp_queues_dir: Path) -> None:
+        add_item(
+            "c",
+            TaskSpec(
+                description="impl low", purpose=SessionPurpose.IMPL,
+                prompt="impl low", priority=1,
+            ),
+        )
+        high_debt = add_item(
+            "c",
+            TaskSpec(
+                description="debt high", purpose=SessionPurpose.DEBT,
+                prompt="debt high", priority=10,
+            ),
+        )
+        add_item(
+            "c",
+            TaskSpec(
+                description="debt low", purpose=SessionPurpose.DEBT,
+                prompt="debt low", priority=1,
+            ),
+        )
+        claimed = claim_next("c", purpose=SessionPurpose.DEBT)
+        assert claimed is not None
+        assert claimed.id == high_debt.id
+
+    def test_negative_priority(self, tmp_queues_dir: Path) -> None:
+        normal = add_item("c", _make_task(description="normal"))
+        add_item(
+            "c",
+            TaskSpec(
+                description="deprioritized", purpose=SessionPurpose.IMPL,
+                prompt="low", priority=-5,
+            ),
+        )
+        claimed = claim_next("c")
+        assert claimed is not None
+        assert claimed.id == normal.id
+
+    def test_priority_preserved_in_roundtrip(self, tmp_queues_dir: Path) -> None:
+        add_item(
+            "c",
+            TaskSpec(
+                description="test", purpose=SessionPurpose.DEBT,
+                prompt="test", priority=42,
+            ),
+        )
+        store = load_queue("c")
+        assert store.items[0].task.priority == 42

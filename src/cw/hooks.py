@@ -1,18 +1,25 @@
-"""Hook management for auto-backgrounding on context exhaustion."""
+"""Hook management for auto-backgrounding and event dispatch."""
 
 from __future__ import annotations
 
 import contextlib
+import json
+import logging
+import os
 import re
+import subprocess
 from typing import TYPE_CHECKING
 
 import click
 
 from cw.config import HOOKS_DIR
 from cw.exceptions import CwError
+from cw.models import EventHookRegistry, HookRule
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 _SAFE_CLIENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
@@ -118,3 +125,115 @@ def reset_turn_count(client: str) -> None:
     turn_path = _turn_count_path(client)
     if turn_path.exists():
         turn_path.write_text("0")
+
+
+# ---------------------------------------------------------------------------
+# Event hook registry — user-defined shell commands for lifecycle events
+# ---------------------------------------------------------------------------
+
+
+def _event_hook_registry_path(client: str) -> Path:
+    """Return the JSON registry path for a client's event hooks."""
+    return HOOKS_DIR / f"event-hooks-{client}.json"
+
+
+def load_event_hooks(client: str) -> EventHookRegistry:
+    """Load event hook rules for a client from disk."""
+    path = _event_hook_registry_path(client)
+    if not path.exists():
+        return EventHookRegistry()
+    raw = json.loads(path.read_text())
+    return EventHookRegistry.model_validate(raw)
+
+
+def save_event_hooks(client: str, registry: EventHookRegistry) -> None:
+    """Persist event hook rules for a client to disk."""
+    HOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _event_hook_registry_path(client)
+    path.write_text(registry.model_dump_json(indent=2))
+
+
+def add_event_hook(
+    client: str,
+    event_type: str,
+    command: str,
+    *,
+    description: str = "",
+) -> HookRule:
+    """Add an event hook rule for a client."""
+    registry = load_event_hooks(client)
+    rule = HookRule(
+        event_type=event_type,
+        command=command,
+        description=description,
+    )
+    registry.rules.append(rule)
+    save_event_hooks(client, registry)
+    return rule
+
+
+def remove_event_hook(client: str, event_type: str) -> int:
+    """Remove all event hook rules matching an event type.
+
+    Returns the number of rules removed.
+    """
+    registry = load_event_hooks(client)
+    original_count = len(registry.rules)
+    registry.rules = [
+        r for r in registry.rules if r.event_type != event_type
+    ]
+    removed = original_count - len(registry.rules)
+    if removed > 0:
+        save_event_hooks(client, registry)
+    return removed
+
+
+def list_event_hooks(client: str) -> list[HookRule]:
+    """List all event hook rules for a client."""
+    return load_event_hooks(client).rules
+
+
+def dispatch_event_hooks(
+    client: str,
+    event_type: str,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Fire matching event hooks as fire-and-forget subprocesses.
+
+    Hooks must never break the caller — all exceptions are caught and logged.
+    Environment variables are set for the hook command:
+    - CW_CLIENT: the client name
+    - CW_EVENT_TYPE: the event type string
+    - CW_META_<KEY>: one per metadata entry (uppercased key)
+    """
+    try:
+        registry = load_event_hooks(client)
+    except Exception:
+        log.debug("Failed to load event hooks for %s", client, exc_info=True)
+        return
+
+    matching = [r for r in registry.rules if r.event_type == event_type]
+    if not matching:
+        return
+
+    env = os.environ.copy()
+    env["CW_CLIENT"] = client
+    env["CW_EVENT_TYPE"] = event_type
+    if metadata:
+        for key, value in metadata.items():
+            env[f"CW_META_{key.upper()}"] = value
+
+    for rule in matching:
+        try:
+            subprocess.Popen(
+                ["/bin/sh", "-c", rule.command],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            log.debug(
+                "Failed to dispatch hook %r for %s/%s",
+                rule.command, client, event_type,
+                exc_info=True,
+            )

@@ -59,6 +59,8 @@ class TaskSpec(BaseModel):
     context_files: list[str] = Field(default_factory=list)
     success_criteria: str | None = None
     source_session: str | None = None
+    priority: int = 0
+    target_session: str | None = None
 
 
 class QueueItem(BaseModel):
@@ -97,6 +99,20 @@ class QueueStore(BaseModel):
             if item.id == item_id:
                 return item
         return None
+
+
+class HookRule(BaseModel):
+    """A user-defined shell command to run when a lifecycle event fires."""
+
+    event_type: str
+    command: str
+    description: str = ""
+
+
+class EventHookRegistry(BaseModel):
+    """Persisted event hook rules for a client."""
+
+    rules: list[HookRule] = Field(default_factory=list)
 
 
 class Session(BaseModel):
