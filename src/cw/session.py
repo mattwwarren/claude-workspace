@@ -105,7 +105,7 @@ def _build_pane_args(
             env_prefix = f"{_build_env_prefix(client_name, purpose)} "
         else:
             env_prefix = ""
-        cmd = f"{env_prefix}claude{extra}"
+        cmd = f"{env_prefix}claude --resume{extra}"
         # KDL-quote the whole command for the layout template.
         # Escape backslashes and double quotes so the KDL string is valid.
         kdl_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
