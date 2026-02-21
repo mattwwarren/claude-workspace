@@ -429,6 +429,26 @@ def background_session(
         _notify_sibling(session.client, session.purpose, notify)
 
 
+def background_all_sessions(
+    *,
+    notify: str | None = None,
+    auto: bool = False,
+) -> None:
+    """Background all active sessions sequentially."""
+    state = load_state()
+    active = state.active_sessions()
+    if not active:
+        click.echo("No active sessions to background.")
+        return
+
+    click.echo(f"Backgrounding {len(active)} active session(s)...")
+    for session in active:
+        try:
+            background_session(session.name, notify=notify, auto=auto)
+        except CwError as exc:
+            click.echo(f"Warning: could not background {session.name}: {exc}")
+
+
 def resume_session(session_name: str) -> None:
     """Resume a backgrounded session with its handoff context."""
     _ensure_zellij()

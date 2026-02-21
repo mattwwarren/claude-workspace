@@ -30,6 +30,7 @@ from cw.plan import find_plan_files, parse_plan
 from cw.queue import add_item, clear_queue, load_queue, remove_item
 from cw.session import (
     CW_SESSION,
+    background_all_sessions,
     background_session,
     delegate_task,
     done_session,
@@ -118,14 +119,28 @@ def start(client: str, purpose: str, worktree: str | None) -> None:
     "--auto", is_flag=True, default=False,
     help="Mark as auto-backgrounded (used by hooks).",
 )
+@click.option(
+    "--all", "all_sessions", is_flag=True, default=False,
+    help="Background all active sessions sequentially.",
+)
 @handle_errors
-def bg(session_name: str | None, notify: str | None, auto: bool) -> None:
+def bg(
+    session_name: str | None,
+    notify: str | None,
+    auto: bool,
+    all_sessions: bool,
+) -> None:
     """Background the current session (auto-handoff).
 
     Optionally specify SESSION_NAME to background a specific session
     remotely (e.g. 'personal/debt' or a session ID).
+
+    Use --all to background every active session sequentially.
     """
-    background_session(session_name, notify=notify, auto=auto)
+    if all_sessions:
+        background_all_sessions(notify=notify, auto=auto)
+    else:
+        background_session(session_name, notify=notify, auto=auto)
 
 
 @main.command()

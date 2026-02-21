@@ -19,6 +19,7 @@ from cw.models import (
 from cw.session import (
     _build_pane_args,
     _create_all_purpose_sessions,
+    background_all_sessions,
     background_session,
     done_session,
     hand_to_session,
@@ -1650,3 +1651,49 @@ class TestHandToSession:
             hand_to_session("debt", "Fix lint", source_purpose="impl")
         assert "cw handoff" in str(exc_info.value)
         assert "cw delegate" in str(exc_info.value)
+
+
+class TestBackgroundAllSessions:
+    def test_backgrounds_all_active(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_zellij: dict[str, list[Any]],
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="a001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+                Session(
+                    id="a002",
+                    name="test-client/idea",
+                    client="test-client",
+                    purpose=SessionPurpose.IDEA,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                ),
+            ]
+        )
+        save_state(state)
+
+        background_all_sessions()
+
+        updated = load_state()
+        for s in updated.sessions:
+            assert s.status == SessionStatus.BACKGROUNDED
+
+    def test_no_active_sessions_is_noop(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        state = CwState(sessions=[])
+        save_state(state)
+
+        background_all_sessions()  # Should not raise
