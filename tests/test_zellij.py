@@ -189,7 +189,6 @@ class TestGenerateLayout:
         assert 'name="impl"' in content
         assert 'name="idea"' in content
         assert 'name="debt"' in content
-        assert 'name="files"' in content
 
     def test_single_purpose_layout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -222,8 +221,7 @@ class TestGenerateLayout:
         assert 'name="impl"' in content
         assert 'name="idea"' in content
         assert 'name="debt"' not in content
-        assert 'size="70%"' in content
-        assert 'size="30%"' in content
+        assert 'size="50%"' in content
 
     def test_four_purpose_layout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -242,8 +240,7 @@ class TestGenerateLayout:
         assert 'name="idea"' in content
         assert 'name="debt"' in content
         assert 'name="explore"' in content
-        assert 'size="60%"' in content
-        assert 'size="40%"' in content
+        assert 'size="50%"' in content
 
     def test_layout_with_prompt_special_chars(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -285,6 +282,66 @@ class TestGenerateLayout:
         assert 'cwd "/custom/worktree"' in content
         assert f'cwd "{ws_dir}"' in content
 
+    def test_default_layout_structure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default layout: idea primary left, impl+debt right."""
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="regress", workspace_path=ws_dir)
+        result = generate_layout(client)
+        content = result.read_text()
+
+        # idea is the primary (first) pane with focus
+        assert 'name="idea" focus=true' in content
+
+        # impl and debt are secondary panes (no focus)
+        assert 'name="impl"' in content
+        assert 'name="debt"' in content
+        assert content.index('name="idea"') < content.index('name="impl"')
+        assert content.index('name="impl"') < content.index('name="debt"')
+
+        # Terminal pane below idea (runs daemon)
+        assert 'name="terminal"' in content
+        assert "cw daemon start" in content
+        assert content.index('name="idea"') < content.index('name="terminal"')
+
+        # No yazi/files pane
+        assert "yazi" not in content
+        assert 'name="files"' not in content
+
+    def test_primary_pane_gets_focus(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: first purpose always gets focus=true."""
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="focus", workspace_path=ws_dir)
+        result = generate_layout(client, purposes=["debt", "impl"])
+        content = result.read_text()
+        assert 'name="debt" focus=true' in content
+
+    def test_all_panes_get_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: every pane gets a cwd set to workspace path."""
+        layouts_dir = tmp_path / "layouts"
+        monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        client = ClientConfig(name="cwd", workspace_path=ws_dir)
+        result = generate_layout(client)
+        content = result.read_text()
+        # 3 purpose panes + 1 terminal pane = 4 cwd references
+        assert content.count(f'cwd "{ws_dir}"') == 4
+
 
 class TestWriteToPane:
     def test_calls_zellij(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,15 +378,16 @@ class TestFocusPane:
         calls: list[tuple[str, ...]] = []
 
         # dump-layout with command= so pane-to-terminal mapping works
+        # 0=idea, 1=terminal (daemon), 2=impl, 3=debt
         layout = (
             'tab name="Tab #1" {\n'
-            '  pane command="yazi" name="files" {\n'
-            '  pane command="claude" name="impl" {\n'
             '  pane command="claude" name="idea" {\n'
+            '  pane command="bash" name="terminal" {\n'
+            '  pane command="claude" name="impl" {\n'
             '  pane command="claude" name="debt" {\n'
         )
-        # Cycle: start on idea (terminal_2), target impl (terminal_1)
-        focused_terminal = ["terminal_2"]
+        # Cycle: start on idea (terminal_0), target impl (terminal_2)
+        focused_terminal = ["terminal_0"]
 
         def mock_run(*args: str, check: bool = True) -> MagicMock:
             calls.append(args)
@@ -342,11 +400,12 @@ class TestFocusPane:
                     f"1         {focused_terminal[0]}     claude\n"
                 )
             elif "focus-next-pane" in args:
-                # Simulate cycle: 2 -> 3 -> 0 -> 1
+                # Simulate cycle: 0 -> 1 -> 2 -> 3 -> 0
                 cycle = {
+                    "terminal_0": "terminal_1",
+                    "terminal_1": "terminal_2",
                     "terminal_2": "terminal_3",
                     "terminal_3": "terminal_0",
-                    "terminal_0": "terminal_1",
                 }
                 focused_terminal[0] = cycle.get(
                     focused_terminal[0], "terminal_0"
@@ -354,19 +413,19 @@ class TestFocusPane:
             return result
 
         monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
-        focus_pane("impl")  # impl = terminal_1
+        focus_pane("impl")  # impl = terminal_2
         focus_calls = [c for c in calls if "focus-next-pane" in c]
-        # Should cycle 3 times: idea->debt->files->impl
-        assert len(focus_calls) == 3
+        # Should cycle 2 times: idea->terminal->impl
+        assert len(focus_calls) == 2
 
 
 class TestCheckPaneHealth:
     def test_all_panes_alive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         layout = (
             'tab name="Tab #1" {\n'
-            '  pane command="yazi" name="files" {\n'
-            '  pane command="claude" name="impl" {\n'
             '  pane command="claude" name="idea" {\n'
+            '  pane command="bash" name="terminal" {\n'
+            '  pane command="claude" name="impl" {\n'
             '  pane command="claude" name="debt" {\n'
         )
         mock_result = MagicMock(returncode=0, stdout=layout)
@@ -376,18 +435,18 @@ class TestCheckPaneHealth:
 
         health = check_pane_health()
         assert health == {
-            "files": True,
-            "impl": True,
+            "terminal": True,
             "idea": True,
+            "impl": True,
             "debt": True,
         }
 
     def test_exited_pane_detected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         layout = (
             'tab name="Tab #1" {\n'
-            '  pane command="yazi" name="files" {\n'
-            '  pane command="claude" name="impl" exited {\n'
             '  pane command="claude" name="idea" {\n'
+            '  pane command="bash" name="terminal" {\n'
+            '  pane command="claude" name="impl" exited {\n'
             '  pane command="claude" name="debt" exited {\n'
         )
         mock_result = MagicMock(returncode=0, stdout=layout)

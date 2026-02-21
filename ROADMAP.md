@@ -4,17 +4,17 @@
 
 ---
 
-## v1: The Workbench (Current)
+## v1: The Workbench ✓
 
 **Theme:** Manage multiple Claude Code sessions without losing context.
 
 Core workflow: start → work → background → switch client → resume.
 
-- Zellij layout engine (tabs per client, panes per purpose)
-- `cw` CLI for session lifecycle (start, bg, resume, list, switch)
-- Integration with existing handoff pipeline (`/session-done`)
-- Per-client config with workspace path mapping
-- Yazi file tree pane for navigation
+- ✓ Zellij layout engine (tabs per client, panes per purpose)
+- ✓ `cw` CLI for session lifecycle (start, bg, resume, list, switch)
+- ✓ Integration with existing handoff pipeline (`/session-done`)
+- ✓ Per-client config with workspace path mapping
+- ✓ Yazi file tree pane for navigation
 
 **Guiding principles:**
 1. Context is the bottleneck - make it cheap to spin off and resume work
@@ -24,39 +24,39 @@ Core workflow: start → work → background → switch client → resume.
 
 ---
 
-## v2: Worktrees & Multi-Purpose Sessions
+## v2: Worktrees & Multi-Purpose Sessions ✓
 
 **Theme:** Full parallel development per client.
 
-- `cw start client --worktree feat/search` - auto-create worktree, set pane cwd
-- `cw start client --purpose review` - spin up review session targeting impl's branch
-- Purpose-aware CLAUDE.md injection: review sessions get review-focused instructions, debt sessions get debt-focused instructions
-- Worktree cleanup: `cw done client/impl` closes session, optionally cleans worktree
-- Session templates per client: define which purposes auto-start (e.g., "sigma always gets impl + review")
+- ✓ `cw start client --worktree feat/search` - auto-create worktree, set pane cwd
+- ✓ `cw start client --purpose review` - spin up review session targeting impl's branch
+- ✓ Purpose-aware CLAUDE.md injection: review sessions get review-focused instructions, debt sessions get debt-focused instructions
+- ✓ Worktree cleanup: `cw done client/impl` closes session, optionally cleans worktree
+- ✓ Session templates per client: define which purposes auto-start (e.g., "sigma always gets impl + review")
 
 ---
 
-## v3: Cross-Session Awareness
+## v3: Cross-Session Awareness (Current — mostly complete)
 
 **Theme:** Sessions that know about each other.
 
-- Shared state directory per client: `~/.local/share/cw/clients/<name>/` with session summaries
-- `cw handoff impl→review` - impl generates a handoff, review auto-resumes with that context on the same branch
-- Session event hooks: "when impl backgrounds, notify review"
-- Health monitoring: detect dead/crashed Claude sessions, mark as completed, surface in `cw status`
-- `cw plan <client>` - show active plan progress across all sessions for a client
+- ✓ Shared state directory per client: `~/.local/share/cw/clients/<name>/` with session summaries
+- ✓ `cw handoff impl→review` - impl generates a handoff, review auto-resumes with that context on the same branch
+- ✗ Session event hooks: "when impl backgrounds, notify review" — hook script generation works, but no active execution/routing
+- ✓ Health monitoring: detect dead/crashed Claude sessions, mark as completed, surface in `cw status`
+- ✓ `cw plan <client>` - show active plan progress across all sessions for a client — parser works, not yet integrated into TUI
 
 ---
 
-## v4: Autonomous Delegation
+## v4: Autonomous Delegation (Current — partially complete)
 
 **Theme:** Spin off anything too heavy for the current context.
 
-- `cw delegate "run ruff --fix across all services" --purpose debt` - fire-and-forget task delegation to a new session
-- Queue system: `cw queue client/debt "review PR #42"` - add work items that debt session picks up
-- Auto-background on context exhaustion: hook into Claude Code's context usage, auto-trigger `cw bg` at 80%
-- Agent-to-agent handoffs: structured format for passing work between sessions (machine-parseable task specs, not just human-readable handoffs)
-- Background debt runner: `cw daemon client/debt` - long-running session that pulls from queue, runs linting, opens PRs, pauses for human review
+- ✓ `cw delegate "run ruff --fix across all services" --purpose debt` - fire-and-forget task delegation to a new session
+- ✓ Queue system: `cw queue client/debt "review PR #42"` - add work items that debt session picks up
+- ✗ Auto-background on context exhaustion: hook infra exists, but no active context monitoring or auto-trigger at 80%
+- ✗ Agent-to-agent handoffs: TaskSpec model exists, but no intelligent routing logic between sessions
+- ✓ Background debt runner: `cw daemon client/debt` - long-running session that pulls from queue, runs linting, opens PRs, pauses for human review
 
 ---
 
@@ -64,11 +64,11 @@ Core workflow: start → work → background → switch client → resume.
 
 **Theme:** See everything at a glance.
 
-- `cw status` as a rich TUI (like lazygit but for sessions): clients on left, sessions in center, recent handoffs on right
-- Zellij plugin (Rust/WASM): live status bar showing all session states, context usage, recent activity
-- Desktop notifications via `notify-send`: "sigma/review found 3 issues in PR #89"
-- Cost tracking: aggregate Claude Code token usage per client/purpose
-- Session history: `cw history client` - timeline of all sessions, handoffs, and outcomes
+- ⚠ `cw status` as a rich TUI (like lazygit but for sessions): clients on left, sessions in center, recent handoffs on right — basic Textual TUI exists with client list, session table, activity feed, key bindings; needs polish and richer features
+- ✗ Zellij plugin (Rust/WASM): live status bar showing all session states, context usage, recent activity
+- ✓ Desktop notifications via `notify-send`: "sigma/review found 3 issues in PR #89"
+- ✗ Cost tracking: aggregate Claude Code token usage per client/purpose
+- ✓ Session history: `cw history client` - timeline of all sessions, handoffs, and outcomes
 
 ---
 

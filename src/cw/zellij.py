@@ -38,42 +38,28 @@ layout {
 {%- endif %}
     tab name="{{ client_name }}" {
         pane split_direction="vertical" {
-            pane split_direction="horizontal" size="20%" {
-                pane name="files" {
-                    command "yazi"
-                    args "{{ workspace_path }}"
+            pane split_direction="horizontal" size="{{ primary_size }}" {
+                pane name="{{ primary_pane.name }}" focus=true {
+                    cwd "{{ primary_pane.cwd }}"
+                    command "bash"
+                    args "-c" {{ primary_pane.claude_cmd }}
                 }
-                pane size=6 name="daemon" {
+                pane size="10%" name="terminal" {
                     cwd "{{ workspace_path }}"
                     command "bash"
                     args "-c" "cw daemon start"
                 }
             }
 {%- if secondary_panes %}
-            pane split_direction="horizontal" size="80%" {
-                pane size="{{ primary_size }}" \
-name="{{ primary_pane.name }}" focus=true {
-                    cwd "{{ primary_pane.cwd }}"
-                    command "bash"
-                    args "-c" {{ primary_pane.claude_cmd }}
-                }
-                pane split_direction="vertical" \
+            pane split_direction="horizontal" \
 size="{{ secondary_size }}" {
 {%- for pane in secondary_panes %}
-                    pane name="{{ pane.name }}" {
-                        cwd "{{ pane.cwd }}"
-                        command "bash"
-                        args "-c" {{ pane.claude_cmd }}
-                    }
-{%- endfor %}
+                pane name="{{ pane.name }}" {
+                    cwd "{{ pane.cwd }}"
+                    command "bash"
+                    args "-c" {{ pane.claude_cmd }}
                 }
-            }
-{%- else %}
-            pane size="80%" \
-name="{{ primary_pane.name }}" focus=true {
-                cwd "{{ primary_pane.cwd }}"
-                command "bash"
-                args "-c" {{ primary_pane.claude_cmd }}
+{%- endfor %}
             }
 {%- endif %}
         }
@@ -188,12 +174,12 @@ def generate_layout(
     if num_secondary == 0:
         primary_size = "100%"
         secondary_size = ""
-    elif num_secondary <= 2:
-        primary_size = "70%"
-        secondary_size = "30%"
-    else:  # 3+
-        primary_size = "60%"
-        secondary_size = "40%"
+    elif num_secondary == 1:
+        primary_size = "50%"
+        secondary_size = "50%"
+    else:  # 2+
+        primary_size = "50%"
+        secondary_size = "50%"
 
     # Include cw-status plugin if WASM is installed
     cw_plugin_path = str(CW_PLUGIN_PATH) if CW_PLUGIN_PATH.exists() else None
@@ -339,9 +325,8 @@ def _get_pane_id_for_name(
     When *tab_name* is given, only inspects the matching tab.
     Otherwise looks at the first tab block (legacy behaviour).
     """
-    # Track terminal index: panes appear in dump-layout in terminal order
-    # terminal_0 = first command pane (files/yazi)
-    # terminal_1 = impl, terminal_2 = idea, terminal_3 = debt
+    # Track terminal index: panes appear in dump-layout order
+    # 0=idea, 1=terminal (daemon), 2=impl, 3=debt
     terminal_idx = 0
     for line in _iter_tab_pane_lines(session, tab_name):
         if _RE_PANE_COMMAND.search(line):

@@ -124,8 +124,8 @@ class Session(BaseModel):
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
-    SessionPurpose.IMPL,
     SessionPurpose.IDEA,
+    SessionPurpose.IMPL,
     SessionPurpose.DEBT,
 ]
 

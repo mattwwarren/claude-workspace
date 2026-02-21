@@ -143,8 +143,8 @@ class TestClientConfig:
     def test_default_auto_purposes(self) -> None:
         c = ClientConfig(name="test", workspace_path="/dev/null")
         assert c.auto_purposes == [
-            SessionPurpose.IMPL,
             SessionPurpose.IDEA,
+            SessionPurpose.IMPL,
             SessionPurpose.DEBT,
         ]
 
