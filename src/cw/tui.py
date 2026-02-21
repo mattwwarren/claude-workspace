@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.widgets import (
     DataTable,
     Footer,
@@ -23,6 +24,7 @@ from cw.cli import _relative_time as relative_time
 from cw.config import load_clients, load_state
 from cw.history import load_history
 from cw.models import SessionStatus
+from cw.plan import PlanSummary, find_plan_files, parse_plan
 
 if TYPE_CHECKING:
     from cw.history import HistoryEvent
@@ -65,12 +67,9 @@ class SessionTable(DataTable[str]):
 class ActivityFeed(RichLog):
     """Log of recent history events for the selected client."""
 
-    DEFAULT_CSS = """
-    ActivityFeed {
-        width: 30%;
-        border-left: solid $primary;
-    }
-    """
+
+class PlanPanel(Static):
+    """Panel showing plan progress for the selected client."""
 
 
 class StatusLine(Static):
@@ -101,7 +100,14 @@ class CwDashboard(App[None]):
     ClientList { width: 20%; border-right: solid $primary; height: 100%; }
     ClientList > ListItem { padding: 0 1; }
     SessionTable { width: 50%; height: 100%; }
-    ActivityFeed { width: 30%; border-left: solid $primary; height: 100%; }
+    #right-panel { width: 30%; border-left: solid $primary; height: 100%; }
+    ActivityFeed { height: 1fr; }
+    PlanPanel {
+        height: auto;
+        max-height: 40%;
+        border-top: solid $primary;
+        padding: 0 1;
+    }
     StatusLine {
         dock: bottom;
         height: 1;
@@ -130,7 +136,9 @@ class CwDashboard(App[None]):
         with Horizontal():
             yield ClientList(self._clients)
             yield SessionTable()
-            yield ActivityFeed()
+            with Vertical(id="right-panel"):
+                yield ActivityFeed()
+                yield PlanPanel("")
         yield StatusLine("Loading...")
         yield Footer()
 
@@ -152,6 +160,7 @@ class CwDashboard(App[None]):
         """Poll state files and update all panels."""
         self._refresh_sessions()
         self._refresh_activity()
+        self._refresh_plans()
         self._refresh_status()
 
     def _refresh_sessions(self) -> None:
@@ -186,6 +195,32 @@ class CwDashboard(App[None]):
         events = load_history(self._selected_client, limit=50)
         for event in events:
             feed.write(_format_event(event))
+
+    def _refresh_plans(self) -> None:
+        """Update the plan panel for the selected client."""
+        panel = self.query_one(PlanPanel)
+
+        if not self._selected_client or self._selected_client not in self._clients:
+            panel.update("")
+            return
+
+        workspace = Path(self._clients[self._selected_client].workspace_path)
+        plans = find_plan_files(workspace)
+        if not plans:
+            panel.update("[dim]No plans[/dim]")
+            return
+
+        lines: list[str] = []
+        for plan_path in plans:
+            try:
+                summary = parse_plan(plan_path)
+            except (OSError, ValueError):
+                continue
+            text = _format_plan_summary(summary)
+            if text:
+                lines.append(text)
+
+        panel.update("\n".join(lines) if lines else "[dim]No active plans[/dim]")
 
     def _refresh_status(self) -> None:
         """Update the bottom status line."""
@@ -289,6 +324,31 @@ def _format_event(event: HistoryEvent) -> str:
     detail = f" - {event.detail}" if event.detail else ""
     session = f" [{event.session_name}]" if event.session_name else ""
     return f"{ts} {event.event_type}{session}{detail}"
+
+
+def _format_plan_summary(summary: PlanSummary) -> str:
+    """Format a plan summary as Rich markup for the TUI panel.
+
+    Returns an empty string for completed plans (100%) or plans with no tasks.
+    """
+    done, total = summary.progress
+    if total == 0:
+        return ""
+    pct = int(done / total * 100)
+    if pct == 100:
+        return ""
+
+    lines = [f"[bold]{summary.title}[/bold] [{done}/{total}] {pct}%"]
+    for phase in summary.phases:
+        p_done, p_total = phase.progress
+        if p_total == 0:
+            continue
+        if p_done == p_total:
+            label = "[green]Done[/green]"
+        else:
+            label = f"[yellow]{p_done}/{p_total}[/yellow]"
+        lines.append(f"  {phase.name}: {label}")
+    return "\n".join(lines)
 
 
 def run_dashboard() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -16,10 +16,15 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
-from cw.tui import CwDashboard, _format_event, _format_status, _session_time
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from cw.plan import PlanPhase, PlanSummary, PlanTask
+from cw.tui import (
+    CwDashboard,
+    PlanPanel,
+    _format_event,
+    _format_plan_summary,
+    _format_status,
+    _session_time,
+)
 
 
 def _make_clients() -> dict[str, ClientConfig]:
@@ -309,3 +314,143 @@ async def test_session_table_excludes_completed(tmp_config_dir: Path) -> None:
 
             assert len(app._sessions) == 1
             assert app._sessions[0].id == "active1"
+
+
+# --- Plan panel tests ---
+
+
+def _make_plan_summary(
+    tmp_path: Path, *, done: int = 1, total: int = 3,
+) -> PlanSummary:
+    """Build a PlanSummary with controllable progress."""
+    tasks = [
+        PlanTask(text=f"Task {i}", completed=i < done, phase="P1")
+        for i in range(total)
+    ]
+    return PlanSummary(
+        path=tmp_path / "plan.md",
+        title="Test Plan",
+        phases=[PlanPhase(name="Phase 1", tasks=tasks)],
+    )
+
+
+class TestFormatPlanSummary:
+    def test_renders_title_and_progress(self, tmp_path: Path) -> None:
+        summary = _make_plan_summary(tmp_path, done=1, total=3)
+        result = _format_plan_summary(summary)
+        assert "Test Plan" in result
+        assert "[1/3]" in result
+        assert "33%" in result
+
+    def test_phase_shown_with_progress(self, tmp_path: Path) -> None:
+        summary = _make_plan_summary(tmp_path, done=1, total=3)
+        result = _format_plan_summary(summary)
+        assert "Phase 1" in result
+        assert "1/3" in result
+
+    def test_completed_plan_returns_empty(self, tmp_path: Path) -> None:
+        summary = _make_plan_summary(tmp_path, done=3, total=3)
+        result = _format_plan_summary(summary)
+        assert result == ""
+
+    def test_no_tasks_returns_empty(self, tmp_path: Path) -> None:
+        summary = PlanSummary(
+            path=tmp_path / "plan.md",
+            title="Empty",
+            phases=[PlanPhase(name="P1")],
+        )
+        result = _format_plan_summary(summary)
+        assert result == ""
+
+    def test_completed_phase_shows_done(self, tmp_path: Path) -> None:
+        summary = PlanSummary(
+            path=tmp_path / "plan.md",
+            title="Mixed",
+            phases=[
+                PlanPhase(
+                    name="Done Phase",
+                    tasks=[PlanTask(text="A", completed=True, phase="Done Phase")],
+                ),
+                PlanPhase(
+                    name="WIP Phase",
+                    tasks=[PlanTask(text="B", completed=False, phase="WIP Phase")],
+                ),
+            ],
+        )
+        result = _format_plan_summary(summary)
+        assert "Done" in result
+        assert "0/1" in result
+
+
+@pytest.mark.asyncio
+async def test_dashboard_has_plan_panel(tmp_config_dir: Path) -> None:
+    """PlanPanel widget exists in the mounted dashboard."""
+    with (
+        patch("cw.config.load_clients", return_value=_make_clients()),
+        patch("cw.config.load_state", return_value=_make_state()),
+        patch("cw.history.load_history", return_value=[]),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(PlanPanel)
+            assert panel is not None
+
+
+@pytest.mark.asyncio
+async def test_refresh_plans_no_client(tmp_config_dir: Path) -> None:
+    """_refresh_plans handles no selected client gracefully."""
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+    ):
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._selected_client = None
+            app._refresh_plans()
+            await pilot.pause()
+            panel = app.query_one(PlanPanel)
+            assert str(panel.render()) == ""
+
+
+@pytest.mark.asyncio
+async def test_refresh_plans_shows_active_plans(tmp_config_dir: Path) -> None:
+    """_refresh_plans populates panel with plan summaries."""
+    with (
+        patch("cw.tui.load_clients", return_value={}),
+        patch("cw.tui.load_state", return_value=CwState()),
+        patch("cw.tui.load_history", return_value=[]),
+        patch("cw.tui.find_plan_files") as mock_find,
+        patch("cw.tui.parse_plan") as mock_parse,
+    ):
+        mock_find.return_value = [Path("/fake/plan.md")]
+        mock_parse.return_value = PlanSummary(
+            path=Path("/fake/plan.md"),
+            title="My Plan",
+            phases=[
+                PlanPhase(
+                    name="Setup",
+                    tasks=[
+                        PlanTask(text="Init", completed=True, phase="Setup"),
+                        PlanTask(text="Config", completed=False, phase="Setup"),
+                    ],
+                ),
+            ],
+        )
+
+        app = CwDashboard()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._clients = _make_clients()
+            app._selected_client = "alpha"
+            app._refresh_plans()
+            await pilot.pause()
+
+            mock_find.assert_called_once_with(Path("/home/test/alpha"))
+
+            panel = app.query_one(PlanPanel)
+            content = str(panel.render())
+            assert "My Plan" in content
+            assert "1/2" in content
