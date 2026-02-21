@@ -354,8 +354,21 @@ class TestWriteToPane:
 
         monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
         write_to_pane("hello\n")
+        assert len(calls) == 2
+        assert calls[0] == ("action", "write-chars", "hello")
+        assert calls[1] == ("action", "write", "13")
+
+    def test_no_trailing_newline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, check: bool = True) -> MagicMock:
+            calls.append(args)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
+        write_to_pane("hello")
         assert len(calls) == 1
-        assert calls[0] == ("action", "write-chars", "hello\n")
+        assert calls[0] == ("action", "write-chars", "hello")
 
 
 class TestGoToTab:

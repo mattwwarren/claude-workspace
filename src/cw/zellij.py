@@ -257,15 +257,25 @@ def attach_session(session_name: str) -> None:
 def write_to_pane(text: str, session: str | None = None) -> None:
     """Write text to the currently focused Zellij pane.
 
+    If *text* ends with ``\\n``, the newline is stripped and a raw Enter
+    keypress (byte 13) is sent via ``zellij action write`` instead.
+    This ensures applications like Claude Code that distinguish between
+    a pasted newline and a real Enter keypress actually submit the input.
+
     Args:
         text: Text to inject as keystrokes.
         session: Target a specific session by name (for remote control).
                  If None, targets the current session (must be inside one).
     """
-    if session:
-        _run_zellij("-s", session, "action", "write-chars", text)
-    else:
-        _run_zellij("action", "write-chars", text)
+    send_enter = text.endswith("\n")
+    if send_enter:
+        text = text[:-1]
+
+    base = ["-s", session] if session else []
+    if text:
+        _run_zellij(*base, "action", "write-chars", text)
+    if send_enter:
+        _run_zellij(*base, "action", "write", "13")
 
 
 def go_to_tab(tab_name: str, session: str | None = None) -> None:
