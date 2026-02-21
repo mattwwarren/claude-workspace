@@ -77,14 +77,10 @@ def _build_pane_args(
     sessions: dict[str, Session],
     client: ClientConfig | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Build pane data for each session including a resilient claude command.
-
-    The command tries --resume first (reconnects to existing conversation),
-    falling back to --session-id (creates new session). This handles both
-    fresh launches and Zellij restarts after detach/reattach.
+    """Build pane data for each session including a claude command.
 
     Args:
-        sessions: Map of purpose name to Session with claude_session_id.
+        sessions: Map of purpose name to Session.
         client: Client config for resolving purpose prompts.
     """
     panes: dict[str, dict[str, str]] = {}
@@ -92,8 +88,6 @@ def _build_pane_args(
     client_name = client.name if client else None
     workspace_path = str(client.workspace_path) if client else None
     for purpose, session in sessions.items():
-        sid = str(session.claude_session_id)
-
         # Build extra flags (e.g. --append-system-prompt)
         extra = ""
         prompt = get_purpose_prompt(
@@ -107,17 +101,11 @@ def _build_pane_args(
             escaped_prompt = shlex.quote(prompt.replace("\n", " "))
             extra = f" --append-system-prompt {escaped_prompt}"
 
-        # Shell command: try --resume if a prior session exists, otherwise
-        # start fresh.  --session-id no longer creates new sessions in
-        # recent Claude Code versions, so fresh launches omit it entirely.
         if client_name:
             env_prefix = f"{_build_env_prefix(client_name, purpose)} "
         else:
             env_prefix = ""
-        cmd = (
-            f"{env_prefix}claude --resume {sid}{extra} 2>/dev/null"
-            f" || {env_prefix}claude{extra}"
-        )
+        cmd = f"{env_prefix}claude{extra}"
         # KDL-quote the whole command for the layout template.
         # Escape backslashes and double quotes so the KDL string is valid.
         kdl_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
@@ -133,14 +121,11 @@ def _create_all_purpose_sessions(
     client: ClientConfig,
     state: CwState,
     *,
-    prior_sessions: dict[str, Session] | None = None,
     worktree_path: Path | None = None,
     worktree_branch: str | None = None,
 ) -> dict[str, Session]:
     """Create Session objects for all purposes.
 
-    When prior_sessions is provided, carries forward their claude_session_ids
-    so that --resume can reconnect to existing Claude conversations.
     worktree_path/branch apply to impl and idea purposes.
     """
     sessions: dict[str, Session] = {}
@@ -158,9 +143,6 @@ def _create_all_purpose_sessions(
         if worktree_path and purpose in WORKTREE_PURPOSES:
             session.worktree_path = worktree_path
             session.branch = worktree_branch
-        # Carry forward Claude session ID for resumption
-        if prior_sessions and purpose in prior_sessions:
-            session.claude_session_id = prior_sessions[purpose].claude_session_id
         sessions[purpose] = session
         state.sessions.append(session)
         record_event(client_name, HistoryEvent(
@@ -272,18 +254,14 @@ def start_session(
                     click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
                     zellij.attach_session(CW_SESSION)
                 return
-        # Zellij session died - collect prior sessions so we can resume
-        # each Claude conversation in its correct pane using --resume.
+        # Zellij session died - mark old sessions completed and start fresh.
         click.echo("Zellij session gone. Recovering sessions...")
-        prior_sessions: dict[str, Session] = {}
         for s in state.sessions:
             if s.client == client_name and s.status == SessionStatus.ACTIVE:
-                prior_sessions[s.purpose] = s
                 s.status = SessionStatus.COMPLETED
 
-        # Create new cw sessions, carrying forward Claude session IDs
         all_sessions = _create_all_purpose_sessions(
-            client_name, client, state, prior_sessions=prior_sessions,
+            client_name, client, state,
         )
         save_state(state)
 
@@ -302,7 +280,7 @@ def start_session(
     panes = _build_pane_args(all_sessions, client=client)
 
     for s in all_sessions.values():
-        click.echo(f"  {s.name} (claude session: {s.claude_session_id})")
+        click.echo(f"  {s.name}")
 
     if not zellij.session_exists(CW_SESSION):
         click.echo(f"Launching Zellij session '{CW_SESSION}' for {client_name}...")
@@ -518,10 +496,10 @@ def resume_session(session_name: str) -> None:
         zellij.rename_tab(session.client)
         _navigate_to_pane(session)
 
-        # Resume the exact Claude session by ID
+        # Launch Claude with interactive session picker
         env_prefix = _build_env_prefix(session.client, session.purpose)
         zellij.write_to_pane(
-            f"{env_prefix} claude --resume {session.claude_session_id}\n"
+            f"{env_prefix} claude --resume\n"
         )
         if prompt:
             time.sleep(CLAUDE_INIT_DELAY_S)  # Wait for Claude to initialize

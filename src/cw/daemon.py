@@ -335,7 +335,7 @@ def _resume_claude_in_pane(
         tab_name=tab,
     )
     zellij.write_to_pane(
-        f"claude --resume {session.claude_session_id}\n",
+        "claude --resume\n",
         session=zellij_target,
     )
 

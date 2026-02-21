@@ -255,7 +255,7 @@ class TestGenerateLayout:
         panes = {
             "impl": {
                 "claude_cmd": (
-                    '"claude --resume abc'
+                    '"claude'
                     " --append-system-prompt 'say \\\"hello\\\"'\""
                 ),
             },
