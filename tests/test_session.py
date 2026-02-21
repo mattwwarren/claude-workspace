@@ -1548,9 +1548,13 @@ class TestRenameTabOnTransition:
         mock_zellij: dict[str, list[Any]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Override in_zellij_session to return True
+        # Override in_zellij_session to return True and session_exists
+        # to return True (avoid nested-session guard)
         monkeypatch.setattr(
             "cw.zellij.in_zellij_session", lambda: True,
+        )
+        monkeypatch.setattr(
+            "cw.zellij.session_exists", lambda _name: True,
         )
 
         clients_file = (

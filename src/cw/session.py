@@ -179,16 +179,25 @@ def _create_session_if_needed(
     """Create and attach to the cw Zellij session if it doesn't exist.
 
     Returns True if a new session was created (terminal taken over),
-    False if already running.
+    False if already running.  Refuses to create a nested session when
+    already inside Zellij.
     """
-    if not zellij.session_exists(CW_SESSION):
-        purposes = [p.value for p in client.auto_purposes]
-        layout_path = zellij.generate_layout(client, panes=panes, purposes=purposes)
-        click.echo(f"Launching Zellij session '{CW_SESSION}' for {client.name}...")
-        # This will take over the terminal - user lands directly in the session
-        zellij.create_and_attach(CW_SESSION, layout_path)
-        return True
-    return False
+    if zellij.session_exists(CW_SESSION):
+        return False
+
+    if zellij.in_zellij_session():
+        msg = (
+            "Already inside a Zellij session but the 'cw' session"
+            " was not found. Cannot create a nested session."
+        )
+        raise CwError(msg)
+
+    purposes = [p.value for p in client.auto_purposes]
+    layout_path = zellij.generate_layout(client, panes=panes, purposes=purposes)
+    click.echo(f"Launching Zellij session '{CW_SESSION}' for {client.name}...")
+    # This will take over the terminal - user lands directly in the session
+    zellij.create_and_attach(CW_SESSION, layout_path)
+    return True
 
 
 def start_session(
