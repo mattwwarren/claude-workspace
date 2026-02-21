@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import signal
 import threading
@@ -16,13 +18,16 @@ if TYPE_CHECKING:
 
 from cw.daemon import (
     _DAEMON_TASK_TIMEOUT_S,
+    _async_process_item,
+    _async_wait_for_completion,
     _ensure_not_running,
     _get_backgrounded_session,
     _inject_into_session,
     _is_process_alive,
     _pid_path,
-    _poll_all_queues,
+    _reap_done_tasks,
     _rebackground_session,
+    _spawn_new_tasks,
     _wait_for_completion,
     daemon_status,
     stop_daemon,
@@ -623,29 +628,141 @@ class TestWaitForCompletion:
         assert elapsed < 5, f"Took {elapsed}s — should have returned promptly"
 
 
-class TestPollAllQueues:
-    def test_returns_false_when_no_work(self, tmp_path: Path) -> None:
-        event = threading.Event()
-        with (
-            patch("cw.daemon.load_clients", return_value={"acme": {}}),
-            patch("cw.daemon.claim_next", return_value=None),
-        ):
-            result = _poll_all_queues(event)
-        assert result is False
+class TestReapDoneTasks:
+    def test_removes_completed_tasks(self) -> None:
+        async def _run() -> None:
+            async def _noop() -> None:
+                pass
 
-    def test_returns_false_when_shutdown_set(self) -> None:
-        event = threading.Event()
-        event.set()
-        with patch("cw.daemon.load_clients", return_value={"acme": {}}):
-            result = _poll_all_queues(event)
-        assert result is False
+            task = asyncio.create_task(_noop())
+            await task
 
-    def test_processes_claimed_item(
+            active: dict[tuple[str, str], asyncio.Task[None]] = {
+                ("client", "debt"): task,
+            }
+            _reap_done_tasks(active)
+            assert ("client", "debt") not in active
+
+        asyncio.run(_run())
+
+    def test_keeps_running_tasks(self) -> None:
+        async def _run() -> None:
+            pending_future: asyncio.Future[None] = asyncio.Future()
+
+            async def _block() -> None:
+                await pending_future
+
+            task = asyncio.create_task(_block())
+
+            active: dict[tuple[str, str], asyncio.Task[None]] = {
+                ("client", "debt"): task,
+            }
+            _reap_done_tasks(active)
+            assert ("client", "debt") in active
+
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_run())
+
+
+class TestSpawnNewTasks:
+    def test_spawns_no_tasks_when_no_work(self) -> None:
+        async def _run() -> None:
+            event = asyncio.Event()
+            active: dict[tuple[str, str], asyncio.Task[None]] = {}
+            with (
+                patch("cw.daemon.load_clients", return_value={"acme": {}}),
+                patch("cw.daemon.claim_next", return_value=None),
+            ):
+                _spawn_new_tasks(active, event)
+            assert len(active) == 0
+
+        asyncio.run(_run())
+
+    def test_spawns_task_for_claimed_item(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            event = asyncio.Event()
+            active: dict[tuple[str, str], asyncio.Task[None]] = {}
+            item = _make_queue_item()
+            client_config = _make_client(tmp_path)
+
+            with (
+                patch("cw.daemon.load_clients",
+                      return_value={"test-client": {}}),
+                patch("cw.daemon.claim_next", return_value=item),
+                patch("cw.daemon.get_client", return_value=client_config),
+            ):
+                _spawn_new_tasks(active, event)
+
+            assert ("test-client", "debt") in active
+            # Cancel to avoid warnings about unfinished tasks.
+            active[("test-client", "debt")].cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active[("test-client", "debt")]
+
+        asyncio.run(_run())
+
+    def test_skips_busy_purpose(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            event = asyncio.Event()
+            # Simulate a running task for (test-client, debt).
+            dummy: asyncio.Future[None] = asyncio.Future()
+
+            async def _block() -> None:
+                await dummy
+
+            existing_task = asyncio.create_task(_block())
+            active: dict[tuple[str, str], asyncio.Task[None]] = {
+                ("test-client", "debt"): existing_task,
+            }
+            item = _make_queue_item()
+            client_config = _make_client(tmp_path)
+
+            with (
+                patch("cw.daemon.load_clients",
+                      return_value={"test-client": {}}),
+                patch("cw.daemon.claim_next", return_value=item),
+                patch("cw.daemon.get_client", return_value=client_config),
+                patch("cw.daemon.fail_item") as mock_fail,
+            ):
+                _spawn_new_tasks(active, event)
+
+            # Should NOT have replaced the existing task.
+            assert active[("test-client", "debt")] is existing_task
+            # Should have failed the item so it can be retried.
+            mock_fail.assert_called_once_with(
+                "test-client", "item01", "Purpose busy, will retry",
+            )
+
+            existing_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await existing_task
+
+        asyncio.run(_run())
+
+    def test_stops_on_shutdown(self) -> None:
+        async def _run() -> None:
+            event = asyncio.Event()
+            event.set()
+            active: dict[tuple[str, str], asyncio.Task[None]] = {}
+            with patch("cw.daemon.load_clients",
+                       return_value={"acme": {}}) as mock_load:
+                _spawn_new_tasks(active, event)
+            mock_load.assert_called_once()
+            assert len(active) == 0
+
+        asyncio.run(_run())
+
+
+class TestAsyncProcessItem:
+    @pytest.mark.asyncio
+    async def test_completes_item(
         self, tmp_path: Path,
         tmp_config_dir: Path,
         mock_zellij: dict[str, list[tuple[object, ...]]],
     ) -> None:
-        event = threading.Event()
         item = _make_queue_item()
         client_config = _make_client(tmp_path)
         session = _make_session(
@@ -653,6 +770,7 @@ class TestPollAllQueues:
             status=SessionStatus.BACKGROUNDED,
         )
         state = CwState(sessions=[session])
+        event = asyncio.Event()
 
         handoffs_dir = tmp_path / "workspace" / ".handoffs"
         handoffs_dir.mkdir(parents=True)
@@ -660,9 +778,6 @@ class TestPollAllQueues:
         handoff_file.write_text("# Done\n")
 
         with (
-            patch("cw.daemon.load_clients", return_value={"test-client": {}}),
-            patch("cw.daemon.claim_next", side_effect=[item, None]),
-            patch("cw.daemon.get_client", return_value=client_config),
             patch("cw.daemon.load_state", return_value=state),
             patch("cw.daemon.save_state"),
             patch("cw.daemon.record_event"),
@@ -675,24 +790,21 @@ class TestPollAllQueues:
             patch("cw.daemon.complete_item") as mock_complete,
             patch("cw.daemon._rebackground_session"),
         ):
-            result = _poll_all_queues(event)
+            await _async_process_item(client_config, item, "debt", event)
 
-        assert result is True
         mock_complete.assert_called_once_with(
             "test-client", "item01", "Completed by daemon",
         )
 
-    def test_sends_notification_on_injection_failure(
+    @pytest.mark.asyncio
+    async def test_sends_notification_on_injection_failure(
         self, tmp_path: Path,
     ) -> None:
-        event = threading.Event()
         item = _make_queue_item()
         client_config = _make_client(tmp_path)
+        event = asyncio.Event()
 
         with (
-            patch("cw.daemon.load_clients", return_value={"test-client": {}}),
-            patch("cw.daemon.claim_next", return_value=item),
-            patch("cw.daemon.get_client", return_value=client_config),
             patch(
                 "cw.daemon._inject_into_session",
                 side_effect=CwError("No debt session"),
@@ -701,21 +813,20 @@ class TestPollAllQueues:
             patch("cw.daemon.fail_item"),
             patch("cw.daemon.send_notification") as mock_notify,
         ):
-            result = _poll_all_queues(event)
+            await _async_process_item(client_config, item, "debt", event)
 
-        assert result is True
         mock_notify.assert_called_once()
         call_args = mock_notify.call_args
         assert call_args[0][0] == "Daemon Item Failed"
         assert "No debt session" in call_args[0][1]
         assert call_args[1]["urgency"] == "critical"
 
-    def test_sends_notification_on_timeout(
+    @pytest.mark.asyncio
+    async def test_sends_notification_on_timeout(
         self, tmp_path: Path,
         tmp_config_dir: Path,
         mock_zellij: dict[str, list[tuple[object, ...]]],
     ) -> None:
-        event = threading.Event()
         item = _make_queue_item()
         client_config = _make_client(tmp_path)
         session = _make_session(
@@ -723,27 +834,66 @@ class TestPollAllQueues:
             status=SessionStatus.BACKGROUNDED,
         )
         state = CwState(sessions=[session])
+        event = asyncio.Event()
 
         with (
-            patch("cw.daemon.load_clients", return_value={"test-client": {}}),
-            patch("cw.daemon.claim_next", return_value=item),
-            patch("cw.daemon.get_client", return_value=client_config),
             patch("cw.daemon.load_state", return_value=state),
             patch("cw.daemon.save_state"),
             patch("cw.daemon.record_event"),
             patch("cw.daemon.time.sleep"),
             patch(
-                "cw.daemon.find_handoffs_newer_than",
-                return_value=[],
+                "cw.daemon._async_wait_for_completion",
+                return_value=None,
             ),
-            patch("cw.daemon._wait_for_completion", return_value=None),
             patch("cw.daemon._rebackground_session"),
             patch("cw.daemon.fail_item") as mock_fail,
             patch("cw.daemon.send_notification") as mock_notify,
         ):
-            result = _poll_all_queues(event)
+            await _async_process_item(client_config, item, "debt", event)
 
-        assert result is True
         mock_fail.assert_called_once()
         mock_notify.assert_called_once()
         assert "Timed Out" in mock_notify.call_args[0][0]
+
+
+class TestAsyncWaitForCompletion:
+    @pytest.mark.asyncio
+    async def test_returns_handoff_when_found(self, tmp_path: Path) -> None:
+        handoff_file = tmp_path / "handoff.md"
+        handoff_file.write_text("# Done\n")
+
+        with patch(
+            "cw.daemon.find_handoffs_newer_than",
+            return_value=[handoff_file],
+        ):
+            result = await _async_wait_for_completion(
+                tmp_path, 0.0, timeout=5, poll_interval=1,
+            )
+        assert result == handoff_file
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_timeout(self, tmp_path: Path) -> None:
+        with patch(
+            "cw.daemon.find_handoffs_newer_than",
+            return_value=[],
+        ):
+            result = await _async_wait_for_completion(
+                tmp_path, 0.0, timeout=0, poll_interval=1,
+            )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_shutdown_set(
+        self, tmp_path: Path,
+    ) -> None:
+        event = asyncio.Event()
+        event.set()
+        with patch(
+            "cw.daemon.find_handoffs_newer_than",
+            return_value=[],
+        ):
+            result = await _async_wait_for_completion(
+                tmp_path, 0.0, timeout=60, poll_interval=1,
+                shutdown_event=event,
+            )
+        assert result is None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import signal
 import threading
@@ -177,121 +179,203 @@ def start_daemon_all(
 ) -> None:
     """Run a daemon that monitors all client queues.
 
-    Iterates over every configured client each poll cycle, claiming
-    any pending item regardless of purpose.  The purpose is determined
-    from the claimed item's task spec.
+    Items for different (client, purpose) pairs are processed concurrently
+    via asyncio tasks, so debt and impl sessions can work in parallel.
     """
+    asyncio.run(_start_daemon_all_async(
+        poll_interval=poll_interval, review=review,
+    ))
+
+
+async def _start_daemon_all_async(
+    *,
+    poll_interval: int = 30,
+    review: bool = False,
+) -> None:
+    """Async main loop for the all-queues daemon."""
     _ensure_not_running("_all", "_all")
 
     pid_file = _pid_path("_all", "_all")
     DAEMONS_DIR.mkdir(parents=True, exist_ok=True)
     pid_file.write_text(str(os.getpid()))
 
-    shutdown_event = threading.Event()
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-    def _handle_signal(_signum: int, _frame: object) -> None:
-        shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, shutdown_event.set)
 
     click.echo(f"Daemon started: all queues (pid {os.getpid()})")
     click.echo(f"Poll interval: {poll_interval}s, Review mode: {review}")
 
+    # Track one task per (client, purpose) pair.
+    active_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+
     try:
         while not shutdown_event.is_set():
-            processed = _poll_all_queues(shutdown_event)
-            if not processed:
-                shutdown_event.wait(poll_interval)
+            _reap_done_tasks(active_tasks)
+            _spawn_new_tasks(active_tasks, shutdown_event)
+
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    shutdown_event.wait(), timeout=poll_interval,
+                )
     finally:
+        # Cancel remaining tasks and wait for them to finish.
+        for task in active_tasks.values():
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks.values(), return_exceptions=True)
         if pid_file.exists():
             pid_file.unlink()
         click.echo("Daemon stopped.")
 
 
-def _poll_all_queues(shutdown_event: threading.Event) -> bool:
-    """Scan all clients for pending work, process one item if found.
+def _reap_done_tasks(
+    active_tasks: dict[tuple[str, str], asyncio.Task[None]],
+) -> None:
+    """Remove completed tasks and log any unexpected exceptions."""
+    done_keys = [k for k, t in active_tasks.items() if t.done()]
+    for key in done_keys:
+        task = active_tasks.pop(key)
+        exc = task.exception() if not task.cancelled() else None
+        if exc is not None:
+            click.echo(f"Task {key} crashed: {exc}")
 
-    Returns ``True`` if an item was processed (success or failure),
-    ``False`` if no work was available.
-    """
+
+def _spawn_new_tasks(
+    active_tasks: dict[tuple[str, str], asyncio.Task[None]],
+    shutdown_event: asyncio.Event,
+) -> None:
+    """Claim pending items and spawn async tasks for new purposes."""
     clients = load_clients()
     for client_name in clients:
         if shutdown_event.is_set():
-            return False
+            return
 
         item = claim_next(client_name, purpose=None)
         if item is None:
             continue
 
         purpose = item.task.purpose
-        client_config = get_client(client_name)
+        key = (client_name, purpose)
 
+        if key in active_tasks:
+            # Purpose already has an active task — don't double-inject.
+            # Put the item back by failing it so it can be retried.
+            fail_item(client_name, item.id, "Purpose busy, will retry")
+            click.echo(
+                f"Skipped: {client_name}/{purpose}"
+                f" — already processing (id: {item.id})"
+            )
+            continue
+
+        client_config = get_client(client_name)
         click.echo(
             f"Processing: {client_name}/{purpose}"
             f" — {item.task.description} (id: {item.id})"
         )
+        active_tasks[key] = asyncio.create_task(
+            _async_process_item(
+                client_config, item, purpose, shutdown_event,
+            ),
+            name=f"daemon-{client_name}-{purpose}",
+        )
 
-        try:
-            before_mtime = time.time()
-            _inject_into_session(client_config, item, purpose)
 
-            handoff_path = _wait_for_completion(
-                client_config.workspace_path,
-                before_mtime,
-                timeout=_DAEMON_TASK_TIMEOUT_S,
-                shutdown_event=shutdown_event,
-            )
+async def _async_process_item(
+    client_config: ClientConfig,
+    item: QueueItem,
+    purpose: str,
+    shutdown_event: asyncio.Event,
+) -> None:
+    """Process a single queue item asynchronously.
 
-            _rebackground_session(client_config.name, purpose)
+    Injects the prompt into the session (sync — fast), then polls for
+    completion using ``asyncio.sleep`` so other tasks can run concurrently.
+    """
+    client_name = client_config.name
+    try:
+        before_mtime = time.time()
+        _inject_into_session(
+            client_config, item, purpose, auto_bootstrap=True,
+        )
 
-            if shutdown_event.is_set():
-                fail_item(client_name, item.id, "Shutdown requested")
-                return True
+        handoff_path = await _async_wait_for_completion(
+            client_config.workspace_path,
+            before_mtime,
+            timeout=_DAEMON_TASK_TIMEOUT_S,
+            shutdown_event=shutdown_event,
+        )
 
-            if handoff_path is None:
-                timeout_msg = f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s"
-                fail_item(client_name, item.id, timeout_msg)
-                send_notification(
-                    "Daemon Item Timed Out",
-                    f"{client_name}/{purpose} {item.id}: {timeout_msg}",
-                    urgency="critical",
-                )
-                click.echo(f"Timed out: {item.id}")
-                return True
+        _rebackground_session(client_name, purpose)
 
-            reason = parse_handoff_reason(handoff_path)
-            if reason:
-                click.echo(
-                    f"Session ended abnormally (reason: {reason})."
-                    " Skipping item."
-                )
-                send_notification(
-                    "Daemon Item Failed",
-                    f"Queue item {item.id}: {reason}",
-                    urgency="critical",
-                )
-                fail_item(
-                    client_name, item.id,
-                    f"Session handoff: {reason}",
-                )
-                return True
+        if shutdown_event.is_set():
+            fail_item(client_name, item.id, "Shutdown requested")
+            return
 
-            complete_item(client_name, item.id, "Completed by daemon")
-            click.echo(f"Completed: {item.id}")
-        except Exception as exc:
-            _rebackground_session(client_config.name, purpose)
-            fail_item(client_name, item.id, str(exc))
+        if handoff_path is None:
+            timeout_msg = f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s"
+            fail_item(client_name, item.id, timeout_msg)
             send_notification(
-                "Daemon Item Failed",
-                f"{client_name}/{purpose} {item.id}: {exc}",
+                "Daemon Item Timed Out",
+                f"{client_name}/{purpose} {item.id}: {timeout_msg}",
                 urgency="critical",
             )
-            click.echo(f"Failed: {item.id} — {exc}")
+            click.echo(f"Timed out: {item.id}")
+            return
 
-        return True
+        reason = parse_handoff_reason(handoff_path)
+        if reason:
+            click.echo(
+                f"Session ended abnormally (reason: {reason})."
+                " Skipping item."
+            )
+            send_notification(
+                "Daemon Item Failed",
+                f"Queue item {item.id}: {reason}",
+                urgency="critical",
+            )
+            fail_item(
+                client_name, item.id,
+                f"Session handoff: {reason}",
+            )
+            return
 
-    return False
+        complete_item(client_name, item.id, "Completed by daemon")
+        click.echo(f"Completed: {item.id}")
+    except Exception as exc:
+        _rebackground_session(client_name, purpose)
+        fail_item(client_name, item.id, str(exc))
+        send_notification(
+            "Daemon Item Failed",
+            f"{client_name}/{purpose} {item.id}: {exc}",
+            urgency="critical",
+        )
+        click.echo(f"Failed: {item.id} — {exc}")
+
+
+async def _async_wait_for_completion(
+    workspace_path: Path,
+    before_mtime: float,
+    *,
+    timeout: int = 600,
+    poll_interval: int = 10,
+    shutdown_event: asyncio.Event | None = None,
+) -> Path | None:
+    """Async version of :func:`_wait_for_completion`.
+
+    Uses ``asyncio.sleep`` so other tasks can run while polling.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        if shutdown_event is not None and shutdown_event.is_set():
+            return None
+        newer = find_handoffs_newer_than(workspace_path, before_mtime)
+        if newer:
+            return newer[0]
+        await asyncio.sleep(poll_interval)
+    return None
 
 
 # Bootstrap polling constants
