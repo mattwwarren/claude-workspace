@@ -32,11 +32,12 @@ class TestSessionPurpose:
 class TestSessionStatus:
     def test_enum_values(self) -> None:
         assert SessionStatus.ACTIVE == "active"
+        assert SessionStatus.IDLE == "idle"
         assert SessionStatus.BACKGROUNDED == "backgrounded"
         assert SessionStatus.COMPLETED == "completed"
 
     def test_all_values(self) -> None:
-        assert len(SessionStatus) == 3
+        assert len(SessionStatus) == 4
 
 
 class TestSession:
@@ -221,6 +222,7 @@ class TestCwState:
         assert state.sessions == []
         assert state.active_sessions() == []
         assert state.backgrounded_sessions() == []
+        assert state.idled_sessions() == []
 
     def test_active_sessions_filter(self, sample_state: CwState) -> None:
         active = sample_state.active_sessions()
@@ -362,6 +364,57 @@ class TestCwState:
         )
         result = state.active_for_client("c")
         assert result == []
+
+    def test_idled_sessions_filter(self) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="s1",
+                    name="c/impl",
+                    client="c",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.IDLE,
+                    workspace_path="/dev/null",
+                ),
+                Session(
+                    id="s2",
+                    name="c/debt",
+                    client="c",
+                    purpose=SessionPurpose.DEBT,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        idled = state.idled_sessions()
+        assert len(idled) == 1
+        assert idled[0].id == "s1"
+
+    def test_active_for_client_includes_idle(self) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="s1",
+                    name="c/impl",
+                    client="c",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.IDLE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        result = state.active_for_client("c")
+        assert len(result) == 1
+        assert result[0].status == SessionStatus.IDLE
+
+    def test_idle_at_defaults_to_none(self) -> None:
+        s = Session(
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path="/dev/null",
+        )
+        assert s.idle_at is None
 
     def test_sibling_sessions(self, sample_state: CwState) -> None:
         source = sample_state.sessions[0]  # test-client/impl ACTIVE

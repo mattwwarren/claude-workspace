@@ -25,6 +25,7 @@ class EventType(StrEnum):
     SESSION_COMPLETED = "session_completed"
     SESSION_CRASHED = "session_crashed"
     SESSION_HANDOFF = "session_handoff"
+    SESSION_IDLED = "session_idled"
     QUEUE_ITEM_ADDED = "queue_item_added"
     QUEUE_ITEM_COMPLETED = "queue_item_completed"
     QUEUE_ITEM_FAILED = "queue_item_failed"

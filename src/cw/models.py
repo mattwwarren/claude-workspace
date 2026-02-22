@@ -19,6 +19,7 @@ class SessionPurpose(StrEnum):
 
 class SessionStatus(StrEnum):
     ACTIVE = "active"
+    IDLE = "idle"
     BACKGROUNDED = "backgrounded"
     COMPLETED = "completed"
 
@@ -132,6 +133,7 @@ class Session(BaseModel):
     last_handoff_path: Path | None = None
     auto_backgrounded: bool = False
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    idle_at: datetime | None = None
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None
@@ -202,6 +204,9 @@ class CwState(BaseModel):
     def backgrounded_sessions(self) -> list[Session]:
         return [s for s in self.sessions if s.status == SessionStatus.BACKGROUNDED]
 
+    def idled_sessions(self) -> list[Session]:
+        return [s for s in self.sessions if s.status == SessionStatus.IDLE]
+
     def find_session(self, client: str, purpose: str) -> Session | None:
         """Find the most recent session for a client+purpose combo."""
         matches = [
@@ -227,12 +232,16 @@ class CwState(BaseModel):
         return [s for s in self.sessions if s.client == client]
 
     def active_for_client(self, client: str) -> list[Session]:
-        """Active and backgrounded sessions for a client."""
+        """Active, idle, and backgrounded sessions for a client."""
         return [
             s
             for s in self.sessions
             if s.client == client
-            and s.status in (SessionStatus.ACTIVE, SessionStatus.BACKGROUNDED)
+            and s.status in (
+                SessionStatus.ACTIVE,
+                SessionStatus.IDLE,
+                SessionStatus.BACKGROUNDED,
+            )
         ]
 
     def sibling_sessions(self, session: Session) -> list[Session]:
