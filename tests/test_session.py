@@ -44,6 +44,35 @@ class TestBuildPaneArgs:
         assert "--append-system-prompt" in panes["impl"]["claude_cmd"]
         assert "IMPLEMENTATION" in panes["impl"]["claude_cmd"]
 
+    def test_fresh_start_uses_session_id(self, sample_client: ClientConfig) -> None:
+        """Fresh session (no claude_session_id) uses --session-id <uuid>."""
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+        )
+        panes = _build_pane_args({"impl": session}, client=sample_client)
+        cmd = panes["impl"]["claude_cmd"]
+        assert "--session-id" in cmd
+        assert "--resume" not in cmd
+        # Session should have claude_session_id set after build
+        assert session.claude_session_id is not None
+
+    def test_recovery_uses_resume_with_id(self, sample_client: ClientConfig) -> None:
+        """Recovery session (claude_session_id set) uses --resume <uuid>."""
+        session = Session(
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=sample_client.workspace_path,
+            claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+        )
+        panes = _build_pane_args({"impl": session}, client=sample_client)
+        cmd = panes["impl"]["claude_cmd"]
+        assert "--resume 550e8400-e29b-41d4-a716-446655440000" in cmd
+        assert "--session-id" not in cmd
+
     def test_client_override_prompt(self, sample_client: ClientConfig) -> None:
         sample_client.purpose_prompts = {"impl": "Custom impl prompt."}
         session = Session(
@@ -140,6 +169,42 @@ class TestCreateAllPurposeSessions:
         )
         assert set(sessions.keys()) == {"impl"}
         assert len(state.sessions) == 1
+
+
+class TestCreateAllPurposeSessionsWithPrior:
+    def test_carries_forward_claude_session_id(
+        self, sample_client: ClientConfig,
+    ) -> None:
+        """Prior sessions' claude_session_id is carried forward."""
+        prior = {
+            "impl": Session(
+                name="test-client/impl",
+                client="test-client",
+                purpose=SessionPurpose.IMPL,
+                workspace_path=sample_client.workspace_path,
+                claude_session_id="old-uuid-impl",
+            ),
+        }
+        state = CwState()
+        sessions = _create_all_purpose_sessions(
+            sample_client.name, sample_client, state,
+            prior_sessions=prior,
+        )
+        assert sessions["impl"].claude_session_id == "old-uuid-impl"
+        # idea and debt have no prior, so no claude_session_id
+        assert sessions["idea"].claude_session_id is None
+        assert sessions["debt"].claude_session_id is None
+
+    def test_no_prior_generates_fresh(
+        self, sample_client: ClientConfig,
+    ) -> None:
+        """Without prior_sessions, all sessions have no claude_session_id."""
+        state = CwState()
+        sessions = _create_all_purpose_sessions(
+            sample_client.name, sample_client, state,
+        )
+        for s in sessions.values():
+            assert s.claude_session_id is None
 
 
 class TestStartSession:

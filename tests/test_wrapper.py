@@ -14,6 +14,7 @@ from cw.config import EVENTS_DIR, load_state, save_state
 from cw.history import EventType, load_history
 from cw.models import CwState, Session, SessionPurpose, SessionStatus
 from cw.wrapper import (
+    _detect_claude_session_id,
     _idle_signal_path,
     _trigger_path,
     _wait_for_trigger,
@@ -154,6 +155,64 @@ class TestSignalIdle:
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.BACKGROUNDED
 
+    def test_stores_claude_session_id(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_idle stores claude_session_id on session and in payload."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="csid1",
+                    name="c/impl",
+                    client="c",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        save_state(state)
+
+        signal_idle(
+            "c", "impl",
+            exit_code=0,
+            claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+        )
+
+        updated = load_state()
+        assert updated.sessions[0].claude_session_id == (
+            "550e8400-e29b-41d4-a716-446655440000"
+        )
+        signal_file = _idle_signal_path("c", "impl")
+        payload = json.loads(signal_file.read_text())
+        assert payload["claude_session_id"] == (
+            "550e8400-e29b-41d4-a716-446655440000"
+        )
+
+    def test_no_claude_session_id_omits_from_payload(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_idle without claude_session_id omits it from payload."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="noid1",
+                    name="c/impl",
+                    client="c",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        save_state(state)
+
+        signal_idle("c", "impl", exit_code=0)
+
+        signal_file = _idle_signal_path("c", "impl")
+        payload = json.loads(signal_file.read_text())
+        assert "claude_session_id" not in payload
+
 
 class TestWaitForTrigger:
     def test_returns_args_from_trigger(self, tmp_path: Path) -> None:
@@ -256,3 +315,43 @@ class TestRunClaudeWrapper:
 
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.IDLE
+
+
+class TestDetectClaudeSessionId:
+    def test_finds_most_recent_session(self, tmp_path: Path) -> None:
+        """Detects UUID from most recently modified .jsonl file."""
+        workspace = str(tmp_path / "workspace")
+        encoded = workspace.replace("/", "-")
+        project_dir = tmp_path / "home" / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True)
+
+        older = project_dir / "aaaa-bbbb-cccc.jsonl"
+        older.write_text("{}")
+        # Ensure different mtime
+        time.sleep(0.05)
+        newer = project_dir / "1111-2222-3333.jsonl"
+        newer.write_text("{}")
+
+        with patch("cw.wrapper.Path.home", return_value=tmp_path / "home"):
+            result = _detect_claude_session_id(workspace)
+
+        assert result == "1111-2222-3333"
+
+    def test_returns_none_for_missing_dir(self, tmp_path: Path) -> None:
+        """Returns None when project dir doesn't exist."""
+        with patch("cw.wrapper.Path.home", return_value=tmp_path / "home"):
+            result = _detect_claude_session_id("/nonexistent/path")
+
+        assert result is None
+
+    def test_returns_none_for_empty_dir(self, tmp_path: Path) -> None:
+        """Returns None when project dir has no .jsonl files."""
+        workspace = str(tmp_path / "workspace")
+        encoded = workspace.replace("/", "-")
+        project_dir = tmp_path / "home" / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True)
+
+        with patch("cw.wrapper.Path.home", return_value=tmp_path / "home"):
+            result = _detect_claude_session_id(workspace)
+
+        assert result is None

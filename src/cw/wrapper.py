@@ -15,16 +15,13 @@ import subprocess
 import sys
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import click
 
 from cw.config import EVENTS_DIR, load_state, save_state
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import SessionStatus
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # How long the wrapper waits for a trigger file before exiting (seconds).
 _TRIGGER_WAIT_TIMEOUT_S = 300  # 5 minutes
@@ -41,6 +38,28 @@ def _trigger_path(client: str, purpose: str) -> Path:
     return EVENTS_DIR / f"{client}__{purpose}.trigger"
 
 
+def _detect_claude_session_id(workspace_path: str) -> str | None:
+    """Detect the Claude session ID from the most recently modified session file.
+
+    Claude stores sessions at ``~/.claude/projects/<encoded-path>/<uuid>.jsonl``
+    where the path encoding replaces ``/`` with ``-`` (e.g. ``/home/foo/bar``
+    becomes ``-home-foo-bar``).
+    """
+    encoded = workspace_path.replace("/", "-")
+    project_dir = Path.home() / ".claude" / "projects" / encoded
+    if not project_dir.is_dir():
+        return None
+    # Find the most recently modified .jsonl file
+    candidates = sorted(
+        project_dir.glob("*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+    return candidates[0].stem
+
+
 def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
     """Run Claude, signal IDLE on exit, then wait for a daemon trigger.
 
@@ -51,12 +70,19 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
     purpose = os.environ.get("CW_PURPOSE")
 
     claude_args = list(extra_args)
+    # Resolve workspace path for session ID detection
+    workspace_path = os.getcwd()
     result = subprocess.run(["claude", *claude_args], check=False)
 
     if not client or not purpose:
         sys.exit(result.returncode)
 
-    signal_idle(client, purpose, exit_code=result.returncode)
+    claude_session_id = _detect_claude_session_id(workspace_path)
+    signal_idle(
+        client, purpose,
+        exit_code=result.returncode,
+        claude_session_id=claude_session_id,
+    )
 
     # Wait for daemon trigger to launch Claude again.
     trigger = _trigger_path(client, purpose)
@@ -65,7 +91,12 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
     while next_args is not None:
         click.echo(f"Trigger received — launching Claude ({client}/{purpose})")
         result = subprocess.run(["claude", *next_args], check=False)
-        signal_idle(client, purpose, exit_code=result.returncode)
+        claude_session_id = _detect_claude_session_id(workspace_path)
+        signal_idle(
+            client, purpose,
+            exit_code=result.returncode,
+            claude_session_id=claude_session_id,
+        )
         next_args = _wait_for_trigger(trigger)
 
     click.echo(f"No trigger after {_TRIGGER_WAIT_TIMEOUT_S}s — wrapper exiting.")
@@ -76,6 +107,7 @@ def signal_idle(
     purpose: str,
     *,
     exit_code: int = 0,
+    claude_session_id: str | None = None,
 ) -> None:
     """Transition the session to IDLE and write an event signal file."""
     state = load_state()
@@ -85,16 +117,20 @@ def signal_idle(
 
     session.status = SessionStatus.IDLE
     session.idle_at = datetime.now(UTC)
+    if claude_session_id:
+        session.claude_session_id = claude_session_id
     save_state(state)
 
     EVENTS_DIR.mkdir(parents=True, exist_ok=True)
     signal_file = _idle_signal_path(client, purpose)
-    payload = {
+    payload: dict[str, object] = {
         "session_id": session.id,
         "client": client,
         "purpose": purpose,
         "exit_code": exit_code,
     }
+    if claude_session_id:
+        payload["claude_session_id"] = claude_session_id
     signal_file.write_text(json.dumps(payload))
 
     record_event(client, HistoryEvent(

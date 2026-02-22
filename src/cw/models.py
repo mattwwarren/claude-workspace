@@ -131,6 +131,7 @@ class Session(BaseModel):
     zellij_pane: str | None = None
     zellij_tab: str | None = None
     last_handoff_path: Path | None = None
+    claude_session_id: str | None = None
     auto_backgrounded: bool = False
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     idle_at: datetime | None = None

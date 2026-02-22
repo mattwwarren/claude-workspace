@@ -6,6 +6,7 @@ import shlex
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import click
 
@@ -101,11 +102,19 @@ def _build_pane_args(
             escaped_prompt = shlex.quote(prompt.replace("\n", " "))
             extra = f" --append-system-prompt {escaped_prompt}"
 
+        # Two-mode launch: recovery uses --resume <uuid>, fresh uses --session-id <uuid>
+        if session.claude_session_id:
+            session_flag = f" --resume {session.claude_session_id}"
+        else:
+            new_id = str(uuid4())
+            session.claude_session_id = new_id
+            session_flag = f" --session-id {new_id}"
+
         if client_name:
             env_prefix = f"{_build_env_prefix(client_name, purpose)} "
         else:
             env_prefix = ""
-        cmd = f"{env_prefix}cw run-claude -- --resume{extra}"
+        cmd = f"{env_prefix}cw run-claude --{session_flag}{extra}"
         # KDL-quote the whole command for the layout template.
         # Escape backslashes and double quotes so the KDL string is valid.
         kdl_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
@@ -123,14 +132,21 @@ def _create_all_purpose_sessions(
     *,
     worktree_path: Path | None = None,
     worktree_branch: str | None = None,
+    prior_sessions: dict[str, Session] | None = None,
 ) -> dict[str, Session]:
     """Create Session objects for all purposes.
 
     worktree_path/branch apply to impl and idea purposes.
+    When *prior_sessions* is provided, carries forward ``claude_session_id``
+    from the matching purpose so recovery uses ``--resume <uuid>``.
     """
     sessions: dict[str, Session] = {}
     for purpose_enum in client.auto_purposes:
         purpose = purpose_enum.value
+        # Carry forward claude_session_id from prior session for recovery
+        prior_claude_id: str | None = None
+        if prior_sessions and purpose in prior_sessions:
+            prior_claude_id = prior_sessions[purpose].claude_session_id
         session = Session(
             name=f"{client_name}/{purpose}",
             client=client_name,
@@ -138,6 +154,7 @@ def _create_all_purpose_sessions(
             workspace_path=client.workspace_path,
             zellij_pane=purpose,
             zellij_tab=client_name,
+            claude_session_id=prior_claude_id,
         )
         # Apply worktree to impl and idea panes
         if worktree_path and purpose in WORKTREE_PURPOSES:
@@ -256,12 +273,15 @@ def start_session(
                 return
         # Zellij session died - mark old sessions completed and start fresh.
         click.echo("Zellij session gone. Recovering sessions...")
+        prior_sessions: dict[str, Session] = {}
         for s in state.sessions:
             if s.client == client_name and s.status == SessionStatus.ACTIVE:
+                prior_sessions[s.purpose] = s
                 s.status = SessionStatus.COMPLETED
 
         all_sessions = _create_all_purpose_sessions(
             client_name, client, state,
+            prior_sessions=prior_sessions,
         )
         save_state(state)
 

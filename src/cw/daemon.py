@@ -10,6 +10,7 @@ import signal
 import threading
 import time
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import click
 
@@ -527,17 +528,27 @@ def _inject_via_trigger(
     client: str,
     purpose: str,
     workflow_prompt: str,
+    *,
+    session: Session | None = None,
 ) -> None:
     """Write a trigger file so the wrapper launches Claude with the workflow.
 
     The wrapper loop picks up the trigger and runs
-    ``claude --append-system-prompt <prompt>`` — a fresh context with no
-    ``--resume``.
+    ``claude --session-id <uuid> --append-system-prompt <prompt>`` — a fresh
+    context with a known session ID.  When *session* is provided, the
+    generated UUID is stored on the session object (caller must persist).
     """
     EVENTS_DIR.mkdir(parents=True, exist_ok=True)
     trigger = _trigger_path(client, purpose)
+    new_id = str(uuid4())
+    claude_args = [
+        "--session-id", new_id,
+        "--append-system-prompt", workflow_prompt,
+    ]
+    if session is not None:
+        session.claude_session_id = new_id
     payload = {
-        "claude_args": ["--append-system-prompt", workflow_prompt],
+        "claude_args": claude_args,
     }
     trigger.write_text(json.dumps(payload))
 
@@ -600,7 +611,10 @@ def _inject_into_session(
 
     if session.status == SessionStatus.IDLE:
         # Write trigger for the wrapper loop — it will launch Claude
-        _inject_via_trigger(client_config.name, purpose, workflow_prompt)
+        _inject_via_trigger(
+            client_config.name, purpose, workflow_prompt,
+            session=session,
+        )
         session.status = SessionStatus.ACTIVE
         save_state(state)
     else:

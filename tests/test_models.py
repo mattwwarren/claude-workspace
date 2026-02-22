@@ -94,10 +94,24 @@ class TestSession:
         assert s.zellij_pane is None
         assert s.zellij_tab is None
         assert s.last_handoff_path is None
+        assert s.claude_session_id is None
         assert s.backgrounded_at is None
         assert s.resumed_at is None
         assert s.completed_reason is None
         assert s.completed_at is None
+
+    def test_claude_session_id_round_trip(self) -> None:
+        s = Session(
+            id="abcd1234",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path="/dev/null",
+            claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+        )
+        json_str = s.model_dump_json()
+        restored = Session.model_validate_json(json_str)
+        assert restored.claude_session_id == "550e8400-e29b-41d4-a716-446655440000"
 
     def test_json_round_trip(self) -> None:
         s = Session(

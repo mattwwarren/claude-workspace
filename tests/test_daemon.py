@@ -963,9 +963,11 @@ class TestInjectViaTrigger:
         assert trigger.exists()
 
         payload = json.loads(trigger.read_text())
-        assert payload["claude_args"] == [
-            "--append-system-prompt", "Do the work.",
-        ]
+        args = payload["claude_args"]
+        # Should include --session-id <uuid> and --append-system-prompt
+        assert args[0] == "--session-id"
+        assert len(args[1]) == 36  # UUID format
+        assert args[2:] == ["--append-system-prompt", "Do the work."]
 
     def test_creates_events_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -977,6 +979,27 @@ class TestInjectViaTrigger:
         _inject_via_trigger("c", "impl", "prompt")
 
         assert events_dir.exists()
+
+    def test_stores_session_id_on_session_object(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        session = Session(
+            name="c/debt",
+            client="c",
+            purpose=SessionPurpose.DEBT,
+            workspace_path="/dev/null",
+        )
+        assert session.claude_session_id is None
+
+        _inject_via_trigger("c", "debt", "prompt", session=session)
+
+        assert session.claude_session_id is not None
+        assert len(session.claude_session_id) == 36  # UUID format
 
 
 class TestWaitForIdleEvent:
