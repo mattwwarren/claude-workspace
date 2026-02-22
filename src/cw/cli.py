@@ -45,6 +45,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
+from cw.wrapper import run_claude_wrapper, signal_idle
 
 
 def handle_errors[F: Callable[..., object]](fn: F) -> F:
@@ -379,6 +380,8 @@ def _display_sessions() -> None:
 
         if s.status == SessionStatus.ACTIVE:
             since = _relative_time(s.resumed_at or s.started_at)
+        elif s.status == SessionStatus.IDLE:
+            since = _relative_time(s.idle_at or s.started_at)
         elif s.status == SessionStatus.BACKGROUNDED:
             since = _relative_time(s.backgrounded_at or s.started_at)
         else:
@@ -430,10 +433,12 @@ def _display_status() -> None:
         click.echo(f"Detected crashed session: {s.name} (crashed)")
 
     active = state.active_sessions()
+    idled = state.idled_sessions()
     backgrounded = state.backgrounded_sessions()
 
     click.echo(f"Clients configured: {len(clients)}")
     click.echo(f"Active sessions:    {len(active)}")
+    click.echo(f"Idle sessions:      {len(idled)}")
     click.echo(f"Backgrounded:       {len(backgrounded)}")
     click.echo()
 
@@ -441,6 +446,12 @@ def _display_status() -> None:
         click.echo("Active:")
         for s in active:
             since = _relative_time(s.resumed_at or s.started_at)
+            click.echo(f"  {s.name} (since {since})")
+
+    if idled:
+        click.echo("Idle:")
+        for s in idled:
+            since = _relative_time(s.idle_at or s.started_at)
             click.echo(f"  {s.name} (since {since})")
 
     if backgrounded:
@@ -795,6 +806,38 @@ def dashboard() -> None:
     from cw.tui import run_dashboard
 
     run_dashboard()
+
+
+@main.command(name="run-claude")
+@click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
+@handle_errors
+def run_claude(extra_args: tuple[str, ...]) -> None:
+    """Wrapper around Claude that signals IDLE on exit.
+
+    Used as the pane command in Zellij layouts. After Claude exits,
+    transitions the session to IDLE and waits for daemon triggers.
+
+    \b
+    Examples:
+      cw run-claude -- --resume
+      cw run-claude -- --resume --append-system-prompt "..."
+    """
+    run_claude_wrapper(extra_args)
+
+
+@main.command(name="pane-exited")
+@click.option("--client", "-c", required=True, help="Client name.")
+@click.option("--purpose", "-p", required=True, help="Session purpose.")
+@click.option("--exit-code", type=int, default=0, help="Claude exit code.")
+@handle_errors
+def pane_exited(client: str, purpose: str, exit_code: int) -> None:
+    """Explicitly signal that Claude exited in a pane.
+
+    Fallback for cases where the wrapper isn't running. Transitions
+    the session to IDLE.
+    """
+    signal_idle(client, purpose, exit_code=exit_code)
+    click.echo(f"Signaled IDLE for {client}/{purpose} (exit code {exit_code}).")
 
 
 _COMPLETION_SCRIPTS = {

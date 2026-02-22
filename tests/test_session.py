@@ -591,7 +591,7 @@ class TestBackgroundSession:
         )
         save_state(state)
 
-        with pytest.raises(CwError, match="not active"):
+        with pytest.raises(CwError, match="not active or idle"):
             background_session("c/impl")
 
     def test_outside_zellij_finds_latest_handoff(
@@ -739,7 +739,7 @@ class TestResumeSession:
         )
         save_state(state)
 
-        with pytest.raises(CwError, match="not backgrounded"):
+        with pytest.raises(CwError, match="not backgrounded or idle"):
             resume_session("test-client/impl")
 
     def test_not_found_raises(

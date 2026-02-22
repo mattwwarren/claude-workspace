@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import threading
@@ -21,14 +22,16 @@ from cw.daemon import (
     _async_process_item,
     _async_wait_for_completion,
     _ensure_not_running,
-    _get_backgrounded_session,
+    _get_injectable_session,
     _inject_into_session,
+    _inject_via_trigger,
     _is_process_alive,
     _pid_path,
     _reap_done_tasks,
     _rebackground_session,
     _spawn_new_tasks,
     _wait_for_completion,
+    _wait_for_idle_event,
     daemon_status,
     stop_daemon,
 )
@@ -336,7 +339,7 @@ def _make_session(
     )
 
 
-class TestGetBackgroundedSession:
+class TestGetInjectableSession:
     def test_returns_session_and_state(self, tmp_path: Path) -> None:
         client_config = _make_client(tmp_path)
         session = _make_session(
@@ -346,7 +349,7 @@ class TestGetBackgroundedSession:
         state = CwState(sessions=[session])
 
         with patch("cw.daemon.load_state", return_value=state):
-            found, returned_state = _get_backgrounded_session(
+            found, returned_state = _get_injectable_session(
                 "test-client", "debt",
             )
         assert found is session
@@ -362,9 +365,24 @@ class TestGetBackgroundedSession:
 
         with (
             patch("cw.daemon.load_state", return_value=state),
-            pytest.raises(CwError, match="not backgrounded"),
+            pytest.raises(CwError, match="not injectable"),
         ):
-            _get_backgrounded_session("test-client", "debt")
+            _get_injectable_session("test-client", "debt")
+
+    def test_accepts_idle_session(self, tmp_path: Path) -> None:
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.IDLE,
+        )
+        state = CwState(sessions=[session])
+
+        with patch("cw.daemon.load_state", return_value=state):
+            found, returned_state = _get_injectable_session(
+                "test-client", "debt",
+            )
+        assert found is session
+        assert returned_state is state
 
     def test_raises_on_missing(self, tmp_path: Path) -> None:
         state = CwState(sessions=[])
@@ -373,7 +391,7 @@ class TestGetBackgroundedSession:
             patch("cw.daemon.load_state", return_value=state),
             pytest.raises(CwError, match="No debt session"),
         ):
-            _get_backgrounded_session("test-client", "debt")
+            _get_injectable_session("test-client", "debt")
 
     def test_raises_on_completed(self, tmp_path: Path) -> None:
         """find_session filters out COMPLETED, so they appear as missing."""
@@ -388,7 +406,7 @@ class TestGetBackgroundedSession:
             patch("cw.daemon.load_state", return_value=state),
             pytest.raises(CwError, match="No debt session"),
         ):
-            _get_backgrounded_session("test-client", "debt")
+            _get_injectable_session("test-client", "debt")
 
     def test_auto_bootstrap_false_raises_on_missing(
         self, tmp_path: Path,
@@ -398,7 +416,7 @@ class TestGetBackgroundedSession:
             patch("cw.daemon.load_state", return_value=state),
             pytest.raises(CwError, match="No debt session"),
         ):
-            _get_backgrounded_session(
+            _get_injectable_session(
                 "test-client", "debt", auto_bootstrap=False,
             )
 
@@ -432,7 +450,7 @@ class TestGetBackgroundedSession:
             patch("cw.daemon.start_session") as mock_start,
             patch("cw.daemon.time.sleep"),
         ):
-            session, _state = _get_backgrounded_session(
+            session, _state = _get_injectable_session(
                 "test-client", "debt", auto_bootstrap=True,
             )
             mock_start.assert_called_once_with("test-client", "debt")
@@ -450,13 +468,13 @@ class TestGetBackgroundedSession:
             patch("cw.daemon.time.sleep"),
             pytest.raises(CwError, match="Timed out"),
         ):
-            _get_backgrounded_session(
+            _get_injectable_session(
                 "test-client", "debt", auto_bootstrap=True,
             )
 
 
 class TestInjectIntoSession:
-    def test_writes_to_pane(
+    def test_writes_to_pane_for_backgrounded(
         self,
         tmp_path: Path,
         tmp_config_dir: Path,
@@ -483,6 +501,37 @@ class TestInjectIntoSession:
         assert "claude --resume" in resume_call
         workflow_call = mock_zellij["write_to_pane"][1][0]
         assert "daemon queue system" in workflow_call
+
+    def test_writes_trigger_for_idle(
+        self,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.IDLE,
+        )
+        state = CwState(sessions=[session])
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state"),
+            patch("cw.daemon.record_event"),
+        ):
+            _inject_into_session(client_config, _make_queue_item(), "debt")
+
+        # Trigger file should exist with workflow prompt
+        trigger = events_dir / "test-client__debt.trigger"
+        assert trigger.exists()
+        payload = json.loads(trigger.read_text())
+        assert "--append-system-prompt" in payload["claude_args"]
 
     def test_sets_active_before_zellij_io(
         self,
@@ -897,3 +946,188 @@ class TestAsyncWaitForCompletion:
                 shutdown_event=event,
             )
         assert result is None
+
+
+class TestInjectViaTrigger:
+    def test_writes_trigger_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        _inject_via_trigger("my-client", "debt", "Do the work.")
+
+        trigger = events_dir / "my-client__debt.trigger"
+        assert trigger.exists()
+
+        payload = json.loads(trigger.read_text())
+        assert payload["claude_args"] == [
+            "--append-system-prompt", "Do the work.",
+        ]
+
+    def test_creates_events_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "new" / "events"
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        _inject_via_trigger("c", "impl", "prompt")
+
+        assert events_dir.exists()
+
+
+class TestWaitForIdleEvent:
+    @pytest.mark.asyncio
+    async def test_returns_payload_when_signal_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        signal_file = events_dir / "c__debt.idle"
+        signal_file.write_text(json.dumps({
+            "session_id": "s1", "exit_code": 0,
+        }))
+
+        result = await _wait_for_idle_event(
+            "c", "debt", timeout=5, poll_interval=0.1,
+        )
+        assert result is not None
+        assert result["exit_code"] == 0
+        assert not signal_file.exists()  # Consumed
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        result = await _wait_for_idle_event(
+            "c", "debt", timeout=0.2, poll_interval=0.1,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_shutdown_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        event = asyncio.Event()
+        event.set()
+
+        result = await _wait_for_idle_event(
+            "c", "debt", timeout=60, poll_interval=0.1,
+            shutdown_event=event,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_handles_malformed_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        signal_file = events_dir / "c__debt.idle"
+        signal_file.write_text("not json{{{")
+
+        result = await _wait_for_idle_event(
+            "c", "debt", timeout=5, poll_interval=0.1,
+        )
+        assert result == {}
+        assert not signal_file.exists()
+
+
+class TestAsyncProcessItemIdlePath:
+    """Tests for _async_process_item when session is IDLE (event-driven)."""
+
+    @pytest.mark.asyncio
+    async def test_completes_via_idle_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        item = _make_queue_item()
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.IDLE,
+        )
+        state = CwState(sessions=[session])
+        event = asyncio.Event()
+
+        idle_payload: dict[str, object] = {
+            "session_id": "sess-debt", "exit_code": 0,
+        }
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state"),
+            patch("cw.daemon.record_event"),
+            patch("cw.daemon.build_daemon_workflow_prompt", return_value="work"),
+            patch(
+                "cw.daemon._wait_for_idle_event",
+                return_value=idle_payload,
+            ),
+            patch("cw.daemon.complete_item") as mock_complete,
+        ):
+            await _async_process_item(client_config, item, "debt", event)
+
+        mock_complete.assert_called_once_with(
+            "test-client", "item01", "Completed by daemon",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fails_on_nonzero_exit_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
+
+        item = _make_queue_item()
+        client_config = _make_client(tmp_path)
+        session = _make_session(
+            client_config.workspace_path,
+            status=SessionStatus.IDLE,
+        )
+        state = CwState(sessions=[session])
+        event = asyncio.Event()
+
+        idle_payload: dict[str, object] = {
+            "session_id": "sess-debt", "exit_code": 1,
+        }
+
+        with (
+            patch("cw.daemon.load_state", return_value=state),
+            patch("cw.daemon.save_state"),
+            patch("cw.daemon.record_event"),
+            patch("cw.daemon.build_daemon_workflow_prompt", return_value="work"),
+            patch(
+                "cw.daemon._wait_for_idle_event",
+                return_value=idle_payload,
+            ),
+            patch("cw.daemon.fail_item") as mock_fail,
+        ):
+            await _async_process_item(client_config, item, "debt", event)
+
+        mock_fail.assert_called_once()
+        assert "exited with code 1" in mock_fail.call_args[0][2]

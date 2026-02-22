@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import threading
@@ -13,7 +14,14 @@ from typing import TYPE_CHECKING
 import click
 
 from cw import zellij
-from cw.config import DAEMONS_DIR, get_client, load_clients, load_state, save_state
+from cw.config import (
+    DAEMONS_DIR,
+    EVENTS_DIR,
+    get_client,
+    load_clients,
+    load_state,
+    save_state,
+)
 from cw.exceptions import CwError
 from cw.handoff import (
     build_daemon_workflow_prompt,
@@ -32,6 +40,7 @@ from cw.models import (
 from cw.notify import send_notification
 from cw.queue import claim_next, complete_item, fail_item
 from cw.session import CLAUDE_INIT_DELAY_S, CW_SESSION, start_session
+from cw.wrapper import _idle_signal_path, _trigger_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -286,61 +295,104 @@ async def _async_process_item(
 ) -> None:
     """Process a single queue item asynchronously.
 
-    Injects the prompt into the session (sync — fast), then polls for
-    completion using ``asyncio.sleep`` so other tasks can run concurrently.
+    Injects the prompt into the session, then waits for completion.
+    For IDLE sessions (wrapper-managed), waits for the idle signal file.
+    For BACKGROUNDED sessions (legacy), polls for handoff files.
     """
     client_name = client_config.name
+
+    # Check session status before injection to choose completion strategy
+    state = load_state()
+    session = state.find_session(client_name, purpose)
+    use_idle_events = session is not None and session.status == SessionStatus.IDLE
+
     try:
         before_mtime = time.time()
         _inject_into_session(
             client_config, item, purpose, auto_bootstrap=True,
         )
 
-        handoff_path = await _async_wait_for_completion(
-            client_config.workspace_path,
-            before_mtime,
-            timeout=_DAEMON_TASK_TIMEOUT_S,
-            shutdown_event=shutdown_event,
-        )
-
-        _rebackground_session(client_name, purpose)
-
-        if shutdown_event.is_set():
-            fail_item(client_name, item.id, "Shutdown requested")
-            return
-
-        if handoff_path is None:
-            timeout_msg = f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s"
-            fail_item(client_name, item.id, timeout_msg)
-            send_notification(
-                "Daemon Item Timed Out",
-                f"{client_name}/{purpose} {item.id}: {timeout_msg}",
-                urgency="critical",
+        if use_idle_events:
+            # Event-driven: wait for wrapper to signal IDLE
+            idle_payload = await _wait_for_idle_event(
+                client_name, purpose,
+                timeout=_DAEMON_TASK_TIMEOUT_S,
+                shutdown_event=shutdown_event,
             )
-            click.echo(f"Timed out: {item.id}")
-            return
 
-        reason = parse_handoff_reason(handoff_path)
-        if reason:
-            click.echo(
-                f"Session ended abnormally (reason: {reason})."
-                " Skipping item."
-            )
-            send_notification(
-                "Daemon Item Failed",
-                f"Queue item {item.id}: {reason}",
-                urgency="critical",
-            )
-            fail_item(
-                client_name, item.id,
-                f"Session handoff: {reason}",
-            )
-            return
+            if shutdown_event.is_set():
+                fail_item(client_name, item.id, "Shutdown requested")
+                return
 
-        complete_item(client_name, item.id, "Completed by daemon")
-        click.echo(f"Completed: {item.id}")
+            if idle_payload is None:
+                timeout_msg = f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s"
+                fail_item(client_name, item.id, timeout_msg)
+                send_notification(
+                    "Daemon Item Timed Out",
+                    f"{client_name}/{purpose} {item.id}: {timeout_msg}",
+                    urgency="critical",
+                )
+                click.echo(f"Timed out: {item.id}")
+                return
+
+            # Wrapper already transitioned to IDLE — no rebackground needed
+            exit_code = idle_payload.get("exit_code", 0)
+            if exit_code != 0:
+                fail_msg = f"Claude exited with code {exit_code}"
+                fail_item(client_name, item.id, fail_msg)
+                click.echo(f"Failed: {item.id} — {fail_msg}")
+                return
+
+            complete_item(client_name, item.id, "Completed by daemon")
+            click.echo(f"Completed: {item.id}")
+        else:
+            # Legacy: poll for handoff files
+            handoff_path = await _async_wait_for_completion(
+                client_config.workspace_path,
+                before_mtime,
+                timeout=_DAEMON_TASK_TIMEOUT_S,
+                shutdown_event=shutdown_event,
+            )
+
+            _rebackground_session(client_name, purpose)
+
+            if shutdown_event.is_set():
+                fail_item(client_name, item.id, "Shutdown requested")
+                return
+
+            if handoff_path is None:
+                timeout_msg = f"Timed out after {_DAEMON_TASK_TIMEOUT_S}s"
+                fail_item(client_name, item.id, timeout_msg)
+                send_notification(
+                    "Daemon Item Timed Out",
+                    f"{client_name}/{purpose} {item.id}: {timeout_msg}",
+                    urgency="critical",
+                )
+                click.echo(f"Timed out: {item.id}")
+                return
+
+            reason = parse_handoff_reason(handoff_path)
+            if reason:
+                click.echo(
+                    f"Session ended abnormally (reason: {reason})."
+                    " Skipping item."
+                )
+                send_notification(
+                    "Daemon Item Failed",
+                    f"Queue item {item.id}: {reason}",
+                    urgency="critical",
+                )
+                fail_item(
+                    client_name, item.id,
+                    f"Session handoff: {reason}",
+                )
+                return
+
+            complete_item(client_name, item.id, "Completed by daemon")
+            click.echo(f"Completed: {item.id}")
     except Exception as exc:
-        _rebackground_session(client_name, purpose)
+        if not use_idle_events:
+            _rebackground_session(client_name, purpose)
         fail_item(client_name, item.id, str(exc))
         send_notification(
             "Daemon Item Failed",
@@ -378,17 +430,17 @@ _BOOTSTRAP_POLL_INTERVAL_S = 2
 _BOOTSTRAP_TIMEOUT_S = 60
 
 
-def _get_backgrounded_session(
+def _get_injectable_session(
     client_name: str,
     purpose: str,
     *,
     auto_bootstrap: bool = False,
 ) -> tuple[Session, CwState]:
-    """Load state and find a BACKGROUNDED session.
+    """Load state and find an IDLE or BACKGROUNDED session.
 
     Returns ``(session, state)`` so callers can mutate and save.
     When *auto_bootstrap* is ``True`` and no session exists, starts
-    a new session and polls until it reaches BACKGROUNDED status.
+    a new session and polls until it reaches an injectable status.
     Raises :class:`CwError` if no suitable session exists (or
     bootstrap times out).
     """
@@ -405,36 +457,39 @@ def _get_backgrounded_session(
         # Bootstrap a new session
         click.echo(f"Bootstrapping {purpose} session for {client_name}...")
         start_session(client_name, purpose)
-        session = _poll_for_backgrounded(client_name, purpose)
+        session = _poll_for_injectable(client_name, purpose)
         state = load_state()
         return session, state
 
-    if session.status != SessionStatus.BACKGROUNDED:
+    if session.status not in (SessionStatus.IDLE, SessionStatus.BACKGROUNDED):
         msg = (
-            f"Session {session.name} is not backgrounded"
-            f" (status: {session.status}). Cannot inject."
+            f"Session {session.name} is not injectable"
+            f" (status: {session.status}). Need IDLE or BACKGROUNDED."
         )
         raise CwError(msg)
 
     return session, state
 
 
-def _poll_for_backgrounded(
+def _poll_for_injectable(
     client_name: str,
     purpose: str,
 ) -> Session:
-    """Poll state until a session becomes BACKGROUNDED or timeout."""
+    """Poll state until a session becomes IDLE or BACKGROUNDED, or timeout."""
     elapsed = 0
     while elapsed < _BOOTSTRAP_TIMEOUT_S:
         time.sleep(_BOOTSTRAP_POLL_INTERVAL_S)
         elapsed += _BOOTSTRAP_POLL_INTERVAL_S
         state = load_state()
         session = state.find_session(client_name, purpose)
-        if session is not None and session.status == SessionStatus.BACKGROUNDED:
+        if session is not None and session.status in (
+            SessionStatus.IDLE,
+            SessionStatus.BACKGROUNDED,
+        ):
             return session
     msg = (
         f"Timed out waiting for {client_name}/{purpose}"
-        f" to reach BACKGROUNDED state ({_BOOTSTRAP_TIMEOUT_S}s)."
+        f" to reach injectable state ({_BOOTSTRAP_TIMEOUT_S}s)."
     )
     raise CwError(msg)
 
@@ -468,6 +523,55 @@ def _resume_claude_in_pane(
     zellij.write_to_pane(workflow_prompt + "\n", session=zellij_target)
 
 
+def _inject_via_trigger(
+    client: str,
+    purpose: str,
+    workflow_prompt: str,
+) -> None:
+    """Write a trigger file so the wrapper launches Claude with the workflow.
+
+    The wrapper loop picks up the trigger and runs
+    ``claude --append-system-prompt <prompt>`` — a fresh context with no
+    ``--resume``.
+    """
+    EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    trigger = _trigger_path(client, purpose)
+    payload = {
+        "claude_args": ["--append-system-prompt", workflow_prompt],
+    }
+    trigger.write_text(json.dumps(payload))
+
+
+async def _wait_for_idle_event(
+    client: str,
+    purpose: str,
+    *,
+    timeout: int = _DAEMON_TASK_TIMEOUT_S,
+    poll_interval: float = 2.0,
+    shutdown_event: asyncio.Event | None = None,
+) -> dict[str, object] | None:
+    """Poll for an idle signal file from the wrapper.
+
+    Returns the parsed JSON payload on success, or ``None`` on timeout
+    or shutdown.  Consumes (deletes) the signal file after reading.
+    """
+    signal_file = _idle_signal_path(client, purpose)
+    start = time.time()
+    while time.time() - start < timeout:
+        if shutdown_event is not None and shutdown_event.is_set():
+            return None
+        if signal_file.exists():
+            try:
+                data: dict[str, object] = json.loads(signal_file.read_text())
+                signal_file.unlink(missing_ok=True)
+                return data
+            except (json.JSONDecodeError, OSError):
+                signal_file.unlink(missing_ok=True)
+                return {}
+        await asyncio.sleep(poll_interval)
+    return None
+
+
 def _inject_into_session(
     client_config: ClientConfig,
     item: QueueItem,
@@ -475,30 +579,35 @@ def _inject_into_session(
     *,
     auto_bootstrap: bool = False,
 ) -> None:
-    """Resume the debt session and inject a workflow prompt.
+    """Inject a workflow prompt into the session.
 
-    The debt pane must already exist (created by ``cw start``) and the
-    session must be BACKGROUNDED.  The daemon resumes Claude in that pane
-    and injects the full workflow prompt via keystroke injection.
+    Supports two injection paths:
+
+    - **IDLE** (wrapper running): writes a trigger file so the wrapper
+      launches a fresh ``claude --append-system-prompt <prompt>``.
+    - **BACKGROUNDED** (no wrapper): falls back to keystroke injection
+      via ``_resume_claude_in_pane``.
 
     When *auto_bootstrap* is ``True``, automatically starts a session if
     none exists.
 
-    On success the session status is set to ACTIVE.  On failure after
-    the resume command has been sent, the session is still marked ACTIVE
-    (Claude is running) — the caller is responsible for re-backgrounding.
+    On success the session status is set to ACTIVE.
     """
-    session, state = _get_backgrounded_session(
+    session, state = _get_injectable_session(
         client_config.name, purpose, auto_bootstrap=auto_bootstrap,
     )
     workflow_prompt = build_daemon_workflow_prompt(item.task)
 
-    # Mark ACTIVE before Zellij IO — after the resume command is sent
-    # Claude is running regardless of whether the prompt injection succeeds.
-    session.status = SessionStatus.ACTIVE
-    save_state(state)
-
-    _resume_claude_in_pane(session, workflow_prompt, purpose)
+    if session.status == SessionStatus.IDLE:
+        # Write trigger for the wrapper loop — it will launch Claude
+        _inject_via_trigger(client_config.name, purpose, workflow_prompt)
+        session.status = SessionStatus.ACTIVE
+        save_state(state)
+    else:
+        # Legacy keystroke injection for BACKGROUNDED sessions
+        session.status = SessionStatus.ACTIVE
+        save_state(state)
+        _resume_claude_in_pane(session, workflow_prompt, purpose)
 
     record_event(client_config.name, HistoryEvent(
         event_type=EventType.SESSION_RESUMED,

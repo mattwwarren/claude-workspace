@@ -1,0 +1,258 @@
+"""Tests for cw.wrapper - Claude wrapper and IDLE signaling."""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+
+import pytest
+
+from cw.config import EVENTS_DIR, load_state, save_state
+from cw.history import EventType, load_history
+from cw.models import CwState, Session, SessionPurpose, SessionStatus
+from cw.wrapper import (
+    _idle_signal_path,
+    _trigger_path,
+    _wait_for_trigger,
+    run_claude_wrapper,
+    signal_idle,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+class TestIdleSignalPath:
+    def test_format(self) -> None:
+        path = _idle_signal_path("my-client", "impl")
+        assert path == EVENTS_DIR / "my-client__impl.idle"
+
+    def test_different_purposes(self) -> None:
+        assert _idle_signal_path("c", "impl") != _idle_signal_path("c", "debt")
+
+
+class TestTriggerPath:
+    def test_format(self) -> None:
+        path = _trigger_path("my-client", "impl")
+        assert path == EVENTS_DIR / "my-client__impl.trigger"
+
+
+class TestSignalIdle:
+    def test_transitions_active_to_idle(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """Active session transitions to IDLE with idle_at set."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="s1",
+                    name="c/impl",
+                    client="c",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        save_state(state)
+
+        signal_idle("c", "impl", exit_code=0)
+
+        updated = load_state()
+        session = updated.sessions[0]
+        assert session.status == SessionStatus.IDLE
+        assert session.idle_at is not None
+
+    def test_writes_signal_file(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """Signal file is written with correct payload."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="sig1",
+                    name="c/debt",
+                    client="c",
+                    purpose=SessionPurpose.DEBT,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        save_state(state)
+
+        signal_idle("c", "debt", exit_code=42)
+
+        signal_file = _idle_signal_path("c", "debt")
+        assert signal_file.exists()
+        payload = json.loads(signal_file.read_text())
+        assert payload["session_id"] == "sig1"
+        assert payload["client"] == "c"
+        assert payload["purpose"] == "debt"
+        assert payload["exit_code"] == 42
+
+    def test_records_history_event(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """SESSION_IDLED event is recorded in history."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="h1",
+                    name="c/impl",
+                    client="c",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        save_state(state)
+
+        signal_idle("c", "impl", exit_code=0)
+
+        events = load_history("c")
+        assert len(events) >= 1
+        idled_events = [e for e in events if e.event_type == EventType.SESSION_IDLED]
+        assert len(idled_events) == 1
+        assert idled_events[0].session_id == "h1"
+        assert idled_events[0].metadata["exit_code"] == "0"
+
+    def test_no_session_found_is_noop(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_idle does nothing if session doesn't exist."""
+        state = CwState(sessions=[])
+        save_state(state)
+
+        # Should not raise
+        signal_idle("nonexistent", "impl", exit_code=0)
+
+    def test_skips_non_active_session(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_idle does nothing if session is not ACTIVE."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="bg1",
+                    name="c/impl",
+                    client="c",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        save_state(state)
+
+        signal_idle("c", "impl", exit_code=0)
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.BACKGROUNDED
+
+
+class TestWaitForTrigger:
+    def test_returns_args_from_trigger(self, tmp_path: Path) -> None:
+        """Returns claude_args from trigger file."""
+        trigger = tmp_path / "test.trigger"
+        trigger.write_text(json.dumps({"claude_args": ["--resume", "--print"]}))
+
+        result = _wait_for_trigger(trigger, timeout=1.0, poll_interval=0.1)
+
+        assert result == ["--resume", "--print"]
+        assert not trigger.exists()  # Trigger consumed
+
+    def test_returns_empty_list_on_missing_args(self, tmp_path: Path) -> None:
+        """Returns empty list if trigger has no claude_args."""
+        trigger = tmp_path / "test.trigger"
+        trigger.write_text(json.dumps({"other": "data"}))
+
+        result = _wait_for_trigger(trigger, timeout=1.0, poll_interval=0.1)
+
+        assert result == []
+
+    def test_returns_none_on_timeout(self, tmp_path: Path) -> None:
+        """Returns None when no trigger appears within timeout."""
+        trigger = tmp_path / "test.trigger"
+
+        result = _wait_for_trigger(trigger, timeout=0.3, poll_interval=0.1)
+
+        assert result is None
+
+    def test_handles_malformed_json(self, tmp_path: Path) -> None:
+        """Returns empty list on malformed JSON in trigger."""
+        trigger = tmp_path / "test.trigger"
+        trigger.write_text("not valid json{{{")
+
+        result = _wait_for_trigger(trigger, timeout=1.0, poll_interval=0.1)
+
+        assert result == []
+        assert not trigger.exists()  # Still consumed
+
+    def test_waits_then_finds_trigger(self, tmp_path: Path) -> None:
+        """Trigger created after a short delay is detected."""
+        trigger = tmp_path / "test.trigger"
+
+        def _write_later() -> None:
+            time.sleep(0.2)
+            trigger.write_text(json.dumps({"claude_args": ["--resume"]}))
+
+        t = threading.Thread(target=_write_later)
+        t.start()
+
+        result = _wait_for_trigger(trigger, timeout=2.0, poll_interval=0.1)
+        t.join()
+
+        assert result == ["--resume"]
+
+
+class TestRunClaudeWrapper:
+    def test_no_env_runs_claude_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without CW_CLIENT/CW_PURPOSE, runs claude and exits."""
+        monkeypatch.delenv("CW_CLIENT", raising=False)
+        monkeypatch.delenv("CW_PURPOSE", raising=False)
+
+        with patch("cw.wrapper.subprocess.run") as mock_run:
+            mock_run.return_value = type("Result", (), {"returncode": 0})()
+            with pytest.raises(SystemExit, match="0"):
+                run_claude_wrapper(("--resume",))
+
+        mock_run.assert_called_once_with(["claude", "--resume"], check=False)
+
+    def test_with_env_signals_idle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """With CW_CLIENT/CW_PURPOSE set, signals IDLE after Claude exits."""
+        monkeypatch.setenv("CW_CLIENT", "test")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="w1",
+                    name="test/impl",
+                    client="test",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path="/dev/null",
+                ),
+            ]
+        )
+        save_state(state)
+
+        with (
+            patch("cw.wrapper.subprocess.run") as mock_run,
+            patch("cw.wrapper._wait_for_trigger", return_value=None),
+        ):
+            mock_run.return_value = type("Result", (), {"returncode": 0})()
+            run_claude_wrapper(("--resume",))
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.IDLE

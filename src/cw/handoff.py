@@ -54,13 +54,31 @@ def find_handoffs_newer_than(workspace_path: Path, since_mtime: float) -> list[P
     ]
 
 
+_CROSS_SESSION_WORKFLOW = (
+    "\n\n## Workflow\n\n"
+    "1. **Assess**: Read the handoff context above and understand the work.\n"
+    "2. **Implement**: Complete the work described.\n"
+    "3. **Quality gates**: Run `ruff check src/ tests/`, `mypy src/`,"
+    " and `pytest tests/ -v`. Fix all issues before proceeding.\n"
+    "4. **Review**: If changes are non-trivial (>20 lines or multi-file),"
+    " spawn review agents using the Task tool"
+    " (Code Quality Reviewer, Architecture Reviewer)."
+    " Fix ALL findings (HIGH, MEDIUM, and LOW)."
+    " If a finding would add significant scope"
+    " (new feature, large refactor, architectural change),"
+    " queue it to the debt session instead of fixing it inline:"
+    ' `cw queue add <client> "<description>" --purpose debt`.\n'
+    "5. **Signal completion**: Run /session-done when finished.\n"
+)
+
+
 def build_cross_session_prompt(
     source_purpose: str,
     target_purpose: str,
     branch: str | None,
     raw_prompt: str | None,
 ) -> str:
-    """Wrap a resumption prompt with cross-session context."""
+    """Wrap a resumption prompt with cross-session context and workflow."""
     branch_label = f" on branch {branch}" if branch else ""
     header = (
         f"Cross-session handoff: {source_purpose} → {target_purpose}"
@@ -72,12 +90,14 @@ def build_cross_session_prompt(
             f"{header}\n"
             f"The {source_purpose} session completed with this context:\n\n"
             f"{raw_prompt}"
+            f"{_CROSS_SESSION_WORKFLOW}"
         )
 
     return (
         f"{header}\n"
         f"The {source_purpose} session has been backgrounded."
         f" No resumption context was captured."
+        f"{_CROSS_SESSION_WORKFLOW}"
     )
 
 
@@ -233,7 +253,11 @@ _DAEMON_WORKFLOW_TEMPLATE = (
     "4. **Review**: Spawn review agents using the Task tool"
     " to review your changes."
     " Use Code Quality Reviewer and Architecture Reviewer"
-    " at minimum. Fix all HIGH and MEDIUM findings."
+    " at minimum. Fix ALL findings (HIGH, MEDIUM, and LOW)."
+    " If a finding would add significant scope"
+    " (new feature, large refactor, architectural change),"
+    " queue it to the debt session instead of fixing it inline:"
+    ' `cw queue add <client> "<description>" --purpose debt`.'
     " Do NOT review inline — always delegate to agents"
     " to protect your context window.\n"
     "5. **Commit**: Create a git commit with a clear message.\n"

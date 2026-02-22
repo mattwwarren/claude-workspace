@@ -105,7 +105,7 @@ def _build_pane_args(
             env_prefix = f"{_build_env_prefix(client_name, purpose)} "
         else:
             env_prefix = ""
-        cmd = f"{env_prefix}claude --resume{extra}"
+        cmd = f"{env_prefix}cw run-claude -- --resume{extra}"
         # KDL-quote the whole command for the layout template.
         # Escape backslashes and double quotes so the KDL string is valid.
         kdl_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
@@ -364,15 +364,20 @@ def background_session(
     state = load_state()
     session = _resolve_session(state, session_name)
 
-    if session.status != SessionStatus.ACTIVE:
-        msg = f"Session {session.name} is not active (status: {session.status})"
+    if session.status not in (SessionStatus.ACTIVE, SessionStatus.IDLE):
+        msg = f"Session {session.name} is not active or idle (status: {session.status})"
         raise CwError(msg)
 
     click.echo(f"Backgrounding session: {session.name}...")
 
     before_mtime = time.time()
 
-    if zellij.in_zellij_session():
+    if session.status == SessionStatus.IDLE:
+        # Claude already exited — no /session-done needed.
+        latest = find_latest_handoff(session.workspace_path)
+        if latest:
+            session.last_handoff_path = latest
+    elif zellij.in_zellij_session():
         _navigate_to_pane(session)
         zellij.write_to_pane("/session-done\n")
 
@@ -447,8 +452,11 @@ def resume_session(session_name: str) -> None:
         msg = f"Session not found: {session_name}"
         raise CwError(msg)
 
-    if session.status != SessionStatus.BACKGROUNDED:
-        msg = f"Session {session.name} is not backgrounded (status: {session.status})"
+    if session.status not in (SessionStatus.BACKGROUNDED, SessionStatus.IDLE):
+        msg = (
+            f"Session {session.name} is not backgrounded or idle"
+            f" (status: {session.status})"
+        )
         raise CwError(msg)
 
     # Extract resumption prompt from handoff

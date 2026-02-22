@@ -16,7 +16,9 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "You are in the IMPLEMENTATION session. "
         "Write code, implement features, and fix bugs. "
         "If you notice quality issues (linting, types, duplication, docs), "
-        "note them for the debt session but stay focused on implementation."
+        "note them for the debt session but stay focused on implementation. "
+        "Before finishing any unit of work, run quality gates "
+        "(ruff check, mypy, pytest) and fix all issues."
     ),
     "idea": (
         "You are in the IDEA session. "
@@ -28,7 +30,9 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "You are in the TECH DEBT session. "
         "Fix linting violations, type errors, duplication, and documentation gaps. "
         "Do not implement new features or change behavior. "
-        "Keep changes minimal and focused on quality."
+        "Keep changes minimal and focused on quality. "
+        "Before finishing any unit of work, run quality gates "
+        "(ruff check, mypy, pytest) and fix all issues."
     ),
     "explore": (
         "You are in the EXPLORE session. "
