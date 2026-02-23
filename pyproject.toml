@@ -6,6 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Matthew Warren", email = "mattwwarren@users.noreply.github.com" }
 ]
+license = "Unlicense"
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.3.1",
@@ -15,6 +16,11 @@ dependencies = [
     "ruamel.yaml>=0.18.6",
     "textual>=1.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mattwwarren/claude-workspace"
+Repository = "https://github.com/mattwwarren/claude-workspace"
+Issues = "https://github.com/mattwwarren/claude-workspace/issues"
 
 [project.scripts]
 cw = "cw.cli:main"
