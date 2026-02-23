@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import click
 from click.shell_completion import CompletionItem
@@ -708,6 +709,63 @@ def hook_list(client: str) -> None:
     click.echo("-" * 60)
     for rule in rules:
         click.echo(f"{rule.event_type:<28} {rule.command}")
+
+
+# --- Plugin command group ---
+
+@main.group()
+def plugin() -> None:
+    """Build and install the Zellij status bar plugin."""
+
+
+@plugin.command(name="build")
+@click.option(
+    "--plugin-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None, help="Path to zellij-plugin source directory.",
+)
+@handle_errors
+def plugin_build(plugin_dir: Path | None) -> None:
+    """Build the WASM status bar plugin from Rust source.
+
+    Requires cargo (Rust toolchain) to be installed.
+    Auto-detects the plugin source directory in editable installs;
+    pass --plugin-dir for non-editable installs.
+    """
+    from cw.plugin import build_plugin
+
+    click.echo("Building Zellij plugin...")
+    wasm_path = build_plugin(plugin_dir=plugin_dir)
+    click.echo(f"Built: {wasm_path}")
+
+
+@plugin.command(name="install")
+@click.option(
+    "--build/--no-build", "do_build", default=True,
+    help="Build before installing (default: yes).",
+)
+@click.option(
+    "--plugin-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None, help="Path to zellij-plugin source directory.",
+)
+@handle_errors
+def plugin_install(do_build: bool, plugin_dir: Path | None) -> None:
+    """Build and install the WASM plugin to Zellij's plugin directory.
+
+    \b
+    After install, restart Zellij to pick up the plugin:
+      cw start <client>
+    """
+    from cw.plugin import build_plugin, install_plugin
+
+    if do_build:
+        click.echo("Building Zellij plugin...")
+        wasm_path = build_plugin(plugin_dir=plugin_dir)
+        click.echo(f"Built: {wasm_path}")
+    else:
+        wasm_path = None
+
+    dest = install_plugin(wasm_path=wasm_path, plugin_dir=plugin_dir)
+    click.echo(f"Installed: {dest}")
 
 
 # --- Daemon command group ---

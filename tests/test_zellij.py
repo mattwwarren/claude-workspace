@@ -391,43 +391,30 @@ class TestFocusPane:
     def test_cycles_to_target(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[tuple[str, ...]] = []
 
-        # dump-layout with command= so pane-to-terminal mapping works
-        # 0=idea, 1=terminal (daemon), 2=impl, 3=debt
-        layout = (
-            'tab name="Tab #1" {\n'
-            '  pane command="claude" name="idea" {\n'
-            '  pane command="bash" name="terminal" {\n'
-            '  pane command="claude" name="impl" {\n'
-            '  pane command="claude" name="debt" {\n'
-        )
-        # Cycle: start on idea (terminal_0), target impl (terminal_2)
-        focused_terminal = ["terminal_0"]
+        # Pane names in cycle order
+        pane_order = ["idea", "terminal", "impl", "debt"]
+        focused_idx = [0]  # Start on idea
+
+        def _make_layout() -> str:
+            lines = ['tab name="Tab #1" {\n']
+            for i, name in enumerate(pane_order):
+                focus = " focus=true" if i == focused_idx[0] else ""
+                lines.append(
+                    f'  pane command="claude" name="{name}"{focus} {{\n'
+                )
+            return "".join(lines)
 
         def mock_run(*args: str, check: bool = True) -> MagicMock:
             calls.append(args)
             result = MagicMock(returncode=0)
             if "dump-layout" in args:
-                result.stdout = layout
-            elif "list-clients" in args:
-                result.stdout = (
-                    "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"
-                    f"1         {focused_terminal[0]}     claude\n"
-                )
+                result.stdout = _make_layout()
             elif "focus-next-pane" in args:
-                # Simulate cycle: 0 -> 1 -> 2 -> 3 -> 0
-                cycle = {
-                    "terminal_0": "terminal_1",
-                    "terminal_1": "terminal_2",
-                    "terminal_2": "terminal_3",
-                    "terminal_3": "terminal_0",
-                }
-                focused_terminal[0] = cycle.get(
-                    focused_terminal[0], "terminal_0"
-                )
+                focused_idx[0] = (focused_idx[0] + 1) % len(pane_order)
             return result
 
         monkeypatch.setattr("cw.zellij._run_zellij", mock_run)
-        focus_pane("impl")  # impl = terminal_2
+        focus_pane("impl")
         focus_calls = [c for c in calls if "focus-next-pane" in c]
         # Should cycle 2 times: idea->terminal->impl
         assert len(focus_calls) == 2

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 from jinja2 import DictLoader, Environment
 
 from cw.exceptions import ZellijError
+from cw.plugin import INSTALL_DIR as _PLUGIN_INSTALL_DIR
+from cw.plugin import PLUGIN_FILENAME as _PLUGIN_FILENAME
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
@@ -67,7 +69,7 @@ size="{{ secondary_size }}" {
 }
 """
 
-CW_PLUGIN_PATH = Path.home() / ".config" / "zellij" / "plugins" / "cw_status.wasm"
+CW_PLUGIN_PATH = _PLUGIN_INSTALL_DIR / _PLUGIN_FILENAME
 
 
 _env = Environment(
@@ -290,21 +292,6 @@ def go_to_tab(tab_name: str, session: str | None = None) -> None:
         raise ZellijError(msg)
 
 
-def _get_focused_pane_id(session: str | None = None) -> str | None:
-    """Get the ZELLIJ_PANE_ID of the currently focused pane."""
-    base = ["-s", session] if session else []
-    result = _run_zellij(*base, "action", "list-clients", check=False)
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.strip().splitlines():
-        if line.startswith("CLIENT_ID"):
-            continue
-        parts = line.split(None, 2)
-        if len(parts) >= 2:
-            return parts[1]  # e.g. "terminal_2"
-    return None
-
-
 _RE_NAME = re.compile(r'name="([^"]+)"')
 _RE_PANE_COMMAND = re.compile(r"pane\b.*\bcommand=")
 
@@ -339,25 +326,34 @@ def _iter_tab_pane_lines(
     return lines
 
 
-def _get_pane_id_for_name(
+def _pane_name_exists(
     pane_name: str,
     session: str | None = None,
     tab_name: str | None = None,
-) -> str | None:
-    """Map a pane name to its terminal_N id via dump-layout.
-
-    When *tab_name* is given, only inspects the matching tab.
-    Otherwise looks at the first tab block (legacy behaviour).
-    """
-    # Track terminal index: panes appear in dump-layout order
-    # 0=idea, 1=terminal (daemon), 2=impl, 3=debt
-    terminal_idx = 0
+) -> bool:
+    """Check whether a named pane exists in the layout."""
     for line in _iter_tab_pane_lines(session, tab_name):
         if _RE_PANE_COMMAND.search(line):
             match = _RE_NAME.search(line)
             if match and match.group(1) == pane_name:
-                return f"terminal_{terminal_idx}"
-            terminal_idx += 1
+                return True
+    return False
+
+
+def _get_focused_pane_name(
+    session: str | None = None,
+    tab_name: str | None = None,
+) -> str | None:
+    """Get the name of the currently focused pane from dump-layout.
+
+    Looks for ``focus=true`` on pane lines (not tab lines) within
+    the target tab.
+    """
+    for line in _iter_tab_pane_lines(session, tab_name):
+        if "focus=true" in line and _RE_PANE_COMMAND.search(line):
+            match = _RE_NAME.search(line)
+            if match:
+                return match.group(1)
     return None
 
 
@@ -372,26 +368,24 @@ def focus_pane(
 ) -> None:
     """Focus a pane by name by cycling focus-next-pane.
 
-    Uses list-clients (reliable source of truth) to check which
-    pane is focused, and dump-layout to map pane names to terminal IDs.
+    Uses dump-layout to check which pane name currently has focus,
+    then cycles until the target pane is reached.
 
-    When *tab_name* is given, only inspects that tab when resolving
-    the pane name to a terminal ID.
+    When *tab_name* is given, only inspects that tab.
     """
-    target_id = _get_pane_id_for_name(pane_name, session, tab_name=tab_name)
-    if target_id is None:
+    if not _pane_name_exists(pane_name, session, tab_name=tab_name):
         msg = f"Pane '{pane_name}' not found in layout."
         raise ZellijError(msg)
 
-    current_id = _get_focused_pane_id(session)
-    if current_id == target_id:
+    current_name = _get_focused_pane_name(session, tab_name=tab_name)
+    if current_name == pane_name:
         return  # Already there
 
     base = ["-s", session] if session else []
     for _ in range(_MAX_PANE_CYCLE):
         _run_zellij(*base, "action", "focus-next-pane", check=False)
-        current_id = _get_focused_pane_id(session)
-        if current_id == target_id:
+        current_name = _get_focused_pane_name(session, tab_name=tab_name)
+        if current_name == pane_name:
             return
 
     msg = f"Could not focus pane '{pane_name}' after cycling."
