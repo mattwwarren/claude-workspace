@@ -720,7 +720,7 @@ class TestSpawnNewTasks:
             active: dict[tuple[str, str], asyncio.Task[None]] = {}
             with (
                 patch("cw.daemon.load_clients", return_value={"acme": {}}),
-                patch("cw.daemon.claim_next", return_value=None),
+                patch("cw.daemon._pending_purposes", return_value=set()),
             ):
                 _spawn_new_tasks(active, event)
             assert len(active) == 0
@@ -737,6 +737,10 @@ class TestSpawnNewTasks:
             with (
                 patch("cw.daemon.load_clients",
                       return_value={"test-client": {}}),
+                patch("cw.daemon._pending_purposes",
+                      return_value={"debt"}),
+                patch("cw.daemon._has_injectable_session",
+                      return_value=True),
                 patch("cw.daemon.claim_next", return_value=item),
                 patch("cw.daemon.get_client", return_value=client_config),
             ):
@@ -763,28 +767,46 @@ class TestSpawnNewTasks:
             active: dict[tuple[str, str], asyncio.Task[None]] = {
                 ("test-client", "debt"): existing_task,
             }
-            item = _make_queue_item()
-            client_config = _make_client(tmp_path)
 
             with (
                 patch("cw.daemon.load_clients",
                       return_value={"test-client": {}}),
-                patch("cw.daemon.claim_next", return_value=item),
-                patch("cw.daemon.get_client", return_value=client_config),
-                patch("cw.daemon.fail_item") as mock_fail,
+                patch("cw.daemon._pending_purposes",
+                      return_value={"debt"}),
+                patch("cw.daemon.claim_next") as mock_claim,
             ):
                 _spawn_new_tasks(active, event)
 
             # Should NOT have replaced the existing task.
             assert active[("test-client", "debt")] is existing_task
-            # Should have failed the item so it can be retried.
-            mock_fail.assert_called_once_with(
-                "test-client", "item01", "Purpose busy, will retry",
-            )
+            # Should never have tried to claim — busy purpose is skipped.
+            mock_claim.assert_not_called()
 
             existing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await existing_task
+
+        asyncio.run(_run())
+
+    def test_skips_purpose_without_session(self) -> None:
+        """Items stay PENDING when no injectable session exists."""
+        async def _run() -> None:
+            event = asyncio.Event()
+            active: dict[tuple[str, str], asyncio.Task[None]] = {}
+
+            with (
+                patch("cw.daemon.load_clients",
+                      return_value={"test-client": {}}),
+                patch("cw.daemon._pending_purposes",
+                      return_value={"debt"}),
+                patch("cw.daemon._has_injectable_session",
+                      return_value=False),
+                patch("cw.daemon.claim_next") as mock_claim,
+            ):
+                _spawn_new_tasks(active, event)
+
+            assert len(active) == 0
+            mock_claim.assert_not_called()
 
         asyncio.run(_run())
 

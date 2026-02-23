@@ -34,12 +34,13 @@ from cw.models import (
     ClientConfig,
     CwState,
     QueueItem,
+    QueueItemStatus,
     Session,
     SessionPurpose,
     SessionStatus,
 )
 from cw.notify import send_notification
-from cw.queue import claim_next, complete_item, fail_item
+from cw.queue import claim_next, complete_item, fail_item, load_queue
 from cw.session import CLAUDE_INIT_DELAY_S, CW_SESSION, start_session
 from cw.wrapper import _idle_signal_path, _trigger_path
 
@@ -248,44 +249,64 @@ def _reap_done_tasks(
             click.echo(f"Task {key} crashed: {exc}")
 
 
+def _has_injectable_session(client_name: str, purpose: str) -> bool:
+    """Check if an idle or backgrounded session exists for this purpose."""
+    state = load_state()
+    session = state.find_session(client_name, purpose)
+    return session is not None and session.status in (
+        SessionStatus.IDLE,
+        SessionStatus.BACKGROUNDED,
+    )
+
+
+def _pending_purposes(client_name: str) -> set[str]:
+    """Return the set of purposes that have pending queue items."""
+    store = load_queue(client_name)
+    return {
+        item.task.purpose
+        for item in store.items
+        if item.status == QueueItemStatus.PENDING
+    }
+
+
 def _spawn_new_tasks(
     active_tasks: dict[tuple[str, str], asyncio.Task[None]],
     shutdown_event: asyncio.Event,
 ) -> None:
-    """Claim pending items and spawn async tasks for new purposes."""
+    """Claim pending items and spawn async tasks for new purposes.
+
+    Only claims items whose purpose has an injectable session (IDLE or
+    BACKGROUNDED).  Items for purposes without a ready session remain
+    PENDING until a session becomes available.
+    """
     clients = load_clients()
     for client_name in clients:
         if shutdown_event.is_set():
             return
 
-        item = claim_next(client_name, purpose=None)
-        if item is None:
-            continue
+        for purpose in _pending_purposes(client_name):
+            key = (client_name, purpose)
+            if key in active_tasks:
+                continue
 
-        purpose = item.task.purpose
-        key = (client_name, purpose)
+            if not _has_injectable_session(client_name, purpose):
+                continue
 
-        if key in active_tasks:
-            # Purpose already has an active task — don't double-inject.
-            # Put the item back by failing it so it can be retried.
-            fail_item(client_name, item.id, "Purpose busy, will retry")
+            item = claim_next(client_name, SessionPurpose(purpose))
+            if item is None:
+                continue
+
+            client_config = get_client(client_name)
             click.echo(
-                f"Skipped: {client_name}/{purpose}"
-                f" — already processing (id: {item.id})"
+                f"Processing: {client_name}/{purpose}"
+                f" — {item.task.description} (id: {item.id})"
             )
-            continue
-
-        client_config = get_client(client_name)
-        click.echo(
-            f"Processing: {client_name}/{purpose}"
-            f" — {item.task.description} (id: {item.id})"
-        )
-        active_tasks[key] = asyncio.create_task(
-            _async_process_item(
-                client_config, item, purpose, shutdown_event,
-            ),
-            name=f"daemon-{client_name}-{purpose}",
-        )
+            active_tasks[key] = asyncio.create_task(
+                _async_process_item(
+                    client_config, item, purpose, shutdown_event,
+                ),
+                name=f"daemon-{client_name}-{purpose}",
+            )
 
 
 async def _async_process_item(
