@@ -10,6 +10,8 @@ from pathlib import Path
 
 import click
 import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 from cw.exceptions import CwError
 from cw.models import DEFAULT_AUTO_PURPOSES, ClientConfig, CwState, SessionPurpose
@@ -22,6 +24,8 @@ _SAFE_CLIENT_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 # Branch names: alphanumeric, slashes, dots, dashes, underscores.
 # Prevents YAML injection via crafted branch strings.
 _SAFE_BRANCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
+
+_EMPTY_CLIENTS_DOC = "clients:\n"
 
 _xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
 _xdg_data = os.environ.get("XDG_DATA_HOME", "")
@@ -185,8 +189,8 @@ def init_client(
 ) -> None:
     """Add a new client to clients.yaml.
 
-    Validates inputs, creates config dir/file if needed, and appends
-    the new client as raw YAML text to preserve existing comments.
+    Validates inputs, creates config dir/file if needed, and uses
+    ruamel.yaml round-trip parsing to preserve existing comments.
     """
     # Validate name
     if not _SAFE_CLIENT_NAME.match(name):
@@ -218,41 +222,43 @@ def init_client(
         msg = f"Path is not a git repository: {workspace_path}"
         raise CwError(msg)
 
-    # Check for duplicate
-    existing = load_clients()
-    if name in existing:
+    # Ensure config dir exists
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Round-trip parse-modify-write with ruamel.yaml (preserves comments)
+    rt = YAML(typ="rt")
+    rt.default_flow_style = False
+
+    if CLIENTS_FILE.exists():
+        content = CLIENTS_FILE.read_text()
+        doc = rt.load(content) if content.strip() else rt.load(_EMPTY_CLIENTS_DOC)
+    else:
+        doc = rt.load(_EMPTY_CLIENTS_DOC)
+
+    if not isinstance(doc, dict) or "clients" not in doc:
+        msg = (
+            f"{CLIENTS_FILE} exists but has no 'clients:' key."
+            " Add 'clients:' manually or delete the file to recreate."
+        )
+        raise CwError(msg)
+
+    clients_map = doc["clients"]
+    if clients_map is None:
+        clients_map = CommentedMap()
+        doc["clients"] = clients_map
+
+    if name in clients_map:
         msg = f"Client '{name}' already exists in {CLIENTS_FILE}"
         raise CwError(msg)
 
-    # Ensure config dir and file exist
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if not CLIENTS_FILE.exists():
-        CLIENTS_FILE.write_text("clients:\n")
-    else:
-        # Verify file has a clients: key (guard against empty/malformed files)
-        content = CLIENTS_FILE.read_text().strip()
-        if not content:
-            CLIENTS_FILE.write_text("clients:\n")
-        elif "clients:" not in content:
-            msg = (
-                f"{CLIENTS_FILE} exists but has no 'clients:' key."
-                " Add 'clients:' manually or delete the file to recreate."
-            )
-            raise CwError(msg)
-
-    # Build YAML block for the new client (single-quote path for safety)
-    escaped_path = str(workspace_path).replace("'", "''")
-    lines = [
-        f"\n  {name}:",
-        f"    workspace_path: '{escaped_path}'",
-        f"    default_branch: {default_branch}",
-    ]
+    # Build the new client entry
+    entry = CommentedMap()
+    entry["workspace_path"] = str(workspace_path)
+    entry["default_branch"] = default_branch
     if auto_purposes:
-        purposes_str = ", ".join(auto_purposes)
-        lines.append(f"    auto_purposes: [{purposes_str}]")
+        entry["auto_purposes"] = auto_purposes
 
-    block = "\n".join(lines) + "\n"
+    clients_map[name] = entry
 
-    # Append to file (preserves existing comments and formatting)
-    with CLIENTS_FILE.open("a") as f:
-        f.write(block)
+    with CLIENTS_FILE.open("w") as f:
+        rt.dump(doc, f)
