@@ -61,7 +61,7 @@ def load_clients() -> dict[str, ClientConfig]:
         if not _SAFE_CLIENT_NAME.match(name):
             msg = (
                 f"Invalid client name '{name}':"
-                " must match [a-zA-Z0-9][a-zA-Z0-9._-]*"
+                " must start with alphanumeric and contain only [a-zA-Z0-9._-]"
             )
             raise CwError(msg)
         client = ClientConfig(name=name, **data)
@@ -180,6 +180,44 @@ def _validate_purposes(purposes: list[str]) -> None:
             raise CwError(msg)
 
 
+def _validate_init_inputs(
+    name: str,
+    workspace_path: Path,
+    default_branch: str,
+    auto_purposes: list[str] | None,
+) -> None:
+    """Validate all inputs for init_client.
+
+    Performs format validation (name, branch, purposes) and filesystem
+    checks (directory exists, git repository). The git check invokes
+    a subprocess.
+    """
+    if not _SAFE_CLIENT_NAME.match(name):
+        msg = (
+            f"Invalid client name '{name}':"
+            " must start with alphanumeric and contain only [a-zA-Z0-9._-]"
+        )
+        raise CwError(msg)
+
+    if not _SAFE_BRANCH_NAME.match(default_branch):
+        msg = (
+            f"Invalid branch name '{default_branch}':"
+            " must start with alphanumeric and contain only [a-zA-Z0-9/_.-]"
+        )
+        raise CwError(msg)
+
+    if auto_purposes:
+        _validate_purposes(auto_purposes)
+
+    if not workspace_path.is_dir():
+        msg = f"Path does not exist or is not a directory: {workspace_path}"
+        raise CwError(msg)
+
+    if not _is_git_repo(workspace_path):
+        msg = f"Path is not a git repository: {workspace_path}"
+        raise CwError(msg)
+
+
 def init_client(
     name: str,
     workspace_path: Path,
@@ -192,35 +230,7 @@ def init_client(
     Validates inputs, creates config dir/file if needed, and uses
     ruamel.yaml round-trip parsing to preserve existing comments.
     """
-    # Validate name
-    if not _SAFE_CLIENT_NAME.match(name):
-        msg = (
-            f"Invalid client name '{name}':"
-            " must start with alphanumeric and contain only [a-zA-Z0-9._-]"
-        )
-        raise CwError(msg)
-
-    # Validate branch name (prevent YAML injection)
-    if not _SAFE_BRANCH_NAME.match(default_branch):
-        msg = (
-            f"Invalid branch name '{default_branch}':"
-            " must start with alphanumeric and contain only [a-zA-Z0-9/_.-]"
-        )
-        raise CwError(msg)
-
-    # Validate purposes against known enum values
-    if auto_purposes:
-        _validate_purposes(auto_purposes)
-
-    # Validate path exists
-    if not workspace_path.is_dir():
-        msg = f"Path does not exist or is not a directory: {workspace_path}"
-        raise CwError(msg)
-
-    # Validate it's a git repo
-    if not _is_git_repo(workspace_path):
-        msg = f"Path is not a git repository: {workspace_path}"
-        raise CwError(msg)
+    _validate_init_inputs(name, workspace_path, default_branch, auto_purposes)
 
     # Ensure config dir exists
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
