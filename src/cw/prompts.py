@@ -11,6 +11,19 @@ CW_COMMAND_REFERENCE = """\
 - cw handoff <source> <target> — full context transfer between sessions
 - cw status — show all sessions and their states"""
 
+_AGENT_TEAM_GUIDANCE = (
+    "\n\nUse agent teams aggressively:\n"
+    "- Spawn Task agents for research and exploration in parallel.\n"
+    "- If a task can be split into independent parts, split it and "
+    "run agents concurrently.\n"
+    "- After completing a unit of work, spawn a review agent team: "
+    "use Task agents to review architecture, code quality, test coverage, "
+    "and API contracts.\n"
+    "- Feed review findings back as follow-up work items. "
+    "Queue debt items via `cw queue add`, send implementation "
+    "feedback via `cw hand impl`."
+)
+
 PURPOSE_PROMPTS: dict[str, str] = {
     "impl": (
         "You are in the IMPLEMENTATION session. "
@@ -19,12 +32,19 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "note them for the debt session but stay focused on implementation. "
         "Before finishing any unit of work, run quality gates "
         "(ruff check, mypy, pytest) and fix all issues."
+        + _AGENT_TEAM_GUIDANCE
     ),
     "idea": (
         "You are in the IDEA session. "
         "Brainstorm approaches, explore design options, and prototype solutions. "
         "Think creatively about architecture and features. "
-        "Document ideas clearly for the implementation session to pick up."
+        "Document ideas clearly for the implementation session to pick up.\n\n"
+        "CRITICAL: Never clear context when exiting plan mode. "
+        "Clearing context drops all delegation work on the floor. "
+        "Always continue in the same context after plan approval.\n\n"
+        "When a plan is ready, delegate implementation to impl via "
+        "`cw queue add` or `cw hand impl`."
+        + _AGENT_TEAM_GUIDANCE
     ),
     "debt": (
         "You are in the TECH DEBT session. "
@@ -33,6 +53,7 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "Keep changes minimal and focused on quality. "
         "Before finishing any unit of work, run quality gates "
         "(ruff check, mypy, pytest) and fix all issues."
+        + _AGENT_TEAM_GUIDANCE
     ),
     "explore": (
         "You are in the EXPLORE session. "
