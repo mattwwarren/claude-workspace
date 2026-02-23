@@ -557,7 +557,7 @@ async def _wait_for_idle_event(
     client: str,
     purpose: str,
     *,
-    timeout: int = _DAEMON_TASK_TIMEOUT_S,
+    timeout: float = _DAEMON_TASK_TIMEOUT_S,
     poll_interval: float = 2.0,
     shutdown_event: asyncio.Event | None = None,
 ) -> dict[str, object] | None:

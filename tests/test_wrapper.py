@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -21,9 +21,6 @@ from cw.wrapper import (
     run_claude_wrapper,
     signal_idle,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TestIdleSignalPath:
@@ -54,7 +51,7 @@ class TestSignalIdle:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -79,7 +76,7 @@ class TestSignalIdle:
                     client="c",
                     purpose=SessionPurpose.DEBT,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -107,7 +104,7 @@ class TestSignalIdle:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -144,7 +141,7 @@ class TestSignalIdle:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.BACKGROUNDED,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -167,7 +164,7 @@ class TestSignalIdle:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -201,7 +198,7 @@ class TestSignalIdle:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -300,7 +297,7 @@ class TestRunClaudeWrapper:
                     client="test",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )

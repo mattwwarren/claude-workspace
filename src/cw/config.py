@@ -3,22 +3,34 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import click
 import yaml
 
 from cw.exceptions import CwError
-from cw.models import DEFAULT_AUTO_PURPOSES, ClientConfig, CwState
+from cw.models import DEFAULT_AUTO_PURPOSES, ClientConfig, CwState, SessionPurpose
 
 # Client names appear unquoted in shell commands (env var prefixes),
 # filesystem paths (queue dirs, history dirs), and Zellij tab names.
 # Restrict to safe characters to prevent injection.
 _SAFE_CLIENT_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
-CONFIG_DIR = Path.home() / ".config" / "cw"
-STATE_DIR = Path.home() / ".local" / "share" / "cw"
+# Branch names: alphanumeric, slashes, dots, dashes, underscores.
+# Prevents YAML injection via crafted branch strings.
+_SAFE_BRANCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
+
+_xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
+_xdg_data = os.environ.get("XDG_DATA_HOME", "")
+CONFIG_DIR = (
+    Path(_xdg_config) / "cw" if _xdg_config else Path.home() / ".config" / "cw"
+)
+STATE_DIR = (
+    Path(_xdg_data) / "cw" if _xdg_data else Path.home() / ".local" / "share" / "cw"
+)
 QUEUES_DIR = STATE_DIR / "queues"
 DAEMONS_DIR = STATE_DIR / "daemons"
 EVENTS_DIR = STATE_DIR / "events"
@@ -136,3 +148,111 @@ def show_config() -> None:
             click.echo(f"    purposes: {purposes_str}")
         if client.worktree_base:
             click.echo(f"    worktrees: {client.worktree_base}")
+
+
+def _is_git_repo(path: Path) -> bool:
+    """Check if a path is inside a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+    except OSError:
+        return False
+
+
+_VALID_PURPOSES = frozenset(p.value for p in SessionPurpose)
+
+
+def _validate_purposes(purposes: list[str]) -> None:
+    """Validate that all purpose strings are known SessionPurpose values."""
+    for p in purposes:
+        if p not in _VALID_PURPOSES:
+            valid = ", ".join(sorted(_VALID_PURPOSES))
+            msg = f"Invalid purpose '{p}'. Valid purposes: {valid}"
+            raise CwError(msg)
+
+
+def init_client(
+    name: str,
+    workspace_path: Path,
+    *,
+    default_branch: str = "main",
+    auto_purposes: list[str] | None = None,
+) -> None:
+    """Add a new client to clients.yaml.
+
+    Validates inputs, creates config dir/file if needed, and appends
+    the new client as raw YAML text to preserve existing comments.
+    """
+    # Validate name
+    if not _SAFE_CLIENT_NAME.match(name):
+        msg = (
+            f"Invalid client name '{name}':"
+            " must start with alphanumeric and contain only [a-zA-Z0-9._-]"
+        )
+        raise CwError(msg)
+
+    # Validate branch name (prevent YAML injection)
+    if not _SAFE_BRANCH_NAME.match(default_branch):
+        msg = (
+            f"Invalid branch name '{default_branch}':"
+            " must start with alphanumeric and contain only [a-zA-Z0-9/_.-]"
+        )
+        raise CwError(msg)
+
+    # Validate purposes against known enum values
+    if auto_purposes:
+        _validate_purposes(auto_purposes)
+
+    # Validate path exists
+    if not workspace_path.is_dir():
+        msg = f"Path does not exist or is not a directory: {workspace_path}"
+        raise CwError(msg)
+
+    # Validate it's a git repo
+    if not _is_git_repo(workspace_path):
+        msg = f"Path is not a git repository: {workspace_path}"
+        raise CwError(msg)
+
+    # Check for duplicate
+    existing = load_clients()
+    if name in existing:
+        msg = f"Client '{name}' already exists in {CLIENTS_FILE}"
+        raise CwError(msg)
+
+    # Ensure config dir and file exist
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CLIENTS_FILE.exists():
+        CLIENTS_FILE.write_text("clients:\n")
+    else:
+        # Verify file has a clients: key (guard against empty/malformed files)
+        content = CLIENTS_FILE.read_text().strip()
+        if not content:
+            CLIENTS_FILE.write_text("clients:\n")
+        elif "clients:" not in content:
+            msg = (
+                f"{CLIENTS_FILE} exists but has no 'clients:' key."
+                " Add 'clients:' manually or delete the file to recreate."
+            )
+            raise CwError(msg)
+
+    # Build YAML block for the new client (single-quote path for safety)
+    escaped_path = str(workspace_path).replace("'", "''")
+    lines = [
+        f"\n  {name}:",
+        f"    workspace_path: '{escaped_path}'",
+        f"    default_branch: {default_branch}",
+    ]
+    if auto_purposes:
+        purposes_str = ", ".join(auto_purposes)
+        lines.append(f"    auto_purposes: [{purposes_str}]")
+
+    block = "\n".join(lines) + "\n"
+
+    # Append to file (preserves existing comments and formatting)
+    with CLIENTS_FILE.open("a") as f:
+        f.write(block)

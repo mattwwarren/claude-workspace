@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture
@@ -246,3 +251,18 @@ def sample_handoff_file(tmp_path: Path) -> Path:
         "```\n"
     )
     return handoff
+
+
+@pytest.fixture
+def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
+    """Factory fixture to create git repos in tmp_path."""
+    def _make(name: str) -> Path:
+        repo = tmp_path / name
+        repo.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", str(repo)],
+            capture_output=True,
+            check=True,
+        )
+        return repo
+    return _make

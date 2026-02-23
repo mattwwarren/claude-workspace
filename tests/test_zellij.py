@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -23,8 +24,6 @@ from cw.zellij import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 
@@ -155,7 +154,7 @@ class TestGenerateLayout:
         monkeypatch.setattr("cw.zellij.GENERATED_LAYOUTS_DIR", layouts_dir)
 
         client = ClientConfig(
-            name="test-proj", workspace_path="/home/user/projects/test"
+            name="test-proj", workspace_path=Path("/home/user/projects/test")
         )
         result = generate_layout(client)
 

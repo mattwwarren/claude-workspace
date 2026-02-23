@@ -18,7 +18,7 @@ from cw.cli import (
     _parse_handoff_route,
     main,
 )
-from cw.config import load_state, save_state
+from cw.config import load_clients, load_state, save_state
 from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
@@ -30,6 +30,7 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -38,7 +39,7 @@ class TestCli:
         runner = CliRunner()
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert "0.3.0" in result.output
 
     def test_help(self) -> None:
         runner = CliRunner()
@@ -612,3 +613,94 @@ class TestDaemonCli:
         with patch("cw.cli.stop_daemon") as mock_stop:
             runner.invoke(main, ["daemon", "stop"])
             mock_stop.assert_called_once_with("_all", "_all")
+
+
+class TestInitCli:
+    def test_init_with_args(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("my-repo")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["init", "my-repo", "--path", str(repo)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Added client 'my-repo'" in result.output
+        assert "cw start my-repo" in result.output
+
+    def test_init_with_branch_and_purposes(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("my-repo")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "init", "my-repo",
+                "--path", str(repo),
+                "--branch", "develop",
+                "--purposes", "impl,idea",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        clients = load_clients()
+        assert "my-repo" in clients
+        assert clients["my-repo"].default_branch == "develop"
+        assert len(clients["my-repo"].auto_purposes) == 2
+
+    def test_init_interactive(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("my-repo")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["init"],
+            input=f"my-repo\n{repo}\nmain\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Added client 'my-repo'" in result.output
+
+        clients = load_clients()
+        assert "my-repo" in clients
+        assert clients["my-repo"].workspace_path == repo
+        assert clients["my-repo"].default_branch == "main"
+
+    def test_init_missing_path_errors(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["init", "my-repo"])
+        assert result.exit_code != 0
+        assert "Path is required" in result.output
+
+    def test_init_duplicate_errors(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("my-repo")
+
+        # Add once
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["init", "my-repo", "--path", str(repo)],
+        )
+        assert result.exit_code == 0
+
+        # Try again — should fail
+        result = runner.invoke(
+            main, ["init", "my-repo", "--path", str(repo)],
+        )
+        assert result.exit_code != 0
+        assert "already exists" in result.output

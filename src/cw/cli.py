@@ -11,7 +11,14 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__, zellij
-from cw.config import get_client, load_clients, load_state, save_state, show_config
+from cw.config import (
+    get_client,
+    init_client,
+    load_clients,
+    load_state,
+    save_state,
+    show_config,
+)
 from cw.daemon import daemon_status as _daemon_status_fn
 from cw.daemon import start_daemon, start_daemon_all, stop_daemon
 from cw.exceptions import CwError
@@ -253,6 +260,70 @@ def handoff(source: str, target: str | None, client: str | None) -> None:
 def config() -> None:
     """Show current configuration."""
     show_config()
+
+
+@main.command(name="init")
+@click.argument("name", required=False, default=None)
+@click.option(
+    "--path", "-p",
+    type=click.Path(exists=True, file_okay=False, resolve_path=True, path_type=Path),
+    default=None,
+    help="Path to the project repository.",
+)
+@click.option("--branch", "-b", default="main", help="Default branch name.")
+@click.option(
+    "--purposes",
+    default=None,
+    help="Comma-separated session purposes (e.g. impl,idea,debt).",
+)
+@handle_errors
+def init(
+    name: str | None,
+    path: Path | None,
+    branch: str,
+    purposes: str | None,
+) -> None:
+    """Initialize a new client configuration.
+
+    \b
+    Non-interactive (scriptable):
+      cw init my-project --path /path/to/repo
+      cw init my-project --path /path/to/repo --branch develop
+
+    \b
+    Interactive (human-friendly):
+      cw init
+    """
+    if name is None:
+        # Interactive mode
+        name = click.prompt("Client name")
+        if path is None:
+            path_str = click.prompt("Repository path", type=str)
+            resolved = Path(path_str).resolve()
+            if not resolved.is_dir():
+                msg = f"Path does not exist or is not a directory: {resolved}"
+                raise CwError(msg)
+            path = resolved
+        branch = click.prompt("Default branch", default=branch)
+
+    if path is None:
+        msg = (
+            "Path is required: use --path or run"
+            " without arguments for interactive mode"
+        )
+        raise CwError(msg)
+
+    purpose_list = None
+    if purposes:
+        purpose_list = [p.strip() for p in purposes.split(",")]
+
+    init_client(name, path, default_branch=branch, auto_purposes=purpose_list)
+
+    click.echo(f"Added client '{name}' to configuration.")
+    click.echo()
+    click.echo("Next steps:")
+    click.echo(f"  cw start {name}              # Start a session")
+    click.echo("  cw config                    # View configuration")
 
 
 @main.command()

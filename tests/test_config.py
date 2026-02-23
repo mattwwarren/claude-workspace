@@ -10,6 +10,7 @@ from cw.config import (
     detect_client_from_cwd,
     ensure_config,
     get_client,
+    init_client,
     load_clients,
     load_state,
     save_state,
@@ -19,6 +20,7 @@ from cw.exceptions import CwError
 from cw.models import DEFAULT_AUTO_PURPOSES, CwState, Session, SessionPurpose
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -417,3 +419,170 @@ class TestShowConfig:
         output = capsys.readouterr().out
         assert "worktrees:" in output
         assert str(worktree_dir) in output
+
+
+class TestInitClient:
+    def test_init_creates_config(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("new-project")
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.unlink(missing_ok=True)
+
+        init_client("new-project", repo)
+
+        assert clients_file.exists()
+        clients = load_clients()
+        assert "new-project" in clients
+        assert clients["new-project"].workspace_path == repo
+
+    def test_init_appends_to_existing(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo_a = make_git_repo("project-a")
+        repo_b = make_git_repo("project-b")
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "# My config\n"
+            "clients:\n"
+            "  project-a:\n"
+            f"    workspace_path: {repo_a}\n"
+        )
+
+        init_client("project-b", repo_b)
+
+        # Both should be loadable
+        clients = load_clients()
+        assert "project-a" in clients
+        assert "project-b" in clients
+
+        # Comment should be preserved in raw text
+        raw = clients_file.read_text()
+        assert "# My config" in raw
+
+    def test_init_rejects_duplicate(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("dup-project")
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  dup-project:\n"
+            f"    workspace_path: {repo}\n"
+        )
+
+        with pytest.raises(CwError, match="already exists"):
+            init_client("dup-project", repo)
+
+    def test_init_rejects_name_with_special_chars(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        with pytest.raises(CwError, match="Invalid client name"):
+            init_client("bad;name", tmp_path)
+
+    def test_init_rejects_name_starting_with_dash(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        with pytest.raises(CwError, match="Invalid client name"):
+            init_client("-starts-with-dash", tmp_path)
+
+    def test_init_validates_path_exists(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        nonexistent = tmp_path / "does-not-exist"
+
+        with pytest.raises(CwError, match="does not exist"):
+            init_client("test", nonexistent)
+
+    def test_init_validates_git_repo(
+        self, tmp_config_dir: Path, tmp_path: Path,
+    ) -> None:
+        not_git = tmp_path / "not-a-repo"
+        not_git.mkdir()
+
+        with pytest.raises(CwError, match="not a git repository"):
+            init_client("test", not_git)
+
+    def test_init_with_custom_branch(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("repo")
+
+        init_client("test", repo, default_branch="develop")
+
+        clients = load_clients()
+        assert clients["test"].default_branch == "develop"
+
+    def test_init_with_purposes(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("repo")
+
+        init_client("test", repo, auto_purposes=["impl", "idea"])
+
+        clients = load_clients()
+        purposes = [p.value for p in clients["test"].auto_purposes]
+        assert purposes == ["impl", "idea"]
+
+    def test_xdg_config_home_respected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """XDG_CONFIG_HOME should control config directory location."""
+        xdg_config = tmp_path / "xdg-config"
+        xdg_data = tmp_path / "xdg-data"
+
+        # Patch derived paths to use custom directories
+        config_dir = xdg_config / "cw"
+        state_dir = xdg_data / "cw"
+        clients_file = config_dir / "clients.yaml"
+        state_file = state_dir / "sessions.json"
+
+        config_dir.mkdir(parents=True)
+        state_dir.mkdir(parents=True)
+
+        monkeypatch.setattr("cw.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
+        monkeypatch.setattr("cw.config.CLIENTS_FILE", clients_file)
+        monkeypatch.setattr("cw.config.STATE_FILE", state_file)
+
+        repo = make_git_repo("repo")
+
+        init_client("test", repo)
+
+        assert clients_file.exists()
+        clients = load_clients()
+        assert "test" in clients
+
+    def test_init_handles_empty_config_file(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("repo")
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("")
+
+        init_client("test", repo)
+
+        clients = load_clients()
+        assert "test" in clients
+
+    def test_init_rejects_invalid_purposes(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("repo")
+        with pytest.raises(CwError, match="Invalid purpose"):
+            init_client("test", repo, auto_purposes=["impl", "bogus"])
+
+    def test_init_rejects_malformed_config(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+    ) -> None:
+        repo = make_git_repo("repo")
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text("something_else: true\n")
+
+        with pytest.raises(CwError, match="no 'clients:' key"):
+            init_client("test", repo)

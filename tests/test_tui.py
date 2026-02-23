@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -39,16 +40,19 @@ from cw.tui import (
     _session_time,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
 
 def _make_clients() -> dict[str, ClientConfig]:
     return {
         "alpha": ClientConfig(
             name="alpha",
-            workspace_path="/home/test/alpha",
+            workspace_path=Path("/home/test/alpha"),
         ),
         "beta": ClientConfig(
             name="beta",
-            workspace_path="/home/test/beta",
+            workspace_path=Path("/home/test/beta"),
         ),
     }
 
@@ -62,7 +66,7 @@ def _make_state() -> CwState:
                 client="alpha",
                 purpose=SessionPurpose.IMPL,
                 status=SessionStatus.ACTIVE,
-                workspace_path="/home/test/alpha",
+                workspace_path=Path("/home/test/alpha"),
                 started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
             ),
             Session(
@@ -71,7 +75,7 @@ def _make_state() -> CwState:
                 client="alpha",
                 purpose=SessionPurpose.IDEA,
                 status=SessionStatus.BACKGROUNDED,
-                workspace_path="/home/test/alpha",
+                workspace_path=Path("/home/test/alpha"),
                 started_at=datetime(2025, 6, 1, 10, 0, 0, tzinfo=UTC),
                 backgrounded_at=datetime(2025, 6, 1, 11, 0, 0, tzinfo=UTC),
             ),
@@ -80,7 +84,7 @@ def _make_state() -> CwState:
 
 
 @pytest.fixture
-def mock_data() -> None:
+def mock_data() -> Generator[None]:
     """Patch config loading for TUI tests."""
     with (
         patch("cw.tui.CwDashboard._load_clients") as mock_load,
@@ -146,7 +150,7 @@ def test_session_time_uses_started_at() -> None:
         name="test/impl",
         client="test",
         purpose=SessionPurpose.IMPL,
-        workspace_path="/home/test/workspace",
+        workspace_path=Path("/home/test/workspace"),
         started_at=datetime.now(UTC),
     )
     result = _session_time(session)
@@ -163,7 +167,7 @@ def test_session_time_prefers_backgrounded_at() -> None:
         client="test",
         purpose=SessionPurpose.IDEA,
         status=SessionStatus.BACKGROUNDED,
-        workspace_path="/home/test/workspace",
+        workspace_path=Path("/home/test/workspace"),
         started_at=old_start,
         backgrounded_at=bg_time,
     )
@@ -183,7 +187,7 @@ def test_session_time_prefers_resumed_at_over_backgrounded() -> None:
         client="test",
         purpose=SessionPurpose.IMPL,
         status=SessionStatus.ACTIVE,
-        workspace_path="/home/test/workspace",
+        workspace_path=Path("/home/test/workspace"),
         started_at=old_start,
         backgrounded_at=old_bg,
         resumed_at=recent_resume,
@@ -298,7 +302,7 @@ async def test_session_table_excludes_completed(tmp_config_dir: Path) -> None:
                 client="alpha",
                 purpose=SessionPurpose.IMPL,
                 status=SessionStatus.ACTIVE,
-                workspace_path="/home/test/alpha",
+                workspace_path=Path("/home/test/alpha"),
                 started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
             ),
             Session(
@@ -307,7 +311,7 @@ async def test_session_table_excludes_completed(tmp_config_dir: Path) -> None:
                 client="alpha",
                 purpose=SessionPurpose.IDEA,
                 status=SessionStatus.COMPLETED,
-                workspace_path="/home/test/alpha",
+                workspace_path=Path("/home/test/alpha"),
                 started_at=datetime(2025, 6, 1, 10, 0, 0, tzinfo=UTC),
             ),
         ]
@@ -643,7 +647,7 @@ async def test_session_detail_screen_shows_fields(
         purpose=SessionPurpose.IMPL,
         status=SessionStatus.ACTIVE,
         origin=SessionOrigin.DELEGATE,
-        workspace_path="/home/test/alpha",
+        workspace_path=Path("/home/test/alpha"),
         branch="feat/search",
         started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
     )
@@ -716,7 +720,7 @@ async def test_session_table_has_origin_column(
                 purpose=SessionPurpose.IMPL,
                 status=SessionStatus.ACTIVE,
                 origin=SessionOrigin.DELEGATE,
-                workspace_path="/home/test/alpha",
+                workspace_path=Path("/home/test/alpha"),
                 started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
             ),
         ]

@@ -20,10 +20,10 @@ from cw.models import (
 
 class TestSessionPurpose:
     def test_enum_values(self) -> None:
-        assert SessionPurpose.IMPL == "impl"
-        assert SessionPurpose.IDEA == "idea"
-        assert SessionPurpose.DEBT == "debt"
-        assert SessionPurpose.EXPLORE == "explore"
+        assert SessionPurpose.IMPL.value == "impl"
+        assert SessionPurpose.IDEA.value == "idea"
+        assert SessionPurpose.DEBT.value == "debt"
+        assert SessionPurpose.EXPLORE.value == "explore"
 
     def test_all_values(self) -> None:
         assert len(SessionPurpose) == 4
@@ -31,10 +31,10 @@ class TestSessionPurpose:
 
 class TestSessionStatus:
     def test_enum_values(self) -> None:
-        assert SessionStatus.ACTIVE == "active"
-        assert SessionStatus.IDLE == "idle"
-        assert SessionStatus.BACKGROUNDED == "backgrounded"
-        assert SessionStatus.COMPLETED == "completed"
+        assert SessionStatus.ACTIVE.value == "active"
+        assert SessionStatus.IDLE.value == "idle"
+        assert SessionStatus.BACKGROUNDED.value == "backgrounded"
+        assert SessionStatus.COMPLETED.value == "completed"
 
     def test_all_values(self) -> None:
         assert len(SessionStatus) == 4
@@ -46,7 +46,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
         )
         assert len(s.id) == 8
         assert re.match(r"^[0-9a-f]{8}$", s.id)
@@ -57,7 +57,7 @@ class TestSession:
                 name="c/impl",
                 client="c",
                 purpose=SessionPurpose.IMPL,
-                workspace_path="/dev/null",
+                workspace_path=Path("/dev/null"),
             ).id
             for _ in range(10)
         }
@@ -68,7 +68,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
         )
         assert s.status == SessionStatus.ACTIVE
 
@@ -77,7 +77,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
         )
         assert s.started_at.tzinfo is not None
         assert s.started_at.tzinfo == UTC
@@ -87,7 +87,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
         )
         assert s.worktree_path is None
         assert s.branch is None
@@ -106,7 +106,7 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
             claude_session_id="550e8400-e29b-41d4-a716-446655440000",
         )
         json_str = s.model_dump_json()
@@ -120,7 +120,7 @@ class TestSession:
             client="c",
             purpose=SessionPurpose.IMPL,
             status=SessionStatus.BACKGROUNDED,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
             started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
             backgrounded_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC),
         )
@@ -138,25 +138,25 @@ class TestSession:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
         )
         assert s.id == "custom99"
 
 
 class TestClientConfig:
     def test_defaults(self, tmp_path: object) -> None:
-        c = ClientConfig(name="test", workspace_path="/dev/null")
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.default_branch == "main"
         assert c.worktree_base is None
 
     def test_custom_branch(self) -> None:
         c = ClientConfig(
-            name="test", workspace_path="/dev/null", default_branch="develop"
+            name="test", workspace_path=Path("/dev/null"), default_branch="develop"
         )
         assert c.default_branch == "develop"
 
     def test_default_auto_purposes(self) -> None:
-        c = ClientConfig(name="test", workspace_path="/dev/null")
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.auto_purposes == [
             SessionPurpose.IDEA,
             SessionPurpose.IMPL,
@@ -166,26 +166,26 @@ class TestClientConfig:
     def test_custom_auto_purposes(self) -> None:
         c = ClientConfig(
             name="test",
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
             auto_purposes=[SessionPurpose.IMPL, SessionPurpose.IDEA],
         )
         assert len(c.auto_purposes) == 2
         assert SessionPurpose.DEBT not in c.auto_purposes
 
     def test_auto_purposes_instances_are_independent(self) -> None:
-        c1 = ClientConfig(name="a", workspace_path="/dev/null")
-        c2 = ClientConfig(name="b", workspace_path="/dev/null")
+        c1 = ClientConfig(name="a", workspace_path=Path("/dev/null"))
+        c2 = ClientConfig(name="b", workspace_path=Path("/dev/null"))
         c1.auto_purposes.append(SessionPurpose.EXPLORE)
         assert SessionPurpose.EXPLORE not in c2.auto_purposes
 
     def test_default_purpose_prompts(self) -> None:
-        c = ClientConfig(name="test", workspace_path="/dev/null")
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.purpose_prompts == {}
 
     def test_custom_purpose_prompts(self) -> None:
         c = ClientConfig(
             name="test",
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
             purpose_prompts={"idea": "Focus on HIPAA compliance."},
         )
         assert c.purpose_prompts["idea"] == "Focus on HIPAA compliance."
@@ -193,7 +193,7 @@ class TestClientConfig:
     def test_worktree_mode_valid(self) -> None:
         c = ClientConfig(
             name="test",
-            repo_path="/home/user/repo",
+            repo_path=Path("/home/user/repo"),
             branch="client-a",
         )
         assert c.is_worktree_client is True
@@ -201,7 +201,7 @@ class TestClientConfig:
         assert c.workspace_path == c.repo_path
 
     def test_legacy_mode_not_worktree(self) -> None:
-        c = ClientConfig(name="test", workspace_path="/dev/null")
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.is_worktree_client is False
         assert c.repo_path is None
         assert c.branch is None
@@ -212,7 +212,7 @@ class TestClientConfig:
 
     def test_repo_path_without_branch_raises(self) -> None:
         with pytest.raises(ValueError, match="workspace_path or both"):
-            ClientConfig(name="test", repo_path="/home/user/repo")
+            ClientConfig(name="test", repo_path=Path("/home/user/repo"))
 
     def test_branch_without_repo_path_raises(self) -> None:
         with pytest.raises(ValueError, match="workspace_path or both"):
@@ -221,8 +221,8 @@ class TestClientConfig:
     def test_explicit_workspace_overrides_sentinel(self) -> None:
         c = ClientConfig(
             name="test",
-            workspace_path="/explicit/path",
-            repo_path="/home/user/repo",
+            workspace_path=Path("/explicit/path"),
+            repo_path=Path("/home/user/repo"),
             branch="client-a",
         )
         assert c.is_worktree_client is True
@@ -270,7 +270,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
                 Session(
                     id="new",
@@ -278,7 +278,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.BACKGROUNDED,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -309,14 +309,14 @@ class TestCwState:
                     name="c/impl",
                     client="c",
                     purpose=SessionPurpose.IMPL,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
                 Session(
                     id="second",
                     name="c/impl",
                     client="c",
                     purpose=SessionPurpose.IMPL,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -338,7 +338,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
                 Session(
                     id="a2",
@@ -346,7 +346,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IDEA,
                     status=SessionStatus.COMPLETED,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -372,7 +372,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.COMPLETED,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -388,7 +388,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.IDLE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
                 Session(
                     id="s2",
@@ -396,7 +396,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.DEBT,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -413,7 +413,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.IDLE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -426,7 +426,7 @@ class TestCwState:
             name="c/impl",
             client="c",
             purpose=SessionPurpose.IMPL,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
         )
         assert s.idle_at is None
 
@@ -445,7 +445,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
                 Session(
                     id="s2",
@@ -453,7 +453,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IDEA,
                     status=SessionStatus.COMPLETED,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -469,7 +469,7 @@ class TestCwState:
                     client="c",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
                 Session(
                     id="s2",
@@ -477,7 +477,7 @@ class TestCwState:
                     client="d",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
-                    workspace_path="/dev/null",
+                    workspace_path=Path("/dev/null"),
                 ),
             ]
         )
@@ -487,9 +487,9 @@ class TestCwState:
 
 class TestCompletionReason:
     def test_enum_values(self) -> None:
-        assert CompletionReason.USER == "user"
-        assert CompletionReason.HANDOFF == "handoff"
-        assert CompletionReason.CRASHED == "crashed"
+        assert CompletionReason.USER.value == "user"
+        assert CompletionReason.HANDOFF.value == "handoff"
+        assert CompletionReason.CRASHED.value == "crashed"
 
     def test_all_values(self) -> None:
         assert len(CompletionReason) == 3

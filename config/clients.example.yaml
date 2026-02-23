@@ -1,25 +1,28 @@
+# cw client configuration
+# See config/CONFIG_REFERENCE.md for all available fields
+#
+# Location: ~/.config/cw/clients.yaml
+# (or $XDG_CONFIG_HOME/cw/clients.yaml)
+
 clients:
-  personal:
-    workspace_path: /home/matthew/workspace/personal
+  # Minimal config — only name and path required
+  my-project:
+    workspace_path: /path/to/your/repo
     default_branch: main
 
-  lgbtqplus-map:
-    workspace_path: /home/matthew/workspace/lgbtqplus.map
-    default_branch: main
+  # Full config with all options
+  # my-other-project:
+  #   workspace_path: /path/to/repo
+  #   default_branch: main
+  #   auto_purposes: [impl, idea, debt]    # which sessions auto-start (default: [idea, impl, debt])
+  #   notifications: true                   # desktop notifications on session events
+  #   auto_background_threshold: 50         # auto-background after N conversation turns
+  #   purpose_prompts:                      # override default session prompts
+  #     impl: "Custom implementation instructions..."
+  #     idea: "Custom ideation instructions..."
+  #   worktree_base: /path/to/worktrees     # base dir for git worktree isolation
 
-  meta-work:
-    workspace_path: /home/matthew/workspace/meta-work
-    default_branch: main
-
-  sigma:
-    workspace_path: /home/matthew/workspace/sigma
-    default_branch: main
-    auto_purposes: [impl, idea]  # default: [impl, idea, debt]
-
-  family:
-    workspace_path: /home/matthew/workspace/family
-    default_branch: main
-
-  contracts:
-    workspace_path: /home/matthew/workspace/contracts
-    default_branch: main
+  # Worktree mode — for multi-branch workflows from a shared repo
+  # my-worktree-project:
+  #   repo_path: /path/to/shared/repo
+  #   branch: my-feature-branch

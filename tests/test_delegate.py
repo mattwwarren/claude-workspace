@@ -88,7 +88,7 @@ def delegate_setup(
         new_pane_calls.append((command, name, cwd, close_on_exit, session))
 
     monkeypatch.setattr("cw.zellij.new_pane", _new_pane)
-    mock_zellij["new_pane"] = new_pane_calls  # type: ignore[assignment]
+    mock_zellij["new_pane"] = new_pane_calls
 
     save_state(CwState())
 

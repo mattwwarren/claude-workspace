@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+
+      - name: Verify version matches tag
+        run: |
+          TAG=${GITHUB_REF#refs/tags/v}
+          VERSION=$(uv run python -c "import cw; print(cw.__version__)")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v$TAG does not match package version $VERSION"
+            exit 1
+          fi
+
+      - name: Run quality gates
+        run: |
+          uv run ruff check src/ tests/
+          uv run ruff format --check src/ tests/
+          uv run mypy src/
+          uv run pytest tests/ -v
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ```bash
+            uv tool install git+https://github.com/${{ github.repository }}.git@${{ github.ref_name }}
+            ```
+
+            ## First-time setup
+
+            ```bash
+            cw init my-project --path /path/to/repo
+            cw start my-project
+            ```

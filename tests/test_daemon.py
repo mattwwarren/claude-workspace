@@ -9,13 +9,10 @@ import os
 import signal
 import threading
 import time
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 from cw.daemon import (
     _DAEMON_TASK_TIMEOUT_S,
@@ -434,13 +431,13 @@ class TestGetInjectableSession:
 
         # load_state is called: 1) initial check, 2) poll iteration,
         # 3) final reload after bootstrap returns
+        call_count = [0]
+
         def _load_state_side_effect() -> CwState:
-            if _load_state_side_effect.call_count == 0:
-                _load_state_side_effect.call_count += 1
+            if call_count[0] == 0:
+                call_count[0] += 1
                 return state_empty
             return state_with_bg
-
-        _load_state_side_effect.call_count = 0  # type: ignore[attr-defined]
 
         with (
             patch(
@@ -497,9 +494,9 @@ class TestInjectIntoSession:
 
         # Should have written twice: resume command + workflow prompt
         assert len(mock_zellij["write_to_pane"]) == 2
-        resume_call = mock_zellij["write_to_pane"][0][0]
+        resume_call = str(mock_zellij["write_to_pane"][0][0])
         assert "claude --resume" in resume_call
-        workflow_call = mock_zellij["write_to_pane"][1][0]
+        workflow_call = str(mock_zellij["write_to_pane"][1][0])
         assert "daemon queue system" in workflow_call
 
     def test_writes_trigger_for_idle(
@@ -992,7 +989,7 @@ class TestInjectViaTrigger:
             name="c/debt",
             client="c",
             purpose=SessionPurpose.DEBT,
-            workspace_path="/dev/null",
+            workspace_path=Path("/dev/null"),
         )
         assert session.claude_session_id is None
 
