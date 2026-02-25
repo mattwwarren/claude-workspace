@@ -65,7 +65,23 @@ clients:
     default_branch: main
 ```
 
-## Step 5: Shell Completion (Optional)
+## Step 5: Install Skills (Slash Commands)
+
+Install the cw slash commands to `~/.claude/commands/` so they're available globally in Claude Code:
+
+```bash
+./scripts/install-skills.sh
+```
+
+Or if working from a non-local install, find the project source and run the script. The skills include:
+- `/session-done` - Wrap up work session with handoff generation
+- `/handoff` - Generate session handoff for abnormal endings
+- `/queue-plan` - Queue a plan for implementation
+- `/queue-debt` - Queue a tech debt item
+- `/pull-and-execute` - Pull and execute queue items
+- `/orchestrate-phase` - Automated phase implementation with GitHub Issue integration
+
+## Step 6: Shell Completion (Optional)
 
 Ask the user's shell and provide the appropriate completion setup:
 
@@ -73,7 +89,7 @@ Ask the user's shell and provide the appropriate completion setup:
 - **Zsh**: `eval "$(_CW_COMPLETE=zsh_source cw)"` in `~/.zshrc`
 - **Fish**: `_CW_COMPLETE=fish_source cw | source` in `~/.config/fish/config.fish`
 
-## Step 6: First Session
+## Step 7: First Session
 
 Start the user's first session:
 
