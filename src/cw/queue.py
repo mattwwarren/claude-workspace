@@ -74,6 +74,37 @@ def add_item(client: str, task: TaskSpec) -> QueueItem:
     return item
 
 
+def _find_best_pending(
+    store: QueueStore,
+    purpose: SessionPurpose | None = None,
+) -> QueueItem | None:
+    """Return the highest-priority pending item without mutating state."""
+    candidates = [
+        (idx, item)
+        for idx, item in enumerate(store.items)
+        if item.status == QueueItemStatus.PENDING
+        and (purpose is None or item.task.purpose == purpose)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: (-pair[1].task.priority, pair[0]))
+    _, best = candidates[0]
+    return best
+
+
+def peek_next(
+    client: str,
+    purpose: SessionPurpose | None = None,
+) -> QueueItem | None:
+    """Read-only peek at the next pending item without claiming it.
+
+    Returns the item that *would* be claimed next, or None if empty.
+    Does not mutate queue state.
+    """
+    store = load_queue(client)
+    return _find_best_pending(store, purpose)
+
+
 def claim_next(
     client: str,
     purpose: SessionPurpose | None = None,
@@ -91,21 +122,34 @@ def claim_next(
     """
     with _queue_lock(client):
         store = load_queue(client)
-        candidates = [
-            (idx, item)
-            for idx, item in enumerate(store.items)
-            if item.status == QueueItemStatus.PENDING
-            and (purpose is None or item.task.purpose == purpose)
-        ]
-        if not candidates:
+        best = _find_best_pending(store, purpose)
+        if best is None:
             return None
-        # Sort by priority descending, then original index ascending (FIFO)
-        candidates.sort(key=lambda pair: (-pair[1].task.priority, pair[0]))
-        _, best = candidates[0]
         best.status = QueueItemStatus.RUNNING
         best.started_at = datetime.now(UTC)
         save_queue(client, store)
         return best
+
+
+def claim_by_id(client: str, item_id: str) -> QueueItem:
+    """Claim a specific pending item by ID.
+
+    Returns the claimed item (now RUNNING).  Raises ``ValueError``
+    if the item is not found or is not in PENDING status.
+    """
+    with _queue_lock(client):
+        store = load_queue(client)
+        item = store.find_item(item_id)
+        if item is None:
+            msg = f"Queue item not found: {item_id}"
+            raise ValueError(msg)
+        if item.status != QueueItemStatus.PENDING:
+            msg = f"Queue item {item_id} is not pending (status: {item.status})"
+            raise ValueError(msg)
+        item.status = QueueItemStatus.RUNNING
+        item.started_at = datetime.now(UTC)
+        save_queue(client, store)
+        return item
 
 
 def complete_item(client: str, item_id: str, result: str) -> None:

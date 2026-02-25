@@ -15,11 +15,13 @@ if TYPE_CHECKING:
 from cw.models import QueueItem, QueueItemStatus, QueueStore, SessionPurpose, TaskSpec
 from cw.queue import (
     add_item,
+    claim_by_id,
     claim_next,
     clear_queue,
     complete_item,
     fail_item,
     load_queue,
+    peek_next,
     remove_item,
     save_queue,
 )
@@ -821,3 +823,115 @@ class TestPrioritySorting:
         )
         store = load_queue("c")
         assert store.items[0].task.priority == 42
+
+
+# ---------------------------------------------------------------------------
+# TestPeekNext
+# ---------------------------------------------------------------------------
+
+
+class TestPeekNext:
+    def test_peek_empty_queue_returns_none(self, tmp_queues_dir: Path) -> None:
+        result = peek_next("test-client")
+        assert result is None
+
+    def test_peek_returns_pending_item(self, tmp_queues_dir: Path) -> None:
+        add_item("test-client", _make_task())
+        item = peek_next("test-client")
+        assert item is not None
+
+    def test_peek_does_not_mutate_status(self, tmp_queues_dir: Path) -> None:
+        added = add_item("test-client", _make_task())
+        peek_next("test-client")
+        store = load_queue("test-client")
+        persisted = store.find_item(added.id)
+        assert persisted is not None
+        assert persisted.status == QueueItemStatus.PENDING
+
+    def test_peek_returns_highest_priority(self, tmp_queues_dir: Path) -> None:
+        add_item("c", _make_task(description="low"))
+        high = add_item(
+            "c",
+            TaskSpec(
+                description="high", purpose=SessionPurpose.IMPL,
+                prompt="high", priority=10,
+            ),
+        )
+        peeked = peek_next("c")
+        assert peeked is not None
+        assert peeked.id == high.id
+
+    def test_peek_with_purpose_filter(self, tmp_queues_dir: Path) -> None:
+        add_item("c", _make_task(purpose=SessionPurpose.IDEA))
+        impl = add_item("c", _make_task(purpose=SessionPurpose.IMPL))
+        peeked = peek_next("c", purpose=SessionPurpose.IMPL)
+        assert peeked is not None
+        assert peeked.id == impl.id
+
+    def test_peek_with_purpose_filter_no_match(self, tmp_queues_dir: Path) -> None:
+        add_item("c", _make_task(purpose=SessionPurpose.IDEA))
+        result = peek_next("c", purpose=SessionPurpose.IMPL)
+        assert result is None
+
+    def test_peek_is_idempotent(self, tmp_queues_dir: Path) -> None:
+        added = add_item("c", _make_task())
+        first = peek_next("c")
+        second = peek_next("c")
+        assert first is not None
+        assert second is not None
+        assert first.id == added.id
+        assert second.id == added.id
+
+
+# ---------------------------------------------------------------------------
+# TestClaimById
+# ---------------------------------------------------------------------------
+
+
+class TestClaimById:
+    def test_claim_by_id_returns_item(self, tmp_queues_dir: Path) -> None:
+        added = add_item("c", _make_task())
+        claimed = claim_by_id("c", added.id)
+        assert claimed.id == added.id
+
+    def test_claim_by_id_marks_running(self, tmp_queues_dir: Path) -> None:
+        added = add_item("c", _make_task())
+        claimed = claim_by_id("c", added.id)
+        assert claimed.status == QueueItemStatus.RUNNING
+
+    def test_claim_by_id_sets_started_at(self, tmp_queues_dir: Path) -> None:
+        added = add_item("c", _make_task())
+        claimed = claim_by_id("c", added.id)
+        assert claimed.started_at is not None
+
+    def test_claim_by_id_persists(self, tmp_queues_dir: Path) -> None:
+        added = add_item("c", _make_task())
+        claim_by_id("c", added.id)
+        store = load_queue("c")
+        persisted = store.find_item(added.id)
+        assert persisted is not None
+        assert persisted.status == QueueItemStatus.RUNNING
+
+    def test_claim_by_id_not_found_raises(self, tmp_queues_dir: Path) -> None:
+        with pytest.raises(ValueError, match="Queue item not found"):
+            claim_by_id("c", "nonexistent")
+
+    def test_claim_by_id_not_pending_raises(self, tmp_queues_dir: Path) -> None:
+        added = add_item("c", _make_task())
+        claim_by_id("c", added.id)  # Now RUNNING
+        with pytest.raises(ValueError, match="not pending"):
+            claim_by_id("c", added.id)
+
+    def test_claim_by_id_skips_completed(self, tmp_queues_dir: Path) -> None:
+        added = add_item("c", _make_task())
+        complete_item("c", added.id, "done")
+        with pytest.raises(ValueError, match="not pending"):
+            claim_by_id("c", added.id)
+
+    def test_claim_by_id_specific_among_many(self, tmp_queues_dir: Path) -> None:
+        add_item("c", _make_task(description="first"))
+        second = add_item("c", _make_task(description="second"))
+        add_item("c", _make_task(description="third"))
+        claimed = claim_by_id("c", second.id)
+        assert claimed.id == second.id
+        assert claimed.task.description == "second"

@@ -24,9 +24,11 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
+    QueueItem,
     Session,
     SessionPurpose,
     SessionStatus,
+    TaskSpec,
 )
 
 if TYPE_CHECKING:
@@ -704,3 +706,209 @@ class TestInitCli:
         )
         assert result.exit_code != 0
         assert "already exists" in result.output
+
+
+class TestQueueNextCli:
+    def test_next_empty_queue(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.peek_next", return_value=None):
+            result = runner.invoke(main, ["queue", "next", "my-client"])
+            assert result.exit_code == 0
+            assert "No pending items" in result.output
+
+    def test_next_shows_item(self, tmp_config_dir: Path) -> None:
+
+        item = QueueItem(
+            client="my-client",
+            task=TaskSpec(
+                description="Fix bug",
+                purpose=SessionPurpose.IMPL,
+                prompt="fix it",
+                priority=5,
+            ),
+        )
+        runner = CliRunner()
+        with patch("cw.cli.peek_next", return_value=item):
+            result = runner.invoke(main, ["queue", "next", "my-client"])
+            assert result.exit_code == 0
+            assert item.id in result.output
+            assert "Fix bug" in result.output
+            assert "priority=5" in result.output
+
+    def test_next_json_output(self, tmp_config_dir: Path) -> None:
+
+        item = QueueItem(
+            client="my-client",
+            task=TaskSpec(
+                description="Fix bug",
+                purpose=SessionPurpose.IMPL,
+                prompt="fix it",
+            ),
+        )
+        runner = CliRunner()
+        with patch("cw.cli.peek_next", return_value=item):
+            result = runner.invoke(
+                main, ["queue", "next", "my-client", "--json"],
+            )
+            assert result.exit_code == 0
+            assert '"description": "Fix bug"' in result.output
+
+    def test_next_with_purpose(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.peek_next", return_value=None) as mock_peek:
+            runner.invoke(
+                main, ["queue", "next", "my-client", "--purpose", "impl"],
+            )
+            mock_peek.assert_called_once_with(
+                "my-client", purpose=SessionPurpose.IMPL,
+            )
+
+
+class TestQueueClaimCli:
+    def test_claim_empty_queue(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.claim_next", return_value=None):
+            result = runner.invoke(main, ["queue", "claim", "my-client"])
+            assert result.exit_code == 0
+            assert "No pending items" in result.output
+
+    def test_claim_shows_item(self, tmp_config_dir: Path) -> None:
+
+        item = QueueItem(
+            client="my-client",
+            task=TaskSpec(
+                description="Fix bug",
+                purpose=SessionPurpose.IMPL,
+                prompt="fix it",
+            ),
+        )
+        runner = CliRunner()
+        with patch("cw.cli.claim_next", return_value=item):
+            result = runner.invoke(main, ["queue", "claim", "my-client"])
+            assert result.exit_code == 0
+            assert "Claimed:" in result.output
+            assert item.id in result.output
+
+    def test_claim_json_output(self, tmp_config_dir: Path) -> None:
+
+        item = QueueItem(
+            client="my-client",
+            task=TaskSpec(
+                description="Fix bug",
+                purpose=SessionPurpose.IMPL,
+                prompt="fix it",
+            ),
+        )
+        runner = CliRunner()
+        with patch("cw.cli.claim_next", return_value=item):
+            result = runner.invoke(
+                main, ["queue", "claim", "my-client", "--json"],
+            )
+            assert result.exit_code == 0
+            assert '"description": "Fix bug"' in result.output
+
+    def test_claim_by_id(self, tmp_config_dir: Path) -> None:
+
+        item = QueueItem(
+            client="my-client",
+            task=TaskSpec(
+                description="Fix bug",
+                purpose=SessionPurpose.IMPL,
+                prompt="fix it",
+            ),
+        )
+        runner = CliRunner()
+        with patch("cw.cli.claim_by_id", return_value=item) as mock_claim:
+            result = runner.invoke(
+                main,
+                ["queue", "claim", "my-client", "--id", "abc12345"],
+            )
+            assert result.exit_code == 0
+            mock_claim.assert_called_once_with("my-client", "abc12345")
+
+    def test_claim_with_purpose(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.claim_next", return_value=None) as mock_claim:
+            runner.invoke(
+                main,
+                ["queue", "claim", "my-client", "--purpose", "debt"],
+            )
+            mock_claim.assert_called_once_with(
+                "my-client", purpose=SessionPurpose.DEBT,
+            )
+
+
+class TestQueueCompleteCli:
+    def test_complete_success(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.complete_item") as mock_complete:
+            result = runner.invoke(
+                main,
+                ["queue", "complete", "my-client", "abc123",
+                 "--result", "All done"],
+            )
+            assert result.exit_code == 0
+            assert "Completed: abc123" in result.output
+            mock_complete.assert_called_once_with(
+                "my-client", "abc123", "All done",
+            )
+
+    def test_complete_default_result(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.complete_item") as mock_complete:
+            result = runner.invoke(
+                main, ["queue", "complete", "my-client", "abc123"],
+            )
+            assert result.exit_code == 0
+            mock_complete.assert_called_once_with(
+                "my-client", "abc123", "",
+            )
+
+    def test_complete_not_found(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch(
+            "cw.cli.complete_item",
+            side_effect=ValueError("Queue item not found: bad-id"),
+        ):
+            result = runner.invoke(
+                main, ["queue", "complete", "my-client", "bad-id"],
+            )
+            assert result.exit_code != 0
+
+
+class TestQueueFailCli:
+    def test_fail_success(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.fail_item") as mock_fail:
+            result = runner.invoke(
+                main,
+                ["queue", "fail", "my-client", "abc123",
+                 "--error", "Crashed"],
+            )
+            assert result.exit_code == 0
+            assert "Failed: abc123" in result.output
+            mock_fail.assert_called_once_with(
+                "my-client", "abc123", "Crashed",
+            )
+
+    def test_fail_default_error(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.fail_item") as mock_fail:
+            result = runner.invoke(
+                main, ["queue", "fail", "my-client", "abc123"],
+            )
+            assert result.exit_code == 0
+            mock_fail.assert_called_once_with(
+                "my-client", "abc123", "",
+            )
+
+    def test_fail_not_found(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        with patch(
+            "cw.cli.fail_item",
+            side_effect=ValueError("Queue item not found: bad-id"),
+        ):
+            result = runner.invoke(
+                main, ["queue", "fail", "my-client", "bad-id"],
+            )
+            assert result.exit_code != 0

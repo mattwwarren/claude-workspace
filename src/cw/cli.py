@@ -34,6 +34,7 @@ from cw.hooks import hook_status as _hook_status_fn
 from cw.models import (
     CompletionReason,
     CwState,
+    QueueItem,
     QueueItemStatus,
     Session,
     SessionPurpose,
@@ -41,7 +42,17 @@ from cw.models import (
     TaskSpec,
 )
 from cw.plan import find_plan_files, parse_plan
-from cw.queue import add_item, clear_queue, load_queue, remove_item
+from cw.queue import (
+    add_item,
+    claim_by_id,
+    claim_next,
+    clear_queue,
+    complete_item,
+    fail_item,
+    load_queue,
+    peek_next,
+    remove_item,
+)
 from cw.session import (
     CW_SESSION,
     background_all_sessions,
@@ -632,6 +643,83 @@ def queue_clear(client: str, purpose: str | None, completed: bool) -> None:
     status_enum = QueueItemStatus.COMPLETED if completed else None
     removed = clear_queue(client, purpose=purpose_enum, status=status_enum)
     click.echo(f"Cleared {removed} item(s).")
+
+
+@queue.command(name="next")
+@click.argument("client", shell_complete=_complete_client)
+@click.option(
+    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
+    default=None, help="Filter by purpose.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output full QueueItem JSON.")
+@handle_errors
+def queue_next(client: str, purpose: str | None, as_json: bool) -> None:
+    """Peek at the next pending item without claiming it."""
+    purpose_enum = SessionPurpose(purpose) if purpose else None
+    item = peek_next(client, purpose=purpose_enum)
+    if item is None:
+        click.echo("No pending items.")
+        return
+    if as_json:
+        click.echo(item.model_dump_json(indent=2))
+    else:
+        click.echo(
+            f"{item.id}  priority={item.task.priority}"
+            f"  purpose={item.task.purpose}  {item.task.description}"
+        )
+
+
+@queue.command(name="claim")
+@click.argument("client", shell_complete=_complete_client)
+@click.option(
+    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
+    default=None, help="Filter by purpose.",
+)
+@click.option("--id", "item_id", default=None, help="Claim a specific item by ID.")
+@click.option("--json", "as_json", is_flag=True, help="Output full QueueItem JSON.")
+@handle_errors
+def queue_claim(
+    client: str,
+    purpose: str | None,
+    item_id: str | None,
+    as_json: bool,
+) -> None:
+    """Claim the next pending item (marks it RUNNING)."""
+    item: QueueItem | None
+    if item_id:
+        item = claim_by_id(client, item_id)
+    else:
+        purpose_enum = SessionPurpose(purpose) if purpose else None
+        item = claim_next(client, purpose=purpose_enum)
+    if item is None:
+        click.echo("No pending items to claim.")
+        return
+    if as_json:
+        click.echo(item.model_dump_json(indent=2))
+    else:
+        click.echo(f"Claimed: {item.id} ({item.task.description})")
+
+
+@queue.command(name="complete")
+@click.argument("client", shell_complete=_complete_client)
+@click.argument("item_id")
+@click.option("--result", default="", help="Result summary text.")
+@handle_errors
+def queue_complete(client: str, item_id: str, result: str) -> None:
+    """Mark a queue item as completed."""
+    complete_item(client, item_id, result)
+    click.echo(f"Completed: {item_id}")
+
+
+@queue.command(name="fail")
+@click.argument("client", shell_complete=_complete_client)
+@click.argument("item_id")
+@click.option("--error", "error_text", default="", help="Error description.")
+@handle_errors
+def queue_fail(client: str, item_id: str, error_text: str) -> None:
+    """Mark a queue item as failed."""
+    fail_item(client, item_id, error_text)
+    click.echo(f"Failed: {item_id}")
 
 
 # --- Delegate command ---
