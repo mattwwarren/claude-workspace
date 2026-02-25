@@ -135,14 +135,7 @@ class TestExtractResumptionPrompt:
 
     def test_multiline_prompt(self, tmp_path: Path) -> None:
         f = tmp_path / "multiline.md"
-        f.write_text(
-            "## Resumption Prompt\n\n"
-            "```\n"
-            "Line 1\n"
-            "Line 2\n"
-            "Line 3\n"
-            "```\n"
-        )
+        f.write_text("## Resumption Prompt\n\n```\nLine 1\nLine 2\nLine 3\n```\n")
         result = extract_resumption_prompt(f)
         assert result is not None
         assert "Line 1" in result
@@ -151,12 +144,7 @@ class TestExtractResumptionPrompt:
 
     def test_prompt_is_stripped(self, tmp_path: Path) -> None:
         f = tmp_path / "padded.md"
-        f.write_text(
-            "## Resumption Prompt\n\n"
-            "```\n"
-            "\n  Resume the work  \n\n"
-            "```\n"
-        )
+        f.write_text("## Resumption Prompt\n\n```\n\n  Resume the work  \n\n```\n")
         result = extract_resumption_prompt(f)
         assert result == "Resume the work"
 
@@ -164,7 +152,10 @@ class TestExtractResumptionPrompt:
 class TestBuildCrossSessionPrompt:
     def test_with_branch_and_prompt(self) -> None:
         result = build_cross_session_prompt(
-            "impl", "idea", "feat/search", "Continue the auth work.",
+            "impl",
+            "idea",
+            "feat/search",
+            "Continue the auth work.",
         )
         assert "impl → idea" in result
         assert "feat/search" in result
@@ -172,7 +163,10 @@ class TestBuildCrossSessionPrompt:
 
     def test_without_branch(self) -> None:
         result = build_cross_session_prompt(
-            "impl", "idea", None, "Some context.",
+            "impl",
+            "idea",
+            None,
+            "Some context.",
         )
         assert "impl → idea" in result
         assert "branch" not in result.lower()
@@ -180,7 +174,10 @@ class TestBuildCrossSessionPrompt:
 
     def test_without_raw_prompt(self) -> None:
         result = build_cross_session_prompt(
-            "impl", "idea", "feat/search", None,
+            "impl",
+            "idea",
+            "feat/search",
+            None,
         )
         assert "impl → idea" in result
         assert "No resumption context" in result
@@ -195,63 +192,33 @@ class TestParseHandoffReason:
     def test_normal_session_done_returns_none(self, tmp_path: Path) -> None:
         """Normal /session-done handoffs lack frontmatter with a reason field."""
         f = tmp_path / "session-done.md"
-        f.write_text(
-            "# Session Handoff\n\n"
-            "## Summary\n\n"
-            "Work is complete.\n"
-        )
+        f.write_text("# Session Handoff\n\n## Summary\n\nWork is complete.\n")
         assert parse_handoff_reason(f) is None
 
     def test_context_reason(self, tmp_path: Path) -> None:
         f = tmp_path / "session-context.md"
-        f.write_text(
-            "---\n"
-            "reason: context\n"
-            "---\n"
-            "# Handoff\n\n"
-            "Context exhausted.\n"
-        )
+        f.write_text("---\nreason: context\n---\n# Handoff\n\nContext exhausted.\n")
         assert parse_handoff_reason(f) is HandoffReason.CONTEXT
 
     def test_debug_fork_reason(self, tmp_path: Path) -> None:
         f = tmp_path / "session-debug.md"
-        f.write_text(
-            "---\n"
-            "reason: debug-fork\n"
-            "---\n"
-            "# Handoff\n"
-        )
+        f.write_text("---\nreason: debug-fork\n---\n# Handoff\n")
         assert parse_handoff_reason(f) is HandoffReason.DEBUG_FORK
 
     def test_scope_reason(self, tmp_path: Path) -> None:
         f = tmp_path / "session-scope.md"
-        f.write_text(
-            "---\n"
-            "reason: scope\n"
-            "---\n"
-            "# Handoff\n"
-        )
+        f.write_text("---\nreason: scope\n---\n# Handoff\n")
         assert parse_handoff_reason(f) is HandoffReason.SCOPE
 
     def test_unknown_reason_returns_none(self, tmp_path: Path) -> None:
         """Unrecognised reason values are ignored (treated as normal)."""
         f = tmp_path / "session-typo.md"
-        f.write_text(
-            "---\n"
-            "reason: contxt\n"
-            "---\n"
-            "# Handoff\n"
-        )
+        f.write_text("---\nreason: contxt\n---\n# Handoff\n")
         assert parse_handoff_reason(f) is None
 
     def test_frontmatter_without_reason_returns_none(self, tmp_path: Path) -> None:
         f = tmp_path / "session-no-reason.md"
-        f.write_text(
-            "---\n"
-            "title: Some handoff\n"
-            "---\n"
-            "# Handoff\n"
-        )
+        f.write_text("---\ntitle: Some handoff\n---\n# Handoff\n")
         assert parse_handoff_reason(f) is None
 
     def test_nonexistent_file_returns_none(self, tmp_path: Path) -> None:
@@ -260,12 +227,7 @@ class TestParseHandoffReason:
 
     def test_reason_with_extra_whitespace(self, tmp_path: Path) -> None:
         f = tmp_path / "session-ws.md"
-        f.write_text(
-            "---\n"
-            "reason:   context  \n"
-            "---\n"
-            "# Handoff\n"
-        )
+        f.write_text("---\nreason:   context  \n---\n# Handoff\n")
         assert parse_handoff_reason(f) is HandoffReason.CONTEXT
 
 

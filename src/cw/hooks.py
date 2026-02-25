@@ -179,9 +179,7 @@ def remove_event_hook(client: str, event_type: str) -> int:
     """
     registry = load_event_hooks(client)
     original_count = len(registry.rules)
-    registry.rules = [
-        r for r in registry.rules if r.event_type != event_type
-    ]
+    registry.rules = [r for r in registry.rules if r.event_type != event_type]
     removed = original_count - len(registry.rules)
     if removed > 0:
         save_event_hooks(client, registry)
@@ -234,6 +232,8 @@ def dispatch_event_hooks(
         except Exception:
             log.debug(
                 "Failed to dispatch hook %r for %s/%s",
-                rule.command, client, event_type,
+                rule.command,
+                client,
+                event_type,
                 exc_info=True,
             )

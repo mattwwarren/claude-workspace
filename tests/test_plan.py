@@ -81,10 +81,7 @@ class TestParsePlan:
     def test_checkbox_parsing(self, tmp_path: Path) -> None:
         f = tmp_path / "plan.md"
         f.write_text(
-            "## Phase 1\n\n"
-            "- [x] Completed task\n"
-            "- [X] Also completed\n"
-            "- [ ] Not done\n"
+            "## Phase 1\n\n- [x] Completed task\n- [X] Also completed\n- [ ] Not done\n"
         )
         result = parse_plan(f)
         tasks = result.phases[0].tasks
@@ -96,10 +93,7 @@ class TestParsePlan:
     def test_ignores_checkboxes_outside_phases(self, tmp_path: Path) -> None:
         f = tmp_path / "plan.md"
         f.write_text(
-            "# Plan\n\n"
-            "- [x] Orphan checkbox\n\n"
-            "## Phase 1\n\n"
-            "- [ ] Real task\n"
+            "# Plan\n\n- [x] Orphan checkbox\n\n## Phase 1\n\n- [ ] Real task\n"
         )
         result = parse_plan(f)
         assert len(result.phases) == 1

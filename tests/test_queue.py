@@ -60,9 +60,7 @@ def tmp_queues_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestLoadSaveQueue:
-    def test_load_missing_file_returns_empty_store(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_load_missing_file_returns_empty_store(self, tmp_queues_dir: Path) -> None:
         store = load_queue("test-client")
         assert store.items == []
 
@@ -127,9 +125,7 @@ class TestLoadSaveQueue:
         parsed = json.loads(raw)
         assert "items" in parsed
 
-    def test_separate_clients_have_separate_files(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_separate_clients_have_separate_files(self, tmp_queues_dir: Path) -> None:
         save_queue("client-a", QueueStore())
         save_queue("client-b", QueueStore())
         assert (tmp_queues_dir / "client-a.json").exists()
@@ -193,9 +189,7 @@ class TestAddItem:
 
 
 class TestClaimNext:
-    def test_claim_next_empty_queue_returns_none(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_claim_next_empty_queue_returns_none(self, tmp_queues_dir: Path) -> None:
         result = claim_next("test-client")
         assert result is None
 
@@ -216,9 +210,7 @@ class TestClaimNext:
         assert item is not None
         assert item.started_at is not None
 
-    def test_claim_next_persists_running_status(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_claim_next_persists_running_status(self, tmp_queues_dir: Path) -> None:
         add_item("test-client", _make_task())
         claimed = claim_next("test-client")
         assert claimed is not None
@@ -247,9 +239,7 @@ class TestClaimNext:
         assert claimed is not None
         assert claimed.id == second.id
 
-    def test_double_claim_returns_different_item(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_double_claim_returns_different_item(self, tmp_queues_dir: Path) -> None:
         add_item("test-client", _make_task(description="a"))
         add_item("test-client", _make_task(description="b"))
         first_claim = claim_next("test-client")
@@ -258,18 +248,14 @@ class TestClaimNext:
         assert second_claim is not None
         assert first_claim.id != second_claim.id
 
-    def test_double_claim_exhausts_single_item(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_double_claim_exhausts_single_item(self, tmp_queues_dir: Path) -> None:
         add_item("test-client", _make_task())
         first_claim = claim_next("test-client")
         second_claim = claim_next("test-client")
         assert first_claim is not None
         assert second_claim is None
 
-    def test_claim_next_skips_completed_items(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_claim_next_skips_completed_items(self, tmp_queues_dir: Path) -> None:
         item = add_item("test-client", _make_task())
         store = load_queue("test-client")
         store.find_item(item.id).status = QueueItemStatus.COMPLETED  # type: ignore[union-attr]
@@ -292,17 +278,13 @@ class TestClaimNext:
 
 
 class TestClaimNextWithPurposeFilter:
-    def test_purpose_filter_returns_matching_item(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_purpose_filter_returns_matching_item(self, tmp_queues_dir: Path) -> None:
         add_item("c", _make_task(purpose=SessionPurpose.IMPL))
         claimed = claim_next("c", purpose=SessionPurpose.IMPL)
         assert claimed is not None
         assert claimed.task.purpose == SessionPurpose.IMPL
 
-    def test_purpose_filter_skips_non_matching(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_purpose_filter_skips_non_matching(self, tmp_queues_dir: Path) -> None:
         add_item("c", _make_task(purpose=SessionPurpose.IDEA))
         result = claim_next("c", purpose=SessionPurpose.IMPL)
         assert result is None
@@ -316,7 +298,8 @@ class TestClaimNextWithPurposeFilter:
         self, tmp_queues_dir: Path
     ) -> None:
         idea_task = _make_task(
-            description="idea task", purpose=SessionPurpose.IDEA,
+            description="idea task",
+            purpose=SessionPurpose.IDEA,
         )
         add_item("c", idea_task)
         impl_item = add_item(
@@ -568,9 +551,7 @@ class TestQueueStoreMethods:
         )
         idea_pending = QueueItem(
             client="c",
-            task=_make_task(
-                description="idea pending", purpose=SessionPurpose.IDEA
-            ),
+            task=_make_task(description="idea pending", purpose=SessionPurpose.IDEA),
             status=QueueItemStatus.PENDING,
         )
         failed = QueueItem(
@@ -663,9 +644,7 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="bad-id-123"):
             complete_item("c", "bad-id-123", "result")
 
-    def test_fail_item_error_message_contains_id(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_fail_item_error_message_contains_id(self, tmp_queues_dir: Path) -> None:
         with pytest.raises(ValueError, match="missing-id"):
             fail_item("c", "missing-id", "error")
 
@@ -679,9 +658,7 @@ class TestEdgeCases:
         save_queue("c", store)
         assert claim_next("c") is None
 
-    def test_add_item_with_optional_task_fields(
-        self, tmp_queues_dir: Path
-    ) -> None:
+    def test_add_item_with_optional_task_fields(self, tmp_queues_dir: Path) -> None:
         task = TaskSpec(
             description="full task",
             purpose=SessionPurpose.IDEA,
@@ -716,7 +693,8 @@ class TestEdgeCases:
 class TestPrioritySorting:
     def test_higher_priority_claimed_first(self, tmp_queues_dir: Path) -> None:
         add_item(
-            "c", _make_task(description="low", purpose=SessionPurpose.DEBT),
+            "c",
+            _make_task(description="low", purpose=SessionPurpose.DEBT),
         )
         high = add_item(
             "c",
@@ -746,22 +724,28 @@ class TestPrioritySorting:
         low = add_item(
             "c",
             TaskSpec(
-                description="low", purpose=SessionPurpose.DEBT,
-                prompt="low", priority=1,
+                description="low",
+                purpose=SessionPurpose.DEBT,
+                prompt="low",
+                priority=1,
             ),
         )
         mid = add_item(
             "c",
             TaskSpec(
-                description="mid", purpose=SessionPurpose.DEBT,
-                prompt="mid", priority=5,
+                description="mid",
+                purpose=SessionPurpose.DEBT,
+                prompt="mid",
+                priority=5,
             ),
         )
         high = add_item(
             "c",
             TaskSpec(
-                description="high", purpose=SessionPurpose.DEBT,
-                prompt="high", priority=10,
+                description="high",
+                purpose=SessionPurpose.DEBT,
+                prompt="high",
+                priority=10,
             ),
         )
         first = claim_next("c")
@@ -778,22 +762,28 @@ class TestPrioritySorting:
         add_item(
             "c",
             TaskSpec(
-                description="impl low", purpose=SessionPurpose.IMPL,
-                prompt="impl low", priority=1,
+                description="impl low",
+                purpose=SessionPurpose.IMPL,
+                prompt="impl low",
+                priority=1,
             ),
         )
         high_debt = add_item(
             "c",
             TaskSpec(
-                description="debt high", purpose=SessionPurpose.DEBT,
-                prompt="debt high", priority=10,
+                description="debt high",
+                purpose=SessionPurpose.DEBT,
+                prompt="debt high",
+                priority=10,
             ),
         )
         add_item(
             "c",
             TaskSpec(
-                description="debt low", purpose=SessionPurpose.DEBT,
-                prompt="debt low", priority=1,
+                description="debt low",
+                purpose=SessionPurpose.DEBT,
+                prompt="debt low",
+                priority=1,
             ),
         )
         claimed = claim_next("c", purpose=SessionPurpose.DEBT)
@@ -805,8 +795,10 @@ class TestPrioritySorting:
         add_item(
             "c",
             TaskSpec(
-                description="deprioritized", purpose=SessionPurpose.IMPL,
-                prompt="low", priority=-5,
+                description="deprioritized",
+                purpose=SessionPurpose.IMPL,
+                prompt="low",
+                priority=-5,
             ),
         )
         claimed = claim_next("c")
@@ -817,8 +809,10 @@ class TestPrioritySorting:
         add_item(
             "c",
             TaskSpec(
-                description="test", purpose=SessionPurpose.DEBT,
-                prompt="test", priority=42,
+                description="test",
+                purpose=SessionPurpose.DEBT,
+                prompt="test",
+                priority=42,
             ),
         )
         store = load_queue("c")
@@ -853,8 +847,10 @@ class TestPeekNext:
         high = add_item(
             "c",
             TaskSpec(
-                description="high", purpose=SessionPurpose.IMPL,
-                prompt="high", priority=10,
+                description="high",
+                purpose=SessionPurpose.IMPL,
+                prompt="high",
+                priority=10,
             ),
         )
         peeked = peek_next("c")

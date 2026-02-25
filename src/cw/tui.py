@@ -48,8 +48,7 @@ class ClientList(ListView):
     def __init__(self, clients: dict[str, ClientConfig]) -> None:
         self._clients = clients
         items = [
-            ListItem(Static(name), id=f"client-{name}")
-            for name in sorted(clients)
+            ListItem(Static(name), id=f"client-{name}") for name in sorted(clients)
         ]
         super().__init__(*items)
 
@@ -265,7 +264,12 @@ class CwDashboard(App[None]):
         """Load initial data and set up refresh timer."""
         table = self.query_one(SessionTable)
         table.add_columns(
-            "Purpose", "Status", "Origin", "Since", "Branch", "Handoff",
+            "Purpose",
+            "Status",
+            "Origin",
+            "Since",
+            "Branch",
+            "Handoff",
         )
         queue_table = self.query_one(QueuePanel)
         queue_table.add_columns("ID", "Status", "Purpose", "Description")
@@ -298,9 +302,9 @@ class CwDashboard(App[None]):
 
         self._state = load_state()
         self._sessions = [
-            s for s in self._state.sessions
-            if s.client == self._selected_client
-            and s.status != SessionStatus.COMPLETED
+            s
+            for s in self._state.sessions
+            if s.client == self._selected_client and s.status != SessionStatus.COMPLETED
         ]
 
         for s in self._sessions:
@@ -310,8 +314,13 @@ class CwDashboard(App[None]):
             branch = s.branch or ""
             handoff = "[dim]handoff[/dim]" if s.last_handoff_path else ""
             table.add_row(
-                s.purpose, status_display, origin, since,
-                branch, handoff, key=s.id,
+                s.purpose,
+                status_display,
+                origin,
+                since,
+                branch,
+                handoff,
+                key=s.id,
             )
 
     def _refresh_sidebar(self) -> None:
@@ -348,7 +357,8 @@ class CwDashboard(App[None]):
         store = load_queue(self._selected_client)
         self._queue = store
         active_items = [
-            i for i in store.items
+            i
+            for i in store.items
             if i.status in (QueueItemStatus.PENDING, QueueItemStatus.RUNNING)
         ]
 
@@ -357,7 +367,7 @@ class CwDashboard(App[None]):
             desc = item.task.description
             max_desc = 35
             if len(desc) > max_desc:
-                desc = desc[:max_desc - 3] + "..."
+                desc = desc[: max_desc - 3] + "..."
             table.add_row(
                 item.id[:8],
                 status_display,

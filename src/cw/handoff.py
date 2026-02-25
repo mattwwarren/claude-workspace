@@ -44,12 +44,10 @@ def find_handoffs_newer_than(workspace_path: Path, since_mtime: float) -> list[P
         return []
 
     # Cache stat results to avoid double stat() per file
-    timed = [
-        (p, p.stat().st_mtime)
-        for p in handoffs_dir.glob(HANDOFF_GLOB)
-    ]
+    timed = [(p, p.stat().st_mtime) for p in handoffs_dir.glob(HANDOFF_GLOB)]
     return [
-        p for p, mtime in sorted(timed, key=lambda t: t[1], reverse=True)
+        p
+        for p, mtime in sorted(timed, key=lambda t: t[1], reverse=True)
         if mtime > since_mtime
     ]
 
@@ -81,8 +79,7 @@ def build_cross_session_prompt(
     """Wrap a resumption prompt with cross-session context and workflow."""
     branch_label = f" on branch {branch}" if branch else ""
     header = (
-        f"Cross-session handoff: {source_purpose} → {target_purpose}"
-        f"{branch_label}."
+        f"Cross-session handoff: {source_purpose} → {target_purpose}{branch_label}."
     )
 
     if raw_prompt:

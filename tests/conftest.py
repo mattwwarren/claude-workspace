@@ -169,7 +169,9 @@ def mock_zellij(
         calls["go_to_tab"].append((t, session))
 
     def _focus_pane(
-        p: str, session: str | None = None, tab_name: str | None = None,
+        p: str,
+        session: str | None = None,
+        tab_name: str | None = None,
     ) -> None:
         calls["focus_pane"].append((p, session, tab_name))
 
@@ -177,23 +179,27 @@ def mock_zellij(
         calls["write_to_pane"].append((t, session))
 
     def _check_pane_health(
-        session: str | None = None, tab_name: str | None = None,
+        session: str | None = None,
+        tab_name: str | None = None,
     ) -> dict[str, bool]:
         calls["check_pane_health"].append((session, tab_name))
         return {}
 
     def _new_pane(
-        command: str, **kwargs: object,
+        command: str,
+        **kwargs: object,
     ) -> None:
         calls["new_pane"].append((command, kwargs))
 
     def _new_tab(
-        client: object, **kwargs: object,
+        client: object,
+        **kwargs: object,
     ) -> None:
         calls["new_tab"].append((client, kwargs))
 
     def _rename_tab(
-        new_name: str, session: str | None = None,
+        new_name: str,
+        session: str | None = None,
     ) -> None:
         calls["rename_tab"].append((new_name, session))
 
@@ -201,34 +207,16 @@ def mock_zellij(
     monkeypatch.setattr("cw.zellij.new_tab", _new_tab)
     monkeypatch.setattr("cw.zellij.rename_tab", _rename_tab)
     monkeypatch.setattr("cw.zellij.is_installed", _is_installed)
-    monkeypatch.setattr(
-        "cw.zellij.in_zellij_session", _in_zellij
-    )
-    monkeypatch.setattr(
-        "cw.zellij.resolve_session_target", _resolve_session_target
-    )
-    monkeypatch.setattr(
-        "cw.zellij.session_exists", _session_exists
-    )
-    monkeypatch.setattr(
-        "cw.zellij.generate_layout", _generate_layout
-    )
-    monkeypatch.setattr(
-        "cw.zellij.create_and_attach", _create_and_attach
-    )
-    monkeypatch.setattr(
-        "cw.zellij.attach_session", _attach
-    )
+    monkeypatch.setattr("cw.zellij.in_zellij_session", _in_zellij)
+    monkeypatch.setattr("cw.zellij.resolve_session_target", _resolve_session_target)
+    monkeypatch.setattr("cw.zellij.session_exists", _session_exists)
+    monkeypatch.setattr("cw.zellij.generate_layout", _generate_layout)
+    monkeypatch.setattr("cw.zellij.create_and_attach", _create_and_attach)
+    monkeypatch.setattr("cw.zellij.attach_session", _attach)
     monkeypatch.setattr("cw.zellij.go_to_tab", _go_to_tab)
-    monkeypatch.setattr(
-        "cw.zellij.focus_pane", _focus_pane
-    )
-    monkeypatch.setattr(
-        "cw.zellij.write_to_pane", _write_to_pane
-    )
-    monkeypatch.setattr(
-        "cw.zellij.check_pane_health", _check_pane_health
-    )
+    monkeypatch.setattr("cw.zellij.focus_pane", _focus_pane)
+    monkeypatch.setattr("cw.zellij.write_to_pane", _write_to_pane)
+    monkeypatch.setattr("cw.zellij.check_pane_health", _check_pane_health)
 
     return calls
 
@@ -256,6 +244,7 @@ def sample_handoff_file(tmp_path: Path) -> Path:
 @pytest.fixture
 def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
     """Factory fixture to create git repos in tmp_path."""
+
     def _make(name: str) -> Path:
         repo = tmp_path / name
         repo.mkdir(parents=True, exist_ok=True)
@@ -265,4 +254,5 @@ def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
             check=True,
         )
         return repo
+
     return _make

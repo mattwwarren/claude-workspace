@@ -87,9 +87,7 @@ def _complete_client(
 ) -> list[CompletionItem]:
     """Complete client names from config."""
     return [
-        CompletionItem(name)
-        for name in load_clients()
-        if name.startswith(incomplete)
+        CompletionItem(name) for name in load_clients() if name.startswith(incomplete)
     ]
 
 
@@ -122,7 +120,8 @@ def main() -> None:
     help="Session purpose.",
 )
 @click.option(
-    "--worktree", "-w",
+    "--worktree",
+    "-w",
     default=None,
     help="Git branch for worktree isolation (e.g. feat/search).",
 )
@@ -133,20 +132,27 @@ def start(client: str, purpose: str, worktree: str | None) -> None:
 
 
 @main.command()
-@click.argument("session_name", required=False, default=None,
-                shell_complete=_complete_session)
+@click.argument(
+    "session_name", required=False, default=None, shell_complete=_complete_session
+)
 @click.option(
-    "--notify", "-n",
+    "--notify",
+    "-n",
     type=click.Choice([e.value for e in SessionPurpose]),
     default=None,
     help="Notify a sibling session after backgrounding.",
 )
 @click.option(
-    "--auto", is_flag=True, default=False,
+    "--auto",
+    is_flag=True,
+    default=False,
     help="Mark as auto-backgrounded (used by hooks).",
 )
 @click.option(
-    "--all", "all_sessions", is_flag=True, default=False,
+    "--all",
+    "all_sessions",
+    is_flag=True,
+    default=False,
     help="Background all active sessions sequentially.",
 )
 @handle_errors
@@ -214,8 +220,9 @@ def hand(target: str, message: str, source: str | None) -> None:
 
 
 @main.command()
-@click.argument("session_name", required=False, default=None,
-                shell_complete=_complete_session)
+@click.argument(
+    "session_name", required=False, default=None, shell_complete=_complete_session
+)
 @click.option("--cleanup", is_flag=True, help="Remove associated worktree.")
 @click.option("--force", is_flag=True, help="Force worktree removal.")
 @handle_errors
@@ -245,7 +252,8 @@ def _parse_handoff_route(
 @click.argument("source", required=True)
 @click.argument("target", required=False, default=None)
 @click.option(
-    "--client", "-c",
+    "--client",
+    "-c",
     default=None,
     shell_complete=_complete_client,
     help="Explicit client name (auto-detected if omitted).",
@@ -276,7 +284,8 @@ def config() -> None:
 @main.command(name="init")
 @click.argument("name", required=False, default=None)
 @click.option(
-    "--path", "-p",
+    "--path",
+    "-p",
     type=click.Path(exists=True, file_okay=False, resolve_path=True, path_type=Path),
     default=None,
     help="Path to the project repository.",
@@ -319,8 +328,7 @@ def init(
 
     if path is None:
         msg = (
-            "Path is required: use --path or run"
-            " without arguments for interactive mode"
+            "Path is required: use --path or run without arguments for interactive mode"
         )
         raise CwError(msg)
 
@@ -490,7 +498,8 @@ def _check_and_mark_dead_sessions(state: CwState) -> list[Session]:
         tab = s.zellij_tab or s.client
         if tab not in tab_health:
             tab_health[tab] = zellij.check_pane_health(
-                session=CW_SESSION, tab_name=tab,
+                session=CW_SESSION,
+                tab_name=tab,
             )
         health = tab_health[tab]
         pane_name = s.zellij_pane or s.purpose
@@ -541,14 +550,13 @@ def _display_status() -> None:
         click.echo("Backgrounded:")
         for s in backgrounded:
             handoff = (
-                f" handoff: {s.last_handoff_path.name}"
-                if s.last_handoff_path
-                else ""
+                f" handoff: {s.last_handoff_path.name}" if s.last_handoff_path else ""
             )
             click.echo(f"  {s.name}{handoff}")
 
 
 # --- Queue command group ---
+
 
 @main.group()
 def queue() -> None:
@@ -559,8 +567,10 @@ def queue() -> None:
 @click.argument("client", shell_complete=_complete_client)
 @click.argument("description")
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default="debt", help="Queue purpose.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default="debt",
+    help="Queue purpose.",
 )
 @click.option("--prompt", default=None, help="Exact prompt for Claude.")
 @click.option("--priority", type=int, default=0, help="Priority (higher = sooner).")
@@ -586,13 +596,17 @@ def queue_add(
 @queue.command(name="list")
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default=None, help="Filter by purpose.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default=None,
+    help="Filter by purpose.",
 )
 @click.option(
-    "--status", "status_filter",
+    "--status",
+    "status_filter",
     type=click.Choice([e.value for e in QueueItemStatus]),
-    default=None, help="Filter by status.",
+    default=None,
+    help="Filter by status.",
 )
 @handle_errors
 def queue_list(
@@ -632,8 +646,10 @@ def queue_remove(client: str, item_id: str) -> None:
 @queue.command(name="clear")
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default=None, help="Clear only items with this purpose.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default=None,
+    help="Clear only items with this purpose.",
 )
 @click.option("--completed", is_flag=True, help="Clear only completed items.")
 @handle_errors
@@ -648,8 +664,10 @@ def queue_clear(client: str, purpose: str | None, completed: bool) -> None:
 @queue.command(name="next")
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default=None, help="Filter by purpose.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default=None,
+    help="Filter by purpose.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output full QueueItem JSON.")
 @handle_errors
@@ -672,8 +690,10 @@ def queue_next(client: str, purpose: str | None, as_json: bool) -> None:
 @queue.command(name="claim")
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default=None, help="Filter by purpose.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default=None,
+    help="Filter by purpose.",
 )
 @click.option("--id", "item_id", default=None, help="Claim a specific item by ID.")
 @click.option("--json", "as_json", is_flag=True, help="Output full QueueItem JSON.")
@@ -724,17 +744,21 @@ def queue_fail(client: str, item_id: str, error_text: str) -> None:
 
 # --- Delegate command ---
 
+
 @main.command()
 @click.argument("client", shell_complete=_complete_client)
 @click.argument("description")
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default="debt", help="Task purpose.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default="debt",
+    help="Task purpose.",
 )
 @click.option("--prompt", default=None, help="Exact prompt for Claude.")
 @click.option("--interactive", is_flag=True, help="Leave Claude in interactive mode.")
 @click.option(
-    "--context-files", default=None,
+    "--context-files",
+    default=None,
     help="Comma-separated file paths for context.",
 )
 @click.option("--priority", type=int, default=0, help="Priority (higher = sooner).")
@@ -761,14 +785,18 @@ def delegate(
     """
     files = context_files.split(",") if context_files else None
     delegate_task(
-        client, description,
-        purpose=purpose, prompt=prompt,
-        context_files=files, interactive=interactive,
+        client,
+        description,
+        purpose=purpose,
+        prompt=prompt,
+        context_files=files,
+        interactive=interactive,
         priority=priority,
     )
 
 
 # --- Hook command group ---
+
 
 @main.group()
 def hook() -> None:
@@ -778,7 +806,9 @@ def hook() -> None:
 @hook.command(name="install")
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
-    "--threshold", type=int, default=None,
+    "--threshold",
+    type=int,
+    default=None,
     help="Turn count threshold (overrides client config).",
 )
 @handle_errors
@@ -872,6 +902,7 @@ def hook_list(client: str) -> None:
 
 # --- Plugin command group ---
 
+
 @main.group()
 def plugin() -> None:
     """Build and install the Zellij status bar plugin."""
@@ -879,8 +910,10 @@ def plugin() -> None:
 
 @plugin.command(name="build")
 @click.option(
-    "--plugin-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None, help="Path to zellij-plugin source directory.",
+    "--plugin-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Path to zellij-plugin source directory.",
 )
 @handle_errors
 def plugin_build(plugin_dir: Path | None) -> None:
@@ -899,12 +932,16 @@ def plugin_build(plugin_dir: Path | None) -> None:
 
 @plugin.command(name="install")
 @click.option(
-    "--build/--no-build", "do_build", default=True,
+    "--build/--no-build",
+    "do_build",
+    default=True,
     help="Build before installing (default: yes).",
 )
 @click.option(
-    "--plugin-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None, help="Path to zellij-plugin source directory.",
+    "--plugin-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Path to zellij-plugin source directory.",
 )
 @handle_errors
 def plugin_install(do_build: bool, plugin_dir: Path | None) -> None:
@@ -929,21 +966,25 @@ def plugin_install(do_build: bool, plugin_dir: Path | None) -> None:
 
 # --- Daemon command group ---
 
+
 @main.group()
 def daemon() -> None:
     """Manage the background task processing daemon."""
 
 
 @daemon.command(name="start")
-@click.argument("client", required=False, default=None,
-                shell_complete=_complete_client)
+@click.argument("client", required=False, default=None, shell_complete=_complete_client)
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default="debt", help="Purpose to process.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default="debt",
+    help="Purpose to process.",
 )
 @click.option("--poll-interval", type=int, default=30, help="Seconds between polls.")
 @click.option(
-    "--no-bootstrap", is_flag=True, default=False,
+    "--no-bootstrap",
+    is_flag=True,
+    default=False,
     help="Don't auto-start sessions when none exist.",
 )
 @handle_errors
@@ -964,18 +1005,20 @@ def daemon_start(
         start_daemon_all(poll_interval=poll_interval)
     else:
         start_daemon(
-            client, purpose,
+            client,
+            purpose,
             poll_interval=poll_interval,
             auto_bootstrap=not no_bootstrap,
         )
 
 
 @daemon.command(name="stop")
-@click.argument("client", required=False, default=None,
-                shell_complete=_complete_client)
+@click.argument("client", required=False, default=None, shell_complete=_complete_client)
 @click.option(
-    "--purpose", type=click.Choice([e.value for e in SessionPurpose]),
-    default="debt", help="Purpose daemon to stop.",
+    "--purpose",
+    type=click.Choice([e.value for e in SessionPurpose]),
+    default="debt",
+    help="Purpose daemon to stop.",
 )
 @handle_errors
 def daemon_stop(client: str | None, purpose: str) -> None:
@@ -1005,10 +1048,7 @@ def daemon_status_cmd(client: str | None) -> None:
     for d in daemons:
         status_label = "alive" if d["alive"] else "dead"
         pid_str = str(d["pid"])
-        click.echo(
-            f"{d['client']:<18} {d['purpose']:<10}"
-            f" {pid_str:<8} {status_label}"
-        )
+        click.echo(f"{d['client']:<18} {d['purpose']:<10} {pid_str:<8} {status_label}")
 
 
 @main.command()

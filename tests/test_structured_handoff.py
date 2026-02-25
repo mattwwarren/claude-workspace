@@ -131,9 +131,7 @@ class TestWriteStructuredHandoff:
     def test_context_blockers_stored(self, tmp_path: Path) -> None:
         task = _make_task()
         blockers = ["mypy errors in session.py", "failing test_config tests"]
-        path = write_structured_handoff(
-            tmp_path, "sess-abc", [task], blockers=blockers
-        )
+        path = write_structured_handoff(tmp_path, "sess-abc", [task], blockers=blockers)
 
         data = json.loads(path.read_text())
         assert data["context"]["blockers"] == blockers
@@ -346,18 +344,14 @@ class TestBuildTaskPrompt:
         assert "Use pytest parametrize for edge cases." in result
 
     def test_includes_context_files(self) -> None:
-        task = _make_task(
-            context_files=["src/cw/handoff.py", "tests/test_handoff.py"]
-        )
+        task = _make_task(context_files=["src/cw/handoff.py", "tests/test_handoff.py"])
         result = build_task_prompt(task)
         assert "Context files:" in result
         assert "src/cw/handoff.py" in result
         assert "tests/test_handoff.py" in result
 
     def test_includes_success_criteria(self) -> None:
-        task = _make_task(
-            success_criteria="100% pass rate, zero ruff violations."
-        )
+        task = _make_task(success_criteria="100% pass rate, zero ruff violations.")
         result = build_task_prompt(task)
         assert "Success criteria:" in result
         assert "100% pass rate, zero ruff violations." in result

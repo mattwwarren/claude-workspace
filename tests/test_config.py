@@ -58,11 +58,7 @@ class TestLoadClients:
         ws = tmp_path / "bad"
         ws.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  'bad;name':\n"
-            f"    workspace_path: {ws}\n"
-        )
+        clients_file.write_text(f"clients:\n  'bad;name':\n    workspace_path: {ws}\n")
         with pytest.raises(CwError, match="Invalid client name"):
             load_clients()
 
@@ -73,9 +69,7 @@ class TestLoadClients:
         ws.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            "clients:\n"
-            "  my-project.v2:\n"
-            f"    workspace_path: {ws}\n"
+            f"clients:\n  my-project.v2:\n    workspace_path: {ws}\n"
         )
         result = load_clients()
         assert "my-project.v2" in result
@@ -93,7 +87,9 @@ class TestLoadClients:
         assert result == {}
 
     def test_auto_purposes_from_yaml(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
@@ -109,32 +105,29 @@ class TestLoadClients:
         assert SessionPurpose.DEBT not in result["sigma"].auto_purposes
 
     def test_default_auto_purposes_when_not_specified(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  acme:\n"
-            f"    workspace_path: {ws_dir}\n"
-        )
+        clients_file.write_text(f"clients:\n  acme:\n    workspace_path: {ws_dir}\n")
         result = load_clients()
         assert result["acme"].auto_purposes == DEFAULT_AUTO_PURPOSES
 
 
 class TestLoadWorktreeClients:
     def test_worktree_client_from_yaml(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         repo = tmp_path / "meta-work"
         repo.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            "clients:\n"
-            "  client-a:\n"
-            f"    repo_path: {repo}\n"
-            "    branch: client-a\n"
+            f"clients:\n  client-a:\n    repo_path: {repo}\n    branch: client-a\n"
         )
         result = load_clients()
         assert len(result) == 1
@@ -146,7 +139,9 @@ class TestLoadWorktreeClients:
         assert c.workspace_path == repo
 
     def test_mixed_legacy_and_worktree(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         repo = tmp_path / "meta-work"
         ws = tmp_path / "personal"
@@ -173,25 +168,15 @@ class TestGetClient:
         acme_dir = tmp_path / "acme"
         acme_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  acme:\n"
-            f"    workspace_path: {acme_dir}\n"
-        )
+        clients_file.write_text(f"clients:\n  acme:\n    workspace_path: {acme_dir}\n")
         result = get_client("acme")
         assert result.name == "acme"
 
-    def test_invalid_name_raises(
-        self, tmp_config_dir: Path, tmp_path: Path
-    ) -> None:
+    def test_invalid_name_raises(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         acme_dir = tmp_path / "acme"
         acme_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  acme:\n"
-            f"    workspace_path: {acme_dir}\n"
-        )
+        clients_file.write_text(f"clients:\n  acme:\n    workspace_path: {acme_dir}\n")
         with pytest.raises(CwError, match="Unknown client 'nope'"):
             get_client("nope")
 
@@ -225,11 +210,7 @@ class TestDetectClientFromCwd:
         workspace = tmp_config_dir / "workspace"
         workspace.mkdir(parents=True)
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  proj:\n"
-            f"    workspace_path: {workspace}\n"
-        )
+        clients_file.write_text(f"clients:\n  proj:\n    workspace_path: {workspace}\n")
         monkeypatch.chdir(workspace)
         result = detect_client_from_cwd()
         assert result is not None
@@ -240,9 +221,7 @@ class TestDetectClientFromCwd:
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            "clients:\n"
-            "  proj:\n"
-            "    workspace_path: /nowhere/special\n"
+            "clients:\n  proj:\n    workspace_path: /nowhere/special\n"
         )
         monkeypatch.chdir(tmp_config_dir)
         result = detect_client_from_cwd()
@@ -256,10 +235,7 @@ class TestDetectClientFromCwd:
         repo.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            f"clients:\n"
-            f"  wt-client:\n"
-            f"    repo_path: {repo}\n"
-            f"    branch: wt-branch\n"
+            f"clients:\n  wt-client:\n    repo_path: {repo}\n    branch: wt-branch\n"
         )
         monkeypatch.chdir(repo)
         result = detect_client_from_cwd()
@@ -271,9 +247,7 @@ class TestLoadSaveState:
         state = load_state()
         assert state.sessions == []
 
-    def test_round_trip(
-        self, tmp_config_dir: Path, tmp_path: Path
-    ) -> None:
+    def test_round_trip(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
         state = CwState(
@@ -351,7 +325,10 @@ class TestShowConfig:
         assert "develop" in output
 
     def test_with_custom_purposes(
-        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
@@ -367,31 +344,30 @@ class TestShowConfig:
         assert "purposes: impl, idea" in output
 
     def test_default_purposes_not_shown(
-        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  acme:\n"
-            f"    workspace_path: {ws_dir}\n"
-        )
+        clients_file.write_text(f"clients:\n  acme:\n    workspace_path: {ws_dir}\n")
         show_config()
         output = capsys.readouterr().out
         assert "purposes:" not in output
 
     def test_worktree_client_display(
-        self, tmp_config_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         repo = tmp_path / "meta-work"
         repo.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            "clients:\n"
-            "  client-a:\n"
-            f"    repo_path: {repo}\n"
-            "    branch: client-a\n"
+            f"clients:\n  client-a:\n    repo_path: {repo}\n    branch: client-a\n"
         )
         show_config()
         output = capsys.readouterr().out
@@ -423,7 +399,9 @@ class TestShowConfig:
 
 class TestInitClient:
     def test_init_creates_config(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo = make_git_repo("new-project")
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -437,17 +415,16 @@ class TestInitClient:
         assert clients["new-project"].workspace_path == repo
 
     def test_init_appends_to_existing(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo_a = make_git_repo("project-a")
         repo_b = make_git_repo("project-b")
 
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            "# My config\n"
-            "clients:\n"
-            "  project-a:\n"
-            f"    workspace_path: {repo_a}\n"
+            f"# My config\nclients:\n  project-a:\n    workspace_path: {repo_a}\n"
         )
 
         init_client("project-b", repo_b)
@@ -462,34 +439,40 @@ class TestInitClient:
         assert "# My config" in raw
 
     def test_init_rejects_duplicate(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo = make_git_repo("dup-project")
 
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            "clients:\n"
-            "  dup-project:\n"
-            f"    workspace_path: {repo}\n"
+            f"clients:\n  dup-project:\n    workspace_path: {repo}\n"
         )
 
         with pytest.raises(CwError, match="already exists"):
             init_client("dup-project", repo)
 
     def test_init_rejects_name_with_special_chars(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         with pytest.raises(CwError, match="Invalid client name"):
             init_client("bad;name", tmp_path)
 
     def test_init_rejects_name_starting_with_dash(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         with pytest.raises(CwError, match="Invalid client name"):
             init_client("-starts-with-dash", tmp_path)
 
     def test_init_validates_path_exists(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         nonexistent = tmp_path / "does-not-exist"
 
@@ -497,7 +480,9 @@ class TestInitClient:
             init_client("test", nonexistent)
 
     def test_init_validates_git_repo(
-        self, tmp_config_dir: Path, tmp_path: Path,
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
     ) -> None:
         not_git = tmp_path / "not-a-repo"
         not_git.mkdir()
@@ -506,7 +491,9 @@ class TestInitClient:
             init_client("test", not_git)
 
     def test_init_with_custom_branch(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo = make_git_repo("repo")
 
@@ -516,7 +503,9 @@ class TestInitClient:
         assert clients["test"].default_branch == "develop"
 
     def test_init_with_purposes(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo = make_git_repo("repo")
 
@@ -559,7 +548,9 @@ class TestInitClient:
         assert "test" in clients
 
     def test_init_handles_empty_config_file(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo = make_git_repo("repo")
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -571,14 +562,18 @@ class TestInitClient:
         assert "test" in clients
 
     def test_init_rejects_invalid_purposes(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo = make_git_repo("repo")
         with pytest.raises(CwError, match="Invalid purpose"):
             init_client("test", repo, auto_purposes=["impl", "bogus"])
 
     def test_init_rejects_malformed_config(
-        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path],
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         repo = make_git_repo("repo")
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"

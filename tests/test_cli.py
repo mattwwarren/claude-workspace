@@ -54,7 +54,9 @@ class TestCli:
         with patch("cw.cli.start_session") as mock_start:
             runner.invoke(main, ["start", "my-client"])
             mock_start.assert_called_once_with(
-                "my-client", "impl", worktree=None,
+                "my-client",
+                "impl",
+                worktree=None,
             )
 
     def test_start_with_purpose(self) -> None:
@@ -62,17 +64,22 @@ class TestCli:
         with patch("cw.cli.start_session") as mock_start:
             runner.invoke(main, ["start", "--purpose", "idea", "my-client"])
             mock_start.assert_called_once_with(
-                "my-client", "idea", worktree=None,
+                "my-client",
+                "idea",
+                worktree=None,
             )
 
     def test_start_with_worktree(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.start_session") as mock_start:
             runner.invoke(
-                main, ["start", "--worktree", "feat/search", "my-client"],
+                main,
+                ["start", "--worktree", "feat/search", "my-client"],
             )
             mock_start.assert_called_once_with(
-                "my-client", "impl", worktree="feat/search",
+                "my-client",
+                "impl",
+                worktree="feat/search",
             )
 
     def test_bg_dispatches(self) -> None:
@@ -86,7 +93,9 @@ class TestCli:
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg", "personal/debt"])
             mock_bg.assert_called_once_with(
-                "personal/debt", notify=None, auto=False,
+                "personal/debt",
+                notify=None,
+                auto=False,
             )
 
     def test_resume_dispatches(self) -> None:
@@ -112,7 +121,9 @@ class TestCli:
         with patch("cw.cli.done_session") as mock_done:
             runner.invoke(main, ["done", "my-session"])
             mock_done.assert_called_once_with(
-                "my-session", cleanup=False, force=False,
+                "my-session",
+                cleanup=False,
+                force=False,
             )
 
     def test_done_with_cleanup(self) -> None:
@@ -120,7 +131,9 @@ class TestCli:
         with patch("cw.cli.done_session") as mock_done:
             runner.invoke(main, ["done", "my-session", "--cleanup", "--force"])
             mock_done.assert_called_once_with(
-                "my-session", cleanup=True, force=True,
+                "my-session",
+                cleanup=True,
+                force=True,
             )
 
     def test_done_no_session_arg(self) -> None:
@@ -128,7 +141,9 @@ class TestCli:
         with patch("cw.cli.done_session") as mock_done:
             runner.invoke(main, ["done"])
             mock_done.assert_called_once_with(
-                None, cleanup=False, force=False,
+                None,
+                cleanup=False,
+                force=False,
             )
 
     def test_config_dispatches(self) -> None:
@@ -185,9 +200,12 @@ class TestCompleteCallbacks:
         clients_file.write_text(
             "clients:\n"
             "  alpha:\n"
-            "    workspace_path: /tmp/a\n"            "  beta:\n"
-            "    workspace_path: /tmp/b\n"            "  apricot:\n"
-            "    workspace_path: /tmp/c\n"        )
+            "    workspace_path: /tmp/a\n"
+            "  beta:\n"
+            "    workspace_path: /tmp/b\n"
+            "  apricot:\n"
+            "    workspace_path: /tmp/c\n"
+        )
 
         # None ctx/param are fine - callbacks don't use them
         items = _complete_client(None, None, "a")  # type: ignore[arg-type]
@@ -204,8 +222,10 @@ class TestCompleteCallbacks:
         clients_file.write_text(
             "clients:\n"
             "  alpha:\n"
-            "    workspace_path: /tmp/a\n"            "  beta:\n"
-            "    workspace_path: /tmp/b\n"        )
+            "    workspace_path: /tmp/a\n"
+            "  beta:\n"
+            "    workspace_path: /tmp/b\n"
+        )
 
         items = _complete_client(None, None, "")  # type: ignore[arg-type]
         names = [item.value for item in items]
@@ -351,8 +371,10 @@ class TestShowStatus:
         clients_file.write_text(
             "clients:\n"
             "  test-client:\n"
-            "    workspace_path: /tmp/ws\n"            "  other-client:\n"
-            "    workspace_path: /tmp/ws2\n"        )
+            "    workspace_path: /tmp/ws\n"
+            "  other-client:\n"
+            "    workspace_path: /tmp/ws2\n"
+        )
 
         save_state(sample_state)
 
@@ -394,12 +416,11 @@ class TestShowStatus:
         save_state(state)
 
         # Zellij session exists but impl pane has exited
-        monkeypatch.setattr(
-            "cw.zellij.session_exists", lambda _name: True
-        )
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
 
         def _mock_check_pane_health(
-            session: str | None = None, tab_name: str | None = None,
+            session: str | None = None,
+            tab_name: str | None = None,
         ) -> dict[str, bool]:
             return {"impl": False, "idea": True, "debt": True}
 
@@ -448,12 +469,11 @@ class TestShowStatus:
         )
         save_state(state)
 
-        monkeypatch.setattr(
-            "cw.zellij.session_exists", lambda _name: True
-        )
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
 
         def _mock_check_pane_health(
-            session: str | None = None, tab_name: str | None = None,
+            session: str | None = None,
+            tab_name: str | None = None,
         ) -> dict[str, bool]:
             return {"impl": False}
 
@@ -492,7 +512,9 @@ class TestHandoffCli:
         with patch("cw.cli.handoff_session") as mock_handoff:
             runner.invoke(main, ["handoff", "impl", "idea"])
             mock_handoff.assert_called_once_with(
-                "impl", "idea", client_name=None,
+                "impl",
+                "idea",
+                client_name=None,
             )
 
     def test_handoff_arrow_dispatches(self) -> None:
@@ -500,17 +522,22 @@ class TestHandoffCli:
         with patch("cw.cli.handoff_session") as mock_handoff:
             runner.invoke(main, ["handoff", "impl->idea"])
             mock_handoff.assert_called_once_with(
-                "impl", "idea", client_name=None,
+                "impl",
+                "idea",
+                client_name=None,
             )
 
     def test_handoff_with_client(self) -> None:
         runner = CliRunner()
         with patch("cw.cli.handoff_session") as mock_handoff:
             runner.invoke(
-                main, ["handoff", "impl", "idea", "--client", "sigma"],
+                main,
+                ["handoff", "impl", "idea", "--client", "sigma"],
             )
             mock_handoff.assert_called_once_with(
-                "impl", "idea", client_name="sigma",
+                "impl",
+                "idea",
+                client_name="sigma",
             )
 
     def test_missing_route_raises(self) -> None:
@@ -540,11 +567,7 @@ class TestPlanCli:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         ws = tmp_config_dir / "workspace"
         ws.mkdir()
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {ws}\n"
-        )
+        clients_file.write_text(f"clients:\n  test-client:\n    workspace_path: {ws}\n")
 
         runner = CliRunner()
         result = runner.invoke(main, ["plan", "test-client"])
@@ -559,17 +582,10 @@ class TestPlanCli:
         ws = tmp_config_dir / "workspace"
         plans_dir = ws / ".claude" / "plans"
         plans_dir.mkdir(parents=True)
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {ws}\n"
-        )
+        clients_file.write_text(f"clients:\n  test-client:\n    workspace_path: {ws}\n")
 
         (plans_dir / "test-plan.md").write_text(
-            "# Test Plan\n\n"
-            "## Phase 1\n\n"
-            "- [x] Task A\n"
-            "- [ ] Task B\n"
+            "# Test Plan\n\n## Phase 1\n\n- [x] Task A\n- [ ] Task B\n"
         )
 
         runner = CliRunner()
@@ -591,7 +607,8 @@ class TestDaemonCli:
         with patch("cw.cli.start_daemon") as mock_start:
             runner.invoke(main, ["daemon", "start", "my-client"])
             mock_start.assert_called_once_with(
-                "my-client", "debt",
+                "my-client",
+                "debt",
                 poll_interval=30,
                 auto_bootstrap=True,
             )
@@ -627,7 +644,8 @@ class TestInitCli:
 
         runner = CliRunner()
         result = runner.invoke(
-            main, ["init", "my-repo", "--path", str(repo)],
+            main,
+            ["init", "my-repo", "--path", str(repo)],
         )
         assert result.exit_code == 0, result.output
         assert "Added client 'my-repo'" in result.output
@@ -644,10 +662,14 @@ class TestInitCli:
         result = runner.invoke(
             main,
             [
-                "init", "my-repo",
-                "--path", str(repo),
-                "--branch", "develop",
-                "--purposes", "impl,idea",
+                "init",
+                "my-repo",
+                "--path",
+                str(repo),
+                "--branch",
+                "develop",
+                "--purposes",
+                "impl,idea",
             ],
         )
         assert result.exit_code == 0, result.output
@@ -666,7 +688,8 @@ class TestInitCli:
 
         runner = CliRunner()
         result = runner.invoke(
-            main, ["init"],
+            main,
+            ["init"],
             input=f"my-repo\n{repo}\nmain\n",
         )
         assert result.exit_code == 0, result.output
@@ -696,13 +719,15 @@ class TestInitCli:
         # Add once
         runner = CliRunner()
         result = runner.invoke(
-            main, ["init", "my-repo", "--path", str(repo)],
+            main,
+            ["init", "my-repo", "--path", str(repo)],
         )
         assert result.exit_code == 0
 
         # Try again — should fail
         result = runner.invoke(
-            main, ["init", "my-repo", "--path", str(repo)],
+            main,
+            ["init", "my-repo", "--path", str(repo)],
         )
         assert result.exit_code != 0
         assert "already exists" in result.output
@@ -748,7 +773,8 @@ class TestQueueNextCli:
         runner = CliRunner()
         with patch("cw.cli.peek_next", return_value=item):
             result = runner.invoke(
-                main, ["queue", "next", "my-client", "--json"],
+                main,
+                ["queue", "next", "my-client", "--json"],
             )
             assert result.exit_code == 0
             assert '"description": "Fix bug"' in result.output
@@ -757,10 +783,12 @@ class TestQueueNextCli:
         runner = CliRunner()
         with patch("cw.cli.peek_next", return_value=None) as mock_peek:
             runner.invoke(
-                main, ["queue", "next", "my-client", "--purpose", "impl"],
+                main,
+                ["queue", "next", "my-client", "--purpose", "impl"],
             )
             mock_peek.assert_called_once_with(
-                "my-client", purpose=SessionPurpose.IMPL,
+                "my-client",
+                purpose=SessionPurpose.IMPL,
             )
 
 
@@ -802,7 +830,8 @@ class TestQueueClaimCli:
         runner = CliRunner()
         with patch("cw.cli.claim_next", return_value=item):
             result = runner.invoke(
-                main, ["queue", "claim", "my-client", "--json"],
+                main,
+                ["queue", "claim", "my-client", "--json"],
             )
             assert result.exit_code == 0
             assert '"description": "Fix bug"' in result.output
@@ -834,7 +863,8 @@ class TestQueueClaimCli:
                 ["queue", "claim", "my-client", "--purpose", "debt"],
             )
             mock_claim.assert_called_once_with(
-                "my-client", purpose=SessionPurpose.DEBT,
+                "my-client",
+                purpose=SessionPurpose.DEBT,
             )
 
 
@@ -844,24 +874,28 @@ class TestQueueCompleteCli:
         with patch("cw.cli.complete_item") as mock_complete:
             result = runner.invoke(
                 main,
-                ["queue", "complete", "my-client", "abc123",
-                 "--result", "All done"],
+                ["queue", "complete", "my-client", "abc123", "--result", "All done"],
             )
             assert result.exit_code == 0
             assert "Completed: abc123" in result.output
             mock_complete.assert_called_once_with(
-                "my-client", "abc123", "All done",
+                "my-client",
+                "abc123",
+                "All done",
             )
 
     def test_complete_default_result(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
         with patch("cw.cli.complete_item") as mock_complete:
             result = runner.invoke(
-                main, ["queue", "complete", "my-client", "abc123"],
+                main,
+                ["queue", "complete", "my-client", "abc123"],
             )
             assert result.exit_code == 0
             mock_complete.assert_called_once_with(
-                "my-client", "abc123", "",
+                "my-client",
+                "abc123",
+                "",
             )
 
     def test_complete_not_found(self, tmp_config_dir: Path) -> None:
@@ -871,7 +905,8 @@ class TestQueueCompleteCli:
             side_effect=ValueError("Queue item not found: bad-id"),
         ):
             result = runner.invoke(
-                main, ["queue", "complete", "my-client", "bad-id"],
+                main,
+                ["queue", "complete", "my-client", "bad-id"],
             )
             assert result.exit_code != 0
 
@@ -882,24 +917,28 @@ class TestQueueFailCli:
         with patch("cw.cli.fail_item") as mock_fail:
             result = runner.invoke(
                 main,
-                ["queue", "fail", "my-client", "abc123",
-                 "--error", "Crashed"],
+                ["queue", "fail", "my-client", "abc123", "--error", "Crashed"],
             )
             assert result.exit_code == 0
             assert "Failed: abc123" in result.output
             mock_fail.assert_called_once_with(
-                "my-client", "abc123", "Crashed",
+                "my-client",
+                "abc123",
+                "Crashed",
             )
 
     def test_fail_default_error(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
         with patch("cw.cli.fail_item") as mock_fail:
             result = runner.invoke(
-                main, ["queue", "fail", "my-client", "abc123"],
+                main,
+                ["queue", "fail", "my-client", "abc123"],
             )
             assert result.exit_code == 0
             mock_fail.assert_called_once_with(
-                "my-client", "abc123", "",
+                "my-client",
+                "abc123",
+                "",
             )
 
     def test_fail_not_found(self, tmp_config_dir: Path) -> None:
@@ -909,6 +948,7 @@ class TestQueueFailCli:
             side_effect=ValueError("Queue item not found: bad-id"),
         ):
             result = runner.invoke(
-                main, ["queue", "fail", "my-client", "bad-id"],
+                main,
+                ["queue", "fail", "my-client", "bad-id"],
             )
             assert result.exit_code != 0

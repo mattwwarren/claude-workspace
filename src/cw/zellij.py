@@ -231,14 +231,18 @@ def new_tab(
     ``zellij action new-tab --layout`` to add it.
     """
     layout_path = generate_layout(
-        client, panes=panes, purposes=purposes, session_mode=False,
+        client,
+        panes=panes,
+        purposes=purposes,
+        session_mode=False,
     )
     base = ["-s", session] if session else []
     _run_zellij(*base, "action", "new-tab", "--layout", str(layout_path))
 
 
 def rename_tab(
-    new_name: str, session: str | None = None,
+    new_name: str,
+    session: str | None = None,
 ) -> None:
     """Rename the currently focused Zellij tab.
 

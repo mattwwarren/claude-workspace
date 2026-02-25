@@ -171,7 +171,8 @@ class TestSignalIdle:
         save_state(state)
 
         signal_idle(
-            "c", "impl",
+            "c",
+            "impl",
             exit_code=0,
             claude_session_id="550e8400-e29b-41d4-a716-446655440000",
         )
@@ -182,9 +183,7 @@ class TestSignalIdle:
         )
         signal_file = _idle_signal_path("c", "impl")
         payload = json.loads(signal_file.read_text())
-        assert payload["claude_session_id"] == (
-            "550e8400-e29b-41d4-a716-446655440000"
-        )
+        assert payload["claude_session_id"] == ("550e8400-e29b-41d4-a716-446655440000")
 
     def test_no_claude_session_id_omits_from_payload(
         self, tmp_config_dir: Path, tmp_state_dir: Path

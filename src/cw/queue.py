@@ -64,13 +64,16 @@ def add_item(client: str, task: TaskSpec) -> QueueItem:
         item = QueueItem(client=client, task=task)
         store.items.append(item)
         save_queue(client, store)
-    record_event(client, HistoryEvent(
-        event_type=EventType.QUEUE_ITEM_ADDED,
-        client=client,
-        purpose=task.purpose,
-        detail=task.description,
-        metadata={"queue_item_id": item.id},
-    ))
+    record_event(
+        client,
+        HistoryEvent(
+            event_type=EventType.QUEUE_ITEM_ADDED,
+            client=client,
+            purpose=task.purpose,
+            detail=task.description,
+            metadata={"queue_item_id": item.id},
+        ),
+    )
     return item
 
 
@@ -164,12 +167,15 @@ def complete_item(client: str, item_id: str, result: str) -> None:
         item.completed_at = datetime.now(UTC)
         item.result = result
         save_queue(client, store)
-    record_event(client, HistoryEvent(
-        event_type=EventType.QUEUE_ITEM_COMPLETED,
-        client=client,
-        detail=result,
-        metadata={"queue_item_id": item_id},
-    ))
+    record_event(
+        client,
+        HistoryEvent(
+            event_type=EventType.QUEUE_ITEM_COMPLETED,
+            client=client,
+            detail=result,
+            metadata={"queue_item_id": item_id},
+        ),
+    )
 
 
 def fail_item(client: str, item_id: str, error: str) -> None:
@@ -184,12 +190,15 @@ def fail_item(client: str, item_id: str, error: str) -> None:
         item.completed_at = datetime.now(UTC)
         item.result = error
         save_queue(client, store)
-    record_event(client, HistoryEvent(
-        event_type=EventType.QUEUE_ITEM_FAILED,
-        client=client,
-        detail=error,
-        metadata={"queue_item_id": item_id},
-    ))
+    record_event(
+        client,
+        HistoryEvent(
+            event_type=EventType.QUEUE_ITEM_FAILED,
+            client=client,
+            detail=error,
+            metadata={"queue_item_id": item_id},
+        ),
+    )
 
 
 def remove_item(client: str, item_id: str) -> None:

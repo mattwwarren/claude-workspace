@@ -94,9 +94,7 @@ class TestIsProcessAlive:
         with patch("os.kill", side_effect=PermissionError):
             assert _is_process_alive(1) is True
 
-    def test_returns_false_on_process_lookup_error(
-        self, tmp_daemons_dir: Path
-    ) -> None:
+    def test_returns_false_on_process_lookup_error(self, tmp_daemons_dir: Path) -> None:
         with patch("os.kill", side_effect=ProcessLookupError):
             assert _is_process_alive(99999) is False
 
@@ -266,9 +264,7 @@ class TestDaemonStatus:
 
         assert result == []
 
-    def test_skips_pid_files_with_malformed_stem(
-        self, tmp_daemons_dir: Path
-    ) -> None:
+    def test_skips_pid_files_with_malformed_stem(self, tmp_daemons_dir: Path) -> None:
         # A file whose stem can't be split by __ into exactly two parts
         (tmp_daemons_dir / "noseparator.pid").write_text(str(os.getpid()))
 
@@ -347,7 +343,8 @@ class TestGetInjectableSession:
 
         with patch("cw.daemon.load_state", return_value=state):
             found, returned_state = _get_injectable_session(
-                "test-client", "debt",
+                "test-client",
+                "debt",
             )
         assert found is session
         assert returned_state is state
@@ -376,7 +373,8 @@ class TestGetInjectableSession:
 
         with patch("cw.daemon.load_state", return_value=state):
             found, returned_state = _get_injectable_session(
-                "test-client", "debt",
+                "test-client",
+                "debt",
             )
         assert found is session
         assert returned_state is state
@@ -406,7 +404,8 @@ class TestGetInjectableSession:
             _get_injectable_session("test-client", "debt")
 
     def test_auto_bootstrap_false_raises_on_missing(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         state = CwState(sessions=[])
         with (
@@ -414,11 +413,14 @@ class TestGetInjectableSession:
             pytest.raises(CwError, match="No debt session"),
         ):
             _get_injectable_session(
-                "test-client", "debt", auto_bootstrap=False,
+                "test-client",
+                "debt",
+                auto_bootstrap=False,
             )
 
     def test_auto_bootstrap_calls_start_session(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """When auto_bootstrap=True and no session exists,
         start_session is called and we poll for BACKGROUNDED."""
@@ -448,13 +450,16 @@ class TestGetInjectableSession:
             patch("cw.daemon.time.sleep"),
         ):
             session, _state = _get_injectable_session(
-                "test-client", "debt", auto_bootstrap=True,
+                "test-client",
+                "debt",
+                auto_bootstrap=True,
             )
             mock_start.assert_called_once_with("test-client", "debt")
             assert session.status == SessionStatus.BACKGROUNDED
 
     def test_auto_bootstrap_timeout_raises(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """When bootstrapped session never becomes BACKGROUNDED, timeout."""
         state_empty = CwState(sessions=[])
@@ -466,7 +471,9 @@ class TestGetInjectableSession:
             pytest.raises(CwError, match="Timed out"),
         ):
             _get_injectable_session(
-                "test-client", "debt", auto_bootstrap=True,
+                "test-client",
+                "debt",
+                auto_bootstrap=True,
             )
 
 
@@ -618,7 +625,10 @@ class TestWaitForCompletion:
         handoff.write_text("# Handoff\n")
 
         result = _wait_for_completion(
-            tmp_path, before, timeout=5, poll_interval=0,
+            tmp_path,
+            before,
+            timeout=5,
+            poll_interval=0,
         )
         assert result is not None
         assert result.name == "session-test.md"
@@ -628,12 +638,16 @@ class TestWaitForCompletion:
         handoffs_dir.mkdir()
 
         result = _wait_for_completion(
-            tmp_path, time.time() + 9999, timeout=0, poll_interval=0,
+            tmp_path,
+            time.time() + 9999,
+            timeout=0,
+            poll_interval=0,
         )
         assert result is None
 
     def test_returns_none_when_shutdown_event_pre_set(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         handoffs_dir = tmp_path / ".handoffs"
         handoffs_dir.mkdir()
@@ -642,13 +656,17 @@ class TestWaitForCompletion:
         event.set()
 
         result = _wait_for_completion(
-            tmp_path, 0, timeout=60, poll_interval=1,
+            tmp_path,
+            0,
+            timeout=60,
+            poll_interval=1,
             shutdown_event=event,
         )
         assert result is None
 
     def test_returns_promptly_when_event_set_mid_wait(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         handoffs_dir = tmp_path / ".handoffs"
         handoffs_dir.mkdir()
@@ -664,7 +682,10 @@ class TestWaitForCompletion:
 
         start = time.time()
         result = _wait_for_completion(
-            tmp_path, time.time() + 9999, timeout=30, poll_interval=30,
+            tmp_path,
+            time.time() + 9999,
+            timeout=30,
+            poll_interval=30,
             shutdown_event=event,
         )
         elapsed = time.time() - start
@@ -735,12 +756,9 @@ class TestSpawnNewTasks:
             client_config = _make_client(tmp_path)
 
             with (
-                patch("cw.daemon.load_clients",
-                      return_value={"test-client": {}}),
-                patch("cw.daemon._pending_purposes",
-                      return_value={"debt"}),
-                patch("cw.daemon._has_injectable_session",
-                      return_value=True),
+                patch("cw.daemon.load_clients", return_value={"test-client": {}}),
+                patch("cw.daemon._pending_purposes", return_value={"debt"}),
+                patch("cw.daemon._has_injectable_session", return_value=True),
                 patch("cw.daemon.claim_next", return_value=item),
                 patch("cw.daemon.get_client", return_value=client_config),
             ):
@@ -769,10 +787,8 @@ class TestSpawnNewTasks:
             }
 
             with (
-                patch("cw.daemon.load_clients",
-                      return_value={"test-client": {}}),
-                patch("cw.daemon._pending_purposes",
-                      return_value={"debt"}),
+                patch("cw.daemon.load_clients", return_value={"test-client": {}}),
+                patch("cw.daemon._pending_purposes", return_value={"debt"}),
                 patch("cw.daemon.claim_next") as mock_claim,
             ):
                 _spawn_new_tasks(active, event)
@@ -790,17 +806,15 @@ class TestSpawnNewTasks:
 
     def test_skips_purpose_without_session(self) -> None:
         """Items stay PENDING when no injectable session exists."""
+
         async def _run() -> None:
             event = asyncio.Event()
             active: dict[tuple[str, str], asyncio.Task[None]] = {}
 
             with (
-                patch("cw.daemon.load_clients",
-                      return_value={"test-client": {}}),
-                patch("cw.daemon._pending_purposes",
-                      return_value={"debt"}),
-                patch("cw.daemon._has_injectable_session",
-                      return_value=False),
+                patch("cw.daemon.load_clients", return_value={"test-client": {}}),
+                patch("cw.daemon._pending_purposes", return_value={"debt"}),
+                patch("cw.daemon._has_injectable_session", return_value=False),
                 patch("cw.daemon.claim_next") as mock_claim,
             ):
                 _spawn_new_tasks(active, event)
@@ -815,8 +829,9 @@ class TestSpawnNewTasks:
             event = asyncio.Event()
             event.set()
             active: dict[tuple[str, str], asyncio.Task[None]] = {}
-            with patch("cw.daemon.load_clients",
-                       return_value={"acme": {}}) as mock_load:
+            with patch(
+                "cw.daemon.load_clients", return_value={"acme": {}}
+            ) as mock_load:
                 _spawn_new_tasks(active, event)
             mock_load.assert_called_once()
             assert len(active) == 0
@@ -827,7 +842,8 @@ class TestSpawnNewTasks:
 class TestAsyncProcessItem:
     @pytest.mark.asyncio
     async def test_completes_item(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
         tmp_config_dir: Path,
         mock_zellij: dict[str, list[tuple[object, ...]]],
     ) -> None:
@@ -861,12 +877,15 @@ class TestAsyncProcessItem:
             await _async_process_item(client_config, item, "debt", event)
 
         mock_complete.assert_called_once_with(
-            "test-client", "item01", "Completed by daemon",
+            "test-client",
+            "item01",
+            "Completed by daemon",
         )
 
     @pytest.mark.asyncio
     async def test_sends_notification_on_injection_failure(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         item = _make_queue_item()
         client_config = _make_client(tmp_path)
@@ -891,7 +910,8 @@ class TestAsyncProcessItem:
 
     @pytest.mark.asyncio
     async def test_sends_notification_on_timeout(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
         tmp_config_dir: Path,
         mock_zellij: dict[str, list[tuple[object, ...]]],
     ) -> None:
@@ -935,7 +955,10 @@ class TestAsyncWaitForCompletion:
             return_value=[handoff_file],
         ):
             result = await _async_wait_for_completion(
-                tmp_path, 0.0, timeout=5, poll_interval=1,
+                tmp_path,
+                0.0,
+                timeout=5,
+                poll_interval=1,
             )
         assert result == handoff_file
 
@@ -946,13 +969,17 @@ class TestAsyncWaitForCompletion:
             return_value=[],
         ):
             result = await _async_wait_for_completion(
-                tmp_path, 0.0, timeout=0, poll_interval=1,
+                tmp_path,
+                0.0,
+                timeout=0,
+                poll_interval=1,
             )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_none_when_shutdown_set(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         event = asyncio.Event()
         event.set()
@@ -961,7 +988,10 @@ class TestAsyncWaitForCompletion:
             return_value=[],
         ):
             result = await _async_wait_for_completion(
-                tmp_path, 0.0, timeout=60, poll_interval=1,
+                tmp_path,
+                0.0,
+                timeout=60,
+                poll_interval=1,
                 shutdown_event=event,
             )
         assert result is None
@@ -969,7 +999,9 @@ class TestAsyncWaitForCompletion:
 
 class TestInjectViaTrigger:
     def test_writes_trigger_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -989,7 +1021,9 @@ class TestInjectViaTrigger:
         assert args[2:] == ["--append-system-prompt", "Do the work."]
 
     def test_creates_events_dir(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "new" / "events"
         monkeypatch.setattr("cw.daemon.EVENTS_DIR", events_dir)
@@ -1000,7 +1034,9 @@ class TestInjectViaTrigger:
         assert events_dir.exists()
 
     def test_stores_session_id_on_session_object(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -1024,7 +1060,9 @@ class TestInjectViaTrigger:
 class TestWaitForIdleEvent:
     @pytest.mark.asyncio
     async def test_returns_payload_when_signal_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -1032,12 +1070,20 @@ class TestWaitForIdleEvent:
         monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
 
         signal_file = events_dir / "c__debt.idle"
-        signal_file.write_text(json.dumps({
-            "session_id": "s1", "exit_code": 0,
-        }))
+        signal_file.write_text(
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "exit_code": 0,
+                }
+            )
+        )
 
         result = await _wait_for_idle_event(
-            "c", "debt", timeout=5, poll_interval=0.1,
+            "c",
+            "debt",
+            timeout=5,
+            poll_interval=0.1,
         )
         assert result is not None
         assert result["exit_code"] == 0
@@ -1045,7 +1091,9 @@ class TestWaitForIdleEvent:
 
     @pytest.mark.asyncio
     async def test_returns_none_on_timeout(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -1053,13 +1101,18 @@ class TestWaitForIdleEvent:
         monkeypatch.setattr("cw.wrapper.EVENTS_DIR", events_dir)
 
         result = await _wait_for_idle_event(
-            "c", "debt", timeout=0.2, poll_interval=0.1,
+            "c",
+            "debt",
+            timeout=0.2,
+            poll_interval=0.1,
         )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_none_when_shutdown_set(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -1070,14 +1123,19 @@ class TestWaitForIdleEvent:
         event.set()
 
         result = await _wait_for_idle_event(
-            "c", "debt", timeout=60, poll_interval=0.1,
+            "c",
+            "debt",
+            timeout=60,
+            poll_interval=0.1,
             shutdown_event=event,
         )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_handles_malformed_json(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -1088,7 +1146,10 @@ class TestWaitForIdleEvent:
         signal_file.write_text("not json{{{")
 
         result = await _wait_for_idle_event(
-            "c", "debt", timeout=5, poll_interval=0.1,
+            "c",
+            "debt",
+            timeout=5,
+            poll_interval=0.1,
         )
         assert result == {}
         assert not signal_file.exists()
@@ -1099,7 +1160,9 @@ class TestAsyncProcessItemIdlePath:
 
     @pytest.mark.asyncio
     async def test_completes_via_idle_event(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -1116,7 +1179,8 @@ class TestAsyncProcessItemIdlePath:
         event = asyncio.Event()
 
         idle_payload: dict[str, object] = {
-            "session_id": "sess-debt", "exit_code": 0,
+            "session_id": "sess-debt",
+            "exit_code": 0,
         }
 
         with (
@@ -1133,12 +1197,16 @@ class TestAsyncProcessItemIdlePath:
             await _async_process_item(client_config, item, "debt", event)
 
         mock_complete.assert_called_once_with(
-            "test-client", "item01", "Completed by daemon",
+            "test-client",
+            "item01",
+            "Completed by daemon",
         )
 
     @pytest.mark.asyncio
     async def test_fails_on_nonzero_exit_code(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -1155,7 +1223,8 @@ class TestAsyncProcessItemIdlePath:
         event = asyncio.Event()
 
         idle_payload: dict[str, object] = {
-            "session_id": "sess-debt", "exit_code": 1,
+            "session_id": "sess-debt",
+            "exit_code": 1,
         }
 
         with (

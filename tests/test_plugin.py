@@ -20,7 +20,9 @@ if TYPE_CHECKING:
 
 class TestFindPluginDir:
     def test_returns_path_when_cargo_toml_exists(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Returns the candidate directory when Cargo.toml exists."""
         # Set up: tmp_path/zellij-plugin/Cargo.toml exists
@@ -39,7 +41,9 @@ class TestFindPluginDir:
         assert result == plugin_dir
 
     def test_returns_none_when_no_cargo_toml(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Returns None when Cargo.toml doesn't exist (wheel install)."""
         fake_file = tmp_path / "src" / "cw" / "plugin.py"
@@ -59,7 +63,9 @@ class TestBuildPlugin:
             build_plugin(plugin_dir=tmp_path)
 
     def test_cargo_not_installed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Raises CwError when cargo binary is missing."""
         (tmp_path / "Cargo.toml").touch()
@@ -69,18 +75,23 @@ class TestBuildPlugin:
             build_plugin(plugin_dir=tmp_path)
 
     def test_cargo_build_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Raises CwError when cargo build fails."""
         (tmp_path / "Cargo.toml").touch()
         monkeypatch.setattr(
-            "cw.plugin.shutil.which", lambda _cmd: "/usr/bin/cargo",
+            "cw.plugin.shutil.which",
+            lambda _cmd: "/usr/bin/cargo",
         )
         monkeypatch.setattr(
             "cw.plugin.subprocess.run",
             MagicMock(
                 side_effect=subprocess.CalledProcessError(
-                    1, "cargo", stderr="compilation error",
+                    1,
+                    "cargo",
+                    stderr="compilation error",
                 ),
             ),
         )
@@ -89,7 +100,9 @@ class TestBuildPlugin:
             build_plugin(plugin_dir=tmp_path)
 
     def test_successful_build(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Returns WASM path on successful build."""
         (tmp_path / "Cargo.toml").touch()
@@ -99,7 +112,8 @@ class TestBuildPlugin:
         wasm_file.write_bytes(b"\x00asm")
 
         monkeypatch.setattr(
-            "cw.plugin.shutil.which", lambda _cmd: "/usr/bin/cargo",
+            "cw.plugin.shutil.which",
+            lambda _cmd: "/usr/bin/cargo",
         )
         monkeypatch.setattr("cw.plugin.subprocess.run", MagicMock())
 
@@ -108,22 +122,27 @@ class TestBuildPlugin:
         assert result == wasm_file
 
     def test_build_succeeds_but_wasm_not_found(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Raises CwError when cargo succeeds but WASM file is missing."""
         (tmp_path / "Cargo.toml").touch()
         monkeypatch.setattr(
-            "cw.plugin.shutil.which", lambda _cmd: "/usr/bin/cargo",
+            "cw.plugin.shutil.which",
+            lambda _cmd: "/usr/bin/cargo",
         )
         monkeypatch.setattr("cw.plugin.subprocess.run", MagicMock())
 
         with pytest.raises(
-            CwError, match=r"Build succeeded but WASM file not found",
+            CwError,
+            match=r"Build succeeded but WASM file not found",
         ):
             build_plugin(plugin_dir=tmp_path)
 
     def test_no_plugin_dir_no_editable(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Raises CwError when plugin_dir is None and auto-detect fails."""
         monkeypatch.setattr("cw.plugin._find_plugin_dir", lambda: None)
@@ -176,7 +195,9 @@ class TestInstallPlugin:
         assert result.read_bytes() == b"\x00asm-v2"
 
     def test_default_install_dir(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Uses INSTALL_DIR when install_dir is None."""
         default_dir = tmp_path / "default-plugins"
@@ -191,7 +212,8 @@ class TestInstallPlugin:
         assert result.exists()
 
     def test_no_wasm_no_editable(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Raises CwError when wasm_path is None and auto-detect fails."""
         monkeypatch.setattr("cw.plugin._find_plugin_dir", lambda: None)
@@ -200,7 +222,9 @@ class TestInstallPlugin:
             install_plugin(wasm_path=None)
 
     def test_install_auto_detects_wasm(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Auto-detects WASM path via _find_plugin_dir when wasm_path is None."""
         plugin_dir = tmp_path / "plugin-src"
@@ -216,7 +240,9 @@ class TestInstallPlugin:
         assert result.read_bytes() == b"\x00asm"
 
     def test_install_uses_explicit_plugin_dir(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Uses explicit plugin_dir to locate WASM when wasm_path is None."""
         # Make auto-detect fail
@@ -231,7 +257,9 @@ class TestInstallPlugin:
         dest_dir = tmp_path / "dest"
 
         result = install_plugin(
-            wasm_path=None, install_dir=dest_dir, plugin_dir=plugin_dir,
+            wasm_path=None,
+            install_dir=dest_dir,
+            plugin_dir=plugin_dir,
         )
 
         assert result.exists()
@@ -240,7 +268,9 @@ class TestInstallPlugin:
 
 class TestPluginCLI:
     def test_plugin_build_success(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """'cw plugin build' exits 0 and prints the built path."""
         wasm_path = tmp_path / "cw_status.wasm"
@@ -255,7 +285,8 @@ class TestPluginCLI:
         mock_build.assert_called_once_with(plugin_dir=None)
 
     def test_plugin_build_error(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """'cw plugin build' reports CwError via handle_errors."""
         mock_build = MagicMock(side_effect=CwError("cargo is not installed"))
@@ -268,7 +299,9 @@ class TestPluginCLI:
         assert "cargo is not installed" in result.output
 
     def test_plugin_build_with_plugin_dir(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """'cw plugin build --plugin-dir' passes directory to build_plugin."""
         plugin_src = tmp_path / "zellij-plugin"
@@ -279,14 +312,17 @@ class TestPluginCLI:
 
         runner = CliRunner()
         result = runner.invoke(
-            main, ["plugin", "build", "--plugin-dir", str(plugin_src)],
+            main,
+            ["plugin", "build", "--plugin-dir", str(plugin_src)],
         )
 
         assert result.exit_code == 0
         mock_build.assert_called_once_with(plugin_dir=plugin_src)
 
     def test_plugin_install_success(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """'cw plugin install' builds then installs."""
         wasm_path = tmp_path / "cw_status.wasm"
@@ -304,11 +340,14 @@ class TestPluginCLI:
         assert str(dest_path) in result.output
         mock_build.assert_called_once_with(plugin_dir=None)
         mock_install.assert_called_once_with(
-            wasm_path=wasm_path, plugin_dir=None,
+            wasm_path=wasm_path,
+            plugin_dir=None,
         )
 
     def test_plugin_install_no_build(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """'cw plugin install --no-build' skips build_plugin."""
         dest_path = tmp_path / "plugins" / "cw_status.wasm"
@@ -324,11 +363,14 @@ class TestPluginCLI:
         assert result.exit_code == 0
         mock_build.assert_not_called()
         mock_install.assert_called_once_with(
-            wasm_path=None, plugin_dir=None,
+            wasm_path=None,
+            plugin_dir=None,
         )
 
     def test_plugin_install_with_plugin_dir(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """'cw plugin install --plugin-dir' passes dir to both functions."""
         plugin_src = tmp_path / "zellij-plugin"
@@ -350,5 +392,6 @@ class TestPluginCLI:
         assert result.exit_code == 0
         mock_build.assert_called_once_with(plugin_dir=plugin_src)
         mock_install.assert_called_once_with(
-            wasm_path=wasm_path, plugin_dir=plugin_src,
+            wasm_path=wasm_path,
+            plugin_dir=plugin_src,
         )

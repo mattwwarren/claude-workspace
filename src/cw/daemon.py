@@ -95,12 +95,15 @@ def start_daemon(
     client_config = get_client(client)
     click.echo(f"Daemon started: {client}/{purpose} (pid {os.getpid()})")
     click.echo(f"Poll interval: {poll_interval}s")
-    record_event(client, HistoryEvent(
-        event_type=EventType.DAEMON_STARTED,
-        client=client,
-        purpose=purpose,
-        metadata={"pid": str(os.getpid())},
-    ))
+    record_event(
+        client,
+        HistoryEvent(
+            event_type=EventType.DAEMON_STARTED,
+            client=client,
+            purpose=purpose,
+            metadata={"pid": str(os.getpid())},
+        ),
+    )
 
     try:
         while not shutdown_event.is_set():
@@ -109,14 +112,14 @@ def start_daemon(
                 shutdown_event.wait(poll_interval)
                 continue
 
-            click.echo(
-                f"Processing: {item.task.description} (id: {item.id})"
-            )
+            click.echo(f"Processing: {item.task.description} (id: {item.id})")
 
             try:
                 before_mtime = time.time()
                 _inject_into_session(
-                    client_config, item, purpose,
+                    client_config,
+                    item,
+                    purpose,
                     auto_bootstrap=auto_bootstrap,
                 )
 
@@ -144,8 +147,7 @@ def start_daemon(
                 reason = parse_handoff_reason(handoff_path)
                 if reason:
                     click.echo(
-                        f"Session ended abnormally (reason: {reason})."
-                        " Pausing daemon."
+                        f"Session ended abnormally (reason: {reason}). Pausing daemon."
                     )
                     send_notification(
                         "Daemon Paused",
@@ -153,7 +155,8 @@ def start_daemon(
                         urgency="critical",
                     )
                     fail_item(
-                        client, item.id,
+                        client,
+                        item.id,
                         f"Session handoff: {reason}",
                     )
                     break
@@ -174,11 +177,14 @@ def start_daemon(
     finally:
         if pid_file.exists():
             pid_file.unlink()
-        record_event(client, HistoryEvent(
-            event_type=EventType.DAEMON_STOPPED,
-            client=client,
-            purpose=purpose,
-        ))
+        record_event(
+            client,
+            HistoryEvent(
+                event_type=EventType.DAEMON_STOPPED,
+                client=client,
+                purpose=purpose,
+            ),
+        )
         click.echo("Daemon stopped.")
 
 
@@ -224,7 +230,8 @@ async def _start_daemon_all_async(
 
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
-                    shutdown_event.wait(), timeout=poll_interval,
+                    shutdown_event.wait(),
+                    timeout=poll_interval,
                 )
     finally:
         # Cancel remaining tasks and wait for them to finish.
@@ -303,7 +310,10 @@ def _spawn_new_tasks(
             )
             active_tasks[key] = asyncio.create_task(
                 _async_process_item(
-                    client_config, item, purpose, shutdown_event,
+                    client_config,
+                    item,
+                    purpose,
+                    shutdown_event,
                 ),
                 name=f"daemon-{client_name}-{purpose}",
             )
@@ -331,13 +341,17 @@ async def _async_process_item(
     try:
         before_mtime = time.time()
         _inject_into_session(
-            client_config, item, purpose, auto_bootstrap=True,
+            client_config,
+            item,
+            purpose,
+            auto_bootstrap=True,
         )
 
         if use_idle_events:
             # Event-driven: wait for wrapper to signal IDLE
             idle_payload = await _wait_for_idle_event(
-                client_name, purpose,
+                client_name,
+                purpose,
                 timeout=_DAEMON_TASK_TIMEOUT_S,
                 shutdown_event=shutdown_event,
             )
@@ -396,8 +410,7 @@ async def _async_process_item(
             reason = parse_handoff_reason(handoff_path)
             if reason:
                 click.echo(
-                    f"Session ended abnormally (reason: {reason})."
-                    " Skipping item."
+                    f"Session ended abnormally (reason: {reason}). Skipping item."
                 )
                 send_notification(
                     "Daemon Item Failed",
@@ -405,7 +418,8 @@ async def _async_process_item(
                     urgency="critical",
                 )
                 fail_item(
-                    client_name, item.id,
+                    client_name,
+                    item.id,
                     f"Session handoff: {reason}",
                 )
                 return
@@ -471,10 +485,7 @@ def _get_injectable_session(
 
     if session is None:
         if not auto_bootstrap:
-            msg = (
-                f"No {purpose} session for {client_name}."
-                " Run `cw start` first."
-            )
+            msg = f"No {purpose} session for {client_name}. Run `cw start` first."
             raise CwError(msg)
         # Bootstrap a new session
         click.echo(f"Bootstrapping {purpose} session for {client_name}...")
@@ -563,8 +574,10 @@ def _inject_via_trigger(
     trigger = _trigger_path(client, purpose)
     new_id = str(uuid4())
     claude_args = [
-        "--session-id", new_id,
-        "--append-system-prompt", workflow_prompt,
+        "--session-id",
+        new_id,
+        "--append-system-prompt",
+        workflow_prompt,
     ]
     if session is not None:
         session.claude_session_id = new_id
@@ -626,14 +639,18 @@ def _inject_into_session(
     On success the session status is set to ACTIVE.
     """
     session, state = _get_injectable_session(
-        client_config.name, purpose, auto_bootstrap=auto_bootstrap,
+        client_config.name,
+        purpose,
+        auto_bootstrap=auto_bootstrap,
     )
     workflow_prompt = build_daemon_workflow_prompt(item.task)
 
     if session.status == SessionStatus.IDLE:
         # Write trigger for the wrapper loop — it will launch Claude
         _inject_via_trigger(
-            client_config.name, purpose, workflow_prompt,
+            client_config.name,
+            purpose,
+            workflow_prompt,
             session=session,
         )
         session.status = SessionStatus.ACTIVE
@@ -644,13 +661,16 @@ def _inject_into_session(
         save_state(state)
         _resume_claude_in_pane(session, workflow_prompt, purpose)
 
-    record_event(client_config.name, HistoryEvent(
-        event_type=EventType.SESSION_RESUMED,
-        client=client_config.name,
-        session_id=session.id,
-        session_name=session.name,
-        purpose=purpose,
-    ))
+    record_event(
+        client_config.name,
+        HistoryEvent(
+            event_type=EventType.SESSION_RESUMED,
+            client=client_config.name,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=purpose,
+        ),
+    )
 
 
 def _rebackground_session(client_name: str, purpose: str) -> None:
@@ -724,15 +744,11 @@ def stop_daemon(client: str, purpose: str = "debt") -> None:
 
     if not _is_process_alive(pid):
         pid_file.unlink(missing_ok=True)
-        click.echo(
-            f"Daemon for {client}/{purpose} was not running (stale PID)."
-        )
+        click.echo(f"Daemon for {client}/{purpose} was not running (stale PID).")
         return
 
     os.kill(pid, signal.SIGTERM)
-    click.echo(
-        f"Sent SIGTERM to daemon {client}/{purpose} (pid {pid})."
-    )
+    click.echo(f"Sent SIGTERM to daemon {client}/{purpose} (pid {pid}).")
 
 
 def daemon_status(client: str | None = None) -> list[dict[str, object]]:
@@ -753,10 +769,12 @@ def daemon_status(client: str | None = None) -> list[dict[str, object]]:
         alive = _is_process_alive(pid)
         if not alive:
             pid_file.unlink(missing_ok=True)
-        results.append({
-            "client": d_client,
-            "purpose": d_purpose,
-            "pid": pid,
-            "alive": alive,
-        })
+        results.append(
+            {
+                "client": d_client,
+                "purpose": d_purpose,
+                "pid": pid,
+                "alive": alive,
+            }
+        )
     return results

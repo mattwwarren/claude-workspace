@@ -57,7 +57,8 @@ class TestResolveWorktreeBase:
     def test_uses_client_worktree_base(self, tmp_path: Path) -> None:
         custom_base = tmp_path / "custom-worktrees"
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=custom_base,
         )
         assert resolve_worktree_base(client) == custom_base
@@ -72,7 +73,8 @@ class TestResolveWorktreeBase:
 class TestWorktreePathFor:
     def test_combines_base_and_slug(self, tmp_path: Path) -> None:
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=tmp_path / "wt",
         )
         result = worktree_path_for(client, "feat/search")
@@ -81,11 +83,14 @@ class TestWorktreePathFor:
 
 class TestCreateWorktree:
     def test_idempotent_existing_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If worktree path already exists, return it without running git."""
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=tmp_path / "wt",
         )
         wt_path = tmp_path / "wt" / "feat-search"
@@ -104,16 +109,21 @@ class TestCreateWorktree:
         assert len(calls) == 0
 
     def test_creates_new_branch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=tmp_path / "wt",
         )
         git_calls: list[tuple[str, ...]] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
             result = MagicMock(stderr="")
@@ -132,16 +142,21 @@ class TestCreateWorktree:
         assert "-b" in add_call
 
     def test_uses_existing_branch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=tmp_path / "wt",
         )
         git_calls: list[tuple[str, ...]] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
             result = MagicMock(stderr="")
@@ -156,7 +171,9 @@ class TestCreateWorktree:
 
 class TestSubmoduleInit:
     def test_submodule_init_when_gitmodules_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -164,13 +181,16 @@ class TestSubmoduleInit:
         (ws / ".gitmodules").write_text("[submodule]\n")
 
         client = ClientConfig(
-            name="test", workspace_path=ws,
+            name="test",
+            workspace_path=ws,
             worktree_base=tmp_path / "wt",
         )
         git_calls: list[tuple[str, ...]] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
             result = MagicMock(stderr="")
@@ -184,29 +204,32 @@ class TestSubmoduleInit:
         create_worktree(client, "feat/new")
 
         # Should have: rev-parse, worktree add, submodule update
-        submodule_calls = [
-            c for c in git_calls if "submodule" in c
-        ]
+        submodule_calls = [c for c in git_calls if "submodule" in c]
         assert len(submodule_calls) == 1
         assert "update" in submodule_calls[0]
         assert "--init" in submodule_calls[0]
         assert "--recursive" in submodule_calls[0]
 
     def test_no_submodule_init_without_gitmodules(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws = tmp_path / "ws"
         ws.mkdir()
         # No .gitmodules file
 
         client = ClientConfig(
-            name="test", workspace_path=ws,
+            name="test",
+            workspace_path=ws,
             worktree_base=tmp_path / "wt",
         )
         git_calls: list[tuple[str, ...]] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
             result = MagicMock(stderr="")
@@ -219,13 +242,13 @@ class TestSubmoduleInit:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         create_worktree(client, "feat/new")
 
-        submodule_calls = [
-            c for c in git_calls if "submodule" in c
-        ]
+        submodule_calls = [c for c in git_calls if "submodule" in c]
         assert len(submodule_calls) == 0
 
     def test_worktree_client_uses_repo_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Worktree-mode client uses repo_path for git cwd."""
         repo = tmp_path / "repo"
@@ -239,7 +262,9 @@ class TestSubmoduleInit:
         git_cwds: list[object] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_cwds.append(cwd)
             result = MagicMock(stderr="")
@@ -259,10 +284,13 @@ class TestSubmoduleInit:
 
 class TestRemoveWorktree:
     def test_removes_existing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=tmp_path / "wt",
         )
         wt_path = tmp_path / "wt" / "feat-search"
@@ -271,7 +299,9 @@ class TestRemoveWorktree:
         git_calls: list[tuple[str, ...]] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
             return MagicMock(returncode=0, stderr="")
@@ -281,16 +311,21 @@ class TestRemoveWorktree:
         assert any("remove" in call for call in git_calls)
 
     def test_noop_if_not_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=tmp_path / "wt",
         )
         git_calls: list[tuple[str, ...]] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
             return MagicMock(returncode=0, stderr="")
@@ -300,10 +335,13 @@ class TestRemoveWorktree:
         assert len(git_calls) == 0
 
     def test_force_flag(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = ClientConfig(
-            name="test", workspace_path=tmp_path / "ws",
+            name="test",
+            workspace_path=tmp_path / "ws",
             worktree_base=tmp_path / "wt",
         )
         wt_path = tmp_path / "wt" / "feat-dirty"
@@ -312,7 +350,9 @@ class TestRemoveWorktree:
         git_calls: list[tuple[str, ...]] = []
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
             return MagicMock(returncode=0, stderr="")
@@ -324,7 +364,9 @@ class TestRemoveWorktree:
 
 class TestListWorktrees:
     def test_parses_porcelain_output(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
         porcelain = (
@@ -337,7 +379,9 @@ class TestListWorktrees:
         )
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             return MagicMock(returncode=0, stdout=porcelain, stderr="")
 
@@ -349,12 +393,16 @@ class TestListWorktrees:
         assert result[1]["branch"] == "feat/search"
 
     def test_empty_on_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
 
         def mock_run(
-            *args: str, cwd: object, check: bool = True,
+            *args: str,
+            cwd: object,
+            check: bool = True,
         ) -> MagicMock:
             return MagicMock(returncode=1, stdout="", stderr="error")
 

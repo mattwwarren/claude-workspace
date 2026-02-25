@@ -238,7 +238,8 @@ class CwState(BaseModel):
             s
             for s in self.sessions
             if s.client == client
-            and s.status in (
+            and s.status
+            in (
                 SessionStatus.ACTIVE,
                 SessionStatus.IDLE,
                 SessionStatus.BACKGROUNDED,

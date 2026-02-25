@@ -29,9 +29,7 @@ _EMPTY_CLIENTS_DOC = "clients:\n"
 
 _xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
 _xdg_data = os.environ.get("XDG_DATA_HOME", "")
-CONFIG_DIR = (
-    Path(_xdg_config) / "cw" if _xdg_config else Path.home() / ".config" / "cw"
-)
+CONFIG_DIR = Path(_xdg_config) / "cw" if _xdg_config else Path.home() / ".config" / "cw"
 STATE_DIR = (
     Path(_xdg_data) / "cw" if _xdg_data else Path.home() / ".local" / "share" / "cw"
 )

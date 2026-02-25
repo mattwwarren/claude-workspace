@@ -337,12 +337,14 @@ async def test_session_table_excludes_completed(tmp_config_dir: Path) -> None:
 
 
 def _make_plan_summary(
-    tmp_path: Path, *, done: int = 1, total: int = 3,
+    tmp_path: Path,
+    *,
+    done: int = 1,
+    total: int = 3,
 ) -> PlanSummary:
     """Build a PlanSummary with controllable progress."""
     tasks = [
-        PlanTask(text=f"Task {i}", completed=i < done, phase="P1")
-        for i in range(total)
+        PlanTask(text=f"Task {i}", completed=i < done, phase="P1") for i in range(total)
     ]
     return PlanSummary(
         path=tmp_path / "plan.md",
@@ -594,7 +596,8 @@ async def test_confirm_screen_dismiss_on_cancel(
                 results.append(result)
 
             app.push_screen(
-                ConfirmScreen("Test?"), on_result,
+                ConfirmScreen("Test?"),
+                on_result,
             )
             await pilot.pause()
             await pilot.click("#confirm-no")
@@ -623,7 +626,8 @@ async def test_confirm_screen_dismiss_on_confirm(
                 results.append(result)
 
             app.push_screen(
-                ConfirmScreen("Test?"), on_result,
+                ConfirmScreen("Test?"),
+                on_result,
             )
             await pilot.pause()
             await pilot.click("#confirm-yes")

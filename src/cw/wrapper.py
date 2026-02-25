@@ -79,7 +79,8 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
 
     claude_session_id = _detect_claude_session_id(workspace_path)
     signal_idle(
-        client, purpose,
+        client,
+        purpose,
         exit_code=result.returncode,
         claude_session_id=claude_session_id,
     )
@@ -93,7 +94,8 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
         result = subprocess.run(["claude", *next_args], check=False)
         claude_session_id = _detect_claude_session_id(workspace_path)
         signal_idle(
-            client, purpose,
+            client,
+            purpose,
             exit_code=result.returncode,
             claude_session_id=claude_session_id,
         )
@@ -133,14 +135,17 @@ def signal_idle(
         payload["claude_session_id"] = claude_session_id
     signal_file.write_text(json.dumps(payload))
 
-    record_event(client, HistoryEvent(
-        event_type=EventType.SESSION_IDLED,
-        client=client,
-        session_id=session.id,
-        session_name=session.name,
-        purpose=purpose,
-        metadata={"exit_code": str(exit_code)},
-    ))
+    record_event(
+        client,
+        HistoryEvent(
+            event_type=EventType.SESSION_IDLED,
+            client=client,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=purpose,
+            metadata={"exit_code": str(exit_code)},
+        ),
+    )
 
 
 def _wait_for_trigger(

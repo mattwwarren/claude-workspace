@@ -37,9 +37,7 @@ def _write_clients_yaml(
 ) -> None:
     clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
     clients_file.write_text(
-        f"clients:\n"
-        f"  {client.name}:\n"
-        f"    workspace_path: {client.workspace_path}\n"
+        f"clients:\n  {client.name}:\n    workspace_path: {client.workspace_path}\n"
     )
 
 

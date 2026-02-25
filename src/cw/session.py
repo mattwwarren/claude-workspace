@@ -162,13 +162,16 @@ def _create_all_purpose_sessions(
             session.branch = worktree_branch
         sessions[purpose] = session
         state.sessions.append(session)
-        record_event(client_name, HistoryEvent(
-            event_type=EventType.SESSION_STARTED,
-            client=client_name,
-            session_id=session.id,
-            session_name=session.name,
-            purpose=purpose,
-        ))
+        record_event(
+            client_name,
+            HistoryEvent(
+                event_type=EventType.SESSION_STARTED,
+                client=client_name,
+                session_id=session.id,
+                session_name=session.name,
+                purpose=purpose,
+            ),
+        )
     return sessions
 
 
@@ -246,7 +249,8 @@ def start_session(
         if zellij.session_exists(CW_SESSION):
             # Check if Claude is still alive in the pane
             health = zellij.check_pane_health(
-                session=CW_SESSION, tab_name=client_name,
+                session=CW_SESSION,
+                tab_name=client_name,
             )
             pane_name = existing.zellij_pane or existing.purpose
             if health.get(pane_name) is False:
@@ -255,13 +259,16 @@ def start_session(
                 existing.completed_reason = CompletionReason.CRASHED
                 existing.completed_at = datetime.now(UTC)
                 save_state(state)
-                record_event(client_name, HistoryEvent(
-                    event_type=EventType.SESSION_CRASHED,
-                    client=client_name,
-                    session_id=existing.id,
-                    session_name=existing.name,
-                    purpose=existing.purpose,
-                ))
+                record_event(
+                    client_name,
+                    HistoryEvent(
+                        event_type=EventType.SESSION_CRASHED,
+                        client=client_name,
+                        session_id=existing.id,
+                        session_name=existing.name,
+                        purpose=existing.purpose,
+                    ),
+                )
                 # Fall through to fresh start / recovery below
             else:
                 click.echo(f"Session already active: {existing.name}")
@@ -280,7 +287,9 @@ def start_session(
                 s.status = SessionStatus.COMPLETED
 
         all_sessions = _create_all_purpose_sessions(
-            client_name, client, state,
+            client_name,
+            client,
+            state,
             prior_sessions=prior_sessions,
         )
         save_state(state)
@@ -292,7 +301,9 @@ def start_session(
 
     # Create sessions for ALL purposes and build pane layout
     all_sessions = _create_all_purpose_sessions(
-        client_name, client, state,
+        client_name,
+        client,
+        state,
         worktree_path=worktree_path,
         worktree_branch=worktree_branch,
     )
@@ -359,8 +370,7 @@ def _notify_sibling(client_name: str, source_purpose: str, target_purpose: str) 
     target = state.find_session(client_name, target_purpose)
     if target is None or target.status != SessionStatus.ACTIVE:
         click.echo(
-            f"Warning: No active {target_purpose} session"
-            f" for {client_name} to notify."
+            f"Warning: No active {target_purpose} session for {client_name} to notify."
         )
         return
 
@@ -425,13 +435,16 @@ def background_session(
     if auto:
         session.auto_backgrounded = True
     save_state(state)
-    record_event(session.client, HistoryEvent(
-        event_type=EventType.SESSION_BACKGROUNDED,
-        client=session.client,
-        session_id=session.id,
-        session_name=session.name,
-        purpose=session.purpose,
-    ))
+    record_event(
+        session.client,
+        HistoryEvent(
+            event_type=EventType.SESSION_BACKGROUNDED,
+            client=session.client,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=session.purpose,
+        ),
+    )
     click.echo(f"Session {session.name} backgrounded.")
 
     # Update Zellij tab name to indicate backgrounded state
@@ -509,13 +522,16 @@ def resume_session(session_name: str) -> None:
     session.status = SessionStatus.ACTIVE
     session.resumed_at = datetime.now(UTC)
     save_state(state)
-    record_event(session.client, HistoryEvent(
-        event_type=EventType.SESSION_RESUMED,
-        client=session.client,
-        session_id=session.id,
-        session_name=session.name,
-        purpose=session.purpose,
-    ))
+    record_event(
+        session.client,
+        HistoryEvent(
+            event_type=EventType.SESSION_RESUMED,
+            client=session.client,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=session.purpose,
+        ),
+    )
 
     click.echo(f"Resumed session: {session.name}")
 
@@ -526,9 +542,7 @@ def resume_session(session_name: str) -> None:
 
         # Launch Claude with interactive session picker
         env_prefix = _build_env_prefix(session.client, session.purpose)
-        zellij.write_to_pane(
-            f"{env_prefix} claude --resume\n"
-        )
+        zellij.write_to_pane(f"{env_prefix} claude --resume\n")
         if prompt:
             time.sleep(CLAUDE_INIT_DELAY_S)  # Wait for Claude to initialize
             zellij.write_to_pane(prompt + "\n")
@@ -557,13 +571,16 @@ def done_session(
     session.completed_reason = CompletionReason.USER
     session.completed_at = datetime.now(UTC)
     save_state(state)
-    record_event(session.client, HistoryEvent(
-        event_type=EventType.SESSION_COMPLETED,
-        client=session.client,
-        session_id=session.id,
-        session_name=session.name,
-        purpose=session.purpose,
-    ))
+    record_event(
+        session.client,
+        HistoryEvent(
+            event_type=EventType.SESSION_COMPLETED,
+            client=session.client,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=session.purpose,
+        ),
+    )
     click.echo(f"Session {session.name} marked as completed.")
 
     if cleanup and session.worktree_path and session.branch:
@@ -620,10 +637,7 @@ def hand_to_session(
     messages_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     msg_file = messages_dir / f"{ts}-{from_label}-to-{target_purpose}.md"
-    msg_file.write_text(
-        f"# Handoff: {from_label} -> {target_purpose}\n\n"
-        f"{message}\n"
-    )
+    msg_file.write_text(f"# Handoff: {from_label} -> {target_purpose}\n\n{message}\n")
     click.echo(f"Message saved: {msg_file.name}")
 
     # Inject into the target pane
@@ -712,20 +726,26 @@ def handoff_session(
     source.status = SessionStatus.COMPLETED
     source.completed_reason = CompletionReason.HANDOFF
     source.completed_at = datetime.now(UTC)
-    record_event(resolved_client, HistoryEvent(
-        event_type=EventType.SESSION_HANDOFF,
-        client=resolved_client,
-        session_id=source.id,
-        session_name=source.name,
-        purpose=source.purpose,
-        detail=f"{source_purpose} -> {target_purpose}",
-    ))
+    record_event(
+        resolved_client,
+        HistoryEvent(
+            event_type=EventType.SESSION_HANDOFF,
+            client=resolved_client,
+            session_id=source.id,
+            session_name=source.name,
+            purpose=source.purpose,
+            detail=f"{source_purpose} -> {target_purpose}",
+        ),
+    )
 
     # For backgrounded targets, write handoff file and set path
     # before saving — avoids a second save_state round-trip
     if target.status == SessionStatus.BACKGROUNDED:
         target.last_handoff_path = _write_cross_session_handoff(
-            target.workspace_path, source_purpose, target_purpose, prompt,
+            target.workspace_path,
+            source_purpose,
+            target_purpose,
+            prompt,
         )
 
     save_state(state)
@@ -741,8 +761,7 @@ def handoff_session(
         resume_session(target.name)
 
     click.echo(
-        f"Handoff complete: {source_purpose} → {target_purpose}"
-        f" ({resolved_client})"
+        f"Handoff complete: {source_purpose} → {target_purpose} ({resolved_client})"
     )
 
 
@@ -794,14 +813,17 @@ def _route_to_existing_session(
     time.sleep(CLAUDE_INIT_DELAY_S)
     zellij.write_to_pane(task_prompt + "\n", session=zellij_target)
 
-    record_event(client_name, HistoryEvent(
-        event_type=EventType.SESSION_RESUMED,
-        client=client_name,
-        session_id=session.id,
-        session_name=session.name,
-        purpose=purpose,
-        detail=f"Routed delegate: {claimed.task.description}",
-    ))
+    record_event(
+        client_name,
+        HistoryEvent(
+            event_type=EventType.SESSION_RESUMED,
+            client=client_name,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=purpose,
+            detail=f"Routed delegate: {claimed.task.description}",
+        ),
+    )
     click.echo(f"Routed to existing session: {session.name}")
     return session
 
@@ -848,7 +870,10 @@ def delegate_task(
 
     # Try routing to an existing backgrounded session
     routed = _route_to_existing_session(
-        client_name, purpose, task_prompt, claimed,
+        client_name,
+        purpose,
+        task_prompt,
+        claimed,
     )
     if routed is not None:
         return routed
@@ -871,16 +896,9 @@ def delegate_task(
     escaped_prompt = shlex.quote(task_prompt)
     env_prefix = _build_env_prefix(client_name, purpose)
     if interactive:
-        cmd = (
-            f"{env_prefix} claude"
-            f" --append-system-prompt {escaped_prompt}"
-        )
+        cmd = f"{env_prefix} claude --append-system-prompt {escaped_prompt}"
     else:
-        cmd = (
-            f"{env_prefix} claude"
-            f" --append-system-prompt {escaped_prompt}"
-            f" --print"
-        )
+        cmd = f"{env_prefix} claude --append-system-prompt {escaped_prompt} --print"
 
     cwd = str(client.workspace_path)
     pane_name = f"delegate-{claimed.id}"
@@ -936,5 +954,3 @@ def _write_cross_session_handoff(
         f"```\n{prompt}\n```\n"
     )
     return path
-
-

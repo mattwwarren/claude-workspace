@@ -51,8 +51,7 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "Always continue in the same context after plan approval.\n\n"
         "When a plan is ready, use `/queue-plan` to queue it for the impl "
         "session. You can also use `cw hand impl` for urgent items or "
-        "`/queue-debt` for quality issues."
-        + _AGENT_TEAM_GUIDANCE
+        "`/queue-debt` for quality issues." + _AGENT_TEAM_GUIDANCE
     ),
     "debt": (
         "You are in the TECH DEBT session. "

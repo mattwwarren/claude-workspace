@@ -149,7 +149,9 @@ class TestCreateAllPurposeSessions:
         sample_client.auto_purposes = [SessionPurpose.IMPL, SessionPurpose.IDEA]
         state = CwState()
         sessions = _create_all_purpose_sessions(
-            sample_client.name, sample_client, state,
+            sample_client.name,
+            sample_client,
+            state,
         )
         assert set(sessions.keys()) == {"impl", "idea"}
         assert len(state.sessions) == 2
@@ -157,7 +159,9 @@ class TestCreateAllPurposeSessions:
     def test_default_purposes(self, sample_client: ClientConfig) -> None:
         state = CwState()
         sessions = _create_all_purpose_sessions(
-            sample_client.name, sample_client, state,
+            sample_client.name,
+            sample_client,
+            state,
         )
         assert set(sessions.keys()) == {"impl", "idea", "debt"}
 
@@ -165,7 +169,9 @@ class TestCreateAllPurposeSessions:
         sample_client.auto_purposes = [SessionPurpose.IMPL]
         state = CwState()
         sessions = _create_all_purpose_sessions(
-            sample_client.name, sample_client, state,
+            sample_client.name,
+            sample_client,
+            state,
         )
         assert set(sessions.keys()) == {"impl"}
         assert len(state.sessions) == 1
@@ -173,7 +179,8 @@ class TestCreateAllPurposeSessions:
 
 class TestCreateAllPurposeSessionsWithPrior:
     def test_carries_forward_claude_session_id(
-        self, sample_client: ClientConfig,
+        self,
+        sample_client: ClientConfig,
     ) -> None:
         """Prior sessions' claude_session_id is carried forward."""
         prior = {
@@ -187,7 +194,9 @@ class TestCreateAllPurposeSessionsWithPrior:
         }
         state = CwState()
         sessions = _create_all_purpose_sessions(
-            sample_client.name, sample_client, state,
+            sample_client.name,
+            sample_client,
+            state,
             prior_sessions=prior,
         )
         assert sessions["impl"].claude_session_id == "old-uuid-impl"
@@ -196,12 +205,15 @@ class TestCreateAllPurposeSessionsWithPrior:
         assert sessions["debt"].claude_session_id is None
 
     def test_no_prior_generates_fresh(
-        self, sample_client: ClientConfig,
+        self,
+        sample_client: ClientConfig,
     ) -> None:
         """Without prior_sessions, all sessions have no claude_session_id."""
         state = CwState()
         sessions = _create_all_purpose_sessions(
-            sample_client.name, sample_client, state,
+            sample_client.name,
+            sample_client,
+            state,
         )
         for s in sessions.values():
             assert s.claude_session_id is None
@@ -273,8 +285,7 @@ class TestStartSession:
 
         output = capsys.readouterr().out
         assert (
-            "backgrounded session" in output.lower()
-            or "Found backgrounded" in output
+            "backgrounded session" in output.lower() or "Found backgrounded" in output
         )
 
     def test_existing_active_navigates(
@@ -349,7 +360,8 @@ class TestStartSession:
         monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
 
         def _mock_check_pane_health(
-            session: str | None = None, tab_name: str | None = None,
+            session: str | None = None,
+            tab_name: str | None = None,
         ) -> dict[str, bool]:
             return {"impl": False}
 
@@ -365,13 +377,10 @@ class TestStartSession:
 
         # The crashed session should be marked COMPLETED with CRASHED reason
         updated = load_state()
-        completed = [
-            s for s in updated.sessions if s.status == SessionStatus.COMPLETED
-        ]
+        completed = [s for s in updated.sessions if s.status == SessionStatus.COMPLETED]
         assert len(completed) >= 1
         crashed = [
-            s for s in completed
-            if s.completed_reason == CompletionReason.CRASHED
+            s for s in completed if s.completed_reason == CompletionReason.CRASHED
         ]
         assert len(crashed) >= 1
         assert crashed[0].completed_at is not None
@@ -402,15 +411,9 @@ class TestStartSession:
 
         state = load_state()
         # impl and idea should have worktree_path set
-        impl_sessions = [
-            s for s in state.sessions if s.purpose == SessionPurpose.IMPL
-        ]
-        idea_sessions = [
-            s for s in state.sessions if s.purpose == SessionPurpose.IDEA
-        ]
-        debt_sessions = [
-            s for s in state.sessions if s.purpose == SessionPurpose.DEBT
-        ]
+        impl_sessions = [s for s in state.sessions if s.purpose == SessionPurpose.IMPL]
+        idea_sessions = [s for s in state.sessions if s.purpose == SessionPurpose.IDEA]
+        debt_sessions = [s for s in state.sessions if s.purpose == SessionPurpose.DEBT]
         assert impl_sessions[0].worktree_path == wt_path
         assert impl_sessions[0].branch == "feat/search"
         assert idea_sessions[0].worktree_path == wt_path
@@ -472,10 +475,7 @@ class TestStartWorktreeClient:
         repo.mkdir()
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
-            "clients:\n"
-            "  client-a:\n"
-            f"    repo_path: {repo}\n"
-            "    branch: client-a\n"
+            f"clients:\n  client-a:\n    repo_path: {repo}\n    branch: client-a\n"
         )
 
         wt_path = tmp_path / "wt" / "client-a"
@@ -495,10 +495,7 @@ class TestStartWorktreeClient:
         # All sessions should exist
         assert len(state.sessions) == 3
         # impl and idea should have worktree_path
-        impl = next(
-            s for s in state.sessions
-            if s.purpose == SessionPurpose.IMPL
-        )
+        impl = next(s for s in state.sessions if s.purpose == SessionPurpose.IMPL)
         assert impl.worktree_path == wt_path
         assert impl.branch == "client-a"
 
@@ -533,7 +530,8 @@ class TestStartWorktreeClient:
 
         # Zellij session already exists (first client started)
         monkeypatch.setattr(
-            "cw.zellij.session_exists", lambda _name: True,
+            "cw.zellij.session_exists",
+            lambda _name: True,
         )
 
         start_session("client-a", "impl")
@@ -864,9 +862,7 @@ class TestResumeSession:
         # Override mock_zellij's in_zellij_session to return True
         monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
         # Mock session_exists to return True (session already running)
-        monkeypatch.setattr(
-            "cw.zellij.session_exists", lambda _name: True
-        )
+        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
         # Skip the sleep
         monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
 
@@ -1557,7 +1553,8 @@ class TestRenameTabOnTransition:
     ) -> None:
         # Override in_zellij_session to return True
         monkeypatch.setattr(
-            "cw.zellij.in_zellij_session", lambda: True,
+            "cw.zellij.in_zellij_session",
+            lambda: True,
         )
 
         state = CwState(
@@ -1616,15 +1613,15 @@ class TestRenameTabOnTransition:
         # Override in_zellij_session to return True and session_exists
         # to return True (avoid nested-session guard)
         monkeypatch.setattr(
-            "cw.zellij.in_zellij_session", lambda: True,
+            "cw.zellij.in_zellij_session",
+            lambda: True,
         )
         monkeypatch.setattr(
-            "cw.zellij.session_exists", lambda _name: True,
+            "cw.zellij.session_exists",
+            lambda _name: True,
         )
 
-        clients_file = (
-            tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        )
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
             f"  test-client:\n"

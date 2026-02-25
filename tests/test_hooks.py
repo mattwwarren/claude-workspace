@@ -41,40 +41,30 @@ def tmp_hooks_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestInstallContextHook:
-    def test_creates_script_file(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_creates_script_file(self, tmp_hooks_dir: Path) -> None:
         script_path = install_context_hook("acme", threshold=20)
         assert script_path.exists()
 
-    def test_script_contains_threshold(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_script_contains_threshold(self, tmp_hooks_dir: Path) -> None:
         install_context_hook("acme", threshold=42)
         script_path = tmp_hooks_dir / "context-check-acme.sh"
         content = script_path.read_text()
         assert "THRESHOLD=42" in content
 
-    def test_script_contains_client_name(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_script_contains_client_name(self, tmp_hooks_dir: Path) -> None:
         install_context_hook("myproject", threshold=10)
         script_path = tmp_hooks_dir / "context-check-myproject.sh"
         content = script_path.read_text()
         assert "myproject" in content
 
-    def test_script_is_executable(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_script_is_executable(self, tmp_hooks_dir: Path) -> None:
         script_path = install_context_hook("acme", threshold=20)
         mode = script_path.stat().st_mode
         assert mode & stat.S_IXUSR, "Script should be user-executable"
         assert mode & stat.S_IXGRP, "Script should be group-executable"
         assert mode & stat.S_IXOTH, "Script should be world-executable"
 
-    def test_returns_path_to_script(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_returns_path_to_script(self, tmp_hooks_dir: Path) -> None:
         script_path = install_context_hook("acme", threshold=20)
         assert script_path == tmp_hooks_dir / "context-check-acme.sh"
 
@@ -89,24 +79,18 @@ class TestInstallContextHook:
 
 
 class TestUninstallContextHook:
-    def test_removes_script_file(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_removes_script_file(self, tmp_hooks_dir: Path) -> None:
         install_context_hook("acme", threshold=20)
         script_path = tmp_hooks_dir / "context-check-acme.sh"
         assert script_path.exists()
         uninstall_context_hook("acme")
         assert not script_path.exists()
 
-    def test_raises_if_not_installed(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_raises_if_not_installed(self, tmp_hooks_dir: Path) -> None:
         with pytest.raises(CwError, match="No hook installed for client 'acme'"):
             uninstall_context_hook("acme")
 
-    def test_cleans_up_turn_counter(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_cleans_up_turn_counter(self, tmp_hooks_dir: Path) -> None:
         install_context_hook("acme", threshold=20)
         turn_path = tmp_hooks_dir / ".turn-count-acme"
         turn_path.write_text("5")
@@ -114,9 +98,7 @@ class TestUninstallContextHook:
         uninstall_context_hook("acme")
         assert not turn_path.exists()
 
-    def test_succeeds_without_turn_counter(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_succeeds_without_turn_counter(self, tmp_hooks_dir: Path) -> None:
         install_context_hook("acme", threshold=20)
         turn_path = tmp_hooks_dir / ".turn-count-acme"
         assert not turn_path.exists()
@@ -125,22 +107,16 @@ class TestUninstallContextHook:
 
 
 class TestHookStatus:
-    def test_returns_installed_true_when_hook_exists(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_returns_installed_true_when_hook_exists(self, tmp_hooks_dir: Path) -> None:
         install_context_hook("acme", threshold=20)
         status = hook_status("acme")
         assert status["installed"] is True
 
-    def test_returns_installed_false_when_no_hook(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_returns_installed_false_when_no_hook(self, tmp_hooks_dir: Path) -> None:
         status = hook_status("acme")
         assert status["installed"] is False
 
-    def test_reads_turn_count_from_file(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_reads_turn_count_from_file(self, tmp_hooks_dir: Path) -> None:
         install_context_hook("acme", threshold=20)
         turn_path = tmp_hooks_dir / ".turn-count-acme"
         turn_path.write_text("7")
@@ -162,26 +138,20 @@ class TestHookStatus:
         status = hook_status("acme")
         assert status["turn_count"] == 0
 
-    def test_includes_script_path_in_result(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_includes_script_path_in_result(self, tmp_hooks_dir: Path) -> None:
         status = hook_status("acme")
         expected = str(tmp_hooks_dir / "context-check-acme.sh")
         assert status["script_path"] == expected
 
 
 class TestResetTurnCount:
-    def test_writes_zero_to_turn_file(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_writes_zero_to_turn_file(self, tmp_hooks_dir: Path) -> None:
         turn_path = tmp_hooks_dir / ".turn-count-acme"
         turn_path.write_text("15")
         reset_turn_count("acme")
         assert turn_path.read_text() == "0"
 
-    def test_no_op_when_file_absent(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_no_op_when_file_absent(self, tmp_hooks_dir: Path) -> None:
         turn_path = tmp_hooks_dir / ".turn-count-acme"
         assert not turn_path.exists()
         # Should not raise
@@ -267,7 +237,10 @@ class TestAddEventHook:
 
     def test_description_is_preserved(self, tmp_hooks_dir: Path) -> None:
         rule = add_event_hook(
-            "acme", "session_started", "echo hi", description="my hook",
+            "acme",
+            "session_started",
+            "echo hi",
+            description="my hook",
         )
         assert rule.description == "my hook"
 
@@ -316,9 +289,7 @@ class TestListEventHooks:
 
 
 class TestDispatchEventHooks:
-    def test_spawns_subprocess_for_matching_hook(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_spawns_subprocess_for_matching_hook(self, tmp_hooks_dir: Path) -> None:
         add_event_hook("acme", "session_started", "echo dispatched")
         with patch("cw.hooks.subprocess.Popen") as mock_popen:
             dispatch_event_hooks("acme", "session_started")
@@ -330,63 +301,56 @@ class TestDispatchEventHooks:
         add_event_hook("acme", "session_started", "echo hi")
         with patch("cw.hooks.subprocess.Popen") as mock_popen:
             dispatch_event_hooks(
-                "acme", "session_started", {"session_id": "abc123"},
+                "acme",
+                "session_started",
+                {"session_id": "abc123"},
             )
             env = mock_popen.call_args[1]["env"]
             assert env["CW_CLIENT"] == "acme"
             assert env["CW_EVENT_TYPE"] == "session_started"
             assert env["CW_META_SESSION_ID"] == "abc123"
 
-    def test_skips_non_matching_event_type(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_skips_non_matching_event_type(self, tmp_hooks_dir: Path) -> None:
         add_event_hook("acme", "session_started", "echo hi")
         with patch("cw.hooks.subprocess.Popen") as mock_popen:
             dispatch_event_hooks("acme", "session_backgrounded")
             mock_popen.assert_not_called()
 
-    def test_dispatches_multiple_matching_hooks(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_dispatches_multiple_matching_hooks(self, tmp_hooks_dir: Path) -> None:
         add_event_hook("acme", "session_started", "echo first")
         add_event_hook("acme", "session_started", "echo second")
         with patch("cw.hooks.subprocess.Popen") as mock_popen:
             dispatch_event_hooks("acme", "session_started")
             assert mock_popen.call_count == 2
 
-    def test_no_op_when_no_hooks_registered(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_no_op_when_no_hooks_registered(self, tmp_hooks_dir: Path) -> None:
         with patch("cw.hooks.subprocess.Popen") as mock_popen:
             dispatch_event_hooks("acme", "session_started")
             mock_popen.assert_not_called()
 
-    def test_hook_failure_does_not_propagate(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_hook_failure_does_not_propagate(self, tmp_hooks_dir: Path) -> None:
         add_event_hook("acme", "session_started", "echo hi")
         with patch(
-            "cw.hooks.subprocess.Popen", side_effect=OSError("spawn failed"),
+            "cw.hooks.subprocess.Popen",
+            side_effect=OSError("spawn failed"),
         ):
             # Must not raise
             dispatch_event_hooks("acme", "session_started")
 
-    def test_corrupt_registry_does_not_propagate(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_corrupt_registry_does_not_propagate(self, tmp_hooks_dir: Path) -> None:
         # Write invalid JSON to the registry file
         path = tmp_hooks_dir / "event-hooks-acme.json"
         path.write_text("not valid json")
         # Must not raise
         dispatch_event_hooks("acme", "session_started")
 
-    def test_metadata_keys_are_uppercased(
-        self, tmp_hooks_dir: Path
-    ) -> None:
+    def test_metadata_keys_are_uppercased(self, tmp_hooks_dir: Path) -> None:
         add_event_hook("acme", "session_started", "echo hi")
         with patch("cw.hooks.subprocess.Popen") as mock_popen:
             dispatch_event_hooks(
-                "acme", "session_started", {"my_key": "val"},
+                "acme",
+                "session_started",
+                {"my_key": "val"},
             )
             env = mock_popen.call_args[1]["env"]
             assert env["CW_META_MY_KEY"] == "val"
@@ -418,8 +382,13 @@ class TestHookCLI:
         result = runner.invoke(
             cli_main,
             [
-                "hook", "add", "acme", "session_started", "echo hi",
-                "-d", "test desc",
+                "hook",
+                "add",
+                "acme",
+                "session_started",
+                "echo hi",
+                "-d",
+                "test desc",
             ],
         )
         assert result.exit_code == 0

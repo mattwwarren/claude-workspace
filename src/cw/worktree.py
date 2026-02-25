@@ -50,13 +50,19 @@ def worktree_path_for(client: ClientConfig, branch: str) -> Path:
 
 
 def _run_git(
-    *args: str, cwd: Path, check: bool = True,
+    *args: str,
+    cwd: Path,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command in the given directory."""
     cmd = ["git", *args]
     try:
         return subprocess.run(
-            cmd, capture_output=True, text=True, check=check, cwd=str(cwd),
+            cmd,
+            capture_output=True,
+            text=True,
+            check=check,
+            cwd=str(cwd),
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.strip() if e.stderr else str(e)
@@ -84,8 +90,11 @@ def create_worktree(
 
     # Check if branch exists locally (refs/heads/ avoids matching tags)
     result = _run_git(
-        "rev-parse", "--verify", f"refs/heads/{branch}",
-        cwd=git_cwd, check=False,
+        "rev-parse",
+        "--verify",
+        f"refs/heads/{branch}",
+        cwd=git_cwd,
+        check=False,
     )
     if result.returncode == 0:
         # Branch exists — create worktree from it
@@ -102,8 +111,12 @@ def create_worktree(
     # Initialize submodules if the repo uses them
     if (git_cwd / ".gitmodules").exists():
         _run_git(
-            "submodule", "update", "--init", "--recursive",
-            cwd=wt_path, check=False,
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+            cwd=wt_path,
+            check=False,
         )
 
     return wt_path
@@ -134,8 +147,11 @@ def list_worktrees(client: ClientConfig) -> list[dict[str, str]]:
     Returns a list of dicts with ``path`` and ``branch`` keys.
     """
     result = _run_git(
-        "worktree", "list", "--porcelain",
-        cwd=_git_dir(client), check=False,
+        "worktree",
+        "list",
+        "--porcelain",
+        cwd=_git_dir(client),
+        check=False,
     )
     if result.returncode != 0:
         return []
