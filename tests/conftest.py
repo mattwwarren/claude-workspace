@@ -136,6 +136,7 @@ def mock_zellij(
         "new_pane": [],
         "new_tab": [],
         "rename_tab": [],
+        "delete_exited_session": [],
     }
 
     def _is_installed() -> bool:
@@ -203,6 +204,11 @@ def mock_zellij(
     ) -> None:
         calls["rename_tab"].append((new_name, session))
 
+    def _delete_exited_session(session_name: str) -> bool:
+        calls["delete_exited_session"].append((session_name,))
+        return False
+
+    monkeypatch.setattr("cw.zellij.delete_exited_session", _delete_exited_session)
     monkeypatch.setattr("cw.zellij.new_pane", _new_pane)
     monkeypatch.setattr("cw.zellij.new_tab", _new_tab)
     monkeypatch.setattr("cw.zellij.rename_tab", _rename_tab)
