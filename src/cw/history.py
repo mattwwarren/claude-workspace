@@ -29,8 +29,6 @@ class EventType(StrEnum):
     QUEUE_ITEM_ADDED = "queue_item_added"
     QUEUE_ITEM_COMPLETED = "queue_item_completed"
     QUEUE_ITEM_FAILED = "queue_item_failed"
-    DAEMON_STARTED = "daemon_started"
-    DAEMON_STOPPED = "daemon_stopped"
 
 
 class HistoryEvent(BaseModel):
@@ -127,24 +125,9 @@ def load_history(
 
 
 def record_event(client: str, event: HistoryEvent) -> None:
-    """Append an event and optionally fire a desktop notification.
+    """Append an event to the client's history.
 
     This is the main entry point for recording events. It appends the
-    event to the JSONL history and fires a notification if enabled for
-    the client.
+    event to the JSONL history file.
     """
     append_event(client, event)
-
-    # Check if notifications are enabled for this client
-    from cw.config import load_clients
-    from cw.notify import notify_event
-
-    clients = load_clients()
-    client_config = clients.get(client)
-    if client_config and client_config.notifications:
-        notify_event(event)
-
-    # Dispatch user-defined event hooks (fire-and-forget)
-    from cw.hooks import dispatch_event_hooks
-
-    dispatch_event_hooks(client, event.event_type, event.metadata)

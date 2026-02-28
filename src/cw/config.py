@@ -34,9 +34,7 @@ STATE_DIR = (
     Path(_xdg_data) / "cw" if _xdg_data else Path.home() / ".local" / "share" / "cw"
 )
 QUEUES_DIR = STATE_DIR / "queues"
-DAEMONS_DIR = STATE_DIR / "daemons"
 EVENTS_DIR = STATE_DIR / "events"
-HOOKS_DIR = STATE_DIR / "hooks"
 HISTORY_DIR = STATE_DIR / "history"
 CLIENTS_FILE = CONFIG_DIR / "clients.yaml"
 STATE_FILE = STATE_DIR / "sessions.json"
@@ -78,25 +76,6 @@ def get_client(name: str) -> ClientConfig:
         msg = f"Unknown client '{name}'. Available: {available}"
         raise CwError(msg)
     return clients[name]
-
-
-def detect_client_from_cwd() -> ClientConfig | None:
-    """Try to detect the client from the current working directory.
-
-    Skips worktree-mode clients whose ``workspace_path`` is a sentinel
-    (equal to ``repo_path``) — their real path isn't known until start time.
-    """
-    cwd = Path.cwd()
-    clients = load_clients()
-    for client in clients.values():
-        if client.is_worktree_client:
-            continue
-        try:
-            cwd.relative_to(client.workspace_path)
-            return client
-        except ValueError:
-            continue
-    return None
 
 
 def load_state() -> CwState:

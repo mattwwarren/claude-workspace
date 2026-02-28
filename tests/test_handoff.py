@@ -6,14 +6,12 @@ import time
 from typing import TYPE_CHECKING
 
 from cw.handoff import (
-    build_cross_session_prompt,
-    build_daemon_workflow_prompt,
+    build_task_prompt,
     extract_resumption_prompt,
     find_handoffs_newer_than,
     find_latest_handoff,
-    parse_handoff_reason,
 )
-from cw.models import HandoffReason, SessionPurpose, TaskSpec
+from cw.models import SessionPurpose, TaskSpec
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -149,118 +147,107 @@ class TestExtractResumptionPrompt:
         assert result == "Resume the work"
 
 
-class TestBuildCrossSessionPrompt:
-    def test_with_branch_and_prompt(self) -> None:
-        result = build_cross_session_prompt(
-            "impl",
-            "idea",
-            "feat/search",
-            "Continue the auth work.",
-        )
-        assert "impl → idea" in result
-        assert "feat/search" in result
-        assert "Continue the auth work." in result
-
-    def test_without_branch(self) -> None:
-        result = build_cross_session_prompt(
-            "impl",
-            "idea",
-            None,
-            "Some context.",
-        )
-        assert "impl → idea" in result
-        assert "branch" not in result.lower()
-        assert "Some context." in result
-
-    def test_without_raw_prompt(self) -> None:
-        result = build_cross_session_prompt(
-            "impl",
-            "idea",
-            "feat/search",
-            None,
-        )
-        assert "impl → idea" in result
-        assert "No resumption context" in result
-
-    def test_without_branch_or_prompt(self) -> None:
-        result = build_cross_session_prompt("impl", "idea", None, None)
-        assert "impl → idea" in result
-        assert "No resumption context" in result
-
-
-class TestParseHandoffReason:
-    def test_normal_session_done_returns_none(self, tmp_path: Path) -> None:
-        """Normal /session-done handoffs lack frontmatter with a reason field."""
-        f = tmp_path / "session-done.md"
-        f.write_text("# Session Handoff\n\n## Summary\n\nWork is complete.\n")
-        assert parse_handoff_reason(f) is None
-
-    def test_context_reason(self, tmp_path: Path) -> None:
-        f = tmp_path / "session-context.md"
-        f.write_text("---\nreason: context\n---\n# Handoff\n\nContext exhausted.\n")
-        assert parse_handoff_reason(f) is HandoffReason.CONTEXT
-
-    def test_debug_fork_reason(self, tmp_path: Path) -> None:
-        f = tmp_path / "session-debug.md"
-        f.write_text("---\nreason: debug-fork\n---\n# Handoff\n")
-        assert parse_handoff_reason(f) is HandoffReason.DEBUG_FORK
-
-    def test_scope_reason(self, tmp_path: Path) -> None:
-        f = tmp_path / "session-scope.md"
-        f.write_text("---\nreason: scope\n---\n# Handoff\n")
-        assert parse_handoff_reason(f) is HandoffReason.SCOPE
-
-    def test_unknown_reason_returns_none(self, tmp_path: Path) -> None:
-        """Unrecognised reason values are ignored (treated as normal)."""
-        f = tmp_path / "session-typo.md"
-        f.write_text("---\nreason: contxt\n---\n# Handoff\n")
-        assert parse_handoff_reason(f) is None
-
-    def test_frontmatter_without_reason_returns_none(self, tmp_path: Path) -> None:
-        f = tmp_path / "session-no-reason.md"
-        f.write_text("---\ntitle: Some handoff\n---\n# Handoff\n")
-        assert parse_handoff_reason(f) is None
-
-    def test_nonexistent_file_returns_none(self, tmp_path: Path) -> None:
-        f = tmp_path / "does-not-exist.md"
-        assert parse_handoff_reason(f) is None
-
-    def test_reason_with_extra_whitespace(self, tmp_path: Path) -> None:
-        f = tmp_path / "session-ws.md"
-        f.write_text("---\nreason:   context  \n---\n# Handoff\n")
-        assert parse_handoff_reason(f) is HandoffReason.CONTEXT
-
-
-class TestBuildDaemonWorkflowPrompt:
-    def _make_task(self) -> TaskSpec:
+class TestBuildTaskPrompt:
+    def _make_task(
+        self,
+        description: str = "Refactor auth module",
+        purpose: SessionPurpose = SessionPurpose.IMPL,
+        prompt: str = "Move auth logic into its own service layer.",
+        context_files: list[str] | None = None,
+        success_criteria: str | None = None,
+    ) -> TaskSpec:
         return TaskSpec(
-            description="Fix ruff violations in session.py",
-            purpose=SessionPurpose.DEBT,
-            prompt="Run ruff check and fix all violations.",
+            description=description,
+            purpose=purpose,
+            prompt=prompt,
+            context_files=context_files or [],
+            success_criteria=success_criteria,
         )
 
-    def test_wraps_task_in_workflow(self) -> None:
-        task = self._make_task()
-        result = build_daemon_workflow_prompt(task)
-        assert "Fix ruff violations in session.py" in result
-        assert "Run ruff check and fix all violations." in result
+    def test_includes_description(self) -> None:
+        task = self._make_task(description="Write integration tests")
+        result = build_task_prompt(task)
+        assert "Write integration tests" in result
 
-    def test_includes_workflow_steps(self) -> None:
-        task = self._make_task()
-        result = build_daemon_workflow_prompt(task)
-        assert "/session-done" in result
-        assert "/handoff --reason context" in result
-        assert "Code Quality Reviewer" in result
-        assert "Architecture Reviewer" in result
+    def test_includes_instructions_header(self) -> None:
+        task = self._make_task(prompt="Use pytest parametrize for edge cases.")
+        result = build_task_prompt(task)
+        assert "Instructions:" in result
 
-    def test_includes_quality_gates(self) -> None:
-        task = self._make_task()
-        result = build_daemon_workflow_prompt(task)
-        assert "ruff check" in result
-        assert "mypy" in result
-        assert "pytest" in result
+    def test_includes_prompt_text(self) -> None:
+        task = self._make_task(prompt="Use pytest parametrize for edge cases.")
+        result = build_task_prompt(task)
+        assert "Use pytest parametrize for edge cases." in result
 
-    def test_includes_daemon_header(self) -> None:
-        task = self._make_task()
-        result = build_daemon_workflow_prompt(task)
-        assert "daemon queue system" in result
+    def test_includes_context_files(self) -> None:
+        files = ["src/cw/handoff.py", "tests/test_handoff.py"]
+        task = self._make_task(context_files=files)
+        result = build_task_prompt(task)
+        assert "Context files:" in result
+        assert "src/cw/handoff.py" in result
+        assert "tests/test_handoff.py" in result
+
+    def test_includes_success_criteria(self) -> None:
+        task = self._make_task(success_criteria="100% pass rate, zero ruff violations.")
+        result = build_task_prompt(task)
+        assert "Success criteria:" in result
+        assert "100% pass rate, zero ruff violations." in result
+
+    def test_no_context_files_section_when_empty(self) -> None:
+        task = self._make_task(context_files=[])
+        result = build_task_prompt(task)
+        assert "Context files:" not in result
+
+    def test_no_success_criteria_section_when_none(self) -> None:
+        task = self._make_task(success_criteria=None)
+        result = build_task_prompt(task)
+        assert "Success criteria:" not in result
+
+    def test_minimal_task_has_required_sections(self) -> None:
+        task = self._make_task(
+            description="Minimal task",
+            prompt="Just do the thing.",
+            context_files=[],
+            success_criteria=None,
+        )
+        result = build_task_prompt(task)
+        assert "Minimal task" in result
+        assert "Instructions:" in result
+        assert "Just do the thing." in result
+
+    def test_description_appears_before_instructions(self) -> None:
+        task = self._make_task(
+            description="Important task",
+            prompt="The actual instructions.",
+        )
+        result = build_task_prompt(task)
+        desc_pos = result.index("Important task")
+        instr_pos = result.index("Instructions:")
+        assert desc_pos < instr_pos
+
+    def test_context_files_appear_before_instructions(self) -> None:
+        task = self._make_task(
+            context_files=["some/file.py"],
+            prompt="Do something.",
+        )
+        result = build_task_prompt(task)
+        files_pos = result.index("Context files:")
+        instr_pos = result.index("Instructions:")
+        assert files_pos < instr_pos
+
+    def test_success_criteria_appears_before_instructions(self) -> None:
+        task = self._make_task(
+            success_criteria="All green.",
+            prompt="Do something.",
+        )
+        result = build_task_prompt(task)
+        criteria_pos = result.index("Success criteria:")
+        instr_pos = result.index("Instructions:")
+        assert criteria_pos < instr_pos
+
+    def test_multiple_context_files_each_listed(self) -> None:
+        files = ["a.py", "b.py", "c.py"]
+        task = self._make_task(context_files=files)
+        result = build_task_prompt(task)
+        for f in files:
+            assert f in result

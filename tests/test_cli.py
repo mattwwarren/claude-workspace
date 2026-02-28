@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
@@ -15,7 +14,6 @@ from cw.cli import (
     _complete_session,
     _display_sessions,
     _display_status,
-    _parse_handoff_route,
     main,
 )
 from cw.config import load_clients, load_state, save_state
@@ -34,6 +32,8 @@ from cw.models import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
 
 
 class TestCli:
@@ -491,60 +491,6 @@ class TestShowStatus:
         assert updated.sessions[0].completed_reason == CompletionReason.CRASHED
 
 
-class TestHandoffCli:
-    def test_two_arg_route(self) -> None:
-        src, tgt = _parse_handoff_route("impl", "idea")
-        assert src == "impl"
-        assert tgt == "idea"
-
-    def test_arrow_route(self) -> None:
-        src, tgt = _parse_handoff_route("impl->idea", None)
-        assert src == "impl"
-        assert tgt == "idea"
-
-    def test_arrow_route_with_spaces(self) -> None:
-        src, tgt = _parse_handoff_route("impl -> idea", None)
-        assert src == "impl"
-        assert tgt == "idea"
-
-    def test_handoff_dispatches(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.handoff_session") as mock_handoff:
-            runner.invoke(main, ["handoff", "impl", "idea"])
-            mock_handoff.assert_called_once_with(
-                "impl",
-                "idea",
-                client_name=None,
-            )
-
-    def test_handoff_arrow_dispatches(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.handoff_session") as mock_handoff:
-            runner.invoke(main, ["handoff", "impl->idea"])
-            mock_handoff.assert_called_once_with(
-                "impl",
-                "idea",
-                client_name=None,
-            )
-
-    def test_handoff_with_client(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.handoff_session") as mock_handoff:
-            runner.invoke(
-                main,
-                ["handoff", "impl", "idea", "--client", "sigma"],
-            )
-            mock_handoff.assert_called_once_with(
-                "impl",
-                "idea",
-                client_name="sigma",
-            )
-
-    def test_missing_route_raises(self) -> None:
-        with pytest.raises(CwError, match="Handoff requires"):
-            _parse_handoff_route("impl", None)
-
-
 class TestBgNotifyCli:
     def test_bg_with_notify(self) -> None:
         runner = CliRunner()
@@ -557,81 +503,6 @@ class TestBgNotifyCli:
         with patch("cw.cli.background_session") as mock_bg:
             runner.invoke(main, ["bg", "-n", "idea"])
             mock_bg.assert_called_once_with(None, notify="idea", auto=False)
-
-
-class TestPlanCli:
-    def test_plan_no_plans(
-        self,
-        tmp_config_dir: Path,
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        ws = tmp_config_dir / "workspace"
-        ws.mkdir()
-        clients_file.write_text(f"clients:\n  test-client:\n    workspace_path: {ws}\n")
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["plan", "test-client"])
-        assert result.exit_code == 0
-        assert "No plans found" in result.output
-
-    def test_plan_shows_progress(
-        self,
-        tmp_config_dir: Path,
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        ws = tmp_config_dir / "workspace"
-        plans_dir = ws / ".claude" / "plans"
-        plans_dir.mkdir(parents=True)
-        clients_file.write_text(f"clients:\n  test-client:\n    workspace_path: {ws}\n")
-
-        (plans_dir / "test-plan.md").write_text(
-            "# Test Plan\n\n## Phase 1\n\n- [x] Task A\n- [ ] Task B\n"
-        )
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["plan", "test-client"])
-        assert result.exit_code == 0
-        assert "Test Plan" in result.output
-        assert "1/2" in result.output
-        assert "50%" in result.output
-
-    def test_plan_unknown_client(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["plan", "nonexistent"])
-        assert result.exit_code != 0
-
-
-class TestDaemonCli:
-    def test_daemon_start_with_client(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.start_daemon") as mock_start:
-            runner.invoke(main, ["daemon", "start", "my-client"])
-            mock_start.assert_called_once_with(
-                "my-client",
-                "debt",
-                poll_interval=30,
-                auto_bootstrap=True,
-            )
-
-    def test_daemon_start_no_args_calls_all(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.start_daemon_all") as mock_all:
-            runner.invoke(main, ["daemon", "start"])
-            mock_all.assert_called_once_with(
-                poll_interval=30,
-            )
-
-    def test_daemon_stop_with_client(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.stop_daemon") as mock_stop:
-            runner.invoke(main, ["daemon", "stop", "my-client"])
-            mock_stop.assert_called_once_with("my-client", "debt")
-
-    def test_daemon_stop_no_args_stops_all(self) -> None:
-        runner = CliRunner()
-        with patch("cw.cli.stop_daemon") as mock_stop:
-            runner.invoke(main, ["daemon", "stop"])
-            mock_stop.assert_called_once_with("_all", "_all")
 
 
 class TestInitCli:

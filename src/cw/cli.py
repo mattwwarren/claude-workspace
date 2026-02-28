@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -12,25 +12,13 @@ from click.shell_completion import CompletionItem
 
 from cw import __version__, zellij
 from cw.config import (
-    get_client,
     init_client,
     load_clients,
     load_state,
     save_state,
     show_config,
 )
-from cw.daemon import daemon_status as _daemon_status_fn
-from cw.daemon import start_daemon, start_daemon_all, stop_daemon
 from cw.exceptions import CwError
-from cw.history import EventType, load_history
-from cw.hooks import (
-    add_event_hook,
-    install_context_hook,
-    list_event_hooks,
-    remove_event_hook,
-    uninstall_context_hook,
-)
-from cw.hooks import hook_status as _hook_status_fn
 from cw.models import (
     CompletionReason,
     CwState,
@@ -41,7 +29,6 @@ from cw.models import (
     SessionStatus,
     TaskSpec,
 )
-from cw.plan import find_plan_files, parse_plan
 from cw.queue import (
     add_item,
     claim_by_id,
@@ -57,10 +44,7 @@ from cw.session import (
     CW_SESSION,
     background_all_sessions,
     background_session,
-    delegate_task,
     done_session,
-    hand_to_session,
-    handoff_session,
     resume_session,
     start_session,
 )
@@ -199,28 +183,6 @@ def status() -> None:
 
 @main.command()
 @click.argument(
-    "target",
-    type=click.Choice([e.value for e in SessionPurpose]),
-)
-@click.argument("message")
-@click.option(
-    "--from",
-    "source",
-    type=click.Choice([e.value for e in SessionPurpose]),
-    default=None,
-    help="Source session (for audit trail).",
-)
-@handle_errors
-def hand(target: str, message: str, source: str | None) -> None:
-    """Hand off a message to another session.
-
-    Example: cw hand debt "Fix the ruff violations in session.py"
-    """
-    hand_to_session(target, message, source_purpose=source)
-
-
-@main.command()
-@click.argument(
     "session_name", required=False, default=None, shell_complete=_complete_session
 )
 @click.option("--cleanup", is_flag=True, help="Remove associated worktree.")
@@ -232,46 +194,6 @@ def done(session_name: str | None, cleanup: bool, force: bool) -> None:
     Optionally removes the associated worktree with --cleanup.
     """
     done_session(session_name, cleanup=cleanup, force=force)
-
-
-def _parse_handoff_route(
-    source: str,
-    target: str | None,
-) -> tuple[str, str]:
-    """Parse handoff route from positional args or arrow syntax."""
-    if "->" in source:
-        parts = source.split("->", 1)
-        return parts[0].strip(), parts[1].strip()
-    if target:
-        return source, target
-    msg = "Handoff requires source and target: cw handoff impl idea"
-    raise CwError(msg)
-
-
-@main.command()
-@click.argument("source", required=True)
-@click.argument("target", required=False, default=None)
-@click.option(
-    "--client",
-    "-c",
-    default=None,
-    shell_complete=_complete_client,
-    help="Explicit client name (auto-detected if omitted).",
-)
-@handle_errors
-def handoff(source: str, target: str | None, client: str | None) -> None:
-    """Hand off context from one session to another.
-
-    Backgrounds the source and delivers context to the target.
-
-    \b
-    Examples:
-      cw handoff impl idea
-      cw handoff impl->idea
-      cw handoff impl idea --client sigma
-    """
-    src, tgt = _parse_handoff_route(source, target)
-    handoff_session(src, tgt, client_name=client)
 
 
 @main.command()
@@ -343,94 +265,6 @@ def init(
     click.echo("Next steps:")
     click.echo(f"  cw start {name}              # Start a session")
     click.echo("  cw config                    # View configuration")
-
-
-@main.command()
-@click.argument("client", shell_complete=_complete_client)
-@click.option("--all", "show_all", is_flag=True, help="Include completed plans.")
-@handle_errors
-def plan(client: str, show_all: bool) -> None:
-    """Show plan progress for a client workspace.
-
-    Parses .claude/plans/ markdown files for checkbox progress.
-    """
-    client_config = get_client(client)
-    plans = find_plan_files(client_config.workspace_path)
-    if not plans:
-        click.echo(f"No plans found for {client}.")
-        return
-
-    for plan_path in plans:
-        summary = parse_plan(plan_path)
-        done, total = summary.progress
-        if total == 0:
-            if show_all:
-                click.echo(f"{summary.title} (no tasks)")
-            continue
-        pct = int(done / total * 100)
-        if not show_all and pct == 100:
-            continue
-        click.echo(f"{summary.title} [{done}/{total}] {pct}%")
-        for phase in summary.phases:
-            p_done, p_total = phase.progress
-            if p_total == 0:
-                continue
-            label = "Done" if p_done == p_total else f"{p_done}/{p_total}"
-            click.echo(f"  {phase.name}: {label}")
-
-
-def _parse_since(since: str | None) -> datetime | None:
-    """Parse a relative time string like '2h', '1d', '7d' into a datetime."""
-    if since is None:
-        return None
-
-    now = datetime.now(UTC)
-    value = since[:-1]
-    unit = since[-1]
-    try:
-        n = int(value)
-    except ValueError:
-        msg = f"Invalid --since value: {since} (expected e.g. 2h, 1d, 7d)"
-        raise CwError(msg) from None
-    if unit == "h":
-        return now - timedelta(hours=n)
-    if unit == "d":
-        return now - timedelta(days=n)
-    msg = f"Invalid --since unit: {unit} (expected h or d)"
-    raise CwError(msg)
-
-
-@main.command()
-@click.argument("client", shell_complete=_complete_client)
-@click.option("--limit", "-n", type=int, default=20, help="Max events to show.")
-@click.option("--since", default=None, help="Filter by time (e.g. 2h, 1d, 7d).")
-@click.option("--type", "event_type", default=None, help="Comma-separated event types.")
-@handle_errors
-def history(client: str, limit: int, since: str | None, event_type: str | None) -> None:
-    """Show event history for a client.
-
-    \b
-    Examples:
-      cw history my-client
-      cw history my-client --limit 50
-      cw history my-client --since 2h
-      cw history my-client --type session_started,session_completed
-    """
-    since_dt = _parse_since(since)
-    type_filter = None
-    if event_type:
-        type_filter = [EventType(t.strip()) for t in event_type.split(",")]
-
-    events = load_history(client, since=since_dt, event_types=type_filter, limit=limit)
-    if not events:
-        click.echo(f"No history events for {client}.")
-        return
-
-    for event in events:
-        ts = _relative_time(event.timestamp)
-        detail = f" - {event.detail}" if event.detail else ""
-        session = f" [{event.session_name}]" if event.session_name else ""
-        click.echo(f"{ts:<12} {event.event_type:<24}{session}{detail}")
 
 
 def _relative_time(dt: datetime | None) -> str:
@@ -560,7 +394,7 @@ def _display_status() -> None:
 
 @main.group()
 def queue() -> None:
-    """Manage the task queue for delegation and daemon processing."""
+    """Manage the task queue."""
 
 
 @queue.command(name="add")
@@ -740,329 +574,6 @@ def queue_fail(client: str, item_id: str, error_text: str) -> None:
     """Mark a queue item as failed."""
     fail_item(client, item_id, error_text)
     click.echo(f"Failed: {item_id}")
-
-
-# --- Delegate command ---
-
-
-@main.command()
-@click.argument("client", shell_complete=_complete_client)
-@click.argument("description")
-@click.option(
-    "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
-    default="debt",
-    help="Task purpose.",
-)
-@click.option("--prompt", default=None, help="Exact prompt for Claude.")
-@click.option("--interactive", is_flag=True, help="Leave Claude in interactive mode.")
-@click.option(
-    "--context-files",
-    default=None,
-    help="Comma-separated file paths for context.",
-)
-@click.option("--priority", type=int, default=0, help="Priority (higher = sooner).")
-@handle_errors
-def delegate(
-    client: str,
-    description: str,
-    purpose: str,
-    prompt: str | None,
-    interactive: bool,
-    context_files: str | None,
-    priority: int,
-) -> None:
-    """Delegate a task to a new Zellij pane running Claude.
-
-    Routes to an existing backgrounded session if one is available,
-    otherwise spawns a new pane.
-
-    \b
-    Examples:
-      cw delegate my-client "Fix ruff violations" --purpose debt
-      cw delegate my-client "Run pytest" --purpose impl --interactive
-      cw delegate my-client "Urgent fix" --priority 10
-    """
-    files = context_files.split(",") if context_files else None
-    delegate_task(
-        client,
-        description,
-        purpose=purpose,
-        prompt=prompt,
-        context_files=files,
-        interactive=interactive,
-        priority=priority,
-    )
-
-
-# --- Hook command group ---
-
-
-@main.group()
-def hook() -> None:
-    """Manage auto-background hooks for context monitoring."""
-
-
-@hook.command(name="install")
-@click.argument("client", shell_complete=_complete_client)
-@click.option(
-    "--threshold",
-    type=int,
-    default=None,
-    help="Turn count threshold (overrides client config).",
-)
-@handle_errors
-def hook_install(client: str, threshold: int | None) -> None:
-    """Install a context monitoring hook for a client."""
-    if threshold is None:
-        client_config = get_client(client)
-        threshold = client_config.auto_background_threshold
-    if threshold is None:
-        threshold = 50  # Default if not configured
-    install_context_hook(client, threshold)
-
-
-@hook.command(name="uninstall")
-@click.argument("client", shell_complete=_complete_client)
-@handle_errors
-def hook_uninstall(client: str) -> None:
-    """Remove the context monitoring hook for a client."""
-    uninstall_context_hook(client)
-
-
-@hook.command(name="status")
-@click.argument("client", shell_complete=_complete_client)
-@handle_errors
-def hook_status(client: str) -> None:
-    """Show hook configuration for a client."""
-    info = _hook_status_fn(client)
-    installed = "Yes" if info["installed"] else "No"
-    click.echo(f"Installed: {installed}")
-    click.echo(f"Script:    {info['script_path']}")
-    click.echo(f"Turns:     {info['turn_count']}")
-
-
-@hook.command(name="add")
-@click.argument("client", shell_complete=_complete_client)
-@click.argument(
-    "event_type",
-    type=click.Choice([e.value for e in EventType]),
-)
-@click.argument("command")
-@click.option("--description", "-d", default="", help="Human-readable description.")
-@handle_errors
-def hook_add(
-    client: str,
-    event_type: str,
-    command: str,
-    description: str,
-) -> None:
-    """Add an event hook that runs a shell command on lifecycle events.
-
-    \b
-    Examples:
-      cw hook add personal session_backgrounded "echo bg >> /tmp/cw.log"
-      cw hook add personal queue_item_completed "notify-send 'Done!'"
-    """
-    rule = add_event_hook(client, event_type, command, description=description)
-    click.echo(f"Added hook: {rule.event_type} -> {rule.command}")
-
-
-@hook.command(name="remove")
-@click.argument("client", shell_complete=_complete_client)
-@click.argument(
-    "event_type",
-    type=click.Choice([e.value for e in EventType]),
-)
-@handle_errors
-def hook_remove(client: str, event_type: str) -> None:
-    """Remove all event hooks for a given event type."""
-    removed = remove_event_hook(client, event_type)
-    if removed == 0:
-        click.echo(f"No hooks found for event type '{event_type}'.")
-    else:
-        click.echo(f"Removed {removed} hook(s) for '{event_type}'.")
-
-
-@hook.command(name="list")
-@click.argument("client", shell_complete=_complete_client)
-@handle_errors
-def hook_list(client: str) -> None:
-    """List all event hooks for a client."""
-    rules = list_event_hooks(client)
-    if not rules:
-        click.echo("No event hooks configured.")
-        return
-
-    click.echo(f"{'EVENT TYPE':<28} {'COMMAND'}")
-    click.echo("-" * 60)
-    for rule in rules:
-        click.echo(f"{rule.event_type:<28} {rule.command}")
-
-
-# --- Plugin command group ---
-
-
-@main.group()
-def plugin() -> None:
-    """Build and install the Zellij status bar plugin."""
-
-
-@plugin.command(name="build")
-@click.option(
-    "--plugin-dir",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Path to zellij-plugin source directory.",
-)
-@handle_errors
-def plugin_build(plugin_dir: Path | None) -> None:
-    """Build the WASM status bar plugin from Rust source.
-
-    Requires cargo (Rust toolchain) to be installed.
-    Auto-detects the plugin source directory in editable installs;
-    pass --plugin-dir for non-editable installs.
-    """
-    from cw.plugin import build_plugin
-
-    click.echo("Building Zellij plugin...")
-    wasm_path = build_plugin(plugin_dir=plugin_dir)
-    click.echo(f"Built: {wasm_path}")
-
-
-@plugin.command(name="install")
-@click.option(
-    "--build/--no-build",
-    "do_build",
-    default=True,
-    help="Build before installing (default: yes).",
-)
-@click.option(
-    "--plugin-dir",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Path to zellij-plugin source directory.",
-)
-@handle_errors
-def plugin_install(do_build: bool, plugin_dir: Path | None) -> None:
-    """Build and install the WASM plugin to Zellij's plugin directory.
-
-    \b
-    After install, restart Zellij to pick up the plugin:
-      cw start <client>
-    """
-    from cw.plugin import build_plugin, install_plugin
-
-    if do_build:
-        click.echo("Building Zellij plugin...")
-        wasm_path = build_plugin(plugin_dir=plugin_dir)
-        click.echo(f"Built: {wasm_path}")
-    else:
-        wasm_path = None
-
-    dest = install_plugin(wasm_path=wasm_path, plugin_dir=plugin_dir)
-    click.echo(f"Installed: {dest}")
-
-
-# --- Daemon command group ---
-
-
-@main.group()
-def daemon() -> None:
-    """Manage the background task processing daemon."""
-
-
-@daemon.command(name="start")
-@click.argument("client", required=False, default=None, shell_complete=_complete_client)
-@click.option(
-    "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
-    default="debt",
-    help="Purpose to process.",
-)
-@click.option("--poll-interval", type=int, default=30, help="Seconds between polls.")
-@click.option(
-    "--no-bootstrap",
-    is_flag=True,
-    default=False,
-    help="Don't auto-start sessions when none exist.",
-)
-@handle_errors
-def daemon_start(
-    client: str | None,
-    purpose: str,
-    poll_interval: int,
-    no_bootstrap: bool,
-) -> None:
-    """Start the daemon to process queued tasks.
-
-    With no arguments, monitors all client queues.
-    With CLIENT, monitors a specific client/purpose.
-
-    Runs in the foreground — designed to be spawned in a Zellij pane.
-    """
-    if client is None:
-        start_daemon_all(poll_interval=poll_interval)
-    else:
-        start_daemon(
-            client,
-            purpose,
-            poll_interval=poll_interval,
-            auto_bootstrap=not no_bootstrap,
-        )
-
-
-@daemon.command(name="stop")
-@click.argument("client", required=False, default=None, shell_complete=_complete_client)
-@click.option(
-    "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
-    default="debt",
-    help="Purpose daemon to stop.",
-)
-@handle_errors
-def daemon_stop(client: str | None, purpose: str) -> None:
-    """Stop a running daemon.
-
-    With no arguments, stops the all-queue daemon.
-    With CLIENT, stops the daemon for that client/purpose.
-    """
-    if client is None:
-        stop_daemon("_all", "_all")
-    else:
-        stop_daemon(client, purpose)
-
-
-@daemon.command(name="status")
-@click.argument("client", required=False, default=None, shell_complete=_complete_client)
-@handle_errors
-def daemon_status_cmd(client: str | None) -> None:
-    """Show running daemons."""
-    daemons = _daemon_status_fn(client)
-    if not daemons:
-        click.echo("No daemons running.")
-        return
-
-    click.echo(f"{'CLIENT':<18} {'PURPOSE':<10} {'PID':<8} {'STATUS'}")
-    click.echo("-" * 50)
-    for d in daemons:
-        status_label = "alive" if d["alive"] else "dead"
-        pid_str = str(d["pid"])
-        click.echo(f"{d['client']:<18} {d['purpose']:<10} {pid_str:<8} {status_label}")
-
-
-@main.command()
-@handle_errors
-def dashboard() -> None:
-    """Launch the interactive TUI dashboard.
-
-    Shows sessions, activity feed, and status across all clients.
-    Keys: r=Resume, b=Background, d=Done, q=Quit.
-    """
-    # Lazy: avoid loading Textual for non-TUI commands
-    from cw.tui import run_dashboard
-
-    run_dashboard()
 
 
 @main.command(name="run-claude")

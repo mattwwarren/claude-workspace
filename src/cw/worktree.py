@@ -141,35 +141,3 @@ def remove_worktree(
     _run_git(*args, cwd=_git_dir(client))
 
 
-def list_worktrees(client: ClientConfig) -> list[dict[str, str]]:
-    """List all git worktrees for the client's repo.
-
-    Returns a list of dicts with ``path`` and ``branch`` keys.
-    """
-    result = _run_git(
-        "worktree",
-        "list",
-        "--porcelain",
-        cwd=_git_dir(client),
-        check=False,
-    )
-    if result.returncode != 0:
-        return []
-
-    worktrees: list[dict[str, str]] = []
-    current: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        if line.startswith("worktree "):
-            if current:
-                worktrees.append(current)
-            current = {"path": line.split(" ", 1)[1]}
-        elif line.startswith("branch "):
-            ref = line.split(" ", 1)[1]
-            # Strip refs/heads/ prefix
-            current["branch"] = ref.removeprefix("refs/heads/")
-        elif not line.strip() and current:
-            worktrees.append(current)
-            current = {}
-    if current:
-        worktrees.append(current)
-    return worktrees

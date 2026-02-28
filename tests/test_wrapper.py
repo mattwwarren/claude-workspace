@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -16,8 +15,6 @@ from cw.models import CwState, Session, SessionPurpose, SessionStatus
 from cw.wrapper import (
     _detect_claude_session_id,
     _idle_signal_path,
-    _trigger_path,
-    _wait_for_trigger,
     run_claude_wrapper,
     signal_idle,
 )
@@ -30,12 +27,6 @@ class TestIdleSignalPath:
 
     def test_different_purposes(self) -> None:
         assert _idle_signal_path("c", "impl") != _idle_signal_path("c", "debt")
-
-
-class TestTriggerPath:
-    def test_format(self) -> None:
-        path = _trigger_path("my-client", "impl")
-        assert path == EVENTS_DIR / "my-client__impl.trigger"
 
 
 class TestSignalIdle:
@@ -210,61 +201,6 @@ class TestSignalIdle:
         assert "claude_session_id" not in payload
 
 
-class TestWaitForTrigger:
-    def test_returns_args_from_trigger(self, tmp_path: Path) -> None:
-        """Returns claude_args from trigger file."""
-        trigger = tmp_path / "test.trigger"
-        trigger.write_text(json.dumps({"claude_args": ["--resume", "--print"]}))
-
-        result = _wait_for_trigger(trigger, timeout=1.0, poll_interval=0.1)
-
-        assert result == ["--resume", "--print"]
-        assert not trigger.exists()  # Trigger consumed
-
-    def test_returns_empty_list_on_missing_args(self, tmp_path: Path) -> None:
-        """Returns empty list if trigger has no claude_args."""
-        trigger = tmp_path / "test.trigger"
-        trigger.write_text(json.dumps({"other": "data"}))
-
-        result = _wait_for_trigger(trigger, timeout=1.0, poll_interval=0.1)
-
-        assert result == []
-
-    def test_returns_none_on_timeout(self, tmp_path: Path) -> None:
-        """Returns None when no trigger appears within timeout."""
-        trigger = tmp_path / "test.trigger"
-
-        result = _wait_for_trigger(trigger, timeout=0.3, poll_interval=0.1)
-
-        assert result is None
-
-    def test_handles_malformed_json(self, tmp_path: Path) -> None:
-        """Returns empty list on malformed JSON in trigger."""
-        trigger = tmp_path / "test.trigger"
-        trigger.write_text("not valid json{{{")
-
-        result = _wait_for_trigger(trigger, timeout=1.0, poll_interval=0.1)
-
-        assert result == []
-        assert not trigger.exists()  # Still consumed
-
-    def test_waits_then_finds_trigger(self, tmp_path: Path) -> None:
-        """Trigger created after a short delay is detected."""
-        trigger = tmp_path / "test.trigger"
-
-        def _write_later() -> None:
-            time.sleep(0.2)
-            trigger.write_text(json.dumps({"claude_args": ["--resume"]}))
-
-        t = threading.Thread(target=_write_later)
-        t.start()
-
-        result = _wait_for_trigger(trigger, timeout=2.0, poll_interval=0.1)
-        t.join()
-
-        assert result == ["--resume"]
-
-
 class TestRunClaudeWrapper:
     def test_no_env_runs_claude_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without CW_CLIENT/CW_PURPOSE, runs claude and exits."""
@@ -302,10 +238,7 @@ class TestRunClaudeWrapper:
         )
         save_state(state)
 
-        with (
-            patch("cw.wrapper.subprocess.run") as mock_run,
-            patch("cw.wrapper._wait_for_trigger", return_value=None),
-        ):
+        with patch("cw.wrapper.subprocess.run") as mock_run:
             mock_run.return_value = type("Result", (), {"returncode": 0})()
             run_claude_wrapper(("--resume",))
 

@@ -9,21 +9,16 @@ Multi-session workspace orchestrator for Claude Code.
 - `src/cw/` - Main package
   - `cli.py` - Click CLI dispatcher
   - `config.py` - Client config loading (~/.config/cw/clients.yaml)
-  - `daemon.py` - Background daemon for session monitoring
   - `exceptions.py` - Custom exception hierarchy
   - `handoff.py` - Handoff document parsing
   - `history.py` - Event history tracking
-  - `hooks.py` - Hook system for session lifecycle events
   - `models.py` - Pydantic models (Session, Client, State)
-  - `notify.py` - Desktop notification integration
-  - `plan.py` - Plan file parsing and management
   - `prompts.py` - Prompt generation for Claude sessions
   - `queue.py` - Task queue for inter-session messaging
   - `session.py` - Session lifecycle (start, bg, resume)
-  - `tui.py` - Terminal UI components
   - `worktree.py` - Git worktree management for parallel work
+  - `wrapper.py` - Claude wrapper for IDLE signaling
   - `zellij.py` - Zellij CLI wrapper
-- `layouts/` - Jinja2 templates for Zellij layouts (.kdl.j2)
 - `config/` - Example configuration files
 - `tests/` - Test suite
 
@@ -57,27 +52,21 @@ Report format: Only actionable problems. Zero praise, zero summaries.
 
 ## Testing
 
-532 tests across 18 test files covering all modules.
+418 tests across 12 test files covering all modules.
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `test_cli.py` | CLI dispatch, Click integration | `cli.py` |
 | `test_config.py` | Config load/save, client lookup | `config.py` |
-| `test_daemon.py` | Daemon lifecycle, monitoring | `daemon.py` |
-| `test_delegate.py` | Task delegation, agent spawning | delegation logic |
 | `test_handoff.py` | Handoff parsing, mtime filtering | `handoff.py` |
 | `test_history.py` | Event history tracking | `history.py` |
-| `test_hooks.py` | Hook system, lifecycle events | `hooks.py` |
 | `test_models.py` | Models, enums, state queries | `models.py` |
-| `test_notify.py` | Desktop notifications | `notify.py` |
-| `test_plan.py` | Plan file parsing | `plan.py` |
 | `test_prompts.py` | Prompt generation | `prompts.py` |
 | `test_queue.py` | Task queue, messaging | `queue.py` |
 | `test_session_helpers.py` | `_relative_time` with freezegun | `session.py` helpers |
 | `test_session.py` | Session lifecycle (start/bg/resume) | `session.py` |
-| `test_structured_handoff.py` | Structured handoff format | `handoff.py` structured |
-| `test_tui.py` | Terminal UI components | `tui.py` |
 | `test_worktree.py` | Git worktree management | `worktree.py` |
+| `test_wrapper.py` | Claude wrapper, IDLE signaling | `wrapper.py` |
 | `test_zellij.py` | Zellij wrapper, layout generation | `zellij.py` |
 
 **Patterns:**
@@ -114,9 +103,8 @@ _CW_COMPLETE=fish_source cw | source
 Run `cw completion <shell>` to see the activation snippet.
 
 Completions provide:
-- Client names for `start`, `switch`
+- Client names for `start`
 - Session names for `resume` (filters out completed sessions)
-- Purpose choices for `hand` (via Click.Choice, automatic)
 
 ## Common Workflows
 
@@ -134,15 +122,6 @@ cw resume my-client/impl
 
 # Check what's running
 cw status
-```
-
-### Handing off between sessions
-
-```bash
-# Send a task from impl to debt session
-cw hand debt "Fix the ruff violations in session.py" --from impl
-
-# Messages are persisted to .cw/messages/ for audit
 ```
 
 ### Multi-client workflow
@@ -168,7 +147,6 @@ cw list
 - **On-demand health checks**: `cw status` and `cw start` detect crashed Claude panes via Zellij's `dump-layout` output. No background daemon needed.
 - **File-based locking**: Prevents concurrent state corruption from parallel session operations.
 - **Event history**: Audit trail for session lifecycle transitions.
-- **Background daemon**: Optional monitoring for session health and auto-recovery.
 
 ---
 

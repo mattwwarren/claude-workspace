@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.config import (
-    detect_client_from_cwd,
     ensure_config,
     get_client,
     init_client,
@@ -201,45 +200,6 @@ class TestGetClient:
     def test_no_clients_shows_none(self, tmp_config_dir: Path) -> None:
         with pytest.raises(CwError, match=r"\(none configured\)"):
             get_client("nope")
-
-
-class TestDetectClientFromCwd:
-    def test_match_when_cwd_under_workspace(
-        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        workspace = tmp_config_dir / "workspace"
-        workspace.mkdir(parents=True)
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(f"clients:\n  proj:\n    workspace_path: {workspace}\n")
-        monkeypatch.chdir(workspace)
-        result = detect_client_from_cwd()
-        assert result is not None
-        assert result.name == "proj"
-
-    def test_no_match_returns_none(
-        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n  proj:\n    workspace_path: /nowhere/special\n"
-        )
-        monkeypatch.chdir(tmp_config_dir)
-        result = detect_client_from_cwd()
-        assert result is None
-
-    def test_skips_worktree_clients(
-        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Worktree clients have sentinel workspace_path and should be skipped."""
-        repo = tmp_config_dir / "repo"
-        repo.mkdir()
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n  wt-client:\n    repo_path: {repo}\n    branch: wt-branch\n"
-        )
-        monkeypatch.chdir(repo)
-        result = detect_client_from_cwd()
-        assert result is None
 
 
 class TestLoadSaveState:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 from freezegun import freeze_time
 
@@ -124,18 +123,17 @@ def test_load_with_event_type_filter(tmp_config_dir: Path) -> None:
 
 
 def test_record_event_appends(tmp_config_dir: Path) -> None:
-    """record_event writes to JSONL and skips notify when disabled."""
-    with patch("cw.config.load_clients", return_value={}):
-        event = HistoryEvent(
-            event_type=EventType.DAEMON_STARTED,
-            client="test-client",
-            purpose="debt",
-        )
-        record_event("test-client", event)
+    """record_event writes to JSONL."""
+    event = HistoryEvent(
+        event_type=EventType.SESSION_STARTED,
+        client="test-client",
+        purpose="debt",
+    )
+    record_event("test-client", event)
 
     events = load_history("test-client")
     assert len(events) == 1
-    assert events[0].event_type == EventType.DAEMON_STARTED
+    assert events[0].event_type == EventType.SESSION_STARTED
 
 
 def test_history_event_metadata(tmp_config_dir: Path) -> None:

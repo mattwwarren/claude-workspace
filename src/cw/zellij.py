@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 from jinja2 import DictLoader, Environment
 
 from cw.exceptions import ZellijError
-from cw.plugin import INSTALL_DIR as _PLUGIN_INSTALL_DIR
-from cw.plugin import PLUGIN_FILENAME as _PLUGIN_FILENAME
+
+_PLUGIN_INSTALL_DIR = Path.home() / ".config" / "zellij" / "plugins"
+_PLUGIN_FILENAME = "cw_status.wasm"
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig

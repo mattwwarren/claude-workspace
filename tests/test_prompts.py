@@ -8,7 +8,6 @@ from cw.prompts import (
     CW_COMMAND_REFERENCE,
     PURPOSE_PROMPTS,
     build_session_context,
-    escape_kdl_string,
     get_purpose_prompt,
 )
 
@@ -113,29 +112,12 @@ class TestBuildSessionContext:
     def test_includes_command_reference(self) -> None:
         result = build_session_context("personal", "/home/user/ws", "impl")
         assert "[cw commands]" in result
-        assert "cw hand" in result
-        assert "cw delegate" in result
         assert "cw queue add" in result
         assert "cw bg" in result
-        assert "cw handoff" in result
         assert "cw status" in result
 
     def test_command_reference_constant_not_empty(self) -> None:
         assert CW_COMMAND_REFERENCE
-        assert "cw hand" in CW_COMMAND_REFERENCE
+        assert "cw queue add" in CW_COMMAND_REFERENCE
 
 
-class TestEscapeKdlString:
-    def test_quotes_escaped(self) -> None:
-        assert escape_kdl_string('say "hello"') == 'say \\"hello\\"'
-
-    def test_backslash_escaped(self) -> None:
-        assert escape_kdl_string("path\\to") == "path\\\\to"
-
-    def test_no_special_chars(self) -> None:
-        text = "simple text"
-        assert escape_kdl_string(text) == text
-
-    def test_mixed_special_chars(self) -> None:
-        text = 'a "b" c\\d'
-        assert escape_kdl_string(text) == 'a \\"b\\" c\\\\d'

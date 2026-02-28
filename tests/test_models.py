@@ -324,61 +324,6 @@ class TestCwState:
         assert result is not None
         assert result.id == "second"
 
-    def test_client_sessions(self, sample_state: CwState) -> None:
-        result = sample_state.client_sessions("test-client")
-        assert len(result) == 2
-        assert all(s.client == "test-client" for s in result)
-
-    def test_client_sessions_includes_all_statuses(self) -> None:
-        state = CwState(
-            sessions=[
-                Session(
-                    id="a1",
-                    name="c/impl",
-                    client="c",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=Path("/dev/null"),
-                ),
-                Session(
-                    id="a2",
-                    name="c/idea",
-                    client="c",
-                    purpose=SessionPurpose.IDEA,
-                    status=SessionStatus.COMPLETED,
-                    workspace_path=Path("/dev/null"),
-                ),
-            ]
-        )
-        result = state.client_sessions("c")
-        assert len(result) == 2
-
-    def test_client_sessions_empty(self, sample_state: CwState) -> None:
-        result = sample_state.client_sessions("nonexistent")
-        assert result == []
-
-    def test_active_for_client(self, sample_state: CwState) -> None:
-        result = sample_state.active_for_client("test-client")
-        assert len(result) == 2  # 1 active + 1 backgrounded
-        statuses = {s.status for s in result}
-        assert statuses == {SessionStatus.ACTIVE, SessionStatus.BACKGROUNDED}
-
-    def test_active_for_client_excludes_completed(self) -> None:
-        state = CwState(
-            sessions=[
-                Session(
-                    id="b1",
-                    name="c/impl",
-                    client="c",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.COMPLETED,
-                    workspace_path=Path("/dev/null"),
-                ),
-            ]
-        )
-        result = state.active_for_client("c")
-        assert result == []
-
     def test_idled_sessions_filter(self) -> None:
         state = CwState(
             sessions=[
@@ -404,23 +349,6 @@ class TestCwState:
         assert len(idled) == 1
         assert idled[0].id == "s1"
 
-    def test_active_for_client_includes_idle(self) -> None:
-        state = CwState(
-            sessions=[
-                Session(
-                    id="s1",
-                    name="c/impl",
-                    client="c",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.IDLE,
-                    workspace_path=Path("/dev/null"),
-                ),
-            ]
-        )
-        result = state.active_for_client("c")
-        assert len(result) == 1
-        assert result[0].status == SessionStatus.IDLE
-
     def test_idle_at_defaults_to_none(self) -> None:
         s = Session(
             name="c/impl",
@@ -429,61 +357,6 @@ class TestCwState:
             workspace_path=Path("/dev/null"),
         )
         assert s.idle_at is None
-
-    def test_sibling_sessions(self, sample_state: CwState) -> None:
-        source = sample_state.sessions[0]  # test-client/impl ACTIVE
-        siblings = sample_state.sibling_sessions(source)
-        assert len(siblings) == 1
-        assert siblings[0].id == "sess0002"  # test-client/idea BACKGROUNDED
-
-    def test_sibling_sessions_excludes_completed(self) -> None:
-        state = CwState(
-            sessions=[
-                Session(
-                    id="s1",
-                    name="c/impl",
-                    client="c",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=Path("/dev/null"),
-                ),
-                Session(
-                    id="s2",
-                    name="c/idea",
-                    client="c",
-                    purpose=SessionPurpose.IDEA,
-                    status=SessionStatus.COMPLETED,
-                    workspace_path=Path("/dev/null"),
-                ),
-            ]
-        )
-        siblings = state.sibling_sessions(state.sessions[0])
-        assert siblings == []
-
-    def test_sibling_sessions_excludes_other_clients(self) -> None:
-        state = CwState(
-            sessions=[
-                Session(
-                    id="s1",
-                    name="c/impl",
-                    client="c",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=Path("/dev/null"),
-                ),
-                Session(
-                    id="s2",
-                    name="d/impl",
-                    client="d",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=Path("/dev/null"),
-                ),
-            ]
-        )
-        siblings = state.sibling_sessions(state.sessions[0])
-        assert siblings == []
-
 
 class TestCompletionReason:
     def test_enum_values(self) -> None:

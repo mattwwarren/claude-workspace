@@ -9,7 +9,6 @@ from cw.models import ClientConfig
 from cw.worktree import (
     _git_dir,
     create_worktree,
-    list_worktrees,
     remove_worktree,
     resolve_worktree_base,
     slugify_branch,
@@ -362,49 +361,3 @@ class TestRemoveWorktree:
         assert any("--force" in call for call in git_calls)
 
 
-class TestListWorktrees:
-    def test_parses_porcelain_output(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
-        porcelain = (
-            "worktree /home/user/repo\n"
-            "branch refs/heads/main\n"
-            "\n"
-            "worktree /home/user/.worktrees/feat-search\n"
-            "branch refs/heads/feat/search\n"
-            "\n"
-        )
-
-        def mock_run(
-            *args: str,
-            cwd: object,
-            check: bool = True,
-        ) -> MagicMock:
-            return MagicMock(returncode=0, stdout=porcelain, stderr="")
-
-        monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        result = list_worktrees(client)
-        assert len(result) == 2
-        assert result[0]["path"] == "/home/user/repo"
-        assert result[0]["branch"] == "main"
-        assert result[1]["branch"] == "feat/search"
-
-    def test_empty_on_failure(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
-
-        def mock_run(
-            *args: str,
-            cwd: object,
-            check: bool = True,
-        ) -> MagicMock:
-            return MagicMock(returncode=1, stdout="", stderr="error")
-
-        monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert list_worktrees(client) == []

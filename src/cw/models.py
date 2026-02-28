@@ -228,30 +228,3 @@ class CwState(BaseModel):
                 return s
         return None
 
-    def client_sessions(self, client: str) -> list[Session]:
-        """All sessions for a client, regardless of status."""
-        return [s for s in self.sessions if s.client == client]
-
-    def active_for_client(self, client: str) -> list[Session]:
-        """Active, idle, and backgrounded sessions for a client."""
-        return [
-            s
-            for s in self.sessions
-            if s.client == client
-            and s.status
-            in (
-                SessionStatus.ACTIVE,
-                SessionStatus.IDLE,
-                SessionStatus.BACKGROUNDED,
-            )
-        ]
-
-    def sibling_sessions(self, session: Session) -> list[Session]:
-        """Non-completed sessions for the same client, excluding the given session."""
-        return [
-            s
-            for s in self.sessions
-            if s.client == session.client
-            and s.id != session.id
-            and s.status != SessionStatus.COMPLETED
-        ]

@@ -4,15 +4,12 @@ from __future__ import annotations
 
 CW_COMMAND_REFERENCE = """\
 [cw commands]
-- cw hand <purpose> "message" — send message to an active sibling session
-- cw delegate <client> "task" --purpose <purpose> — spawn autonomous task in new pane
-- cw queue add <client> "task" — queue work for daemon pickup
+- cw queue add <client> "task" — queue work for later pickup
 - cw queue next <client> [--purpose] [--json] — peek at next pending item (read-only)
 - cw queue claim <client> [--purpose] [--id] [--json] — claim next item (RUNNING)
 - cw queue complete <client> <item_id> [--result <text>] — mark item completed
 - cw queue fail <client> <item_id> [--error <text>] — mark item failed
 - cw bg — background current session (runs /session-done first)
-- cw handoff <source> <target> — full context transfer between sessions
 - cw status — show all sessions and their states"""
 
 _AGENT_TEAM_GUIDANCE = (
@@ -24,8 +21,7 @@ _AGENT_TEAM_GUIDANCE = (
     "use Task agents to review architecture, code quality, test coverage, "
     "and API contracts.\n"
     "- Feed review findings back as follow-up work items. "
-    "Queue debt items via `cw queue add`, send implementation "
-    "feedback via `cw hand impl`."
+    "Queue debt items via `cw queue add`."
 )
 
 PURPOSE_PROMPTS: dict[str, str] = {
@@ -50,8 +46,7 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "Clearing context drops all delegation work on the floor. "
         "Always continue in the same context after plan approval.\n\n"
         "When a plan is ready, use `/queue-plan` to queue it for the impl "
-        "session. You can also use `cw hand impl` for urgent items or "
-        "`/queue-debt` for quality issues." + _AGENT_TEAM_GUIDANCE
+        "session. Use `/queue-debt` for quality issues." + _AGENT_TEAM_GUIDANCE
     ),
     "debt": (
         "You are in the TECH DEBT session. "
@@ -128,9 +123,3 @@ def get_purpose_prompt(
     return prompt
 
 
-def escape_kdl_string(text: str) -> str:
-    """Escape a string for safe embedding in KDL values.
-
-    Handles quotes and backslashes that could break KDL parsing.
-    """
-    return text.replace("\\", "\\\\").replace('"', '\\"')
