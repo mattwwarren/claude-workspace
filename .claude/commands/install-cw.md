@@ -25,7 +25,7 @@ If any required tools are missing, stop and tell the user what needs to be insta
 - **Zellij**: Install from https://zellij.dev/documentation/installation (cargo, brew, or package manager)
 - **Claude Code**: `npm install -g @anthropic-ai/claude-code`
 
-Optional: check for yazi (`yazi --version`) - not required but enhances the file tree pane.
+Optional: check for peon-ping (`peon status`) - not required but provides sound notifications when Claude needs attention.
 
 ## Step 2: Install cw
 

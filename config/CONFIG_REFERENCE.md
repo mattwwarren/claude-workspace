@@ -7,7 +7,6 @@ Complete reference for `cw` client configuration.
 - **[Zellij](https://zellij.dev/)** - Terminal multiplexer (required)
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** - AI coding assistant (required)
 - **[uv](https://docs.astral.sh/uv/)** - Python package manager (for installation)
-- **[Yazi](https://yazi-rs.github.io/)** - Terminal file manager (optional, for tree pane)
 
 ## Quick Start
 

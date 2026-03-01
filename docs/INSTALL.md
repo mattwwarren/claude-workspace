@@ -12,7 +12,7 @@ Install these before installing cw:
 | [Python 3.13+](https://python.org/) | Yes | Runtime | Via uv: `uv python install 3.13` |
 | [Zellij](https://zellij.dev/) | Yes | Terminal multiplexer | `cargo install zellij` or package manager |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Yes | AI coding assistant | `npm install -g @anthropic-ai/claude-code` |
-| [Yazi](https://yazi-rs.github.io/) | No | File tree pane | `cargo install yazi-fm` or package manager |
+| [peon-ping](https://github.com/PeonPing/peon-ping) | No | Sound notifications when Claude needs attention | `curl -fsSL peonping.com/install \| bash` |
 
 ### Verifying Prerequisites
 
@@ -22,7 +22,7 @@ uv --version          # >= 0.4.0
 python3 --version     # >= 3.13
 zellij --version      # any recent version
 claude --version      # any recent version
-yazi --version        # optional
+peon status           # optional
 ```
 
 ## Installation

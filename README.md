@@ -45,7 +45,7 @@ cw status
 - [Zellij](https://zellij.dev/) - Terminal multiplexer
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) - AI coding assistant
 - [uv](https://docs.astral.sh/uv/) - Python package manager
-- [Yazi](https://yazi-rs.github.io/) - Terminal file manager (optional, for tree pane)
+- [peon-ping](https://github.com/PeonPing/peon-ping) - Sound notifications when Claude needs attention (optional)
 
 ## Commands
 
