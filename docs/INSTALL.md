@@ -36,7 +36,7 @@ uv tool install git+https://github.com/mattwwarren/claude-workspace.git
 Pin to a specific release:
 
 ```bash
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.3.0
+uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.4.0
 ```
 
 ### From Local Clone
@@ -138,15 +138,11 @@ clients:
 ### Full Configuration
 
 ```yaml
-notifications: true  # global default
-
 clients:
   my-project:
     workspace_path: /home/user/projects/my-project
     default_branch: main
     auto_purposes: [impl, idea, debt]
-    notifications: true
-    auto_background_threshold: 40
     purpose_prompts:
       impl: |
         Focus on implementation. Follow existing patterns.

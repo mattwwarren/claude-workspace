@@ -45,20 +45,12 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `workspace_path` | path | *required* | Absolute path to the project repository |
 | `default_branch` | string | `"main"` | Default git branch |
 | `auto_purposes` | list | `[idea, impl, debt]` | Session purposes to auto-start with `cw start` |
-| `notifications` | bool | `false` | Enable desktop notifications for session events |
-| `auto_background_threshold` | int | *none* | Auto-background session after N conversation turns |
 | `purpose_prompts` | dict | `{}` | Custom prompts per session purpose |
 | `worktree_base` | path | *none* | Base directory for git worktree isolation |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
-
-### Global Fields
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `notifications` | bool | `false` | Default notification setting for all clients |
 
 ## Session Purposes
 
@@ -135,18 +127,6 @@ clients:
       idea: |
         Brainstorm features for the next sprint.
         Focus on user experience improvements.
-```
-
-### Auto-Background with Notifications
-
-```yaml
-notifications: true  # global default
-
-clients:
-  my-project:
-    workspace_path: /home/user/projects/my-project
-    default_branch: main
-    auto_background_threshold: 40
 ```
 
 ### Worktree Mode with Base Directory

@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "0.3.0"
+version = "0.4.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -14,7 +14,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
     "ruamel.yaml>=0.18.6",
-    "textual>=1.0.0",
+
 ]
 
 [project.urls]
@@ -95,12 +95,6 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "src/cw/models.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
-]
-"src/cw/history.py" = [
-    "PLC0415",  # Lazy imports in record_event: notify (circular) and config (conditional)
-]
-"src/cw/cli.py" = [
-    "PLC0415",  # Lazy import of cw.tui to avoid loading Textual for non-TUI commands
 ]
 "tests/**" = [
     "S101",   # assert is fine in tests
