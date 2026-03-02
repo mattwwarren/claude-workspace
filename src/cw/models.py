@@ -227,4 +227,3 @@ class CwState(BaseModel):
             if s.name == identifier or s.id == identifier:
                 return s
         return None
-

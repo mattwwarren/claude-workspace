@@ -579,5 +579,3 @@ def done_session(
         click.echo(f"Removing worktree for branch '{session.branch}'...")
         remove_worktree(client, session.branch, force=force)
         click.echo("Worktree removed.")
-
-

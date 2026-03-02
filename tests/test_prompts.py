@@ -119,5 +119,3 @@ class TestBuildSessionContext:
     def test_command_reference_constant_not_empty(self) -> None:
         assert CW_COMMAND_REFERENCE
         assert "cw queue add" in CW_COMMAND_REFERENCE
-
-

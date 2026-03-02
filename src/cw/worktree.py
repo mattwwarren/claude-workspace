@@ -139,5 +139,3 @@ def remove_worktree(
         args.append("--force")
 
     _run_git(*args, cwd=_git_dir(client))
-
-

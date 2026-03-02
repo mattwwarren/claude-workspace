@@ -113,5 +113,3 @@ def signal_idle(
             metadata={"exit_code": str(exit_code)},
         ),
     )
-
-

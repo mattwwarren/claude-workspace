@@ -359,5 +359,3 @@ class TestRemoveWorktree:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         remove_worktree(client, "feat/dirty", force=True)
         assert any("--force" in call for call in git_calls)
-
-
