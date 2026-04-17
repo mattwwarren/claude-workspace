@@ -10,17 +10,15 @@ from pathlib import Path
 import click
 from click.shell_completion import CompletionItem
 
-from cw import __version__, zellij
+from cw import __version__
 from cw.config import (
     init_client,
     load_clients,
     load_state,
-    save_state,
     show_config,
 )
 from cw.exceptions import CwError
 from cw.models import (
-    CompletionReason,
     CwState,
     QueueItem,
     QueueItemStatus,
@@ -41,7 +39,6 @@ from cw.queue import (
     remove_item,
 )
 from cw.session import (
-    CW_SESSION,
     background_all_sessions,
     background_session,
     done_session,
@@ -315,38 +312,13 @@ def _display_sessions() -> None:
         click.echo(f"{s.client:<18} {s.purpose:<10} {s.status:<14} {s.id:<10} {since}")
 
 
-def _check_and_mark_dead_sessions(state: CwState) -> list[Session]:
-    """Check active sessions for dead panes, mark them COMPLETED.
+def _check_and_mark_dead_sessions(_state: CwState) -> list[Session]:
+    """Check active sessions for dead surfaces, mark them COMPLETED.
 
-    Inspects each client's tab individually so multi-tab sessions
-    are checked correctly.
+    Currently a stub — cmux health check will be implemented in a follow-up
+    ticket once the cmux surface liveness API is determined.
     """
-    if not zellij.session_exists(CW_SESSION):
-        return []
-
-    dead: list[Session] = []
-    now = datetime.now(UTC)
-    # Cache health per client tab to avoid repeated dump-layout calls
-    tab_health: dict[str, dict[str, bool]] = {}
-    for s in state.active_sessions():
-        tab = s.zellij_tab or s.client
-        if tab not in tab_health:
-            tab_health[tab] = zellij.check_pane_health(
-                session=CW_SESSION,
-                tab_name=tab,
-            )
-        health = tab_health[tab]
-        pane_name = s.zellij_pane or s.purpose
-        if pane_name in health and not health[pane_name]:
-            s.status = SessionStatus.COMPLETED
-            s.completed_reason = CompletionReason.CRASHED
-            s.completed_at = now
-            dead.append(s)
-
-    if dead:
-        save_state(state)
-
-    return dead
+    return []
 
 
 def _display_status() -> None:

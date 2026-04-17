@@ -128,8 +128,7 @@ class Session(BaseModel):
     workspace_path: Path
     worktree_path: Path | None = None
     branch: str | None = None
-    zellij_pane: str | None = None
-    zellij_tab: str | None = None
+    surface_ref: str | None = None
     last_handoff_path: Path | None = None
     claude_session_id: str | None = None
     auto_backgrounded: bool = False
@@ -172,6 +171,7 @@ class ClientConfig(BaseModel):
     purpose_prompts: dict[str, str] = Field(default_factory=dict)
     auto_background_threshold: int | None = None
     notifications: bool = False
+    cmux_workspace: str | None = None
 
     @model_validator(mode="after")
     def _validate_path_config(self) -> ClientConfig:

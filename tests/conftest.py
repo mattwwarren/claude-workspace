@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.cmux import FakeCmuxAdapter
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
 
 if TYPE_CHECKING:
@@ -70,8 +72,7 @@ def sample_session(sample_client: ClientConfig) -> Session:
         purpose=SessionPurpose.IMPL,
         status=SessionStatus.ACTIVE,
         workspace_path=sample_client.workspace_path,
-        zellij_pane="impl",
-        zellij_tab="test-client",
+        surface_ref="impl",
         started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
     )
 
@@ -117,114 +118,9 @@ def sample_state(sample_client: ClientConfig) -> CwState:
 
 
 @pytest.fixture
-def mock_zellij(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> dict[str, list[tuple[object, ...]]]:
-    """Patch all cw.zellij functions used by session.py, returning call tracker."""
-    calls: dict[str, list[tuple[object, ...]]] = {
-        "is_installed": [],
-        "in_zellij_session": [],
-        "resolve_session_target": [],
-        "session_exists": [],
-        "generate_layout": [],
-        "create_and_attach": [],
-        "attach_session": [],
-        "go_to_tab": [],
-        "focus_pane": [],
-        "write_to_pane": [],
-        "check_pane_health": [],
-        "new_pane": [],
-        "new_tab": [],
-        "rename_tab": [],
-        "delete_exited_session": [],
-    }
-
-    def _is_installed() -> bool:
-        calls["is_installed"].append(())
-        return True
-
-    def _in_zellij() -> bool:
-        calls["in_zellij_session"].append(())
-        return False
-
-    def _resolve_session_target(default: str) -> str | None:
-        calls["resolve_session_target"].append((default,))
-        # Mock is "outside zellij" by default, so return the default
-        return default
-
-    def _session_exists(name: str) -> bool:
-        calls["session_exists"].append((name,))
-        return False
-
-    def _generate_layout(c: object, **kwargs: object) -> Path:
-        calls["generate_layout"].append((c, kwargs))
-        return Path(tmp_path / "layout.kdl")
-
-    def _create_and_attach(s: str, lp: object) -> None:
-        calls["create_and_attach"].append((s, lp))
-
-    def _attach(s: str) -> None:
-        calls["attach_session"].append((s,))
-
-    def _go_to_tab(t: str, session: str | None = None) -> None:
-        calls["go_to_tab"].append((t, session))
-
-    def _focus_pane(
-        p: str,
-        session: str | None = None,
-        tab_name: str | None = None,
-    ) -> None:
-        calls["focus_pane"].append((p, session, tab_name))
-
-    def _write_to_pane(t: str, session: str | None = None) -> None:
-        calls["write_to_pane"].append((t, session))
-
-    def _check_pane_health(
-        session: str | None = None,
-        tab_name: str | None = None,
-    ) -> dict[str, bool]:
-        calls["check_pane_health"].append((session, tab_name))
-        return {}
-
-    def _new_pane(
-        command: str,
-        **kwargs: object,
-    ) -> None:
-        calls["new_pane"].append((command, kwargs))
-
-    def _new_tab(
-        client: object,
-        **kwargs: object,
-    ) -> None:
-        calls["new_tab"].append((client, kwargs))
-
-    def _rename_tab(
-        new_name: str,
-        session: str | None = None,
-    ) -> None:
-        calls["rename_tab"].append((new_name, session))
-
-    def _delete_exited_session(session_name: str) -> bool:
-        calls["delete_exited_session"].append((session_name,))
-        return False
-
-    monkeypatch.setattr("cw.zellij.delete_exited_session", _delete_exited_session)
-    monkeypatch.setattr("cw.zellij.new_pane", _new_pane)
-    monkeypatch.setattr("cw.zellij.new_tab", _new_tab)
-    monkeypatch.setattr("cw.zellij.rename_tab", _rename_tab)
-    monkeypatch.setattr("cw.zellij.is_installed", _is_installed)
-    monkeypatch.setattr("cw.zellij.in_zellij_session", _in_zellij)
-    monkeypatch.setattr("cw.zellij.resolve_session_target", _resolve_session_target)
-    monkeypatch.setattr("cw.zellij.session_exists", _session_exists)
-    monkeypatch.setattr("cw.zellij.generate_layout", _generate_layout)
-    monkeypatch.setattr("cw.zellij.create_and_attach", _create_and_attach)
-    monkeypatch.setattr("cw.zellij.attach_session", _attach)
-    monkeypatch.setattr("cw.zellij.go_to_tab", _go_to_tab)
-    monkeypatch.setattr("cw.zellij.focus_pane", _focus_pane)
-    monkeypatch.setattr("cw.zellij.write_to_pane", _write_to_pane)
-    monkeypatch.setattr("cw.zellij.check_pane_health", _check_pane_health)
-
-    return calls
+def mock_cmux_adapter() -> FakeCmuxAdapter:
+    """A FakeCmuxAdapter for testing session operations."""
+    return FakeCmuxAdapter()
 
 
 @pytest.fixture
@@ -258,6 +154,7 @@ def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
             ["git", "init", str(repo)],
             capture_output=True,
             check=True,
+            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
         )
         return repo
 
