@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from cw.models import (
+    DEFAULT_AUTO_PURPOSES,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -23,10 +24,9 @@ class TestSessionPurpose:
         assert SessionPurpose.IMPL.value == "impl"
         assert SessionPurpose.IDEA.value == "idea"
         assert SessionPurpose.DEBT.value == "debt"
-        assert SessionPurpose.EXPLORE.value == "explore"
 
     def test_all_values(self) -> None:
-        assert len(SessionPurpose) == 4
+        assert len(SessionPurpose) == 3
 
 
 class TestSessionStatus:
@@ -175,8 +175,8 @@ class TestClientConfig:
     def test_auto_purposes_instances_are_independent(self) -> None:
         c1 = ClientConfig(name="a", workspace_path=Path("/dev/null"))
         c2 = ClientConfig(name="b", workspace_path=Path("/dev/null"))
-        c1.auto_purposes.append(SessionPurpose.EXPLORE)
-        assert SessionPurpose.EXPLORE not in c2.auto_purposes
+        c1.auto_purposes.append(SessionPurpose.IMPL)
+        assert len(c2.auto_purposes) == len(DEFAULT_AUTO_PURPOSES)
 
     def test_default_purpose_prompts(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))

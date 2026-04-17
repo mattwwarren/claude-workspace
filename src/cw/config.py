@@ -134,11 +134,14 @@ def show_config() -> None:
 def _is_git_repo(path: Path) -> bool:
     """Check if a path is inside a git repository."""
     try:
+        # Strip GIT_* env vars so leaked worktree env doesn't affect detection.
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
             text=True,
             check=False,
+            env=clean_env,
         )
         return result.returncode == 0
     except OSError:
