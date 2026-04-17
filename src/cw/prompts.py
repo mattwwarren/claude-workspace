@@ -59,12 +59,6 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "with agent teams. Use `/queue-debt` to add new debt items."
         + _AGENT_TEAM_GUIDANCE
     ),
-    "explore": (
-        "You are in the EXPLORE session. "
-        "Read and analyze the codebase to understand architecture and patterns. "
-        "Do not make any changes to files. "
-        "Answer questions and provide insights about the code."
-    ),
 }
 
 

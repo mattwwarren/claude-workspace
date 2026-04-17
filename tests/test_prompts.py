@@ -28,11 +28,6 @@ class TestGetPurposePrompt:
         assert prompt is not None
         assert "TECH DEBT" in prompt
 
-    def test_default_explore_prompt(self) -> None:
-        prompt = get_purpose_prompt("explore")
-        assert prompt is not None
-        assert "EXPLORE" in prompt
-
     def test_unknown_purpose_returns_none(self) -> None:
         assert get_purpose_prompt("unknown") is None
 
