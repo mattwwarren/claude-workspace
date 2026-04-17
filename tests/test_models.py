@@ -358,6 +358,7 @@ class TestCwState:
         )
         assert s.idle_at is None
 
+
 class TestCompletionReason:
     def test_enum_values(self) -> None:
         assert CompletionReason.USER.value == "user"

@@ -89,5 +89,3 @@ def build_task_prompt(task: TaskSpec) -> str:
     lines.append("Instructions:")
     lines.append(task.prompt)
     return "\n".join(lines)
-
-

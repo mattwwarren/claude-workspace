@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,10 +19,13 @@ from cw.config import (
     save_state,
     show_config,
 )
+from cw.events import advance_cursor, read_events
+from cw.events import record_event as record_orchestrator_event
 from cw.exceptions import CwError
 from cw.models import (
     CompletionReason,
     CwState,
+    OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
     Session,
@@ -574,6 +578,140 @@ def queue_fail(client: str, item_id: str, error_text: str) -> None:
     """Mark a queue item as failed."""
     fail_item(client, item_id, error_text)
     click.echo(f"Failed: {item_id}")
+
+
+# --- Event bus command group ---
+
+
+@main.group()
+def event() -> None:
+    """Manage the orchestrator event bus."""
+
+
+_VALID_EVENT_TYPES = {e.value for e in OrchestratorEventType}
+
+
+@event.command(name="record")
+@click.argument("event_type")
+@click.option("--payload", default="{}", help="JSON payload string.")
+@click.option("--correlation-id", default=None, help="Correlation ID to link events.")
+@handle_errors
+def event_record(
+    event_type: str,
+    payload: str,
+    correlation_id: str | None,
+) -> None:
+    """Record an event to the inbox.
+
+    EVENT_TYPE must be one of: ticket.enqueued, session.spawned,
+    session.completed, pr.registered, pr.ci_failed,
+    pr.review_received, pr.mergeable, pr.merged.
+    """
+    if event_type not in _VALID_EVENT_TYPES:
+        valid = ", ".join(sorted(_VALID_EVENT_TYPES))
+        msg = f"Unknown event type '{event_type}'. Valid types: {valid}"
+        raise CwError(msg)
+
+    try:
+        payload_dict = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        msg = f"Invalid JSON payload: {exc}"
+        raise CwError(msg) from exc
+
+    if not isinstance(payload_dict, dict):
+        msg = "Payload must be a JSON object (dict), not a scalar or list."
+        raise CwError(msg)
+
+    etype = OrchestratorEventType(event_type)
+    recorded = record_orchestrator_event(
+        etype,
+        payload_dict,
+        correlation_id=correlation_id,
+    )
+    click.echo(f"Recorded event: {recorded.id} ({recorded.type})")
+
+
+@event.command(name="tail")
+@click.option(
+    "--since",
+    default=None,
+    help="Consumer name (cursor) or ISO timestamp (e.g. 2025-01-01T00:00:00Z).",
+)
+@click.option(
+    "--type",
+    "type_filter",
+    multiple=True,
+    help="Filter by event type (repeatable).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output full event JSON.")
+@handle_errors
+def event_tail(
+    since: str | None,
+    type_filter: tuple[str, ...],
+    as_json: bool,
+) -> None:
+    """Read events from the inbox.
+
+    --since may be a consumer name (alphanumeric, e.g. 'daemon') whose
+    persisted cursor determines the starting position, or an ISO 8601
+    timestamp to filter by creation time.
+
+    When a consumer name is given, the cursor advances automatically
+    after reading.
+    """
+    # Determine if `since` is a consumer name or a timestamp.
+    # Consumer names: alphanumeric + underscores (no colons, no dashes, no dots).
+    consumer: str | None = None
+    since_ts: datetime | None = None
+
+    if since is not None:
+        # Heuristic: consumer names are simple identifiers (no colons or dashes)
+        if since.replace("_", "").isalnum():
+            consumer = since
+        else:
+            try:
+                since_ts = datetime.fromisoformat(since)
+                if since_ts.tzinfo is None:
+                    since_ts = since_ts.replace(tzinfo=UTC)
+            except ValueError as exc:
+                msg = (
+                    f"Cannot parse --since value '{since}'"
+                    " as consumer name or ISO timestamp."
+                )
+                raise CwError(msg) from exc
+
+    # Resolve event type filters
+    etype_filter: list[OrchestratorEventType] | None = None
+    if type_filter:
+        invalid = [t for t in type_filter if t not in _VALID_EVENT_TYPES]
+        if invalid:
+            valid = ", ".join(sorted(_VALID_EVENT_TYPES))
+            msg = f"Unknown event type(s): {', '.join(invalid)}. Valid: {valid}"
+            raise CwError(msg)
+        etype_filter = [OrchestratorEventType(t) for t in type_filter]
+
+    events = read_events(
+        consumer=consumer,
+        since_ts=since_ts,
+        event_types=etype_filter,
+    )
+
+    if not events:
+        click.echo("No events.")
+        return
+
+    for ev in events:
+        if as_json:
+            click.echo(ev.model_dump_json())
+        else:
+            ts = ev.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+            corr = f" corr={ev.correlation_id}" if ev.correlation_id else ""
+            click.echo(f"{ts}  {ev.id}  {ev.type}{corr}  {ev.payload}")
+
+    # Advance consumer cursor to last event seen
+    if consumer is not None and events:
+        advance_cursor(consumer, events[-1].id)
+        click.echo(f"Cursor advanced to: {events[-1].id}", err=True)
 
 
 @main.command(name="run-claude")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -100,6 +101,33 @@ class QueueStore(BaseModel):
             if item.id == item_id:
                 return item
         return None
+
+
+class OrchestratorEventType(StrEnum):
+    """Event types for the orchestrator-level event bus.
+
+    Covers PR lifecycle, ticket queue, and cross-session coordination.
+    """
+
+    TICKET_ENQUEUED = "ticket.enqueued"
+    SESSION_SPAWNED = "session.spawned"
+    SESSION_COMPLETED = "session.completed"
+    PR_REGISTERED = "pr.registered"
+    PR_CI_FAILED = "pr.ci_failed"
+    PR_REVIEW_RECEIVED = "pr.review_received"
+    PR_MERGEABLE = "pr.mergeable"
+    PR_MERGED = "pr.merged"
+
+
+class OrchestratorEvent(BaseModel):
+    """A single event on the orchestrator event bus."""
+
+    id: str = Field(default_factory=lambda: uuid4().hex[:16])
+    type: OrchestratorEventType
+    payload: dict[str, Any] = Field(default_factory=dict)
+    correlation_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    consumed_at: datetime | None = None
 
 
 class HookRule(BaseModel):
@@ -227,4 +255,3 @@ class CwState(BaseModel):
             if s.name == identifier or s.id == identifier:
                 return s
         return None
-

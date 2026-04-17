@@ -121,5 +121,3 @@ def get_purpose_prompt(
         prompt = f"{context}\n\n{prompt}"
 
     return prompt
-
-
