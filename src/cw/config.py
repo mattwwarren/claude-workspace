@@ -14,7 +14,13 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw.exceptions import CwError
-from cw.models import DEFAULT_AUTO_PURPOSES, ClientConfig, CwState, SessionPurpose
+from cw.models import (
+    DEFAULT_AUTO_PURPOSES,
+    ClientConfig,
+    CwState,
+    OrchestratorConfig,
+    SessionPurpose,
+)
 
 # Client names appear unquoted in shell commands (env var prefixes),
 # filesystem paths (queue dirs, history dirs), and Zellij tab names.
@@ -38,6 +44,18 @@ EVENTS_DIR = STATE_DIR / "events"
 HISTORY_DIR = STATE_DIR / "history"
 CLIENTS_FILE = CONFIG_DIR / "clients.yaml"
 STATE_FILE = STATE_DIR / "sessions.json"
+
+ORCHESTRATOR_CONFIG_DIR = Path.home() / ".claude-workspace"
+ORCHESTRATOR_CONFIG_FILE = ORCHESTRATOR_CONFIG_DIR / "orchestrator.yaml"
+DEV_QUEUE_FILE = STATE_DIR / "dev_queue.json"
+DEV_QUEUE_LOCK = STATE_DIR / ".dev_queue.lock"
+
+_DEFAULT_ORCHESTRATOR_YAML = """\
+tick_interval_seconds: 30
+per_client_max_parallel:
+  default: 2
+linear_prefix_map: {}
+"""
 
 
 def load_clients() -> dict[str, ClientConfig]:
@@ -92,6 +110,17 @@ def save_state(state: CwState) -> None:
     STATE_FILE.write_text(state.model_dump_json(indent=2))
 
 
+def load_orchestrator_config() -> OrchestratorConfig:
+    """Load orchestrator.yaml, creating with defaults if missing."""
+    if not ORCHESTRATOR_CONFIG_FILE.exists():
+        ORCHESTRATOR_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        ORCHESTRATOR_CONFIG_FILE.write_text(_DEFAULT_ORCHESTRATOR_YAML)
+    raw = yaml.safe_load(ORCHESTRATOR_CONFIG_FILE.read_text())
+    if not raw:
+        return OrchestratorConfig()
+    return OrchestratorConfig.model_validate(raw)
+
+
 def ensure_config() -> None:
     """Create config directory and example file if missing."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -134,11 +163,14 @@ def show_config() -> None:
 def _is_git_repo(path: Path) -> bool:
     """Check if a path is inside a git repository."""
     try:
+        # Strip GIT_* env vars so leaked worktree env doesn't affect detection.
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
             text=True,
             check=False,
+            env=clean_env,
         )
         return result.returncode == 0
     except OSError:

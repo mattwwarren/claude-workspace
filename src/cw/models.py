@@ -102,6 +102,65 @@ class QueueStore(BaseModel):
         return None
 
 
+class OrchestratorEventType(StrEnum):
+    """Event types emitted by the orchestrator."""
+
+    TICKET_ENQUEUED = "ticket.enqueued"
+    SESSION_SPAWNED = "session.spawned"
+    SESSION_COMPLETED = "session.completed"
+    PR_REGISTERED = "pr.registered"
+    PR_CI_FAILED = "pr.ci_failed"
+    PR_REVIEW_RECEIVED = "pr.review_received"
+    PR_MERGEABLE = "pr.mergeable"
+    PR_MERGED = "pr.merged"
+
+
+class TicketTask(BaseModel):
+    """A ticket queued for dispatch to a Claude session."""
+
+    ticket_id: str
+    client: str
+    priority: int = 0
+    worktree_path: Path | None = None
+    linear_url: str | None = None
+    scope_hint: str | None = None
+    status: QueueItemStatus = QueueItemStatus.PENDING
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class DispatchPlan(BaseModel):
+    """Ordered list of tickets to dispatch, with optional grouping hints."""
+
+    tasks: list[TicketTask] = Field(default_factory=list)
+    grouping_hints: dict[str, str] = Field(default_factory=dict)
+
+
+class DevQueueStore(BaseModel):
+    """Persisted dev-queue state holding TicketTasks."""
+
+    tasks: list[TicketTask] = Field(default_factory=list)
+
+    def pending(self) -> list[TicketTask]:
+        return [t for t in self.tasks if t.status == QueueItemStatus.PENDING]
+
+    def running(self) -> list[TicketTask]:
+        return [t for t in self.tasks if t.status == QueueItemStatus.RUNNING]
+
+    def completed(self) -> list[TicketTask]:
+        return [t for t in self.tasks if t.status == QueueItemStatus.COMPLETED]
+
+    def by_client(self, client: str) -> list[TicketTask]:
+        return [t for t in self.tasks if t.client == client]
+
+
+class OrchestratorConfig(BaseModel):
+    """Parsed contents of orchestrator.yaml."""
+
+    tick_interval_seconds: int = 30
+    per_client_max_parallel: dict[str, int] = Field(default_factory=dict)
+    linear_prefix_map: dict[str, str] = Field(default_factory=dict)
+
+
 class HookRule(BaseModel):
     """A user-defined shell command to run when a lifecycle event fires."""
 
