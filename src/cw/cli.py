@@ -15,11 +15,12 @@ from cw import __version__
 from cw.config import (
     init_client,
     load_clients,
+    load_orchestrator_config,
     load_state,
     show_config,
 )
-from cw.events import advance_cursor, read_events
-from cw.events import record_event as record_orchestrator_event
+from cw.dev_queue import add_ticket, list_tickets, resolve_client
+from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
     CwState,
@@ -30,6 +31,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
     TaskSpec,
+    TicketTask,
 )
 from cw.queue import (
     add_item,
@@ -595,7 +597,7 @@ def event_record(
         raise CwError(msg)
 
     etype = OrchestratorEventType(event_type)
-    recorded = record_orchestrator_event(
+    recorded = record_event(
         etype,
         payload_dict,
         correlation_id=correlation_id,
@@ -747,3 +749,67 @@ def completion(shell: str) -> None:
     # Output the activation one-liner for the user to add to their profile
     click.echo("# Add this to your shell profile:")
     click.echo(_COMPLETION_SCRIPTS[shell])
+
+
+# --- Dev-queue command group ---
+
+
+@main.group(name="dev-queue")
+def dev_queue() -> None:
+    """Manage the orchestrator development queue."""
+
+
+@dev_queue.command(name="add")
+@click.argument("tickets", nargs=-1, required=True)
+@click.option("--client", "-c", default=None, help="Target client name.")
+@click.option("--priority", "-p", type=int, default=0, help="Priority (higher=sooner).")
+@handle_errors
+def dev_queue_add(tickets: tuple[str, ...], client: str | None, priority: int) -> None:
+    """Enqueue one or more tickets for dispatch."""
+    config = load_orchestrator_config()
+    for ticket_id in tickets:
+        resolved = resolve_client(ticket_id, config, client)
+        task = TicketTask(ticket_id=ticket_id, client=resolved, priority=priority)
+        add_ticket(task)
+        record_event(
+            OrchestratorEventType.TICKET_ENQUEUED,
+            {"ticket_id": ticket_id, "client": resolved, "priority": priority},
+        )
+        click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
+
+
+@dev_queue.command(name="status")
+@click.option("--client", "-c", default=None, help="Filter by client.")
+@handle_errors
+def dev_queue_status(client: str | None) -> None:
+    """Show dev queue status grouped by client."""
+    tasks = list_tickets(client)
+
+    if not tasks:
+        click.echo("Dev queue is empty.")
+        return
+
+    # Group by client
+    clients_seen: list[str] = []
+    by_client: dict[str, list[TicketTask]] = {}
+    for task in tasks:
+        if task.client not in by_client:
+            clients_seen.append(task.client)
+            by_client[task.client] = []
+        by_client[task.client].append(task)
+
+    header = f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'COMPLETED':>9}  TICKETS"
+    click.echo(header)
+    click.echo("-" * 70)
+    for client_name in clients_seen:
+        client_tasks = by_client[client_name]
+        pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
+        running_tasks = [t for t in client_tasks if t.status == QueueItemStatus.RUNNING]
+        completed_tasks = [
+            t for t in client_tasks if t.status == QueueItemStatus.COMPLETED
+        ]
+        ticket_ids = ", ".join(t.ticket_id for t in client_tasks)
+        click.echo(
+            f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
+            f"  {len(completed_tasks):>9}  {ticket_ids}"
+        )
