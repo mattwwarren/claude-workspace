@@ -23,6 +23,7 @@ from cw.config import (
     save_state,
     show_config,
 )
+from cw.daemon import run_watcher_tick
 from cw.dev_queue import add_ticket, list_tickets, resolve_client
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
@@ -725,6 +726,31 @@ def pane_exited(client: str, purpose: str, exit_code: int) -> None:
     """
     signal_idle(client, purpose, exit_code=exit_code)
     click.echo(f"Signaled IDLE for {client}/{purpose} (exit code {exit_code}).")
+
+
+@main.command(name="daemon")
+@click.option(
+    "--once",
+    is_flag=True,
+    default=False,
+    help="Run one tick and exit (useful for testing or cron).",
+)
+@handle_errors
+def daemon(once: bool) -> None:
+    """Run the PR event watcher daemon.
+
+    Polls review-monitor state files and emits orchestrator events
+    for PR lifecycle changes (merged, CI failed, review received, mergeable).
+
+    \b
+    Run continuously (default):
+      cw daemon
+
+    \b
+    Single tick (e.g. from cron):
+      cw daemon --once
+    """
+    run_watcher_tick(once=once)
 
 
 _COMPLETION_SCRIPTS = {
