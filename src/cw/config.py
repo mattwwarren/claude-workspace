@@ -51,6 +51,9 @@ ORCHESTRATOR_CONFIG_DIR = Path.home() / ".claude-workspace"
 ORCHESTRATOR_CONFIG_FILE = ORCHESTRATOR_CONFIG_DIR / "orchestrator.yaml"
 DEV_QUEUE_FILE = STATE_DIR / "dev_queue.json"
 DEV_QUEUE_LOCK = STATE_DIR / ".dev_queue.lock"
+DEV_PLAN_FILE = STATE_DIR / "dev_plan.json"
+DEV_PLAN_LOCK = STATE_DIR / ".dev_plan.lock"
+DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30

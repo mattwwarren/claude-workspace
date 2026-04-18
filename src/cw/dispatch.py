@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from cw.cmux import get_cmux_adapter
 from cw.config import load_clients, load_orchestrator_config, load_state
-from cw.dev_queue import _lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import _lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.models import (
     OrchestratorEventType,
@@ -25,15 +25,37 @@ if TYPE_CHECKING:
 _DISPATCH_CONSUMER = "dispatch"
 
 
-def _claim_next_pending(client_name: str) -> TicketTask | None:
+def _claim_next_pending(
+    client_name: str,
+    *,
+    priority_ticket_ids: list[str] | None = None,
+) -> TicketTask | None:
     """Atomically claim the next PENDING task for a client.
 
     Acquires the dev-queue file lock, loads the queue, marks the first
     PENDING task for *client_name* as RUNNING, saves, and returns it.
     Returns None if no pending task exists for the client.
+
+    If *priority_ticket_ids* is provided, prefer claiming PENDING tasks in
+    that order (only those whose ticket_id appears in the list).  Tasks not
+    referenced by the list are skipped at this stage; they will be claimed
+    by subsequent ticks once the prioritised tasks are exhausted (the
+    parameter is intentionally a *preference*, not a filter — see the
+    fallback after the priority loop).
     """
     with _lock():
         store = load_dev_queue()
+        if priority_ticket_ids:
+            for ticket_id in priority_ticket_ids:
+                for task in store.tasks:
+                    if (
+                        task.client == client_name
+                        and task.ticket_id == ticket_id
+                        and task.status == QueueItemStatus.PENDING
+                    ):
+                        task.status = QueueItemStatus.RUNNING
+                        save_dev_queue(store)
+                        return task
         for task in store.tasks:
             if task.client == client_name and task.status == QueueItemStatus.PENDING:
                 task.status = QueueItemStatus.RUNNING
@@ -45,6 +67,8 @@ def _claim_next_pending(client_name: str) -> TicketTask | None:
 def dispatch_tick(
     config: OrchestratorConfig,
     adapter: CmuxAdapter | None = None,
+    *,
+    use_plan: bool = False,
 ) -> int:
     """Run one dispatch tick.
 
@@ -61,6 +85,15 @@ def dispatch_tick(
     state = load_state()
     spawned = 0
 
+    plan_order_by_client: dict[str, list[str]] = {}
+    if use_plan:
+        plan = load_plan()
+        if plan is not None:
+            for plan_task in plan.tasks:
+                plan_order_by_client.setdefault(plan_task.client, []).append(
+                    plan_task.ticket_id,
+                )
+
     for client in clients.values():
         # Count running daemon sessions for this client
         running_count = sum(
@@ -73,8 +106,12 @@ def dispatch_tick(
 
         cap = config.per_client_max_parallel.get(client.name, 1)
 
+        priority_ids = plan_order_by_client.get(client.name)
         while running_count < cap:
-            task = _claim_next_pending(client.name)
+            task: TicketTask | None = _claim_next_pending(
+                client.name,
+                priority_ticket_ids=priority_ids,
+            )
             if task is None:
                 break
 
@@ -159,6 +196,7 @@ def run_dispatch_loop(
     max_parallel: int | None = None,
     once: bool = False,
     adapter: CmuxAdapter | None = None,
+    use_plan: bool = False,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -167,6 +205,9 @@ def run_dispatch_loop(
         once: If True, run a single tick and return immediately.
         adapter: Optional CmuxAdapter for testing.  Defaults to
             ``get_cmux_adapter()`` at call time.
+        use_plan: If True, load the persisted DispatchPlan and use its
+            ordering to claim tasks.  Falls back to enqueue order when no
+            plan is found (load_plan returns None).
     """
     config = load_orchestrator_config()
 
@@ -179,7 +220,7 @@ def run_dispatch_loop(
 
     while True:
         consume_completed_sessions()
-        dispatch_tick(config, adapter=resolved_adapter)
+        dispatch_tick(config, adapter=resolved_adapter, use_plan=use_plan)
 
         if once:
             return

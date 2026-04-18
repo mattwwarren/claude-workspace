@@ -49,6 +49,30 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     with contextlib.suppress(AttributeError):
         monkeypatch.setattr("cw.pr_responder.STATE_DIR", state_dir)
 
+    # Dev queue paths used by cw.dev_queue
+    dev_queue_file = state_dir / "dev_queue.json"
+    dev_queue_lock = state_dir / ".dev_queue.lock"
+    monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", dev_queue_file)
+    monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", dev_queue_lock)
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_FILE", dev_queue_file)
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_LOCK", dev_queue_lock)
+
+    # Dev plan paths used by cw.plan and cw.dev_queue
+    dev_plan_file = state_dir / "dev_plan.json"
+    dev_plan_lock = state_dir / ".dev_plan.lock"
+    dev_plan_output_dir = state_dir / "plan_output"
+    monkeypatch.setattr("cw.config.DEV_PLAN_FILE", dev_plan_file)
+    monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", dev_plan_lock)
+    monkeypatch.setattr("cw.config.DEV_PLAN_OUTPUT_DIR", dev_plan_output_dir)
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr("cw.dev_queue.DEV_PLAN_FILE", dev_plan_file)
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr("cw.dev_queue.DEV_PLAN_LOCK", dev_plan_lock)
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr("cw.plan.DEV_PLAN_OUTPUT_DIR", dev_plan_output_dir)
+
     return tmp_path
 
 

@@ -42,6 +42,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.orchestrate import OrchestratorStatus, orchestrator_status, retire_merged_prs
+from cw.plan import run_planner
 from cw.queue import (
     add_item,
     claim_by_id,
@@ -864,10 +865,89 @@ def dev_queue_status(client: str | None) -> None:
     default=False,
     help="Run a single dispatch tick and exit.",
 )
+@click.option(
+    "--use-plan",
+    is_flag=True,
+    default=False,
+    help="Respect the persisted DispatchPlan ordering when claiming tasks.",
+)
 @handle_errors
-def dev_queue_run(max_parallel: int | None, once: bool) -> None:
+def dev_queue_run(max_parallel: int | None, once: bool, use_plan: bool) -> None:
     """Run the dispatch loop, spawning sessions for pending tickets."""
-    run_dispatch_loop(max_parallel=max_parallel, once=once)
+    run_dispatch_loop(max_parallel=max_parallel, once=once, use_plan=use_plan)
+
+
+_PLAN_DEFAULT_TIMEOUT = 300
+
+
+def _run_plan_impl(
+    *,
+    client_name: str,
+    timeout: int,
+    adapter: CmuxAdapter,
+    client_filter: str | None,
+) -> int:
+    """Spawn the planner, persist the result, and report status.
+
+    Separated from the Click command so tests can inject the cmux adapter
+    directly.  Returns 0 on success, 1 on validation/timeout failure.
+    """
+    client_config = get_client(client_name)
+    result = run_planner(
+        client=client_config,
+        adapter=adapter,
+        timeout_seconds=timeout,
+        client_filter=client_filter,
+    )
+    plan = result.plan
+    if plan is None:
+        click.echo(
+            f"Planner failed: {result.error} (queue order unchanged)",
+            err=True,
+        )
+        return 1
+    click.echo(f"Plan persisted: {len(plan.tasks)} tasks (session {result.session_id})")
+    return 0
+
+
+@dev_queue.command(name="plan")
+@click.option(
+    "--client",
+    "-c",
+    required=True,
+    shell_complete=_complete_client,
+    help="Client whose cmux workspace will host the planner session.",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=_PLAN_DEFAULT_TIMEOUT,
+    help="Seconds to wait for the planner JSON output (default: 300).",
+)
+@click.option(
+    "--filter-client",
+    default=None,
+    help="Only include pending tickets for this client in the planner prompt.",
+)
+@handle_errors
+def dev_queue_plan(client: str, timeout: int, filter_client: str | None) -> None:
+    """Spawn /orchestrate-plan to produce a DispatchPlan for pending tickets.
+
+    Runs a one-shot Claude session via cw spawn, waits for it to write a
+    DispatchPlan JSON file, validates it, and persists it for use by
+    ``cw dev-queue run --use-plan``.
+
+    On validation failure or timeout, the dev queue is left unchanged.
+    """
+    adapter = get_cmux_adapter()
+    exit_code = _run_plan_impl(
+        client_name=client,
+        timeout=timeout,
+        adapter=adapter,
+        client_filter=filter_client,
+    )
+    if exit_code != 0:
+        raise click.exceptions.Exit(exit_code)
 
 
 # --- Orchestrate command group ---

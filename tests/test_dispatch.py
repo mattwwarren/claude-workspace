@@ -8,13 +8,14 @@ import pytest
 
 from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
-from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
+from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue, save_plan
 from cw.dispatch import consume_completed_sessions, dispatch_tick
 from cw.events import record_event
 from cw.models import (
     ClientConfig,
     CwState,
     DevQueueStore,
+    DispatchPlan,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -55,6 +56,8 @@ def tmp_dispatch_dirs(
     events_dir.mkdir(parents=True)
     dev_queue_file = state_dir / "dev_queue.json"
     dev_queue_lock = state_dir / ".dev_queue.lock"
+    dev_plan_file = state_dir / "dev_plan.json"
+    dev_plan_lock = state_dir / ".dev_plan.lock"
 
     monkeypatch.setattr("cw.config.CONFIG_DIR", config_dir)
     monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
@@ -64,11 +67,15 @@ def tmp_dispatch_dirs(
     monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
     monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", dev_queue_file)
     monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", dev_queue_lock)
+    monkeypatch.setattr("cw.config.DEV_PLAN_FILE", dev_plan_file)
+    monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", dev_plan_lock)
 
     # Patch module-level imported references
     monkeypatch.setattr("cw.events.EVENTS_DIR", events_dir)
     monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_FILE", dev_queue_file)
     monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_LOCK", dev_queue_lock)
+    monkeypatch.setattr("cw.dev_queue.DEV_PLAN_FILE", dev_plan_file)
+    monkeypatch.setattr("cw.dev_queue.DEV_PLAN_LOCK", dev_plan_lock)
 
     return tmp_path
 
@@ -363,3 +370,92 @@ class TestDispatchTickReturnsCount:
 
         assert count == 0
         assert len(adapter.calls["spawn"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchTickWithPlan
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchTickWithPlan:
+    """use_plan=True respects DispatchPlan ordering, falls back gracefully."""
+
+    def test_use_plan_reorders_pending_claims(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        cap2_config: OrchestratorConfig,
+    ) -> None:
+        """When use_plan=True, dispatch claims tickets in plan order, not enqueue."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Enqueue in order A, B, C
+        add_ticket(TicketTask(ticket_id="GEN-A", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-B", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-C", client="test-client"))
+
+        # Plan reorders to C, A, B
+        save_plan(
+            DispatchPlan(
+                tasks=[
+                    TicketTask(ticket_id="GEN-C", client="test-client"),
+                    TicketTask(ticket_id="GEN-A", client="test-client"),
+                    TicketTask(ticket_id="GEN-B", client="test-client"),
+                ]
+            )
+        )
+
+        adapter = FakeCmuxAdapter()
+        # cap=2 => should claim C first, then A
+        spawned = dispatch_tick(cap2_config, adapter=adapter, use_plan=True)
+        assert spawned == 2
+
+        store = load_dev_queue()
+        running_ids = sorted(t.ticket_id for t in store.running())
+        assert running_ids == ["GEN-A", "GEN-C"]
+
+    def test_use_plan_missing_falls_back_to_enqueue_order(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """No persisted plan: dispatch falls back to enqueue order, no crash."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        add_ticket(TicketTask(ticket_id="GEN-FIRST", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-SECOND", client="test-client"))
+
+        adapter = FakeCmuxAdapter()
+        spawned = dispatch_tick(simple_config, adapter=adapter, use_plan=True)
+        assert spawned == 1
+
+        store = load_dev_queue()
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].ticket_id == "GEN-FIRST"
+
+    def test_use_plan_drains_unplanned_after_planned(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        cap2_config: OrchestratorConfig,
+    ) -> None:
+        """Planned tickets first, then unplanned still get dispatched."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        add_ticket(TicketTask(ticket_id="GEN-A", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-B", client="test-client"))
+
+        # Plan only mentions B
+        save_plan(
+            DispatchPlan(tasks=[TicketTask(ticket_id="GEN-B", client="test-client")])
+        )
+
+        adapter = FakeCmuxAdapter()
+        spawned = dispatch_tick(cap2_config, adapter=adapter, use_plan=True)
+        # cap=2: claims B first (per plan), then A (fallback)
+        assert spawned == 2
+
+        store = load_dev_queue()
+        assert len(store.running()) == 2
