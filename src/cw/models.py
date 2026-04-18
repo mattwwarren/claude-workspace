@@ -14,7 +14,6 @@ class SessionPurpose(StrEnum):
     IMPL = "impl"
     IDEA = "idea"
     DEBT = "debt"
-    EXPLORE = "explore"
 
 
 class SessionStatus(StrEnum):
@@ -30,18 +29,8 @@ class CompletionReason(StrEnum):
     CRASHED = "crashed"
 
 
-class HandoffReason(StrEnum):
-    """Known reasons for abnormal session endings via /handoff."""
-
-    CONTEXT = "context"
-    DEBUG_FORK = "debug-fork"
-    SCOPE = "scope"
-
-
 class SessionOrigin(StrEnum):
     USER = "user"
-    DELEGATE = "delegate"
-    DAEMON = "daemon"
 
 
 class QueueItemStatus(StrEnum):

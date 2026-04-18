@@ -150,11 +150,12 @@ def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
     def _make(name: str) -> Path:
         repo = tmp_path / name
         repo.mkdir(parents=True, exist_ok=True)
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         subprocess.run(
             ["git", "init", str(repo)],
             capture_output=True,
             check=True,
-            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+            env=clean_env,
         )
         return repo
 
