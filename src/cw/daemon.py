@@ -3,25 +3,37 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from cw.config import STATE_DIR, load_clients, load_orchestrator_config, load_state
+from cw.config import (
+    REVIEW_MONITOR_DIR as _CONFIG_REVIEW_MONITOR_DIR,
+)
+from cw.config import (
+    STATE_DIR,
+    load_clients,
+    load_orchestrator_config,
+    load_state,
+)
 from cw.events import record_event
 from cw.models import OrchestratorEventType, SessionStatus
+from cw.orchestrate import retire_merged_prs
 from cw.pr_responder import clear_completed_pr_sessions, respond_to_pr_events
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorEvent
 
-# Directory where review-monitor state files live
-REVIEW_MONITOR_DIR: Path = Path.home() / ".claude" / "review-monitor"
+# Directory where review-monitor state files live (re-exported from
+# cw.config so tests can monkeypatch this module's reference directly).
+REVIEW_MONITOR_DIR = _CONFIG_REVIEW_MONITOR_DIR
 
 # Directory for persisted watcher snapshots (one file per client)
-PR_WATCHER_DIR: Path = STATE_DIR / "pr_watcher"
+PR_WATCHER_DIR = STATE_DIR / "pr_watcher"
 
 # CI-failure keywords to look for in delta_findings messages
 _CI_KEYWORDS = frozenset(
@@ -308,6 +320,12 @@ def run_watcher_tick(*, once: bool = False) -> None:
         state = load_state()
         clear_completed_pr_sessions(state)
         respond_to_pr_events()
+
+        # Retire merged PRs: close sessions, drop dispatch entries, emit events.
+        try:
+            retire_merged_prs()
+        except Exception:  # pragma: no cover - defensive in long-running loop
+            logger.exception("retire_merged_prs failed")
 
         if once:
             return

@@ -41,6 +41,7 @@ from cw.models import (
     TaskSpec,
     TicketTask,
 )
+from cw.orchestrate import OrchestratorStatus, orchestrator_status, retire_merged_prs
 from cw.queue import (
     add_item,
     claim_by_id,
@@ -867,6 +868,79 @@ def dev_queue_status(client: str | None) -> None:
 def dev_queue_run(max_parallel: int | None, once: bool) -> None:
     """Run the dispatch loop, spawning sessions for pending tickets."""
     run_dispatch_loop(max_parallel=max_parallel, once=once)
+
+
+# --- Orchestrate command group ---
+
+
+@main.group()
+def orchestrate() -> None:
+    """Orchestrator pipeline: status snapshot and PR retirement."""
+
+
+def _format_status_human(status: OrchestratorStatus) -> str:
+    """Render an OrchestratorStatus as a human-readable string."""
+    ts = status.generated_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines: list[str] = [f"Orchestrator status (as of {ts})", ""]
+
+    lines.append(f"Pending tickets:   {len(status.pending_tickets)}")
+    lines.extend(
+        f"  - {t.ticket_id}  client={t.client}  priority={t.priority}"
+        for t in status.pending_tickets
+    )
+
+    lines.append("")
+    lines.append(f"Running sessions:  {len(status.running_sessions)}")
+    lines.extend(
+        f"  - {s.id}  {s.name}  status={s.status}" for s in status.running_sessions
+    )
+
+    lines.append("")
+    lines.append(f"Monitored PRs:     {len(status.monitored_prs)}")
+    lines.extend(
+        f"  - {pr.repo}#{pr.pr_number}  status={pr.status}"
+        f"  unresolved={pr.unresolved_threads}"
+        for pr in status.monitored_prs
+    )
+
+    lines.append("")
+    lines.append(f"Recent events:     {len(status.recent_events)}")
+    lines.extend(
+        f"  - {e.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {e.id}  {e.type}"
+        for e in status.recent_events
+    )
+
+    return "\n".join(lines)
+
+
+@orchestrate.command(name="status")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+@handle_errors
+def orchestrate_status(as_json: bool) -> None:
+    """Show a snapshot of the orchestrator subsystem.
+
+    Includes pending dev-queue tickets, running sessions, PRs being
+    monitored, and the last 20 orchestrator events.
+    """
+    snapshot = orchestrator_status()
+    if as_json:
+        click.echo(snapshot.model_dump_json(indent=2))
+    else:
+        click.echo(_format_status_human(snapshot))
+
+
+@orchestrate.command(name="retire")
+@handle_errors
+def orchestrate_retire() -> None:
+    """Run a single PR-retirement pass and print retired session IDs."""
+    adapter = get_cmux_adapter()
+    retired = retire_merged_prs(adapter=adapter)
+    if not retired:
+        click.echo("No sessions retired.")
+        return
+    click.echo(f"Retired {len(retired)} session(s):")
+    for sid in retired:
+        click.echo(f"  {sid}")
 
 
 # --- Spawn command group ---
