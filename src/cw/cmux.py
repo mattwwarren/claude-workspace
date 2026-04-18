@@ -15,16 +15,29 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from cw.exceptions import CwError
 
+_LEGACY_HINT_PATH: Path = Path("/tmp/cmux-last-socket-path")
+
 
 def _find_socket() -> Path:
     """Discover cmux socket path in priority order."""
     if path := os.environ.get("CMUX_SOCKET_PATH"):
         return Path(path)
+    if path := os.environ.get("CMUX_SOCKET"):
+        return Path(path)
     if tag := os.environ.get("CMUX_TAG"):
-        return Path(f"/tmp/cmux-{tag}.sock")
+        return Path(f"/tmp/cmux-debug-{tag}.sock")
     stable = Path.home() / "Library" / "Application Support" / "cmux" / "cmux.sock"
     if stable.exists():
         return stable
+    hint_files = [
+        Path.home() / "Library" / "Application Support" / "cmux" / "last-socket-path",
+        _LEGACY_HINT_PATH,
+    ]
+    for hint_file in hint_files:
+        if hint_file.exists():
+            candidate = Path(hint_file.read_text().strip())
+            if candidate.exists():
+                return candidate
     return Path("/tmp/cmux.sock")
 
 
@@ -98,9 +111,16 @@ class RealCmuxAdapter:
         if ws_id is None:
             msg = f"cmux workspace not found: {workspace!r}"
             raise CwError(msg)
-        split = self._call(
-            "surface.split", {"workspace_id": ws_id, "direction": surface}
+        surfaces = self._call("surface.list", {"workspace_id": ws_id}).get(
+            "surfaces", []
         )
+        split_params: dict[str, Any] = {
+            "workspace_id": ws_id,
+            "direction": surface,
+        }
+        if surfaces:
+            split_params["surface_id"] = surfaces[0]["id"]
+        split = self._call("surface.split", split_params)
         surf_id: str = split["surface_id"]
         self._call("surface.send_text", {"surface_id": surf_id, "text": f"{command}\n"})
         return surf_id

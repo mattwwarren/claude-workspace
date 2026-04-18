@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -128,34 +128,214 @@ class TestRealCmuxAdapterPlatformGuard:
             get_cmux_adapter()
 
 
+class TestRealCmuxAdapterSpawn:
+    """Tests for RealCmuxAdapter.spawn() via _call mocking (platform-independent)."""
+
+    def _make_adapter(self, monkeypatch: pytest.MonkeyPatch) -> RealCmuxAdapter:
+        """Create a RealCmuxAdapter with the platform guard bypassed."""
+        monkeypatch.setattr("cw.cmux.sys.platform", "darwin")
+        return RealCmuxAdapter(socket_path=Path("/tmp/fake-cmux.sock"))
+
+    def test_spawn_calls_surface_list_for_surface_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn() calls surface.list to get a surface_id before surface.split."""
+        adapter = self._make_adapter(monkeypatch)
+        call_log: list[tuple[str, dict[str, Any]]] = []
+
+        def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            call_log.append((method, params))
+            if method == "workspace.list":
+                return {"workspaces": [{"id": "ws-uuid-1", "title": "my-workspace"}]}
+            if method == "surface.list":
+                return {"surfaces": [{"id": "surf-uuid-1", "ref": "surface:0"}]}
+            if method == "surface.split":
+                return {"surface_id": "new-surf-uuid"}
+            if method == "surface.send_text":
+                return {}
+            return {}
+
+        monkeypatch.setattr(adapter, "_call", fake_call)
+        result = adapter.spawn("my-workspace", "claude")
+        assert result == "new-surf-uuid"
+        methods = [m for m, _ in call_log]
+        assert methods == [
+            "workspace.list",
+            "surface.list",
+            "surface.split",
+            "surface.send_text",
+        ]
+
+    def test_spawn_passes_surface_id_to_split(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn() passes surface_id from surface.list to surface.split params."""
+        adapter = self._make_adapter(monkeypatch)
+        split_params: dict[str, Any] = {}
+
+        def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "workspace.list":
+                return {"workspaces": [{"id": "ws-uuid-1", "title": "my-workspace"}]}
+            if method == "surface.list":
+                return {"surfaces": [{"id": "surf-uuid-1", "ref": "surface:0"}]}
+            if method == "surface.split":
+                split_params.update(params)
+                return {"surface_id": "new-surf-uuid"}
+            if method == "surface.send_text":
+                return {}
+            return {}
+
+        monkeypatch.setattr(adapter, "_call", fake_call)
+        adapter.spawn("my-workspace", "claude", "right")
+        assert split_params["workspace_id"] == "ws-uuid-1"
+        assert split_params["surface_id"] == "surf-uuid-1"
+        assert split_params["direction"] == "right"
+
+    def test_spawn_omits_surface_id_when_surface_list_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn() omits surface_id when surface.list returns empty."""
+        adapter = self._make_adapter(monkeypatch)
+        split_params: dict[str, Any] = {}
+
+        def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "workspace.list":
+                return {"workspaces": [{"id": "ws-uuid-1", "title": "my-workspace"}]}
+            if method == "surface.list":
+                return {"surfaces": []}
+            if method == "surface.split":
+                split_params.update(params)
+                return {"surface_id": "new-surf-uuid"}
+            if method == "surface.send_text":
+                return {}
+            return {}
+
+        monkeypatch.setattr(adapter, "_call", fake_call)
+        adapter.spawn("my-workspace", "claude")
+        assert "surface_id" not in split_params
+        assert split_params["workspace_id"] == "ws-uuid-1"
+
+    def test_spawn_raises_when_workspace_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn() raises CwError when workspace label is not in workspace.list."""
+        adapter = self._make_adapter(monkeypatch)
+
+        def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "workspace.list":
+                return {"workspaces": [{"id": "ws-uuid-1", "title": "other-ws"}]}
+            return {}
+
+        monkeypatch.setattr(adapter, "_call", fake_call)
+        with pytest.raises(CwError, match="workspace not found"):
+            adapter.spawn("my-workspace", "claude")
+
+
 class TestFindSocket:
     def test_env_var_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """CMUX_SOCKET_PATH env var is honoured."""
         from cw.cmux import _find_socket
 
         monkeypatch.setenv("CMUX_SOCKET_PATH", "/custom/path.sock")
+        monkeypatch.delenv("CMUX_SOCKET", raising=False)
         monkeypatch.delenv("CMUX_TAG", raising=False)
         assert _find_socket() == Path("/custom/path.sock")
 
-    def test_tag_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """CMUX_TAG env var builds /tmp/cmux-<tag>.sock."""
+    def test_cmux_socket_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CMUX_SOCKET alias is checked when CMUX_SOCKET_PATH is absent."""
         from cw.cmux import _find_socket
 
         monkeypatch.delenv("CMUX_SOCKET_PATH", raising=False)
+        monkeypatch.delenv("CMUX_TAG", raising=False)
+        monkeypatch.setenv("CMUX_SOCKET", "/alias/path.sock")
+        assert _find_socket() == Path("/alias/path.sock")
+
+    def test_cmux_socket_path_takes_priority_over_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CMUX_SOCKET_PATH takes priority over CMUX_SOCKET."""
+        from cw.cmux import _find_socket
+
+        monkeypatch.setenv("CMUX_SOCKET_PATH", "/primary/path.sock")
+        monkeypatch.setenv("CMUX_SOCKET", "/alias/path.sock")
+        monkeypatch.delenv("CMUX_TAG", raising=False)
+        assert _find_socket() == Path("/primary/path.sock")
+
+    def test_tag_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CMUX_TAG env var builds /tmp/cmux-debug-<tag>.sock."""
+        from cw.cmux import _find_socket
+
+        monkeypatch.delenv("CMUX_SOCKET_PATH", raising=False)
+        monkeypatch.delenv("CMUX_SOCKET", raising=False)
         monkeypatch.setenv("CMUX_TAG", "my-tag")
-        assert _find_socket() == Path("/tmp/cmux-my-tag.sock")
+        assert _find_socket() == Path("/tmp/cmux-debug-my-tag.sock")
+
+    def test_hint_file_used_when_stable_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """last-socket-path hint file is read when stable path does not exist."""
+        import cw.cmux as cmux_module
+
+        monkeypatch.delenv("CMUX_SOCKET_PATH", raising=False)
+        monkeypatch.delenv("CMUX_SOCKET", raising=False)
+        monkeypatch.delenv("CMUX_TAG", raising=False)
+
+        # Create a fake socket target that "exists"
+        fake_sock = tmp_path / "cmux-session.sock"
+        fake_sock.touch()
+
+        # Create the hint file inside a simulated Application Support dir
+        app_support = tmp_path / "Library" / "Application Support" / "cmux"
+        app_support.mkdir(parents=True)
+        hint_file = app_support / "last-socket-path"
+        hint_file.write_text(str(fake_sock))
+
+        monkeypatch.setattr("cw.cmux.Path.home", lambda: tmp_path)
+        # Redirect legacy hint so it doesn't interfere
+        monkeypatch.setattr(cmux_module, "_LEGACY_HINT_PATH", tmp_path / "no-such-hint")
+        assert cmux_module._find_socket() == fake_sock
+
+    def test_legacy_hint_file_used_when_primary_hint_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """/tmp/cmux-last-socket-path legacy hint is read as fallback."""
+        import cw.cmux as cmux_module
+
+        monkeypatch.delenv("CMUX_SOCKET_PATH", raising=False)
+        monkeypatch.delenv("CMUX_SOCKET", raising=False)
+        monkeypatch.delenv("CMUX_TAG", raising=False)
+
+        # Create a fake socket target that "exists"
+        fake_sock = tmp_path / "cmux-legacy.sock"
+        fake_sock.touch()
+
+        # Create the legacy hint file in tmp_path (simulates /tmp/cmux-last-socket-path)
+        legacy_hint = tmp_path / "cmux-last-socket-path"
+        legacy_hint.write_text(str(fake_sock))
+
+        # Redirect home so the stable and primary hint paths don't exist
+        app_support = tmp_path / "Library" / "Application Support" / "cmux"
+        app_support.mkdir(parents=True)
+        monkeypatch.setattr("cw.cmux.Path.home", lambda: tmp_path)
+
+        # Inject the tmp-based legacy hint path into the module for this test
+        monkeypatch.setattr(cmux_module, "_LEGACY_HINT_PATH", legacy_hint)
+        assert cmux_module._find_socket() == fake_sock
 
     def test_falls_back_to_legacy(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Falls back to /tmp/cmux.sock when stable path does not exist."""
-        from cw.cmux import _find_socket
+        import cw.cmux as cmux_module
 
         monkeypatch.delenv("CMUX_SOCKET_PATH", raising=False)
+        monkeypatch.delenv("CMUX_SOCKET", raising=False)
         monkeypatch.delenv("CMUX_TAG", raising=False)
         # Stable path won't exist in tmp_path environment
         monkeypatch.setattr("cw.cmux.Path.home", lambda: tmp_path)
-        assert _find_socket() == Path("/tmp/cmux.sock")
+        # Redirect legacy hint to a non-existent path so it doesn't interfere
+        monkeypatch.setattr(cmux_module, "_LEGACY_HINT_PATH", tmp_path / "no-such-hint")
+        assert cmux_module._find_socket() == Path("/tmp/cmux.sock")
 
 
 class TestMigration:
