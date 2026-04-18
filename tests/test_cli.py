@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -20,7 +20,6 @@ from cw.config import load_clients, load_state, save_state
 from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
-    CompletionReason,
     CwState,
     QueueItem,
     Session,
@@ -365,7 +364,7 @@ class TestShowStatus:
         tmp_config_dir: Path,
         sample_state: CwState,
         capsys: pytest.CaptureFixture[str],
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: object,
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
@@ -385,14 +384,14 @@ class TestShowStatus:
         assert "Active sessions:    1" in output
         assert "Backgrounded:       1" in output
 
-    def test_detects_crashed_session(
+    def test_check_dead_sessions_stub_returns_empty(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
+        mock_cmux_adapter: object,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """_check_and_mark_dead_sessions is stubbed — always returns empty list."""
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -403,92 +402,25 @@ class TestShowStatus:
         state = CwState(
             sessions=[
                 Session(
-                    id="crash001",
+                    id="active01",
                     name="test-client/impl",
                     client="test-client",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="impl",
+                    surface_ref="impl",
                 )
             ]
         )
         save_state(state)
 
-        # Zellij session exists but impl pane has exited
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
-
-        def _mock_check_pane_health(
-            session: str | None = None,
-            tab_name: str | None = None,
-        ) -> dict[str, bool]:
-            return {"impl": False, "idea": True, "debt": True}
-
-        monkeypatch.setattr(
-            "cw.zellij.check_pane_health",
-            _mock_check_pane_health,
-        )
-
         _display_status()
 
         output = capsys.readouterr().out
-        assert "crashed" in output.lower()
-        assert "Active sessions:    0" in output
-
-        # Verify state was persisted
+        # Stub never detects crashes — session stays active
+        assert "Active sessions:    1" in output
         updated = load_state()
-        assert updated.sessions[0].status == SessionStatus.COMPLETED
-
-    def test_crashed_session_shows_reason(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="crash002",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                    zellij_pane="impl",
-                )
-            ]
-        )
-        save_state(state)
-
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
-
-        def _mock_check_pane_health(
-            session: str | None = None,
-            tab_name: str | None = None,
-        ) -> dict[str, bool]:
-            return {"impl": False}
-
-        monkeypatch.setattr(
-            "cw.zellij.check_pane_health",
-            _mock_check_pane_health,
-        )
-
-        _display_status()
-
-        output = capsys.readouterr().out
-        assert "(crashed)" in output
-
-        updated = load_state()
-        assert updated.sessions[0].completed_reason == CompletionReason.CRASHED
+        assert updated.sessions[0].status == SessionStatus.ACTIVE
 
 
 class TestBgNotifyCli:

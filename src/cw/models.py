@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -14,7 +15,6 @@ class SessionPurpose(StrEnum):
     IMPL = "impl"
     IDEA = "idea"
     DEBT = "debt"
-    EXPLORE = "explore"
 
 
 class SessionStatus(StrEnum):
@@ -30,18 +30,8 @@ class CompletionReason(StrEnum):
     CRASHED = "crashed"
 
 
-class HandoffReason(StrEnum):
-    """Known reasons for abnormal session endings via /handoff."""
-
-    CONTEXT = "context"
-    DEBUG_FORK = "debug-fork"
-    SCOPE = "scope"
-
-
 class SessionOrigin(StrEnum):
     USER = "user"
-    DELEGATE = "delegate"
-    DAEMON = "daemon"
 
 
 class QueueItemStatus(StrEnum):
@@ -103,7 +93,10 @@ class QueueStore(BaseModel):
 
 
 class OrchestratorEventType(StrEnum):
-    """Event types emitted by the orchestrator."""
+    """Event types for the orchestrator-level event bus.
+
+    Covers PR lifecycle, ticket queue, and cross-session coordination.
+    """
 
     TICKET_ENQUEUED = "ticket.enqueued"
     SESSION_SPAWNED = "session.spawned"
@@ -113,6 +106,17 @@ class OrchestratorEventType(StrEnum):
     PR_REVIEW_RECEIVED = "pr.review_received"
     PR_MERGEABLE = "pr.mergeable"
     PR_MERGED = "pr.merged"
+
+
+class OrchestratorEvent(BaseModel):
+    """A single event on the orchestrator event bus."""
+
+    id: str = Field(default_factory=lambda: uuid4().hex[:16])
+    type: OrchestratorEventType
+    payload: dict[str, Any] = Field(default_factory=dict)
+    correlation_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    consumed_at: datetime | None = None
 
 
 class TicketTask(BaseModel):
@@ -187,8 +191,7 @@ class Session(BaseModel):
     workspace_path: Path
     worktree_path: Path | None = None
     branch: str | None = None
-    zellij_pane: str | None = None
-    zellij_tab: str | None = None
+    surface_ref: str | None = None
     last_handoff_path: Path | None = None
     claude_session_id: str | None = None
     auto_backgrounded: bool = False
@@ -231,6 +234,7 @@ class ClientConfig(BaseModel):
     purpose_prompts: dict[str, str] = Field(default_factory=dict)
     auto_background_threshold: int | None = None
     notifications: bool = False
+    cmux_workspace: str | None = None
 
     @model_validator(mode="after")
     def _validate_path_config(self) -> ClientConfig:

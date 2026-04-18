@@ -589,7 +589,7 @@ class TestQueueStoreMethods:
 
     def test_by_purpose_returns_empty_for_unknown(self) -> None:
         store = self._store_with_items()
-        result = store.by_purpose(SessionPurpose.EXPLORE)
+        result = store.by_purpose("nonexistent")
         assert result == []
 
     def test_by_status_filters_correctly(self) -> None:

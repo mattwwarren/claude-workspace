@@ -87,21 +87,28 @@ select = [
 ]
 ignore = [
     "T201",  # print() is our UI output mechanism (via click.echo, but also direct)
-    "S603",  # subprocess calls are core to zellij integration
-    "S607",  # partial executable path (zellij) is expected
-    "S701",  # jinja2 autoescape - templates render KDL config, not HTML
+    "S603",  # subprocess calls (git, etc.)
+    "S607",  # partial executable path is expected
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "src/cw/models.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
 ]
+"src/cw/cmux.py" = [
+    "S108",  # Unix socket paths in /tmp are part of the cmux protocol spec
+]
 "tests/**" = [
-    "S101",   # assert is fine in tests
-    "ARG001", # unused function args common in fixtures/mocks
-    "ARG002", # unused method args common in test classes
-    "SLF001", # private member access is fine in tests
-    "PT004",  # fixture doesn't return anything - not always needed
+    "S101",     # assert is fine in tests
+    "ARG001",   # unused function args common in fixtures/mocks
+    "ARG002",   # unused method args common in test classes
+    "SLF001",   # private member access is fine in tests
+    "PT004",    # fixture doesn't return anything - not always needed
+    "TC001",    # app imports used at runtime in test type annotations
+    "TC003",    # pathlib.Path annotation at runtime in test signatures is fine
+    "TC005",    # empty type-checking blocks during migration are fine
+    "S108",     # /tmp socket paths are part of the cmux protocol spec
+    "PLC0415",  # inline imports used in test methods that need monkeypatching first
 ]
 
 [tool.mypy]

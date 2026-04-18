@@ -97,10 +97,17 @@ def get_client(name: str) -> ClientConfig:
 
 
 def load_state() -> CwState:
-    """Load persisted session state."""
+    """Load persisted session state, migrating old field names if present."""
     if not STATE_FILE.exists():
         return CwState()
     raw = json.loads(STATE_FILE.read_text())
+    # Migrate: zellij_pane -> surface_ref, drop zellij_tab (introduced in v0.4.x)
+    for session_raw in raw.get("sessions", []):
+        if "zellij_pane" in session_raw and "surface_ref" not in session_raw:
+            session_raw["surface_ref"] = session_raw.pop("zellij_pane")
+        else:
+            session_raw.pop("zellij_pane", None)
+        session_raw.pop("zellij_tab", None)
     return CwState.model_validate(raw)
 
 
