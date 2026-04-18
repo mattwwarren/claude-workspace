@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from cw.config import STATE_DIR, load_clients, load_orchestrator_config, load_state
 from cw.events import record_event
 from cw.models import OrchestratorEventType, SessionStatus
+from cw.pr_responder import clear_completed_pr_sessions, respond_to_pr_events
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorEvent
@@ -302,6 +303,11 @@ def run_watcher_tick(*, once: bool = False) -> None:
             snapshot = _load_snapshot(client_name)
             _events, updated_snapshot = watch_prs_for_client(client, snapshot)
             _save_snapshot(client_name, updated_snapshot)
+
+        # Respond to queued PR events and clean up completed dispatch records
+        state = load_state()
+        clear_completed_pr_sessions(state)
+        respond_to_pr_events()
 
         if once:
             return
