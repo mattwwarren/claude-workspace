@@ -1,0 +1,295 @@
+"""Tests for cw.plan and `cw dev-queue plan` CLI command."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import pytest
+
+from cw.cmux import FakeCmuxAdapter
+from cw.dev_queue import add_ticket, load_dev_queue, load_plan
+from cw.exceptions import CwError
+from cw.models import (
+    ClientConfig,
+    DispatchPlan,
+    QueueItemStatus,
+    TicketTask,
+)
+from cw.plan import run_planner
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def planner_client(tmp_path: Path) -> ClientConfig:
+    """A ClientConfig usable as the planner host."""
+    workspace = tmp_path / "workspace" / "planner-client"
+    workspace.mkdir(parents=True)
+    return ClientConfig(
+        name="planner-client",
+        workspace_path=workspace,
+        default_branch="main",
+    )
+
+
+class _ScriptedAdapter(FakeCmuxAdapter):
+    """FakeCmuxAdapter that, on spawn, immediately writes a planned JSON file.
+
+    Reads the prompt file (path appears in the cmux command argument) to
+    discover the expected output_path declared by run_planner, then writes
+    *output_payload* (string) to that path.  Mimics the production
+    /orchestrate-plan skill side-effect without invoking Claude.
+    """
+
+    def __init__(self, output_payload: str) -> None:
+        super().__init__()
+        self._payload = output_payload
+
+    def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
+        ref = super().spawn(workspace, command, surface)
+        # The prompt file path appears in the command between the literal
+        # string repr quotes; recover it by looking for "/orchestrate-plan ".
+        # Easier path: re-read the prompt files in DEV_PLAN_OUTPUT_DIR.
+        from cw.config import DEV_PLAN_OUTPUT_DIR
+
+        prompts = sorted(DEV_PLAN_OUTPUT_DIR.glob("prompt-*.txt"))
+        if not prompts:
+            return ref
+        prompt_text = prompts[-1].read_text()
+        first_line = prompt_text.splitlines()[0]
+        # Format: "/orchestrate-plan <output_path>"
+        parts = first_line.split(" ", maxsplit=1)
+        if len(parts) == 2:
+            output_path = parts[1].strip()
+            from pathlib import Path
+
+            Path(output_path).write_text(self._payload)
+        return ref
+
+
+# ---------------------------------------------------------------------------
+# TestRunPlanner
+# ---------------------------------------------------------------------------
+
+
+class TestRunPlanner:
+    def test_no_pending_tickets_raises(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+    ) -> None:
+        with pytest.raises(CwError, match="No pending tickets"):
+            run_planner(
+                client=planner_client,
+                adapter=FakeCmuxAdapter(),
+                timeout_seconds=1,
+            )
+
+    def test_happy_path_persists_plan(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
+        add_ticket(TicketTask(ticket_id="GEN-2", client="planner-client"))
+
+        plan_payload = DispatchPlan(
+            tasks=[
+                TicketTask(ticket_id="GEN-2", client="planner-client"),
+                TicketTask(ticket_id="GEN-1", client="planner-client"),
+            ],
+            grouping_hints={"GEN-2": "should run first per planner heuristic"},
+        ).model_dump_json()
+        adapter = _ScriptedAdapter(plan_payload)
+
+        result = run_planner(
+            client=planner_client,
+            adapter=adapter,
+            timeout_seconds=10,
+            poll_interval=0.05,
+        )
+
+        assert result.error is None
+        assert result.plan is not None
+        assert [t.ticket_id for t in result.plan.tasks] == ["GEN-2", "GEN-1"]
+
+        loaded = load_plan()
+        assert loaded is not None
+        assert [t.ticket_id for t in loaded.tasks] == ["GEN-2", "GEN-1"]
+
+    def test_malformed_json_returns_error_no_persist(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
+        adapter = _ScriptedAdapter("this is { not valid JSON")
+
+        result = run_planner(
+            client=planner_client,
+            adapter=adapter,
+            timeout_seconds=5,
+            poll_interval=0.05,
+        )
+
+        assert result.plan is None
+        assert result.error is not None
+        assert "validation" in result.error.lower()
+
+        # Plan must NOT be persisted on failure
+        assert load_plan() is None
+
+        # Queue must remain unchanged (still PENDING)
+        store = load_dev_queue()
+        assert all(t.status == QueueItemStatus.PENDING for t in store.tasks)
+
+    def test_invalid_schema_returns_error(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
+        # Valid JSON but missing required ticket_task fields
+        bad_payload = json.dumps({"tasks": [{"foo": "bar"}]})
+        adapter = _ScriptedAdapter(bad_payload)
+
+        result = run_planner(
+            client=planner_client,
+            adapter=adapter,
+            timeout_seconds=5,
+            poll_interval=0.05,
+        )
+
+        assert result.plan is None
+        assert result.error is not None
+        assert load_plan() is None
+
+    def test_timeout_returns_error(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
+        # Plain FakeCmuxAdapter never writes the output file
+        adapter = FakeCmuxAdapter()
+
+        result = run_planner(
+            client=planner_client,
+            adapter=adapter,
+            timeout_seconds=1,
+            poll_interval=0.05,
+        )
+
+        assert result.plan is None
+        assert result.error is not None
+        assert "timed out" in result.error.lower()
+        assert load_plan() is None
+
+    def test_client_filter_limits_tickets_in_prompt(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
+        add_ticket(TicketTask(ticket_id="OTH-1", client="other-client"))
+
+        plan_payload = DispatchPlan(
+            tasks=[TicketTask(ticket_id="GEN-1", client="planner-client")]
+        ).model_dump_json()
+        adapter = _ScriptedAdapter(plan_payload)
+
+        result = run_planner(
+            client=planner_client,
+            adapter=adapter,
+            timeout_seconds=5,
+            poll_interval=0.05,
+            client_filter="planner-client",
+        )
+
+        assert result.plan is not None
+        # Verify the prompt file only contained the filtered ticket
+        prompt_text = result.prompt_path.read_text()
+        assert "GEN-1" in prompt_text
+        assert "OTH-1" not in prompt_text
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueuePlan
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueuePlan:
+    def test_cli_plan_happy_path(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        # Register the planner client in the in-memory client config
+        clients = {planner_client.name: planner_client}
+        monkeypatch.setattr("cw.cli.load_clients", lambda: clients)
+        monkeypatch.setattr("cw.config.load_clients", lambda: clients)
+
+        add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
+
+        plan_payload = DispatchPlan(
+            tasks=[TicketTask(ticket_id="GEN-1", client="planner-client")]
+        ).model_dump_json()
+        adapter = _ScriptedAdapter(plan_payload)
+        monkeypatch.setattr("cw.cli.get_cmux_adapter", lambda: adapter)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "plan", "--client", "planner-client", "--timeout", "5"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Plan persisted" in result.output
+
+        loaded = load_plan()
+        assert loaded is not None
+        assert [t.ticket_id for t in loaded.tasks] == ["GEN-1"]
+
+    def test_cli_plan_validation_failure_exits_nonzero(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        clients = {planner_client.name: planner_client}
+        monkeypatch.setattr("cw.cli.load_clients", lambda: clients)
+        monkeypatch.setattr("cw.config.load_clients", lambda: clients)
+
+        add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
+
+        adapter = _ScriptedAdapter("not valid json at all")
+        monkeypatch.setattr("cw.cli.get_cmux_adapter", lambda: adapter)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "plan", "--client", "planner-client", "--timeout", "5"],
+        )
+
+        assert result.exit_code != 0
+        assert "Planner failed" in result.output
+        # Queue unchanged
+        store = load_dev_queue()
+        assert all(t.status == QueueItemStatus.PENDING for t in store.tasks)
+        # Plan not persisted
+        assert load_plan() is None

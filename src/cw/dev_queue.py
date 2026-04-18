@@ -7,12 +7,18 @@ import fcntl
 import json
 from typing import TYPE_CHECKING
 
-from cw.config import DEV_QUEUE_FILE, DEV_QUEUE_LOCK
+from cw.config import (
+    DEV_PLAN_FILE,
+    DEV_PLAN_LOCK,
+    DEV_QUEUE_FILE,
+    DEV_QUEUE_LOCK,
+)
 from cw.exceptions import CwError
-from cw.models import DevQueueStore, OrchestratorConfig, TicketTask
+from cw.models import DevQueueStore, DispatchPlan, OrchestratorConfig, TicketTask
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 
 @contextlib.contextmanager
@@ -26,6 +32,50 @@ def _lock() -> Iterator[None]:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
+
+
+@contextlib.contextmanager
+def _plan_lock() -> Iterator[None]:
+    """Acquire an exclusive file lock for the dispatch plan."""
+    DEV_PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = DEV_PLAN_LOCK.open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+def plan_path() -> Path:
+    """Return the path to the persisted dispatch plan file."""
+    return DEV_PLAN_FILE
+
+
+def save_plan(plan: DispatchPlan) -> Path:
+    """Persist a DispatchPlan to disk under the plan file lock.
+
+    Returns the path the plan was written to.
+    """
+    with _plan_lock():
+        DEV_PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DEV_PLAN_FILE.write_text(plan.model_dump_json(indent=2))
+    return DEV_PLAN_FILE
+
+
+def load_plan() -> DispatchPlan | None:
+    """Load the persisted DispatchPlan, returning None if missing.
+
+    Returns None if the plan file does not exist or fails validation.
+    Does not raise on validation errors — callers should fall back to
+    enqueue order when None is returned.
+    """
+    if not DEV_PLAN_FILE.exists():
+        return None
+    try:
+        return DispatchPlan.model_validate_json(DEV_PLAN_FILE.read_text())
+    except (ValueError, OSError):
+        return None
 
 
 def load_dev_queue() -> DevQueueStore:
