@@ -10,10 +10,19 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.config import load_orchestrator_config
-from cw.dev_queue import add_ticket, list_tickets, load_dev_queue, resolve_client
+from cw.dev_queue import (
+    add_ticket,
+    list_tickets,
+    load_dev_queue,
+    load_plan,
+    plan_path,
+    resolve_client,
+    save_plan,
+)
 from cw.exceptions import CwError
 from cw.models import (
     DevQueueStore,
+    DispatchPlan,
     OrchestratorConfig,
     QueueItemStatus,
     TicketTask,
@@ -33,11 +42,17 @@ def tmp_dev_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect dev queue file and lock to tmp_path."""
     dev_queue_file = tmp_path / "dev_queue.json"
     dev_queue_lock = tmp_path / ".dev_queue.lock"
+    dev_plan_file = tmp_path / "dev_plan.json"
+    dev_plan_lock = tmp_path / ".dev_plan.lock"
 
     monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", dev_queue_file)
     monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", dev_queue_lock)
     monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_FILE", dev_queue_file)
     monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_LOCK", dev_queue_lock)
+    monkeypatch.setattr("cw.config.DEV_PLAN_FILE", dev_plan_file)
+    monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", dev_plan_lock)
+    monkeypatch.setattr("cw.dev_queue.DEV_PLAN_FILE", dev_plan_file)
+    monkeypatch.setattr("cw.dev_queue.DEV_PLAN_LOCK", dev_plan_lock)
 
     return tmp_path
 
@@ -431,3 +446,57 @@ class TestCLIDevQueueStatus:
         assert result.exit_code == 0, result.output
         assert "genhealth" in result.output
         assert "other" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchPlanPersistence
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchPlanPersistence:
+    """Save/load round-trip and missing-file behaviour for the dispatch plan."""
+
+    def test_load_when_missing_returns_none(self, tmp_dev_queue: Path) -> None:
+        assert load_plan() is None
+
+    def test_save_roundtrip(self, tmp_dev_queue: Path) -> None:
+        plan = DispatchPlan(
+            tasks=[
+                TicketTask(ticket_id="GEN-100", client="genhealth"),
+                TicketTask(ticket_id="GEN-101", client="genhealth"),
+            ],
+            grouping_hints={"GEN-100": "shared dependency with GEN-101"},
+        )
+        save_plan(plan)
+        loaded = load_plan()
+        assert loaded is not None
+        assert [t.ticket_id for t in loaded.tasks] == ["GEN-100", "GEN-101"]
+        assert loaded.grouping_hints == {"GEN-100": "shared dependency with GEN-101"}
+
+    def test_save_overwrites_previous_plan(self, tmp_dev_queue: Path) -> None:
+        save_plan(DispatchPlan(tasks=[TicketTask(ticket_id="X-1", client="c")]))
+        save_plan(
+            DispatchPlan(
+                tasks=[
+                    TicketTask(ticket_id="Y-1", client="c"),
+                    TicketTask(ticket_id="Y-2", client="c"),
+                ]
+            )
+        )
+        loaded = load_plan()
+        assert loaded is not None
+        assert [t.ticket_id for t in loaded.tasks] == ["Y-1", "Y-2"]
+
+    def test_load_malformed_json_returns_none(self, tmp_dev_queue: Path) -> None:
+        plan_path().parent.mkdir(parents=True, exist_ok=True)
+        plan_path().write_text("not valid json")
+        assert load_plan() is None
+
+    def test_load_invalid_schema_returns_none(self, tmp_dev_queue: Path) -> None:
+        plan_path().parent.mkdir(parents=True, exist_ok=True)
+        plan_path().write_text('{"tasks": [{"missing": "fields"}]}')
+        assert load_plan() is None
+
+    def test_plan_path_returns_configured_path(self, tmp_dev_queue: Path) -> None:
+        path = plan_path()
+        assert path == tmp_dev_queue / "dev_plan.json"
