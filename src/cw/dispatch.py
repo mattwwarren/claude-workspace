@@ -171,9 +171,8 @@ def run_dispatch_loop(
     config = load_orchestrator_config()
 
     if max_parallel is not None:
-        overridden: dict[str, int] = dict.fromkeys(
-            config.per_client_max_parallel, max_parallel
-        )
+        clients = load_clients()
+        overridden: dict[str, int] = dict.fromkeys(clients, max_parallel)
         config = config.model_copy(update={"per_client_max_parallel": overridden})
 
     resolved_adapter = adapter or get_cmux_adapter()
