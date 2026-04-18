@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
 from cw.models import (
@@ -174,6 +175,17 @@ class TestCreateAllPurposeSessions:
         assert set(sessions.keys()) == {"impl"}
         assert len(state.sessions) == 1
 
+    def test_surface_ref_set_to_purpose(self, sample_client: ClientConfig) -> None:
+        """Sessions get surface_ref set to the purpose name by default."""
+        state = CwState()
+        sessions = _create_all_purpose_sessions(
+            sample_client.name,
+            sample_client,
+            state,
+        )
+        for purpose, session in sessions.items():
+            assert session.surface_ref == purpose
+
 
 class TestCreateAllPurposeSessionsWithPrior:
     def test_carries_forward_claude_session_id(
@@ -222,8 +234,7 @@ class TestStartSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         # Set up client config
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -233,7 +244,7 @@ class TestStartSession:
             f"    workspace_path: {sample_client.workspace_path}\n"
         )
 
-        start_session("test-client", "impl")
+        start_session("test-client", "impl", adapter=mock_cmux_adapter)
 
         state = load_state()
         # Fresh start creates sessions for all purposes (impl, idea, debt)
@@ -248,12 +259,30 @@ class TestStartSession:
             assert s.client == "test-client"
             assert s.status == SessionStatus.ACTIVE
 
+    def test_new_session_spawns_cmux_surfaces(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """start_session calls adapter.spawn for each purpose."""
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        start_session("test-client", "impl", adapter=mock_cmux_adapter)
+
+        # Spawned one surface per purpose (3 default purposes)
+        assert len(mock_cmux_adapter.calls["spawn"]) == 3
+
     def test_existing_backgrounded_triggers_resume(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
+        mock_cmux_adapter: FakeCmuxAdapter,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
 
@@ -279,19 +308,18 @@ class TestStartSession:
         )
         save_state(state)
 
-        start_session("test-client", "impl")
+        start_session("test-client", "impl", adapter=mock_cmux_adapter)
 
         output = capsys.readouterr().out
         assert (
             "backgrounded session" in output.lower() or "Found backgrounded" in output
         )
 
-    def test_existing_active_navigates(
+    def test_existing_active_noop(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
+        mock_cmux_adapter: FakeCmuxAdapter,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -315,79 +343,16 @@ class TestStartSession:
         )
         save_state(state)
 
-        # Mock Zellij session as running so the active check doesn't clean up
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
-
-        start_session("test-client", "impl")
+        start_session("test-client", "impl", adapter=mock_cmux_adapter)
 
         output = capsys.readouterr().out
         assert "already active" in output.lower()
-
-    def test_crashed_pane_triggers_recovery(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="crash002",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                    zellij_pane="impl",
-                    zellij_tab="test-client",
-                )
-            ]
-        )
-        save_state(state)
-
-        # Zellij session exists but impl pane has crashed
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
-
-        def _mock_check_pane_health(
-            session: str | None = None,
-            tab_name: str | None = None,
-        ) -> dict[str, bool]:
-            return {"impl": False}
-
-        monkeypatch.setattr(
-            "cw.zellij.check_pane_health",
-            _mock_check_pane_health,
-        )
-
-        start_session("test-client", "impl")
-
-        output = capsys.readouterr().out
-        assert "crashed" in output.lower() or "Recovering" in output
-
-        # The crashed session should be marked COMPLETED with CRASHED reason
-        updated = load_state()
-        completed = [s for s in updated.sessions if s.status == SessionStatus.COMPLETED]
-        assert len(completed) >= 1
-        crashed = [
-            s for s in completed if s.completed_reason == CompletionReason.CRASHED
-        ]
-        assert len(crashed) >= 1
-        assert crashed[0].completed_at is not None
 
     def test_start_with_worktree(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -405,7 +370,9 @@ class TestStartSession:
             lambda _client, _branch: wt_path,
         )
 
-        start_session("test-client", "impl", worktree="feat/search")
+        start_session(
+            "test-client", "impl", worktree="feat/search", adapter=mock_cmux_adapter
+        )
 
         state = load_state()
         # impl and idea should have worktree_path set
@@ -417,54 +384,13 @@ class TestStartSession:
         assert idea_sessions[0].worktree_path == wt_path
         assert debt_sessions[0].worktree_path is None
 
-    def test_late_join_creates_new_tab(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """When Zellij is already running, a new tab is injected."""
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
-        # Zellij session already exists
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
-
-        start_session("test-client", "impl")
-
-        # new_tab should have been called
-        assert len(mock_zellij["new_tab"]) == 1
-        # Sessions for all purposes should be created
-        state = load_state()
-        purposes = {s.purpose for s in state.sessions}
-        assert purposes == {
-            SessionPurpose.IMPL,
-            SessionPurpose.IDEA,
-            SessionPurpose.DEBT,
-        }
-
-    def test_zellij_not_installed_raises(
-        self,
-        tmp_config_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr("cw.zellij.is_installed", lambda: False)
-
-        with pytest.raises(CwError, match="not installed"):
-            start_session("test-client", "impl")
-
 
 class TestStartWorktreeClient:
     def test_auto_creates_worktree(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -483,7 +409,7 @@ class TestStartWorktreeClient:
             lambda _client, _branch: wt_path,
         )
 
-        start_session("client-a", "impl")
+        start_session("client-a", "impl", adapter=mock_cmux_adapter)
 
         output = capsys.readouterr().out
         assert "Creating worktree for branch 'client-a'" in output
@@ -497,14 +423,14 @@ class TestStartWorktreeClient:
         assert impl.worktree_path == wt_path
         assert impl.branch == "client-a"
 
-    def test_second_worktree_client_creates_tab(
+    def test_second_worktree_client_creates_surfaces(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Second client creates a new tab when Zellij is running."""
+        """Second client creates surfaces via cmux adapter."""
         repo = tmp_path / "repo"
         repo.mkdir()
         ws = tmp_path / "personal"
@@ -526,17 +452,10 @@ class TestStartWorktreeClient:
             lambda _client, _branch: wt_path,
         )
 
-        # Zellij session already exists (first client started)
-        monkeypatch.setattr(
-            "cw.zellij.session_exists",
-            lambda _name: True,
-        )
+        start_session("client-a", "impl", adapter=mock_cmux_adapter)
 
-        start_session("client-a", "impl")
-
-        # Should have called new_tab, not create_and_attach
-        assert len(mock_zellij["new_tab"]) == 1
-        assert len(mock_zellij["create_and_attach"]) == 0
+        # Should have spawned surfaces for all purposes
+        assert len(mock_cmux_adapter.calls["spawn"]) == 3
 
 
 class TestBackgroundSession:
@@ -544,7 +463,7 @@ class TestBackgroundSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         state = CwState(
@@ -570,7 +489,7 @@ class TestBackgroundSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         state = CwState(
             sessions=[
@@ -595,7 +514,7 @@ class TestBackgroundSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         state = CwState(
             sessions=[
@@ -625,7 +544,7 @@ class TestBackgroundSession:
     def test_raises_on_no_active(
         self,
         tmp_config_dir: Path,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         save_state(CwState())
 
@@ -636,7 +555,7 @@ class TestBackgroundSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         state = CwState(
             sessions=[
@@ -655,11 +574,11 @@ class TestBackgroundSession:
         with pytest.raises(CwError, match="not active or idle"):
             background_session("c/impl")
 
-    def test_outside_zellij_finds_latest_handoff(
+    def test_finds_latest_handoff(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         # Create a handoff file
@@ -687,12 +606,12 @@ class TestBackgroundSession:
         updated = load_state()
         assert updated.sessions[0].last_handoff_path is not None
         output = capsys.readouterr().out
-        assert "Not inside Zellij" in output
+        assert "Not inside cmux" in output
 
     def test_session_not_found_raises(
         self,
         tmp_config_dir: Path,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         save_state(CwState())
 
@@ -705,7 +624,7 @@ class TestResumeSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         sample_handoff_file: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -731,7 +650,7 @@ class TestResumeSession:
         )
         save_state(state)
 
-        resume_session("test-client/impl")
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.ACTIVE
@@ -740,11 +659,48 @@ class TestResumeSession:
         output = capsys.readouterr().out
         assert "Resumed session" in output
 
+    def test_resume_spawns_cmux_surface(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+        sample_handoff_file: Path,
+    ) -> None:
+        """resume_session calls adapter.spawn to create a new surface."""
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="spawn001",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    last_handoff_path=sample_handoff_file,
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
+
+        assert len(mock_cmux_adapter.calls["spawn"]) == 1
+        workspace, cmd, _surface = mock_cmux_adapter.calls["spawn"][0]
+        assert "test-client" in str(workspace)
+        assert "claude --resume" in str(cmd)
+
     def test_no_handoff_warns(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -768,7 +724,7 @@ class TestResumeSession:
         )
         save_state(state)
 
-        resume_session("test-client/impl")
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
         output = capsys.readouterr().out
         assert "No handoff file" in output
@@ -777,7 +733,7 @@ class TestResumeSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
@@ -801,26 +757,29 @@ class TestResumeSession:
         save_state(state)
 
         with pytest.raises(CwError, match="not backgrounded or idle"):
-            resume_session("test-client/impl")
+            resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
     def test_not_found_raises(
         self,
         tmp_config_dir: Path,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         save_state(CwState())
 
         with pytest.raises(CwError, match="Session not found"):
-            resume_session("nonexistent")
+            resume_session("nonexistent", adapter=mock_cmux_adapter)
 
-    def test_outside_zellij_shows_prompt(
+    def test_resume_shows_prompt(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         sample_handoff_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
+
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -843,66 +802,21 @@ class TestResumeSession:
         )
         save_state(state)
 
-        resume_session("test-client/impl")
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
         output = capsys.readouterr().out
         assert "Resumption prompt:" in output
         assert "auth feature" in output
 
-    def test_in_zellij_injects_prompt(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        sample_handoff_file: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Override mock_zellij's in_zellij_session to return True
-        monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
-        # Mock session_exists to return True (session already running)
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
-        # Skip the sleep
-        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
-
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="inject01",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.BACKGROUNDED,
-                    workspace_path=sample_client.workspace_path,
-                    last_handoff_path=sample_handoff_file,
-                    zellij_pane="impl",
-                    zellij_tab="test-client",
-                )
-            ]
-        )
-        save_state(state)
-
-        resume_session("test-client/impl")
-
-        # Verify write_to_pane was called (for "claude\n" and prompt)
-        assert len(mock_zellij["write_to_pane"]) >= 2
-
     def test_resume_no_handoff_injects_context_only(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Without a handoff, resumed session still gets [cw identity] context."""
-        monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
         monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
 
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -921,31 +835,26 @@ class TestResumeSession:
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="impl",
-                    zellij_tab="test-client",
+                    surface_ref="impl",
                 )
             ]
         )
         save_state(state)
 
-        resume_session("test-client/impl")
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
-        # Should still inject context-only prompt
-        assert len(mock_zellij["write_to_pane"]) >= 2
-        injected_prompt = mock_zellij["write_to_pane"][1][0]
-        assert "[cw identity]" in injected_prompt
-        assert "Client: 'test-client'" in injected_prompt
+        output = capsys.readouterr().out
+        assert "[cw identity]" in output
+        assert "Client: 'test-client'" in output
 
     def test_resume_command_includes_env_vars(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The claude --resume command has CW_CLIENT/CW_PURPOSE env vars."""
-        monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
         monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
 
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -964,31 +873,30 @@ class TestResumeSession:
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="impl",
-                    zellij_tab="test-client",
+                    surface_ref="impl",
                 )
             ]
         )
         save_state(state)
 
-        resume_session("test-client/impl")
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
-        # First write_to_pane is the claude --resume command
-        resume_cmd = mock_zellij["write_to_pane"][0][0]
-        assert "CW_CLIENT=test-client" in resume_cmd
-        assert "CW_PURPOSE=impl" in resume_cmd
+        # The spawn command should include CW_CLIENT/CW_PURPOSE env vars
+        assert len(mock_cmux_adapter.calls["spawn"]) == 1
+        _workspace, cmd, _surface = mock_cmux_adapter.calls["spawn"][0]
+        assert "CW_CLIENT=test-client" in str(cmd)
+        assert "CW_PURPOSE=impl" in str(cmd)
 
     def test_resume_injects_client_context(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         sample_handoff_file: Path,
         monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Resumed session gets [cw identity] prepended to handoff prompt."""
-        monkeypatch.setattr("cw.zellij.in_zellij_session", lambda: True)
-        monkeypatch.setattr("cw.zellij.session_exists", lambda _name: True)
         monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
 
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -1008,31 +916,31 @@ class TestResumeSession:
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
                     last_handoff_path=sample_handoff_file,
-                    zellij_pane="impl",
-                    zellij_tab="test-client",
+                    surface_ref="impl",
                 )
             ]
         )
         save_state(state)
 
-        resume_session("test-client/impl")
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
-        # The second write_to_pane call is the prompt injection
-        assert len(mock_zellij["write_to_pane"]) >= 2
-        injected_prompt = mock_zellij["write_to_pane"][1][0]
-        assert "[cw identity]" in injected_prompt
-        assert "Client: 'test-client'" in injected_prompt
+        output = capsys.readouterr().out
+        assert "[cw identity]" in output
+        assert "Client: 'test-client'" in output
         # Original handoff content still present
-        assert "auth feature" in injected_prompt
+        assert "auth feature" in output
 
     def test_regular_handoff_not_cleaned_up(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         sample_handoff_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setattr("cw.session.time.sleep", lambda _s: None)
+
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -1055,7 +963,7 @@ class TestResumeSession:
         )
         save_state(state)
 
-        resume_session("test-client/impl")
+        resume_session("test-client/impl", adapter=mock_cmux_adapter)
 
         # Regular session-*.md handoffs should be preserved
         assert sample_handoff_file.exists()
@@ -1068,7 +976,7 @@ class TestDoneSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         state = CwState(
             sessions=[
@@ -1093,7 +1001,7 @@ class TestDoneSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         state = CwState(
             sessions=[
@@ -1116,7 +1024,7 @@ class TestDoneSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -1161,7 +1069,7 @@ class TestDoneSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -1204,7 +1112,7 @@ class TestDoneSession:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         state = CwState(
             sessions=[
@@ -1228,13 +1136,20 @@ class TestDoneSession:
 
 
 class TestBackgroundNotify:
-    def test_notify_calls_write_to_pane(
+    def test_notify_calls_adapter_spawn(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
         state = CwState(
             sessions=[
                 Session(
@@ -1252,25 +1167,22 @@ class TestBackgroundNotify:
                     purpose=SessionPurpose.IDEA,
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
-                    zellij_pane="idea",
-                    zellij_tab="test-client",
+                    surface_ref="idea",
                 ),
             ]
         )
         save_state(state)
 
-        background_session("test-client/impl", notify="idea")
+        background_session("test-client/impl", notify="idea", adapter=mock_cmux_adapter)
 
         output = capsys.readouterr().out
         assert "Notified" in output
-        # write_to_pane should have been called for the notification
-        assert len(mock_zellij["write_to_pane"]) >= 1
 
     def test_notify_no_active_target_warns(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         state = CwState(
@@ -1287,118 +1199,10 @@ class TestBackgroundNotify:
         )
         save_state(state)
 
-        background_session("test-client/impl", notify="idea")
+        background_session("test-client/impl", notify="idea", adapter=mock_cmux_adapter)
 
         output = capsys.readouterr().out
         assert "No active idea session" in output
-
-
-class TestRenameTabOnTransition:
-    """Verify rename_tab is called on background/resume when inside Zellij."""
-
-    def test_background_renames_tab(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Override in_zellij_session to return True
-        monkeypatch.setattr(
-            "cw.zellij.in_zellij_session",
-            lambda: True,
-        )
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="rntab001",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                )
-            ]
-        )
-        save_state(state)
-
-        background_session("test-client/impl")
-
-        assert len(mock_zellij["rename_tab"]) == 1
-        name_arg = mock_zellij["rename_tab"][0][0]
-        assert "test-client" in name_arg
-        assert "[bg]" in name_arg
-
-    def test_background_no_rename_outside_zellij(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-    ) -> None:
-        # Default mock_zellij returns False for in_zellij_session
-        state = CwState(
-            sessions=[
-                Session(
-                    id="rntab002",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                )
-            ]
-        )
-        save_state(state)
-
-        background_session("test-client/impl")
-
-        assert len(mock_zellij["rename_tab"]) == 0
-
-    def test_resume_renames_tab(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Override in_zellij_session to return True and session_exists
-        # to return True (avoid nested-session guard)
-        monkeypatch.setattr(
-            "cw.zellij.in_zellij_session",
-            lambda: True,
-        )
-        monkeypatch.setattr(
-            "cw.zellij.session_exists",
-            lambda _name: True,
-        )
-
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="rntab003",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.BACKGROUNDED,
-                    workspace_path=sample_client.workspace_path,
-                )
-            ]
-        )
-        save_state(state)
-
-        resume_session("test-client/impl")
-
-        assert len(mock_zellij["rename_tab"]) == 1
-        name_arg = mock_zellij["rename_tab"][0][0]
-        assert name_arg == "test-client"
 
 
 class TestBackgroundAllSessions:
@@ -1406,7 +1210,7 @@ class TestBackgroundAllSessions:
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_zellij: dict[str, list[Any]],
+        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         state = CwState(
             sessions=[

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -443,7 +444,13 @@ class TestInitClient:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # Strip GIT_* vars that leak from Claude Code worktree environments
+        # and would make any path appear to be inside a git repo.
+        for key in [k for k in os.environ if k.startswith("GIT_")]:
+            monkeypatch.delenv(key, raising=False)
+
         not_git = tmp_path / "not-a-repo"
         not_git.mkdir()
 

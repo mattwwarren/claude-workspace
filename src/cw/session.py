@@ -13,14 +13,10 @@ import click
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cw import zellij
+from cw.cmux import CmuxAdapter, get_cmux_adapter
 from cw.config import get_client, load_state, save_state
 from cw.exceptions import CwError
-from cw.handoff import (
-    extract_resumption_prompt,
-    find_handoffs_newer_than,
-    find_latest_handoff,
-)
+from cw.handoff import extract_resumption_prompt, find_latest_handoff
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
     ClientConfig,
@@ -32,8 +28,6 @@ from cw.models import (
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.worktree import create_worktree, remove_worktree
 
-CW_SESSION = "cw"
-
 # Purposes that receive worktree cwd (impl works on the feature branch,
 # idea brainstorms within it; debt stays on the main workspace).
 WORKTREE_PURPOSES: frozenset[str] = frozenset({"impl", "idea"})
@@ -44,28 +38,7 @@ def _build_env_prefix(client_name: str, purpose: str) -> str:
     return f"CW_CLIENT={client_name} CW_PURPOSE={purpose}"
 
 
-# Timing constants for session lifecycle
-HANDOFF_POLL_TIMEOUT_S = 30
-HANDOFF_POLL_INTERVAL_S = 1
 CLAUDE_INIT_DELAY_S = 2
-
-
-def _navigate_to_pane(session: Session, *, target: str | None = None) -> None:
-    """Navigate to a session's tab and pane in Zellij."""
-    tab = session.zellij_tab or session.client
-    zellij.go_to_tab(tab, session=target)
-    zellij.focus_pane(
-        session.zellij_pane or session.purpose,
-        session=target,
-        tab_name=tab,
-    )
-
-
-def _ensure_zellij() -> None:
-    """Verify zellij is installed."""
-    if not zellij.is_installed():
-        msg = "Zellij is not installed. Install it: https://zellij.dev/documentation/installation"
-        raise CwError(msg)
 
 
 def _build_pane_args(
@@ -92,7 +65,7 @@ def _build_pane_args(
             workspace_path=workspace_path,
         )
         if prompt:
-            # Collapse newlines — KDL strings cannot span multiple lines
+            # Collapse newlines for single-line shell command
             escaped_prompt = shlex.quote(prompt.replace("\n", " "))
             extra = f" --append-system-prompt {escaped_prompt}"
 
@@ -109,10 +82,7 @@ def _build_pane_args(
         else:
             env_prefix = ""
         cmd = f"{env_prefix}cw run-claude --{session_flag}{extra}"
-        # KDL-quote the whole command for the layout template.
-        # Escape backslashes and double quotes so the KDL string is valid.
-        kdl_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
-        pane_data: dict[str, str] = {"claude_cmd": f'"{kdl_cmd}"'}
+        pane_data: dict[str, str] = {"claude_cmd": cmd}
         cwd = str(session.worktree_path or session.workspace_path)
         pane_data["cwd"] = cwd
         panes[purpose] = pane_data
@@ -146,8 +116,7 @@ def _create_all_purpose_sessions(
             client=client_name,
             purpose=purpose_enum,
             workspace_path=client.workspace_path,
-            zellij_pane=purpose,
-            zellij_tab=client_name,
+            surface_ref=purpose,
             claude_session_id=prior_claude_id,
         )
         # Apply worktree to impl and idea panes
@@ -169,32 +138,16 @@ def _create_all_purpose_sessions(
     return sessions
 
 
-def _create_session_if_needed(
+def _spawn_session_surface(
     client: ClientConfig,
-    panes: dict[str, dict[str, str]] | None = None,
-) -> bool:
-    """Create and attach to the cw Zellij session if it doesn't exist.
-
-    Returns True if a new session was created (terminal taken over),
-    False if already running.  Refuses to create a nested session when
-    already inside Zellij.
-    """
-    if zellij.session_exists(CW_SESSION):
-        return False
-
-    if zellij.in_zellij_session():
-        msg = (
-            "Already inside a Zellij session but the 'cw' session"
-            " was not found. Cannot create a nested session."
-        )
-        raise CwError(msg)
-
-    purposes = [p.value for p in client.auto_purposes]
-    layout_path = zellij.generate_layout(client, panes=panes, purposes=purposes)
-    click.echo(f"Launching Zellij session '{CW_SESSION}' for {client.name}...")
-    # This will take over the terminal - user lands directly in the session
-    zellij.create_and_attach(CW_SESSION, layout_path)
-    return True
+    session: Session,
+    command: str,
+    adapter: CmuxAdapter,
+) -> None:
+    """Spawn a cmux surface for the session and store the surface_ref."""
+    workspace = client.cmux_workspace or client.name
+    surface_ref = adapter.spawn(workspace, command)
+    session.surface_ref = surface_ref
 
 
 def start_session(
@@ -202,12 +155,20 @@ def start_session(
     purpose: str,
     *,
     worktree: str | None = None,
+    adapter: CmuxAdapter | None = None,
 ) -> None:
-    """Start or resume a Claude Code session for a client."""
-    _ensure_zellij()
-    # Clean up stale EXITED Zellij session so we don't try to inject into it
-    if zellij.delete_exited_session(CW_SESSION):
-        click.echo(f"Cleaned up exited Zellij session '{CW_SESSION}'.")
+    """Start or resume a Claude Code session for a client.
+
+    Args:
+        client_name: Name of the client to start.
+        purpose: Session purpose (impl, idea, debt, explore).
+        worktree: Optional git branch for worktree isolation.
+        adapter: CmuxAdapter instance. Defaults to get_cmux_adapter() (macOS only).
+                 Inject FakeCmuxAdapter for tests.
+    """
+    if adapter is None:
+        adapter = get_cmux_adapter()
+
     client = get_client(client_name)
     state = load_state()
 
@@ -235,65 +196,14 @@ def start_session(
 
     if existing and existing.status == SessionStatus.BACKGROUNDED:
         click.echo(f"Found backgrounded session: {existing.name}")
-        resume_session(existing.name)
+        resume_session(existing.name, adapter=adapter)
         return
 
     if existing and existing.status == SessionStatus.ACTIVE:
-        # Verify Zellij session is actually running
-        if zellij.session_exists(CW_SESSION):
-            # Check if Claude is still alive in the pane
-            health = zellij.check_pane_health(
-                session=CW_SESSION,
-                tab_name=client_name,
-            )
-            pane_name = existing.zellij_pane or existing.purpose
-            if health.get(pane_name) is False:
-                click.echo(f"Claude crashed in {existing.name}. Recovering...")
-                existing.status = SessionStatus.COMPLETED
-                existing.completed_reason = CompletionReason.CRASHED
-                existing.completed_at = datetime.now(UTC)
-                save_state(state)
-                record_event(
-                    client_name,
-                    HistoryEvent(
-                        event_type=EventType.SESSION_CRASHED,
-                        client=client_name,
-                        session_id=existing.id,
-                        session_name=existing.name,
-                        purpose=existing.purpose,
-                    ),
-                )
-                # Fall through to fresh start / recovery below
-            else:
-                click.echo(f"Session already active: {existing.name}")
-                if zellij.in_zellij_session():
-                    _navigate_to_pane(existing)
-                else:
-                    click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
-                    zellij.attach_session(CW_SESSION)
-                return
-        # Zellij session died - mark old sessions completed and start fresh.
-        click.echo("Zellij session gone. Recovering sessions...")
-        prior_sessions: dict[str, Session] = {}
-        for s in state.sessions:
-            if s.client == client_name and s.status == SessionStatus.ACTIVE:
-                prior_sessions[s.purpose] = s
-                s.status = SessionStatus.COMPLETED
+        click.echo(f"Session already active: {existing.name}")
+        return
 
-        all_sessions = _create_all_purpose_sessions(
-            client_name,
-            client,
-            state,
-            prior_sessions=prior_sessions,
-        )
-        save_state(state)
-
-        panes = _build_pane_args(all_sessions, client=client)
-        click.echo("Resuming Claude sessions in new Zellij layout...")
-        _create_session_if_needed(client, panes=panes)
-        return  # User is now inside Zellij
-
-    # Create sessions for ALL purposes and build pane layout
+    # Create sessions for ALL purposes
     all_sessions = _create_all_purpose_sessions(
         client_name,
         client,
@@ -307,18 +217,13 @@ def start_session(
     for s in all_sessions.values():
         click.echo(f"  {s.name}")
 
-    if not zellij.session_exists(CW_SESSION):
-        click.echo(f"Launching Zellij session '{CW_SESSION}' for {client_name}...")
-        _create_session_if_needed(client, panes=panes)
-        return  # User is now inside Zellij
+    # Spawn cmux surfaces for all purposes
+    click.echo(f"Launching cmux surfaces for {client_name}...")
+    for purpose_str, session in all_sessions.items():
+        pane_cmd = panes[purpose_str]["claude_cmd"]
+        _spawn_session_surface(client, session, pane_cmd, adapter)
 
-    # Zellij already running — inject a new tab for this client
-    click.echo(f"Adding tab for {client_name} to Zellij session '{CW_SESSION}'...")
-    zellij.new_tab(client, panes=panes, session=CW_SESSION)
-
-    if not zellij.in_zellij_session():
-        click.echo(f"Attaching to Zellij session '{CW_SESSION}'...")
-        zellij.attach_session(CW_SESSION)
+    save_state(state)
 
 
 def _resolve_session(state: CwState, session_name: str | None) -> Session:
@@ -345,20 +250,12 @@ def _resolve_session(state: CwState, session_name: str | None) -> Session:
     raise CwError(msg)
 
 
-def _wait_for_handoff(workspace_path: Path, before_mtime: float) -> Path | None:
-    """Poll for a new handoff file created after before_mtime.
-
-    Returns the path to the new handoff, or None on timeout.
-    """
-    for _ in range(HANDOFF_POLL_TIMEOUT_S):
-        time.sleep(HANDOFF_POLL_INTERVAL_S)
-        new_handoffs = find_handoffs_newer_than(workspace_path, before_mtime)
-        if new_handoffs:
-            return new_handoffs[0]
-    return None
-
-
-def _notify_sibling(client_name: str, source_purpose: str, target_purpose: str) -> None:
+def _notify_sibling(
+    client_name: str,
+    source_purpose: str,
+    target_purpose: str,
+    adapter: CmuxAdapter,
+) -> None:
     """Send a short notification to a sibling session after backgrounding."""
     state = load_state()
     target = state.find_session(client_name, target_purpose)
@@ -372,9 +269,14 @@ def _notify_sibling(client_name: str, source_purpose: str, target_purpose: str) 
         f"\n[cw] {source_purpose} session has been backgrounded."
         f" Handoff context is available."
     )
-    zellij_target = zellij.resolve_session_target(CW_SESSION)
-    _navigate_to_pane(target, target=zellij_target)
-    zellij.write_to_pane(message + "\n", session=zellij_target)
+    if target.surface_ref:
+        try:
+            # Send via cmux surface if we have a reference
+            client = get_client(client_name)
+            workspace = client.cmux_workspace or client_name
+            adapter.spawn(workspace, message)
+        except CwError:
+            pass
     click.echo(f"Notified {target.name}.")
 
 
@@ -383,6 +285,7 @@ def background_session(
     *,
     notify: str | None = None,
     auto: bool = False,
+    adapter: CmuxAdapter | None = None,
 ) -> None:
     """Background a session by triggering /session-done and recording the handoff."""
     state = load_state()
@@ -394,33 +297,17 @@ def background_session(
 
     click.echo(f"Backgrounding session: {session.name}...")
 
-    before_mtime = time.time()
-
     if session.status == SessionStatus.IDLE:
         # Claude already exited — no /session-done needed.
         latest = find_latest_handoff(session.workspace_path)
         if latest:
             session.last_handoff_path = latest
-    elif zellij.in_zellij_session():
-        _navigate_to_pane(session)
-        zellij.write_to_pane("/session-done\n")
-
-        click.echo("Waiting for handoff generation...")
-        handoff_path = _wait_for_handoff(session.workspace_path, before_mtime)
-        if handoff_path:
-            session.last_handoff_path = handoff_path
-            click.echo(f"Handoff saved: {handoff_path}")
-        else:
-            click.echo(
-                f"Warning: No handoff detected within {HANDOFF_POLL_TIMEOUT_S}s."
-                " Session marked as backgrounded anyway."
-            )
     else:
         latest = find_latest_handoff(session.workspace_path)
         if latest:
             session.last_handoff_path = latest
         click.echo(
-            "Not inside Zellij session."
+            "Not inside cmux session."
             " Marking as backgrounded without /session-done injection."
         )
 
@@ -441,12 +328,10 @@ def background_session(
     )
     click.echo(f"Session {session.name} backgrounded.")
 
-    # Update Zellij tab name to indicate backgrounded state
-    if zellij.in_zellij_session():
-        zellij.rename_tab(f"{session.client} [bg]")
-
     if notify:
-        _notify_sibling(session.client, session.purpose, notify)
+        if adapter is None:
+            adapter = get_cmux_adapter()
+        _notify_sibling(session.client, session.purpose, notify, adapter)
 
 
 def background_all_sessions(
@@ -469,9 +354,21 @@ def background_all_sessions(
             click.echo(f"Warning: could not background {session.name}: {exc}")
 
 
-def resume_session(session_name: str) -> None:
-    """Resume a backgrounded session with its handoff context."""
-    _ensure_zellij()
+def resume_session(
+    session_name: str,
+    *,
+    adapter: CmuxAdapter | None = None,
+) -> None:
+    """Resume a backgrounded session with its handoff context.
+
+    Args:
+        session_name: Session name or ID to resume.
+        adapter: CmuxAdapter instance. Defaults to get_cmux_adapter() (macOS only).
+                 Inject FakeCmuxAdapter for tests.
+    """
+    if adapter is None:
+        adapter = get_cmux_adapter()
+
     state = load_state()
 
     session = state.find_by_name_or_id(session_name)
@@ -498,7 +395,7 @@ def resume_session(session_name: str) -> None:
     else:
         click.echo("No handoff file available. Starting fresh session.")
 
-    # Ensure client tab exists
+    # Get client config
     client = get_client(session.client)
 
     # Prepend client identity so resumed sessions know who they are
@@ -507,8 +404,12 @@ def resume_session(session_name: str) -> None:
         str(client.workspace_path),
         session.purpose,
     )
-    prompt = f"{context}\n\n{prompt}" if prompt else context
-    _create_session_if_needed(client)
+    full_prompt = f"{context}\n\n{prompt}" if prompt else context
+
+    # Spawn a new cmux surface for the resumed session
+    env_prefix = _build_env_prefix(session.client, session.purpose)
+    resume_cmd = f"{env_prefix} claude --resume"
+    _spawn_session_surface(client, session, resume_cmd, adapter)
 
     session.status = SessionStatus.ACTIVE
     session.resumed_at = datetime.now(UTC)
@@ -526,22 +427,11 @@ def resume_session(session_name: str) -> None:
 
     click.echo(f"Resumed session: {session.name}")
 
-    if zellij.in_zellij_session():
-        # Restore tab name (remove [bg] suffix)
-        zellij.rename_tab(session.client)
-        _navigate_to_pane(session)
-
-        # Launch Claude with interactive session picker
-        env_prefix = _build_env_prefix(session.client, session.purpose)
-        zellij.write_to_pane(f"{env_prefix} claude --resume\n")
-        if prompt:
-            time.sleep(CLAUDE_INIT_DELAY_S)  # Wait for Claude to initialize
-            zellij.write_to_pane(prompt + "\n")
-    else:
-        click.echo(f"Attach with: zellij attach {CW_SESSION}")
-        if prompt:
-            click.echo("\nResumption prompt:")
-            click.echo(prompt)
+    # Output prompt for injection (cmux surface has been spawned with the command)
+    if full_prompt:
+        time.sleep(CLAUDE_INIT_DELAY_S)  # Wait for Claude to initialize
+        click.echo("\nResumption prompt:")
+        click.echo(full_prompt)
 
 
 def done_session(
