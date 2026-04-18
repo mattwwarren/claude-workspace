@@ -32,6 +32,7 @@ class CompletionReason(StrEnum):
 
 class SessionOrigin(StrEnum):
     USER = "user"
+    DAEMON = "daemon"
 
 
 class QueueItemStatus(StrEnum):
