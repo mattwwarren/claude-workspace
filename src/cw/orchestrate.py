@@ -293,6 +293,7 @@ class SessionSummary(BaseModel):
     purpose: str
     started_at: datetime
     surface_ref: str | None = None
+    worktree_path: Path | None = None
 
 
 class TicketSummary(BaseModel):
@@ -303,6 +304,7 @@ class TicketSummary(BaseModel):
     priority: int
     status: str
     created_at: datetime
+    scope_hint: str | None = None
 
 
 class EventSummary(BaseModel):
@@ -336,6 +338,7 @@ def _summarise_ticket(task: TicketTask) -> TicketSummary:
         priority=task.priority,
         status=task.status.value,
         created_at=task.created_at,
+        scope_hint=task.scope_hint,
     )
 
 
@@ -348,6 +351,7 @@ def _summarise_session(sess: Session) -> SessionSummary:
         purpose=sess.purpose.value,
         started_at=sess.started_at,
         surface_ref=sess.surface_ref,
+        worktree_path=sess.worktree_path,
     )
 
 

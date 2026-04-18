@@ -62,6 +62,8 @@ from cw.session import (
     start_session,
 )
 from cw.spawn import spawn_create_impl
+from cw.tui import DetailLevel
+from cw.tui import watch as tui_watch
 from cw.wrapper import run_claude_wrapper, signal_idle
 
 
@@ -1021,6 +1023,64 @@ def orchestrate_retire() -> None:
     click.echo(f"Retired {len(retired)} session(s):")
     for sid in retired:
         click.echo(f"  {sid}")
+
+
+@orchestrate.command(name="watch")
+@click.option(
+    "--interval",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Seconds between refreshes (1-60).",
+)
+@click.option(
+    "--client",
+    "client_filter",
+    default=None,
+    shell_complete=_complete_client,
+    help="Only render this client.",
+)
+@click.option(
+    "--compact",
+    "level_compact",
+    is_flag=True,
+    default=False,
+    help="One-line per-client summary (counts only).",
+)
+@click.option(
+    "--verbose",
+    "level_verbose",
+    is_flag=True,
+    default=False,
+    help="Show extra columns: surface_ref, scope_hint, unresolved threads.",
+)
+@handle_errors
+def orchestrate_watch(
+    interval: int,
+    client_filter: str | None,
+    level_compact: bool,
+    level_verbose: bool,
+) -> None:
+    """Render the orchestrator dashboard live, refreshing on an interval.
+
+    Groups sessions, tickets, and PRs by client.  Press Ctrl-C to exit.
+    """
+    if level_compact and level_verbose:
+        msg = "Pass at most one of --compact / --verbose."
+        raise click.ClickException(msg)
+
+    level = DetailLevel.DEFAULT
+    if level_compact:
+        level = DetailLevel.COMPACT
+    elif level_verbose:
+        level = DetailLevel.VERBOSE
+
+    tui_watch(
+        interval=interval,
+        client_filter=client_filter,
+        level=level,
+        home=str(Path.home()),
+    )
 
 
 # --- Spawn command group ---
