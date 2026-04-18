@@ -42,6 +42,7 @@ STATE_DIR = (
 QUEUES_DIR = STATE_DIR / "queues"
 EVENTS_DIR = STATE_DIR / "events"
 HISTORY_DIR = STATE_DIR / "history"
+PR_WATCHER_DIR = STATE_DIR / "pr_watcher"
 CLIENTS_FILE = CONFIG_DIR / "clients.yaml"
 STATE_FILE = STATE_DIR / "sessions.json"
 
