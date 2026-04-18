@@ -7,27 +7,34 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
+from cw.cmux import CmuxAdapter, get_cmux_adapter
 from cw.config import (
+    get_client,
     init_client,
     load_clients,
     load_orchestrator_config,
     load_state,
+    save_state,
     show_config,
 )
 from cw.dev_queue import add_ticket, list_tickets, resolve_client
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
+    ClientConfig,
+    CompletionReason,
     CwState,
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TaskSpec,
@@ -813,3 +820,161 @@ def dev_queue_status(client: str | None) -> None:
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
             f"  {len(completed_tasks):>9}  {ticket_ids}"
         )
+
+
+# --- Spawn command group ---
+
+
+def _spawn_create_impl(
+    *,
+    client: ClientConfig,
+    worktree: Path,
+    prompt_file: Path,
+    surface: str,
+    label: str | None,
+    adapter: CmuxAdapter,
+) -> str:
+    """Create a daemon-spawned session.
+
+    Separated from the Click command so tests can inject adapters directly.
+    Returns the new session's ID.
+    """
+    prompt_content = prompt_file.read_text()
+    workspace = client.cmux_workspace or client.name
+    command = f"claude -w {worktree} --print {prompt_content!r}"
+    surface_ref = adapter.spawn(workspace, command, surface)
+
+    session_label = label or "daemon"
+    sess = Session(
+        name=f"{client.name}/{session_label}",
+        client=client.name,
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        workspace_path=client.workspace_path,
+        worktree_path=worktree,
+        surface_ref=surface_ref,
+    )
+
+    state = load_state()
+    state.sessions.append(sess)
+    save_state(state)
+    return sess.id
+
+
+def _spawn_close_impl(
+    *,
+    session_id: str,
+    adapter: CmuxAdapter,
+) -> None:
+    """Close a daemon-spawned session.
+
+    Separated from the Click command so tests can inject adapters directly.
+    """
+    state = load_state()
+    sess = state.find_by_name_or_id(session_id)
+    if sess is None:
+        msg = f"Session '{session_id}' not found."
+        raise CwError(msg)
+    if sess.status == SessionStatus.COMPLETED:
+        msg = f"Session '{session_id}' is already completed."
+        raise CwError(msg)
+
+    if sess.surface_ref is not None:
+        adapter.close(sess.surface_ref)
+
+    sess.status = SessionStatus.COMPLETED
+    sess.completed_at = datetime.now(UTC)
+    sess.completed_reason = CompletionReason.USER
+    save_state(state)
+
+
+@main.group(invoke_without_command=True)
+@click.option("--client", "-c", default=None, help="Client name.")
+@click.option("--worktree", "-w", default=None, help="Worktree path.")
+@click.option("--prompt-file", "-f", default=None, help="Path to prompt file.")
+@click.option(
+    "--surface",
+    "-s",
+    default="split",
+    type=click.Choice(["split", "tab"]),
+    help="Surface type.",
+)
+@click.option("--label", "-l", default=None, help="Session label (default: daemon).")
+@click.pass_context
+@handle_errors
+def spawn(
+    ctx: click.Context,
+    client: str | None,
+    worktree: str | None,
+    prompt_file: str | None,
+    surface: str,
+    label: str | None,
+) -> None:
+    """Spawn a daemon-managed Claude session or manage spawned sessions.
+
+    When called directly (not via a subcommand), spawns a new session:
+
+    \b
+      cw spawn --client my-client --worktree /path/to/worktree --prompt-file prompt.txt
+
+    Subcommands:
+      close  Close a spawned session by session ID.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # Invoked as `cw spawn --client ...` (top-level create)
+    missing: list[str] = []
+    if client is None:
+        missing.append("--client")
+    if worktree is None:
+        missing.append("--worktree")
+    if prompt_file is None:
+        missing.append("--prompt-file")
+    if missing:
+        opts = ", ".join(missing)
+        msg = f"Missing required option(s): {opts}"
+        raise CwError(msg)
+
+    # At this point client/worktree/prompt_file are guaranteed non-None
+    # (the `if missing` guard above raised CwError if any were absent).
+    client_config = get_client(cast("str", client))
+    adapter = get_cmux_adapter()
+    session_id = _spawn_create_impl(
+        client=client_config,
+        worktree=Path(cast("str", worktree)),
+        prompt_file=Path(cast("str", prompt_file)),
+        surface=surface,
+        label=label,
+        adapter=adapter,
+    )
+    click.echo(session_id)
+
+
+@spawn.command(name="close")
+@click.argument("session_id")
+@handle_errors
+def spawn_close(session_id: str) -> None:
+    """Close a spawned session by session ID.
+
+    Calls adapter.close on the associated surface and marks the session
+    as COMPLETED.
+
+    \b
+    Example:
+      cw spawn close abc12345
+    """
+    # Validate session exists before acquiring the adapter (adapter may fail on
+    # non-macOS when cmux is not installed).
+    state = load_state()
+    sess = state.find_by_name_or_id(session_id)
+    if sess is None:
+        not_found_msg = f"Session '{session_id}' not found."
+        raise CwError(not_found_msg)
+    if sess.status == SessionStatus.COMPLETED:
+        already_done_msg = f"Session '{session_id}' is already completed."
+        raise CwError(already_done_msg)
+
+    adapter = get_cmux_adapter()
+    _spawn_close_impl(session_id=session_id, adapter=adapter)
+    click.echo(f"Closed session: {session_id}")
