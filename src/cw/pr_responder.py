@@ -49,7 +49,7 @@ class PRDispatchRecord(BaseModel):
     active: dict[str, str] = Field(default_factory=dict)
 
 
-def _load_dispatch_record() -> PRDispatchRecord:
+def load_dispatch_record() -> PRDispatchRecord:
     """Load PRDispatchRecord from STATE_DIR, or return an empty one."""
     path = STATE_DIR / _DISPATCH_FILE_NAME
     if not path.exists():
@@ -57,7 +57,7 @@ def _load_dispatch_record() -> PRDispatchRecord:
     return PRDispatchRecord.model_validate_json(path.read_text())
 
 
-def _save_dispatch_record(record: PRDispatchRecord) -> None:
+def save_dispatch_record(record: PRDispatchRecord) -> None:
     """Persist PRDispatchRecord to STATE_DIR."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = STATE_DIR / _DISPATCH_FILE_NAME
@@ -132,7 +132,7 @@ def respond_to_pr_events(adapter: CmuxAdapter | None = None) -> int:
     resolved_adapter = adapter or get_cmux_adapter()
     clients = load_clients()
     state = load_state()
-    dispatch_record = _load_dispatch_record()
+    dispatch_record = load_dispatch_record()
     spawned_count = 0
 
     for event in events:
@@ -203,7 +203,7 @@ def respond_to_pr_events(adapter: CmuxAdapter | None = None) -> int:
 
         # Record dispatch and persist
         dispatch_record.active[dispatch_key] = session_id
-        _save_dispatch_record(dispatch_record)
+        save_dispatch_record(dispatch_record)
 
         # Reload state so subsequent throttle checks see the new session
         state = load_state()
@@ -223,7 +223,7 @@ def clear_completed_pr_sessions(state: CwState) -> None:
     Args:
         state: Current CwState used to determine completed session IDs.
     """
-    dispatch_record = _load_dispatch_record()
+    dispatch_record = load_dispatch_record()
     completed_ids = {
         s.id for s in state.sessions if s.status == SessionStatus.COMPLETED
     }
@@ -232,4 +232,4 @@ def clear_completed_pr_sessions(state: CwState) -> None:
         for key, sid in dispatch_record.active.items()
         if sid not in completed_ids
     }
-    _save_dispatch_record(dispatch_record)
+    save_dispatch_record(dispatch_record)
