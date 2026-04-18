@@ -25,6 +25,7 @@ from cw.config import (
 )
 from cw.daemon import run_watcher_tick
 from cw.dev_queue import add_ticket, list_tickets, resolve_client
+from cw.dispatch import run_dispatch_loop
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
@@ -35,7 +36,6 @@ from cw.models import (
     QueueItem,
     QueueItemStatus,
     Session,
-    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TaskSpec,
@@ -59,6 +59,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
+from cw.spawn import spawn_create_impl
 from cw.wrapper import run_claude_wrapper, signal_idle
 
 
@@ -848,6 +849,26 @@ def dev_queue_status(client: str | None) -> None:
         )
 
 
+@dev_queue.command(name="run")
+@click.option(
+    "--max-parallel",
+    "-p",
+    default=None,
+    type=int,
+    help="Override per-client concurrency cap.",
+)
+@click.option(
+    "--once",
+    is_flag=True,
+    default=False,
+    help="Run a single dispatch tick and exit.",
+)
+@handle_errors
+def dev_queue_run(max_parallel: int | None, once: bool) -> None:
+    """Run the dispatch loop, spawning sessions for pending tickets."""
+    run_dispatch_loop(max_parallel=max_parallel, once=once)
+
+
 # --- Spawn command group ---
 
 
@@ -864,27 +885,17 @@ def _spawn_create_impl(
 
     Separated from the Click command so tests can inject adapters directly.
     Returns the new session's ID.
+
+    Delegates to :func:`cw.spawn.spawn_create_impl`.
     """
-    prompt_content = prompt_file.read_text()
-    workspace = client.cmux_workspace or client.name
-    command = f"claude -w {worktree} --print {prompt_content!r}"
-    surface_ref = adapter.spawn(workspace, command, surface)
-
-    session_label = label or "daemon"
-    sess = Session(
-        name=f"{client.name}/{session_label}",
-        client=client.name,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        workspace_path=client.workspace_path,
-        worktree_path=worktree,
-        surface_ref=surface_ref,
+    return spawn_create_impl(
+        client=client,
+        worktree=worktree,
+        prompt_file=prompt_file,
+        surface=surface,
+        label=label,
+        adapter=adapter,
     )
-
-    state = load_state()
-    state.sessions.append(sess)
-    save_state(state)
-    return sess.id
 
 
 def _spawn_close_impl(
