@@ -46,6 +46,8 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.history.HISTORY_DIR", history_dir)
     with contextlib.suppress(AttributeError):
         monkeypatch.setattr("cw.events.EVENTS_DIR", events_dir)
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr("cw.pr_responder.STATE_DIR", state_dir)
 
     return tmp_path
 
