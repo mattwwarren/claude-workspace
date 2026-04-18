@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 from datetime import UTC, datetime
@@ -32,14 +33,19 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     history_dir.mkdir(parents=True)
     queues_dir = state_dir / "queues"
     queues_dir.mkdir(parents=True)
+    events_dir = state_dir / "events"
+    events_dir.mkdir(parents=True)
 
     monkeypatch.setattr("cw.config.CONFIG_DIR", config_dir)
     monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
     monkeypatch.setattr("cw.config.CLIENTS_FILE", clients_file)
     monkeypatch.setattr("cw.config.STATE_FILE", state_file)
     monkeypatch.setattr("cw.config.HISTORY_DIR", history_dir)
-    # Also patch history module's imported reference
+    monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
+    # Also patch module-level imported references
     monkeypatch.setattr("cw.history.HISTORY_DIR", history_dir)
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr("cw.events.EVENTS_DIR", events_dir)
 
     return tmp_path
 
