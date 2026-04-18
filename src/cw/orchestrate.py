@@ -79,7 +79,9 @@ def _invoke_review_monitor_complete(
     proceeds.
     """
     script = _REVIEW_MONITOR_SCRIPT
-    if not script.exists():
+    # The script existence check is a production UX helper -- skip it when
+    # a custom runner is injected so tests can stub the subprocess entirely.
+    if runner is None and not script.exists():
         # Resolve from PATH as a fallback (e.g. when packaged differently).
         which = shutil.which("review_monitor.py")
         if which is None:
