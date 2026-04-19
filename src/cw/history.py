@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from cw.config import HISTORY_DIR
+from cw.config import history_dir
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -46,18 +46,18 @@ class HistoryEvent(BaseModel):
 
 def _history_path(client: str) -> Path:
     """Return the JSONL history file path for a client."""
-    return HISTORY_DIR / f"{client}.jsonl"
+    return history_dir() / f"{client}.jsonl"
 
 
 def _lock_path(client: str) -> Path:
     """Return the lock file path for a client's history."""
-    return HISTORY_DIR / f".{client}.lock"
+    return history_dir() / f".{client}.lock"
 
 
 @contextlib.contextmanager
 def _history_lock(client: str) -> Iterator[None]:
     """Acquire an exclusive file lock for a client's history."""
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    history_dir().mkdir(parents=True, exist_ok=True)
     lock = _lock_path(client)
     fd = lock.open("w")
     try:

@@ -18,7 +18,7 @@ Multi-session workspace orchestrator for Claude Code.
   - `session.py` - Session lifecycle (start, bg, resume)
   - `worktree.py` - Git worktree management for parallel work
   - `wrapper.py` - Claude wrapper for IDLE signaling
-  - `zellij.py` - Zellij CLI wrapper
+  - `cmux.py` - Multiplexer adapter protocol + cmux implementation
 - `config/` - Example configuration files
 - `tests/` - Test suite
 
@@ -52,26 +52,16 @@ Report format: Only actionable problems. Zero praise, zero summaries.
 
 ## Testing
 
-418 tests across 12 test files covering all modules.
-
-| File | Tests | Covers |
-|------|-------|--------|
-| `test_cli.py` | CLI dispatch, Click integration | `cli.py` |
-| `test_config.py` | Config load/save, client lookup | `config.py` |
-| `test_handoff.py` | Handoff parsing, mtime filtering | `handoff.py` |
-| `test_history.py` | Event history tracking | `history.py` |
-| `test_models.py` | Models, enums, state queries | `models.py` |
-| `test_prompts.py` | Prompt generation | `prompts.py` |
-| `test_queue.py` | Task queue, messaging | `queue.py` |
-| `test_session_helpers.py` | `_relative_time` with freezegun | `session.py` helpers |
-| `test_session.py` | Session lifecycle (start/bg/resume) | `session.py` |
-| `test_worktree.py` | Git worktree management | `worktree.py` |
-| `test_wrapper.py` | Claude wrapper, IDLE signaling | `wrapper.py` |
-| `test_zellij.py` | Zellij wrapper, layout generation | `zellij.py` |
+541 tests across 21 test files (see `tests/`). Test files map one-to-one
+onto source modules (`test_cli.py` ↔ `cli.py`, `test_cmux.py` ↔
+`cmux.py`, etc.).
 
 **Patterns:**
-- Monkeypatch `CONFIG_DIR`/`STATE_DIR` to `tmp_path` (see `conftest.py`)
-- Mock `cw.zellij.*` via `mock_zellij` fixture for session tests
+- Isolation: the autouse `tmp_config_dir` fixture in `conftest.py` patches
+  every `cw.config.*` path at module load; consumers read paths through
+  accessor functions so no per-test module-local patching is needed
+- Mock `cw.cmux.FakeCmuxAdapter` via the `mock_cmux_adapter` fixture for
+  session tests
 - Use `freezegun` for time-dependent assertions
 - Use Click's `CliRunner` for CLI tests
 - File-based locking for concurrent session state access
@@ -80,7 +70,6 @@ Report format: Only actionable problems. Zero praise, zero summaries.
 
 - State stored at `~/.local/share/cw/sessions.json`
 - Client config at `~/.config/cw/clients.yaml`
-- Generated layouts at `~/.config/zellij/layouts/cw-<client>.kdl`
 - Integrates with existing handoff pipeline at `~/.claude/scripts/generate_handoff.py`
 - File-based locking prevents concurrent state corruption
 - Event history provides audit trail for session lifecycle
@@ -111,7 +100,7 @@ Completions provide:
 ### Full session lifecycle
 
 ```bash
-# Start a new session (launches Zellij with impl/idea/debt panes)
+# Start a new session (launches a multiplexer surface with impl/idea/debt panes)
 cw start my-client
 
 # Background when done (triggers /session-done, waits for handoff)
@@ -131,7 +120,7 @@ cw status
 cw start client-a
 cw start client-b
 
-# Switch between client tabs in Zellij
+# Switch between client workspaces
 cw switch client-a
 cw switch client-b
 
@@ -141,10 +130,10 @@ cw list
 
 ## Architecture Decisions
 
-- **Keystroke injection**: `cw bg` injects `/session-done` into Zellij panes. Fragile but zero-coupling to Claude Code internals.
+- **Keystroke injection**: `cw bg` injects `/session-done` into multiplexer panes. Fragile but zero-coupling to Claude Code internals.
 - **Flat JSON state**: Simple, human-readable. Single-user tool.
-- **Jinja2 layouts**: KDL templates rendered per-client with workspace paths.
-- **On-demand health checks**: `cw status` and `cw start` detect crashed Claude panes via Zellij's `dump-layout` output. No background daemon needed.
+- **Pluggable backend**: Multiplexer adapters implement a small protocol (`spawn`, `close`, `identify`). Today only the cmux adapter ships; tmux is planned for 0.6.0.
+- **On-demand health checks**: `cw status` and `cw start` detect crashed Claude panes via the multiplexer's surface listing. No background daemon needed.
 - **File-based locking**: Prevents concurrent state corruption from parallel session operations.
 - **Event history**: Audit trail for session lifecycle transitions.
 
@@ -307,7 +296,7 @@ Explicitly communicate:
 - Writing validators, models, or complex business logic
 - Any multi-file changes
 - CLI commands or session management methods
-- Code that touches state files, Zellij integration, or handoff parsing
+- Code that touches state files, multiplexer adapters, or handoff parsing
 
 **Don't need to show thinking for:**
 - Simple one-line fixes (typos, obvious bugs)

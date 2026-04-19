@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.config import EVENTS_DIR, load_state, save_state
+from cw.config import events_dir, load_state, save_state
 from cw.history import EventType, load_history
 from cw.models import CwState, Session, SessionPurpose, SessionStatus
 from cw.wrapper import (
@@ -23,7 +23,7 @@ from cw.wrapper import (
 class TestIdleSignalPath:
     def test_format(self) -> None:
         path = _idle_signal_path("my-client", "impl")
-        assert path == EVENTS_DIR / "my-client__impl.idle"
+        assert path == events_dir() / "my-client__impl.idle"
 
     def test_different_purposes(self) -> None:
         assert _idle_signal_path("c", "impl") != _idle_signal_path("c", "debt")

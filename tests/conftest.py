@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
 import subprocess
 from datetime import UTC, datetime
@@ -18,60 +17,43 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect config module paths to tmp_path."""
+    """Redirect every cw state/config path to ``tmp_path``.
+
+    Autouse so no test can accidentally touch ``~/.local/share/cw`` or
+    ``~/.config/cw``. Consumers read paths via ``cw.config`` accessor
+    functions, so patching the module-level constants here reaches every
+    caller — individual test files should not need to patch module-local
+    bindings. Attribute names must match exactly; any drift fails loudly
+    rather than being swallowed.
+    """
     config_dir = tmp_path / ".config" / "cw"
     state_dir = tmp_path / ".local" / "share" / "cw"
     config_dir.mkdir(parents=True)
     state_dir.mkdir(parents=True)
 
-    clients_file = config_dir / "clients.yaml"
-    state_file = state_dir / "sessions.json"
-
-    history_dir = state_dir / "history"
-    history_dir.mkdir(parents=True)
-    queues_dir = state_dir / "queues"
-    queues_dir.mkdir(parents=True)
-    events_dir = state_dir / "events"
-    events_dir.mkdir(parents=True)
-
     monkeypatch.setattr("cw.config.CONFIG_DIR", config_dir)
     monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
-    monkeypatch.setattr("cw.config.CLIENTS_FILE", clients_file)
-    monkeypatch.setattr("cw.config.STATE_FILE", state_file)
-    monkeypatch.setattr("cw.config.HISTORY_DIR", history_dir)
-    monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
-    # Also patch module-level imported references
-    monkeypatch.setattr("cw.history.HISTORY_DIR", history_dir)
-    with contextlib.suppress(AttributeError):
-        monkeypatch.setattr("cw.events.EVENTS_DIR", events_dir)
-    with contextlib.suppress(AttributeError):
-        monkeypatch.setattr("cw.pr_responder.STATE_DIR", state_dir)
-
-    # Dev queue paths used by cw.dev_queue
-    dev_queue_file = state_dir / "dev_queue.json"
-    dev_queue_lock = state_dir / ".dev_queue.lock"
-    monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", dev_queue_file)
-    monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", dev_queue_lock)
-    with contextlib.suppress(AttributeError):
-        monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_FILE", dev_queue_file)
-    with contextlib.suppress(AttributeError):
-        monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_LOCK", dev_queue_lock)
-
-    # Dev plan paths used by cw.plan and cw.dev_queue
-    dev_plan_file = state_dir / "dev_plan.json"
-    dev_plan_lock = state_dir / ".dev_plan.lock"
-    dev_plan_output_dir = state_dir / "plan_output"
-    monkeypatch.setattr("cw.config.DEV_PLAN_FILE", dev_plan_file)
-    monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", dev_plan_lock)
-    monkeypatch.setattr("cw.config.DEV_PLAN_OUTPUT_DIR", dev_plan_output_dir)
-    with contextlib.suppress(AttributeError):
-        monkeypatch.setattr("cw.dev_queue.DEV_PLAN_FILE", dev_plan_file)
-    with contextlib.suppress(AttributeError):
-        monkeypatch.setattr("cw.dev_queue.DEV_PLAN_LOCK", dev_plan_lock)
-    with contextlib.suppress(AttributeError):
-        monkeypatch.setattr("cw.plan.DEV_PLAN_OUTPUT_DIR", dev_plan_output_dir)
+    monkeypatch.setattr("cw.config.CLIENTS_FILE", config_dir / "clients.yaml")
+    monkeypatch.setattr("cw.config.STATE_FILE", state_dir / "sessions.json")
+    monkeypatch.setattr("cw.config.QUEUES_DIR", state_dir / "queues")
+    monkeypatch.setattr("cw.config.EVENTS_DIR", state_dir / "events")
+    monkeypatch.setattr("cw.config.HISTORY_DIR", state_dir / "history")
+    monkeypatch.setattr("cw.config.PR_WATCHER_DIR", state_dir / "pr_watcher")
+    monkeypatch.setattr("cw.config.REVIEW_MONITOR_DIR", tmp_path / "review-monitor")
+    monkeypatch.setattr(
+        "cw.config.ORCHESTRATOR_CONFIG_DIR", tmp_path / ".claude-workspace"
+    )
+    monkeypatch.setattr(
+        "cw.config.ORCHESTRATOR_CONFIG_FILE",
+        tmp_path / ".claude-workspace" / "orchestrator.yaml",
+    )
+    monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", state_dir / "dev_queue.json")
+    monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", state_dir / ".dev_queue.lock")
+    monkeypatch.setattr("cw.config.DEV_PLAN_FILE", state_dir / "dev_plan.json")
+    monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", state_dir / ".dev_plan.lock")
+    monkeypatch.setattr("cw.config.DEV_PLAN_OUTPUT_DIR", state_dir / "plan_output")
 
     return tmp_path
 

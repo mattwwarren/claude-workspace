@@ -707,8 +707,8 @@ def event_tail(
 def run_claude(extra_args: tuple[str, ...]) -> None:
     """Wrapper around Claude that signals IDLE on exit.
 
-    Used as the pane command in Zellij layouts. After Claude exits,
-    transitions the session to IDLE and waits for daemon triggers.
+    Used as the pane command in the multiplexer workspace. After Claude
+    exits, transitions the session to IDLE and waits for daemon triggers.
 
     \b
     Examples:

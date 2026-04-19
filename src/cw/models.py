@@ -42,6 +42,13 @@ class QueueItemStatus(StrEnum):
     FAILED = "failed"
 
 
+# Schema versions for persisted state. Bump when making a breaking change
+# to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
+# or `cw.dev_queue.migrate_dev_queue` to handle older versions.
+CW_STATE_SCHEMA_VERSION = 1
+DEV_QUEUE_SCHEMA_VERSION = 1
+
+
 class TaskSpec(BaseModel):
     """Machine-parseable task specification for agent-to-agent handoffs."""
 
@@ -143,6 +150,7 @@ class DispatchPlan(BaseModel):
 class DevQueueStore(BaseModel):
     """Persisted dev-queue state holding TicketTasks."""
 
+    schema_version: int = DEV_QUEUE_SCHEMA_VERSION
     tasks: list[TicketTask] = Field(default_factory=list)
 
     def pending(self) -> list[TicketTask]:
@@ -261,6 +269,7 @@ class ClientConfig(BaseModel):
 class CwState(BaseModel):
     """Persisted state across all sessions."""
 
+    schema_version: int = CW_STATE_SCHEMA_VERSION
     sessions: list[Session] = Field(default_factory=list)
 
     def active_sessions(self) -> list[Session]:

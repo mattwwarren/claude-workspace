@@ -13,11 +13,19 @@ from cw.config import (
     init_client,
     load_clients,
     load_state,
+    migrate_cw_state,
     save_state,
     show_config,
 )
 from cw.exceptions import CwError
-from cw.models import DEFAULT_AUTO_PURPOSES, CwState, Session, SessionPurpose
+from cw.models import (
+    CW_STATE_SCHEMA_VERSION,
+    DEFAULT_AUTO_PURPOSES,
+    CwState,
+    Session,
+    SessionOrigin,
+    SessionPurpose,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -548,3 +556,64 @@ class TestInitClient:
 
         with pytest.raises(CwError, match="no 'clients:' key"):
             init_client("test", repo)
+
+
+class TestMigrateCwState:
+    def test_new_state_carries_schema_version(self) -> None:
+        state = CwState()
+        assert state.schema_version == CW_STATE_SCHEMA_VERSION
+
+    def test_rename_zellij_pane_to_surface_ref(self) -> None:
+        raw = {"sessions": [{"id": "s1", "zellij_pane": "0:1.0"}]}
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["surface_ref"] == "0:1.0"
+        assert "zellij_pane" not in session
+
+    def test_drop_zellij_pane_when_surface_ref_already_set(self) -> None:
+        raw = {
+            "sessions": [
+                {"id": "s1", "zellij_pane": "stale", "surface_ref": "fresh"},
+            ]
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["surface_ref"] == "fresh"
+        assert "zellij_pane" not in session
+
+    def test_drop_zellij_tab_unconditionally(self) -> None:
+        raw = {"sessions": [{"id": "s1", "zellij_tab": "tab0"}]}
+        migrated = migrate_cw_state(raw)
+        assert "zellij_tab" not in migrated["sessions"][0]
+
+    def test_unknown_origin_coerced_to_user(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        raw = {"sessions": [{"id": "s1", "origin": "delegate"}]}
+        with caplog.at_level("WARNING", logger="cw.config"):
+            migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["origin"] == SessionOrigin.USER.value
+        assert any("unknown origin" in rec.message for rec in caplog.records)
+
+    def test_known_origin_preserved(self) -> None:
+        raw = {"sessions": [{"id": "s1", "origin": "daemon"}]}
+        migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["origin"] == "daemon"
+
+    def test_load_state_survives_unknown_origin(self, tmp_config_dir: Path) -> None:
+        # Simulate a sessions.json from a diverged branch that contains
+        # an origin value this version of cw doesn't know about.
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        state_file = state_dir / "sessions.json"
+        state_file.write_text(
+            '{"sessions": [{'
+            '"id": "stale01",'
+            '"name": "cw/impl",'
+            '"client": "cw",'
+            '"purpose": "impl",'
+            '"origin": "delegate",'
+            f'"workspace_path": "{state_dir}"'
+            "}]}"
+        )
+        state = load_state()
+        assert state.sessions[0].origin == SessionOrigin.USER

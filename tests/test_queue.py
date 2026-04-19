@@ -50,7 +50,6 @@ def tmp_queues_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     queues_dir = tmp_path / "queues"
     queues_dir.mkdir(parents=True)
     monkeypatch.setattr("cw.config.QUEUES_DIR", queues_dir)
-    monkeypatch.setattr("cw.queue.QUEUES_DIR", queues_dir)
     return queues_dir
 
 
@@ -75,7 +74,6 @@ class TestLoadSaveQueue:
     ) -> None:
         nested = tmp_path / "deep" / "queues"
         monkeypatch.setattr("cw.config.QUEUES_DIR", nested)
-        monkeypatch.setattr("cw.queue.QUEUES_DIR", nested)
         store = QueueStore()
         save_queue("test-client", store)
         assert (nested / "test-client.json").exists()

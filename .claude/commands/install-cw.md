@@ -14,7 +14,8 @@ Verify each prerequisite is installed. Run these checks:
 ```bash
 uv --version 2>/dev/null || echo "MISSING: uv"
 python3 --version 2>/dev/null || echo "MISSING: python3"
-zellij --version 2>/dev/null || echo "MISSING: zellij"
+test -S ~/Library/Application\ Support/cmux/cmux.sock 2>/dev/null \
+    || echo "MISSING or not running: cmux (macOS backend)"
 claude --version 2>/dev/null || echo "MISSING: claude"
 ```
 
@@ -22,7 +23,8 @@ If any required tools are missing, stop and tell the user what needs to be insta
 
 - **uv**: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **Python 3.13+**: `uv python install 3.13`
-- **Zellij**: Install from https://zellij.dev/documentation/installation (cargo, brew, or package manager)
+- **cmux** (macOS): see https://github.com/cmuxio/cmux for install; verify
+  the daemon is running (its Unix socket must exist).
 - **Claude Code**: `npm install -g @anthropic-ai/claude-code`
 
 Optional: check for peon-ping (`peon status`) - not required but provides sound notifications when Claude needs attention.
@@ -97,7 +99,7 @@ Start the user's first session:
 cw start <project-name>
 ```
 
-This launches Zellij with panes for impl, idea, and debt sessions.
+This launches a multiplexer workspace with panes for impl, idea, and debt sessions.
 
 ## Output
 
