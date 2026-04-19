@@ -110,10 +110,15 @@ class TmuxAdapter:
         return parsed
 
     def list_surfaces(self) -> set[str]:
-        """Return the set of live pane refs from tmux.
+        """Return the set of live tmux pane refs across all sessions.
 
-        Stub implementation — full reconciliation query added in Task 2.
-        Returns empty set on any error so callers treat "tmux unreachable"
-        as "no surfaces alive" rather than "all surfaces still alive".
+        Empty set when the tmux server is not running — callers in
+        reconciliation rely on this invariant to avoid false positives.
         """
-        return set()
+        result = self._run(
+            ["list-panes", "-a", "-F", _PANE_FORMAT],
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return set()
+        return {line for line in result.stdout.strip().splitlines() if line}
