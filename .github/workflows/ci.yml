@@ -8,9 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.13"]
 
     steps:
@@ -21,6 +23,14 @@ jobs:
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
+
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
 
       - name: Install dependencies
         run: uv sync --dev
@@ -34,5 +44,8 @@ jobs:
       - name: Type check
         run: uv run mypy src/
 
-      - name: Test
-        run: uv run pytest tests/ -v --tb=short
+      - name: Test (unit)
+        run: uv run pytest tests/ -v --tb=short -m 'not integration'
+
+      - name: Test (tmux integration)
+        run: uv run pytest tests/ -v --tb=short -m integration
