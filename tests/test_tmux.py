@@ -182,6 +182,25 @@ def test_tmux_list_surfaces_returns_empty_on_server_down(
     assert adapter.list_surfaces() == set()
 
 
+def test_tmux_list_surfaces_returns_empty_when_no_panes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running tmux server with zero panes: returncode 0, stdout empty → empty set."""
+    monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+    adapter = TmuxAdapter()
+    assert adapter.list_surfaces() == set()
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 class TestTmuxIntegration:
