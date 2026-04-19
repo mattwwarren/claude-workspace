@@ -9,8 +9,18 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cw.cmux import CmuxAdapter, FakeCmuxAdapter, RealCmuxAdapter, get_cmux_adapter
+from cw.cmux import (
+    CmuxAdapter,
+    FakeCmuxAdapter,
+    MultiplexerAdapter,
+    RealCmuxAdapter,
+    _resolve_backend_name,
+    get_backend_adapter,
+    get_cmux_adapter,
+)
 from cw.exceptions import CwError
+from cw.models import BackendName, OrchestratorConfig
+from cw.tmux import TmuxAdapter
 
 if TYPE_CHECKING:
     pass
@@ -119,11 +129,16 @@ class TestRealCmuxAdapterPlatformGuard:
         with pytest.raises(CwError, match="requires macOS"):
             RealCmuxAdapter()
 
-    def test_get_cmux_adapter_raises_on_non_macos(self) -> None:
-        """get_cmux_adapter() raises CwError on non-macOS."""
+    def test_get_cmux_adapter_raises_on_non_macos(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Forcing cmux on a non-macOS platform still raises CwError."""
         if sys.platform == "darwin":
             pytest.skip("skipping on macOS — guard not triggered")
 
+        # The default selector on Linux now returns TmuxAdapter, so force
+        # cmux via the env-var tier to exercise the platform guard.
+        monkeypatch.setenv("CW_BACKEND", "cmux")
         with pytest.raises(CwError, match="requires macOS"):
             get_cmux_adapter()
 
@@ -455,3 +470,80 @@ class TestMigration:
         state = load_state()
         # surface_ref already present — zellij_pane should be discarded
         assert state.sessions[0].surface_ref == "new-ref"
+
+
+class TestMultiplexerAdapterAlias:
+    def test_cmux_adapter_is_multiplexer_adapter(self) -> None:
+        # The legacy name must still resolve to the new protocol so any
+        # downstream `from cw.cmux import CmuxAdapter` survives this
+        # release.
+        assert CmuxAdapter is MultiplexerAdapter
+
+    def test_get_cmux_adapter_is_backend_adapter(self) -> None:
+        assert get_cmux_adapter is get_backend_adapter
+
+
+class TestResolveBackendName:
+    def test_env_var_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        assert _resolve_backend_name() is BackendName.FAKE
+
+    def test_env_var_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CW_BACKEND", "TMUX")
+        assert _resolve_backend_name() is BackendName.TMUX
+
+    def test_invalid_env_var_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CW_BACKEND", "wat")
+        with pytest.raises(CwError, match="Invalid CW_BACKEND"):
+            _resolve_backend_name()
+
+    def test_config_tier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CW_BACKEND", raising=False)
+        monkeypatch.setattr(
+            "cw.cmux.load_orchestrator_config",
+            lambda: OrchestratorConfig(backend=BackendName.TMUX),
+        )
+        assert _resolve_backend_name() is BackendName.TMUX
+
+    def test_platform_default_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CW_BACKEND", raising=False)
+        monkeypatch.setattr(
+            "cw.cmux.load_orchestrator_config",
+            lambda: OrchestratorConfig(backend=None),
+        )
+        monkeypatch.setattr("cw.cmux.sys.platform", "linux")
+        assert _resolve_backend_name() is BackendName.TMUX
+
+    def test_platform_default_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CW_BACKEND", raising=False)
+        monkeypatch.setattr(
+            "cw.cmux.load_orchestrator_config",
+            lambda: OrchestratorConfig(backend=None),
+        )
+        monkeypatch.setattr("cw.cmux.sys.platform", "darwin")
+        assert _resolve_backend_name() is BackendName.CMUX
+
+
+class TestGetBackendAdapter:
+    def test_fake_backend_returns_fake_adapter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        adapter = get_backend_adapter()
+        assert isinstance(adapter, FakeCmuxAdapter)
+
+    def test_tmux_backend_raises_without_tmux_on_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CW_BACKEND", "tmux")
+        monkeypatch.setattr("cw.tmux.shutil.which", lambda _name: None)
+        with pytest.raises(CwError, match="tmux not found"):
+            get_backend_adapter()
+
+    def test_tmux_backend_returns_tmux_adapter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CW_BACKEND", "tmux")
+        monkeypatch.setattr("cw.tmux.shutil.which", lambda _name: "/usr/bin/tmux")
+        adapter = get_backend_adapter()
+        assert isinstance(adapter, TmuxAdapter)

@@ -16,7 +16,10 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
+from cw.config import load_orchestrator_config
 from cw.exceptions import CwError
+from cw.models import BackendName
+from cw.tmux import TmuxAdapter
 
 _LEGACY_HINT_PATH: Path = Path("/tmp/cmux-last-socket-path")
 
@@ -175,14 +178,49 @@ class FakeCmuxAdapter:
         }
 
 
+def _resolve_backend_name() -> BackendName:
+    """Walk the three-tier backend selector and return the chosen name.
+
+    Priority:
+    1. ``CW_BACKEND`` env var — testing / CI override, highest priority.
+    2. ``orchestrator.yaml`` ``backend:`` field — persistent user choice.
+    3. Platform default — ``darwin`` picks cmux, everything else tmux.
+    """
+    env_choice = os.environ.get("CW_BACKEND", "").strip().lower()
+    if env_choice:
+        try:
+            return BackendName(env_choice)
+        except ValueError as exc:
+            valid = ", ".join(b.value for b in BackendName)
+            msg = f"Invalid CW_BACKEND={env_choice!r}; valid values: {valid}"
+            raise CwError(msg) from exc
+
+    try:
+        config = load_orchestrator_config()
+    except Exception:  # pragma: no cover - config load shouldn't hard-fail selector
+        config = None
+    if config is not None and config.backend is not None:
+        return config.backend
+
+    return BackendName.CMUX if sys.platform == "darwin" else BackendName.TMUX
+
+
 def get_backend_adapter() -> MultiplexerAdapter:
     """Return the active multiplexer adapter.
 
-    Today this is hard-coded to :class:`RealCmuxAdapter` (macOS only).
-    #37 replaces this with a 3-tier selector (env var → config →
-    platform default) and #38 plugs in :class:`TmuxAdapter` for Linux.
+    Walks the three-tier selector (env → config → platform default).
+    On ``CW_BACKEND=fake`` returns a :class:`FakeCmuxAdapter` so CI and
+    local smoke tests can skip the real multiplexer entirely.
     """
-    return RealCmuxAdapter()
+    name = _resolve_backend_name()
+    if name is BackendName.CMUX:
+        return RealCmuxAdapter()
+    if name is BackendName.TMUX:
+        return TmuxAdapter()
+    if name is BackendName.FAKE:
+        return FakeCmuxAdapter()
+    msg = f"Unhandled backend selector: {name!r}"  # pragma: no cover - enum exhausted
+    raise CwError(msg)
 
 
 # Legacy alias retained for one release alongside ``CmuxAdapter``.
