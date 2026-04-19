@@ -36,7 +36,6 @@ from cw.models import (
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
-    Session,
     SessionPurpose,
     SessionStatus,
     TaskSpec,
@@ -55,6 +54,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
+from cw.reconcile import reconcile
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -324,6 +324,12 @@ def _display_sessions() -> None:
     """Display all tracked sessions."""
     state = load_state()
 
+    dead = _check_and_mark_dead_sessions(state)
+    for name in dead:
+        click.echo(f"Reaped phantom session: {name}")
+    if dead:
+        state = load_state()
+
     if not state.sessions:
         click.echo("No sessions tracked.")
         return
@@ -347,13 +353,31 @@ def _display_sessions() -> None:
         click.echo(f"{s.client:<18} {s.purpose:<10} {s.status:<14} {s.id:<10} {since}")
 
 
-def _check_and_mark_dead_sessions(_state: CwState) -> list[Session]:
-    """Check active sessions for dead surfaces, mark them COMPLETED.
+def _check_and_mark_dead_sessions(_state: CwState) -> list[str]:
+    """Reconcile state with the live multiplexer and return reaped session names.
 
-    Currently a stub — cmux health check will be implemented in a follow-up
-    ticket once the cmux surface liveness API is determined.
+    Cheap passive reconciliation: called from every read path (``cw status``,
+    ``cw list``, ``cw start``). The reconciler is idempotent and returns an
+    empty list when nothing changed. When the adapter cannot reach its
+    backend (empty live set from ``list_surfaces``), everything active with
+    a surface_ref gets flagged — that is the intended behaviour: we treat
+    "backend unreachable" as "nothing running".
     """
-    return []
+    try:
+        adapter = get_cmux_adapter()
+    except CwError:
+        return []
+    report = reconcile(adapter)
+    if not report.phantom_session_ids:
+        return []
+    # load_state() again after reconcile so we can name the reaped sessions.
+    reloaded = load_state()
+    names: list[str] = []
+    for sid in report.phantom_session_ids:
+        sess = reloaded.find_by_name_or_id(sid)
+        if sess is not None:
+            names.append(sess.name)
+    return names
 
 
 def _display_status() -> None:
@@ -362,8 +386,11 @@ def _display_status() -> None:
     clients = load_clients()
 
     dead = _check_and_mark_dead_sessions(state)
-    for s in dead:
-        click.echo(f"Detected crashed session: {s.name} (crashed)")
+    for name in dead:
+        click.echo(f"Reaped phantom session: {name}")
+    if dead:
+        # State mutated, reload so active/backgrounded lists reflect truth.
+        state = load_state()
 
     active = state.active_sessions()
     idled = state.idled_sessions()
