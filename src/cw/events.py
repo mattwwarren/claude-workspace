@@ -8,6 +8,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from cw.atomic import atomic_write_text
 from cw.config import events_dir
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
@@ -97,7 +98,7 @@ def advance_cursor(consumer: str, event_id: str) -> None:
         "cursor": event_id,
         "updated_at": datetime.now(UTC).isoformat(),
     }
-    path.write_text(json.dumps(data))
+    atomic_write_text(path, json.dumps(data))
 
 
 def read_events(

@@ -8,6 +8,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cw.atomic import atomic_write_text
 from cw.config import queues_dir
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import QueueItem, QueueItemStatus, QueueStore, TaskSpec
@@ -51,10 +52,10 @@ def load_queue(client: str) -> QueueStore:
 
 
 def save_queue(client: str, store: QueueStore) -> None:
-    """Persist a client's queue to disk."""
+    """Persist a client's queue to disk atomically."""
     path = _queue_path(client)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(store.model_dump_json(indent=2))
+    atomic_write_text(path, store.model_dump_json(indent=2))
 
 
 def add_item(client: str, task: TaskSpec) -> QueueItem:

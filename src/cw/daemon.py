@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from cw.atomic import atomic_write_text
 from cw.config import (
     load_clients,
     load_orchestrator_config,
@@ -90,11 +91,11 @@ def _load_snapshot(client_name: str) -> WatcherSnapshot:
 
 
 def _save_snapshot(client_name: str, snapshot: WatcherSnapshot) -> None:
-    """Persist a WatcherSnapshot for a client."""
+    """Persist a WatcherSnapshot for a client atomically."""
     watcher_dir = pr_watcher_dir()
     watcher_dir.mkdir(parents=True, exist_ok=True)
     path = watcher_dir / f"{client_name}.json"
-    path.write_text(snapshot.model_dump_json(indent=2))
+    atomic_write_text(path, snapshot.model_dump_json(indent=2))
 
 
 def _load_throttle() -> ThrottleStore:
@@ -106,10 +107,10 @@ def _load_throttle() -> ThrottleStore:
 
 
 def _save_throttle(store: ThrottleStore) -> None:
-    """Persist the global ThrottleStore."""
+    """Persist the global ThrottleStore atomically."""
     state_dir().mkdir(parents=True, exist_ok=True)
     path = state_dir() / "pr_dispatch_throttle.json"
-    path.write_text(store.model_dump_json(indent=2))
+    atomic_write_text(path, store.model_dump_json(indent=2))
 
 
 def _load_monitor_files() -> list[dict[str, Any]]:

@@ -15,6 +15,7 @@ import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
+from cw.atomic import atomic_write_text
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_AUTO_PURPOSES,
@@ -236,9 +237,9 @@ def _coerce_session_origin(session_raw: dict[str, Any]) -> None:
 
 
 def save_state(state: CwState) -> None:
-    """Persist session state to disk."""
+    """Persist session state to disk atomically."""
     state_dir().mkdir(parents=True, exist_ok=True)
-    state_file().write_text(state.model_dump_json(indent=2))
+    atomic_write_text(state_file(), state.model_dump_json(indent=2))
 
 
 def load_orchestrator_config() -> OrchestratorConfig:
