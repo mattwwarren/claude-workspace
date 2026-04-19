@@ -1249,6 +1249,28 @@ def test_start_session_reaps_phantom_before_existing_check(
     assert len(adapter.calls["spawn"]) >= 1
 
 
+def test_start_session_launch_message_names_backend(
+    tmp_config_dir: Path,
+    sample_client: ClientConfig,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 'Launching X surfaces...' message names the backend in use."""
+    from cw.models import BackendName
+
+    clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+    clients_file.write_text(
+        f"clients:\n"
+        f"  test-client:\n"
+        f"    workspace_path: {sample_client.workspace_path}\n"
+    )
+    monkeypatch.setattr("cw.session._resolve_backend_name", lambda: BackendName.TMUX)
+
+    start_session(sample_client.name, "impl", adapter=FakeCmuxAdapter())
+    out = capsys.readouterr().out
+    assert "Launching tmux surfaces" in out
+
+
 class TestBackgroundAllSessions:
     def test_backgrounds_all_active(
         self,

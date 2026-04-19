@@ -13,7 +13,7 @@ import click
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cw.cmux import CmuxAdapter, get_cmux_adapter
+from cw.cmux import CmuxAdapter, _resolve_backend_name, get_cmux_adapter
 from cw.config import get_client, load_state, save_state
 from cw.exceptions import CwError
 from cw.handoff import extract_resumption_prompt, find_latest_handoff
@@ -222,8 +222,9 @@ def start_session(
     for s in all_sessions.values():
         click.echo(f"  {s.name}")
 
-    # Spawn cmux surfaces for all purposes
-    click.echo(f"Launching cmux surfaces for {client_name}...")
+    # Spawn surfaces for all purposes
+    backend = _resolve_backend_name()
+    click.echo(f"Launching {backend.value} surfaces for {client_name}...")
     for purpose_str, session in all_sessions.items():
         pane_cmd = panes[purpose_str]["claude_cmd"]
         _spawn_session_surface(client, session, pane_cmd, adapter)
