@@ -26,6 +26,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.prompts import build_session_context, get_purpose_prompt
+from cw.reconcile import reconcile
 from cw.worktree import create_worktree, remove_worktree
 
 # Purposes that receive worktree cwd (impl works on the feature branch,
@@ -170,6 +171,10 @@ def start_session(
         adapter = get_cmux_adapter()
 
     client = get_client(client_name)
+    state = load_state()
+
+    # Reap phantom sessions so we don't short-circuit on a dead "active" row.
+    reconcile(adapter)
     state = load_state()
 
     # Auto-resolve worktree for worktree-mode clients

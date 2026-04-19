@@ -1205,6 +1205,50 @@ class TestBackgroundNotify:
         assert "No active idea session" in output
 
 
+def test_start_session_reaps_phantom_before_existing_check(
+    tmp_config_dir: Path,
+    sample_client: ClientConfig,
+) -> None:
+    """Phantom ACTIVE session is reaped; start_session then spawns fresh sessions.
+
+    Reconciliation runs before the existing-session check so a dead "active"
+    row doesn't cause start_session to short-circuit.
+    """
+    clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+    clients_file.write_text(
+        f"clients:\n"
+        f"  {sample_client.name}:\n"
+        f"    workspace_path: {sample_client.workspace_path}\n"
+    )
+
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id="phantom",
+                    name=f"{sample_client.name}/impl",
+                    client=sample_client.name,
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="gone-ref",
+                ),
+            ]
+        )
+    )
+
+    adapter = FakeCmuxAdapter()  # empty live set
+    start_session(sample_client.name, "impl", adapter=adapter)
+
+    reloaded = load_state()
+    # Phantom got reaped
+    phantom = reloaded.find_by_name_or_id("phantom")
+    assert phantom is not None
+    assert phantom.status == SessionStatus.COMPLETED
+    # New sessions spawned (at least one spawn call)
+    assert len(adapter.calls["spawn"]) >= 1
+
+
 class TestBackgroundAllSessions:
     def test_backgrounds_all_active(
         self,
