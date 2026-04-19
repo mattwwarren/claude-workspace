@@ -202,10 +202,13 @@ def retire_merged_prs(
     if not events:
         return []
 
-    resolved_adapter = adapter or get_cmux_adapter()
     state = load_state()
     dispatch_record = load_dispatch_record()
     retired: list[str] = []
+    # Resolve the adapter lazily — only when we actually have a session to
+    # close. On Linux, `get_cmux_adapter()` crashes at instantiation, so
+    # `retire_merged_prs` with no matching sessions must not trigger it.
+    resolved_adapter: CmuxAdapter | None = adapter
 
     for event in events:
         payload = event.payload
@@ -251,6 +254,8 @@ def retire_merged_prs(
                 dispatch_record.active.pop(dispatch_key, None)
                 continue
 
+            if resolved_adapter is None:
+                resolved_adapter = get_cmux_adapter()
             _close_session(
                 sess,
                 resolved_adapter,
