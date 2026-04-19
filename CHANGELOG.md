@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-04-18
+
+The multi-platform bridge. `cw` now runs natively on Linux via tmux,
+while keeping the macOS-native cmux path unchanged. Backend choice is
+driven by a three-tier selector so CI, power users, and single-user
+preferences all have a way in.
+
+### Added
+- `cw.tmux.TmuxAdapter`: a tmux backend that wraps the `tmux` CLI via
+  `subprocess`. A workspace maps to a tmux session, a surface to a
+  pane. Raises `CwError` at instantiation time if `tmux` is not on
+  PATH (#38).
+- Three-tier backend selector in `cw.cmux.get_backend_adapter()`:
+  `CW_BACKEND` env var → `orchestrator.yaml` `backend:` field →
+  platform default (`darwin` → cmux, everything else → tmux). Setting
+  `CW_BACKEND=fake` returns a `FakeCmuxAdapter` for CI and local
+  smoke tests (#37).
+- `BackendName` enum in `cw.models`; optional `backend` field on
+  `OrchestratorConfig`.
+- `MultiplexerAdapter` protocol — the backend-neutral name the
+  protocol carries going forward. `CmuxAdapter` is a type alias kept
+  for one release (#36).
+- `cw doctor` subcommand and module — reports resolved backend,
+  binary/daemon availability, config and state file validity, and
+  version. Exits non-zero when any check fails (#41).
+- Parametrized protocol-conformance suite covering every adapter
+  class (`tests/test_adapter_protocol.py`) (#39).
+- `integration` pytest marker for end-to-end tests that shell out to
+  a real multiplexer.
+
+### Changed
+- CI matrix is now `[ubuntu-latest, macos-latest]`; tmux is installed
+  via apt/brew on the matching runner, and the tmux integration test
+  runs on both OSes (#40). Release workflow mirrors the matrix.
+
+### Migration notes
+- `from cw.cmux import CmuxAdapter, get_cmux_adapter` keeps working
+  in this release. Switch to `MultiplexerAdapter` and
+  `get_backend_adapter` before 0.7.
+- On Linux, `cw` now defaults to tmux — install `tmux` or set
+  `CW_BACKEND=cmux` (if you really want the macOS-only cmux path).
+
 ## [0.5.0] — 2026-04-18
 
 Foundations for the multi-platform bridge landing in 0.6.0. No new user

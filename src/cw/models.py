@@ -166,12 +166,21 @@ class DevQueueStore(BaseModel):
         return [t for t in self.tasks if t.client == client]
 
 
+class BackendName(StrEnum):
+    """Name of a multiplexer backend cw can drive."""
+
+    CMUX = "cmux"
+    TMUX = "tmux"
+    FAKE = "fake"
+
+
 class OrchestratorConfig(BaseModel):
     """Parsed contents of orchestrator.yaml."""
 
     tick_interval_seconds: int = 30
     per_client_max_parallel: dict[str, int] = Field(default_factory=dict)
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)
+    backend: BackendName | None = None
 
 
 class HookRule(BaseModel):
