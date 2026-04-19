@@ -15,9 +15,20 @@ event emission, dev-queue revert).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cw.models import SessionStatus
+from cw.config import load_state, save_state
+from cw.dev_queue import _lock as _dev_queue_lock
+from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.events import record_event
+from cw.models import (
+    CompletionReason,
+    OrchestratorEventType,
+    QueueItemStatus,
+    SessionOrigin,
+    SessionStatus,
+)
 
 if TYPE_CHECKING:
     from cw.cmux import MultiplexerAdapter
@@ -69,3 +80,76 @@ def compute_drift(state: CwState, adapter: MultiplexerAdapter) -> ReconcileRepor
         if session.surface_ref not in live:
             phantoms.append(session.id)
     return ReconcileReport(phantom_session_ids=phantoms)
+
+
+# Daemon session names follow "client/auto-dev/<ticket-id>" (see
+# src/cw/dispatch.py::dispatch_tick where the label is constructed).
+_AUTO_DEV_LABEL_PREFIX = "auto-dev/"
+
+
+def _ticket_id_for_session(session_name: str) -> str | None:
+    """Extract the ticket id from a daemon session name, or None."""
+    _, _, tail = session_name.partition("/")
+    if tail.startswith(_AUTO_DEV_LABEL_PREFIX):
+        return tail[len(_AUTO_DEV_LABEL_PREFIX) :]
+    return None
+
+
+def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
+    """Apply drift reconciliation against the persisted state.
+
+    Flips phantom ACTIVE/IDLE sessions to COMPLETED with
+    ``completed_reason = CRASHED``, emits a ``SESSION_COMPLETED`` event
+    with ``crashed: True``, and reverts any RUNNING TicketTask whose
+    ticket-id can be recovered from the session name back to PENDING so
+    the dispatch loop will retry.
+    """
+    state = load_state()
+    drift = compute_drift(state, adapter)
+    if not drift.phantom_session_ids:
+        return drift
+
+    phantom_set = set(drift.phantom_session_ids)
+    now = datetime.now(UTC)
+
+    ticket_ids_to_revert: list[str] = []
+    for session in state.sessions:
+        if session.id not in phantom_set:
+            continue
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.CRASHED
+        session.completed_at = now
+        if session.origin is SessionOrigin.DAEMON:
+            ticket_id = _ticket_id_for_session(session.name)
+            if ticket_id:
+                ticket_ids_to_revert.append(ticket_id)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "crashed": True,
+            },
+        )
+
+    save_state(state)
+
+    reverted: list[str] = []
+    if ticket_ids_to_revert:
+        with _dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id in ticket_ids_to_revert
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.PENDING
+                    reverted.append(task.ticket_id)
+            if reverted:
+                save_dev_queue(store)
+
+    return ReconcileReport(
+        phantom_session_ids=drift.phantom_session_ids,
+        reverted_ticket_ids=reverted,
+    )

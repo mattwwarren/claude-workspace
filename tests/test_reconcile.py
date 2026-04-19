@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from cw.cmux import FakeCmuxAdapter
+from cw.config import load_state, save_state
+from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
     ClientConfig,
+    CompletionReason,
     CwState,
+    DevQueueStore,
+    QueueItemStatus,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
-from cw.reconcile import compute_drift
+from cw.reconcile import compute_drift, reconcile
 
 
 def _mk_session(
@@ -89,3 +97,58 @@ def test_compute_drift_empty_live_set_from_adapter_is_reconciled() -> None:
     )
     report = compute_drift(state, adapter)
     assert set(report.phantom_session_ids) == {"s1", "s2"}
+
+
+def test_reconcile_marks_phantom_completed_crashed(
+    tmp_config_dir: Path,
+) -> None:
+    """reconcile flips phantom sessions to COMPLETED/CRASHED and persists."""
+    state = CwState(sessions=[_mk_session("s1", "missing-ref")])
+    save_state(state)
+
+    adapter = FakeCmuxAdapter()  # empty live set → s1 is phantom
+    report = reconcile(adapter)
+
+    assert report.phantom_session_ids == ["s1"]
+    reloaded = load_state()
+    s1 = reloaded.find_by_name_or_id("s1")
+    assert s1 is not None
+    assert s1.status == SessionStatus.COMPLETED
+    assert s1.completed_reason == CompletionReason.CRASHED
+    assert s1.completed_at is not None
+
+
+def test_reconcile_reverts_daemon_session_ticket_to_pending(
+    tmp_config_dir: Path,
+) -> None:
+    """When a DAEMON session for a ticket is phantom, revert its task."""
+    sess = _mk_session("sess-daemon", "dead-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TKT-1"
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TKT-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    report = reconcile(FakeCmuxAdapter())
+
+    assert "TKT-1" in report.reverted_ticket_ids
+    queue = load_dev_queue()
+    assert queue.tasks[0].status == QueueItemStatus.PENDING
+
+
+def test_reconcile_noop_when_no_phantoms(
+    tmp_config_dir: Path,
+) -> None:
+    adapter = FakeCmuxAdapter()
+    live_ref = adapter.spawn("ws", "echo")
+    sess = _mk_session("alive", live_ref)
+    save_state(CwState(sessions=[sess]))
+
+    report = reconcile(adapter)
+    assert report.phantom_session_ids == []
+    assert report.reverted_ticket_ids == []
