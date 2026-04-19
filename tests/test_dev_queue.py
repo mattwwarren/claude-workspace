@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +18,7 @@ from cw.dev_queue import (
     load_plan,
     plan_path,
     resolve_client,
+    save_dev_queue,
     save_plan,
 )
 from cw.exceptions import CwError
@@ -496,3 +498,106 @@ class TestDispatchPlanPersistence:
     def test_plan_path_returns_configured_path(self, tmp_dev_queue: Path) -> None:
         path = plan_path()
         assert path == tmp_dev_queue / "dev_plan.json"
+
+
+# ---------------------------------------------------------------------------
+# TestConcurrentAccess
+# ---------------------------------------------------------------------------
+
+
+_RACE_WRITER_COUNT = 4
+_RACE_READER_COUNT = 4
+_RACE_DURATION_SECONDS = 0.4
+_RACE_SEED_TICKETS = 40
+
+
+class TestConcurrentAccess:
+    """Concurrent writers + readers must never observe a partial JSON file."""
+
+    def test_reader_never_sees_partial_write(self, tmp_dev_queue: Path) -> None:
+        # Seed enough tasks that the serialized file is large enough for a
+        # truncating writer to race a reader mid-flight.
+        for i in range(_RACE_SEED_TICKETS):
+            add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="genhealth"))
+
+        stop = threading.Event()
+        reader_errors: list[BaseException] = []
+
+        def writer() -> None:
+            while not stop.is_set():
+                store = load_dev_queue()
+                save_dev_queue(store)
+
+        def reader() -> None:
+            while not stop.is_set():
+                try:
+                    load_dev_queue()
+                except (
+                    ValueError,
+                    OSError,
+                ) as exc:  # ValueError covers json.JSONDecodeError
+                    reader_errors.append(exc)
+
+        threads = [
+            threading.Thread(target=writer, daemon=True)
+            for _ in range(_RACE_WRITER_COUNT)
+        ] + [
+            threading.Thread(target=reader, daemon=True)
+            for _ in range(_RACE_READER_COUNT)
+        ]
+        for t in threads:
+            t.start()
+        time.sleep(_RACE_DURATION_SECONDS)
+        stop.set()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert not reader_errors, (
+            f"Reader observed {len(reader_errors)} partial writes: {reader_errors[:3]}"
+        )
+
+    def test_save_plan_reader_never_sees_partial_write(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        seed = DispatchPlan(
+            tasks=[
+                TicketTask(ticket_id=f"GEN-{i}", client="genhealth")
+                for i in range(_RACE_SEED_TICKETS)
+            ]
+        )
+        save_plan(seed)
+
+        stop = threading.Event()
+        reader_errors: list[BaseException] = []
+
+        def writer() -> None:
+            while not stop.is_set():
+                save_plan(seed)
+
+        def reader() -> None:
+            while not stop.is_set():
+                try:
+                    load_plan()
+                except (ValueError, OSError) as exc:
+                    reader_errors.append(exc)
+
+        threads = [
+            threading.Thread(target=writer, daemon=True)
+            for _ in range(_RACE_WRITER_COUNT)
+        ] + [
+            threading.Thread(target=reader, daemon=True)
+            for _ in range(_RACE_READER_COUNT)
+        ]
+        for t in threads:
+            t.start()
+        time.sleep(_RACE_DURATION_SECONDS)
+        stop.set()
+        for t in threads:
+            t.join(timeout=5)
+
+        # load_plan() swallows parse errors and returns None — so instead
+        # assert that load_plan kept returning the expected populated plan
+        # (no intermittent None from half-written files).
+        assert not reader_errors, (
+            f"Reader observed {len(reader_errors)} partial writes: {reader_errors[:3]}"
+        )

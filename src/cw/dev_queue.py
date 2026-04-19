@@ -7,6 +7,7 @@ import fcntl
 import json
 from typing import TYPE_CHECKING
 
+from cw.atomic import atomic_write_text
 from cw.config import (
     dev_plan_file,
     dev_plan_lock,
@@ -60,7 +61,7 @@ def save_plan(plan: DispatchPlan) -> Path:
     with _plan_lock():
         path = dev_plan_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(plan.model_dump_json(indent=2))
+        atomic_write_text(path, plan.model_dump_json(indent=2))
     return path
 
 
@@ -90,10 +91,10 @@ def load_dev_queue() -> DevQueueStore:
 
 
 def save_dev_queue(store: DevQueueStore) -> None:
-    """Persist the dev queue to disk."""
+    """Persist the dev queue to disk atomically."""
     path = dev_queue_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(store.model_dump_json(indent=2))
+    atomic_write_text(path, store.model_dump_json(indent=2))
 
 
 def add_ticket(task: TicketTask) -> None:

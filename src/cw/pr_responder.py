@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from cw.atomic import atomic_write_text
 from cw.cmux import get_cmux_adapter
 from cw.config import load_clients, load_state, save_state, state_dir
 from cw.events import advance_cursor, read_events
@@ -58,10 +59,10 @@ def load_dispatch_record() -> PRDispatchRecord:
 
 
 def save_dispatch_record(record: PRDispatchRecord) -> None:
-    """Persist PRDispatchRecord to the state directory."""
+    """Persist PRDispatchRecord to the state directory atomically."""
     state_dir().mkdir(parents=True, exist_ok=True)
     path = state_dir() / _DISPATCH_FILE_NAME
-    path.write_text(record.model_dump_json(indent=2))
+    atomic_write_text(path, record.model_dump_json(indent=2))
 
 
 def _is_session_active(session_id: str, state: CwState) -> bool:
