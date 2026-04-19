@@ -14,12 +14,19 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
 
 
-# cmux rejects worktree names longer than this; the full path is treated
-# as the name. Any default layout that would exceed this limit falls
-# back to a hash-derived short base under ~/.cw/wt/ so path length stays
-# bounded regardless of client name or workspace nesting depth.
+# cmux rejects worktree names longer than 64 chars with:
+#   "Invalid worktree name: must be 64 characters or fewer (got N)"
+# The full ``claude -w <path>`` argument is what cmux measures. When the
+# default ``<ws.parent>/.worktrees/<ws.name>/<slug>`` layout would exceed
+# this cap, fall back to a hash-derived short base under ``~/.cw/wt/``
+# so path length stays bounded regardless of client name or workspace
+# nesting depth.
 _WORKTREE_NAME_CAP = 64
 _HASH_BASE_SEGMENTS = (".cw", "wt")
+# 8 hex chars = 32 bits. For a single-user tool with a handful of
+# clients the collision probability is negligible; raising this value
+# pushes the hashed base closer to _WORKTREE_NAME_CAP and reduces
+# headroom for the branch slug, so increase with care.
 _WORKSPACE_HASH_CHARS = 8
 
 
@@ -56,10 +63,12 @@ def _hashed_worktree_base(client: ClientConfig) -> Path:
     """Return a short hash-derived worktree base for a client.
 
     Used as a fallback when the default sibling layout would exceed
-    ``_WORKTREE_NAME_CAP``. Hash is stable per git directory so repeat
-    invocations resolve to the same location.
+    ``_WORKTREE_NAME_CAP``. The hash seeds from the *resolved* git
+    directory so symlinks and non-canonical paths collapse to the
+    same digest — ``create_worktree`` and ``remove_worktree`` must
+    agree on the location across invocations.
     """
-    git_dir = _git_dir(client)
+    git_dir = _git_dir(client).resolve()
     digest = hashlib.sha256(str(git_dir).encode("utf-8")).hexdigest()
     return Path.home().joinpath(*_HASH_BASE_SEGMENTS, digest[:_WORKSPACE_HASH_CHARS])
 

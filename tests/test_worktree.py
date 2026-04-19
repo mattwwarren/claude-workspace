@@ -109,6 +109,20 @@ class TestWorktreePathFor:
         result = worktree_path_for(client, "main")
         assert result == Path("/p/.worktrees/r/main")
 
+    def test_hashed_fallback_is_stable_across_calls(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """create_worktree and remove_worktree must compute the same path
+        for the same client; the hash fallback must be deterministic."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/home/u"))
+        ws = Path("/home/matthew/workspace/companies/infini-player")
+        client = ClientConfig(name="infini-player", workspace_path=ws)
+
+        first = worktree_path_for(client, "auto-dev/1")
+        second = worktree_path_for(client, "auto-dev/1")
+        assert first == second
+
     def test_client_override_used_even_when_long(self) -> None:
         """An explicit ``worktree_base`` is respected even if it makes the
         resulting path exceed the cap — user choice wins over our fallback."""
