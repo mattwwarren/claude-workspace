@@ -420,3 +420,63 @@ class TestDispatchTickWithPlan:
 
         store = load_dev_queue()
         assert len(store.running()) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchTickReconcilePhantoms
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_tick_reconciles_phantoms_before_counting(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+    simple_config: OrchestratorConfig,
+) -> None:
+    """Phantom DAEMON sessions do not block new dispatch."""
+    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+    # Cap = 1, one ACTIVE phantom DAEMON session for the same client,
+    # and one PENDING ticket. Without reconciliation, running_count == 1
+    # would equal the cap and dispatch would spawn nothing.
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id="phantom-daemon",
+                    name=f"{sample_client_config.name}/auto-dev/TKT-OLD",
+                    client=sample_client_config.name,
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client_config.workspace_path,
+                    surface_ref="dead",
+                ),
+            ]
+        )
+    )
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="TKT-OLD",
+                    client=sample_client_config.name,
+                    status=QueueItemStatus.RUNNING,
+                ),
+                TicketTask(
+                    ticket_id="TKT-NEW",
+                    client=sample_client_config.name,
+                    status=QueueItemStatus.PENDING,
+                ),
+            ]
+        )
+    )
+
+    adapter = FakeCmuxAdapter()
+
+    spawned = dispatch_tick(simple_config, adapter=adapter)
+    assert spawned == 1
+
+    reloaded = load_state()
+    phantom = reloaded.find_by_name_or_id("phantom-daemon")
+    assert phantom is not None
+    assert phantom.status == SessionStatus.COMPLETED

@@ -15,6 +15,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
+from cw.reconcile import reconcile
 from cw.spawn import spawn_create_impl
 from cw.worktree import worktree_path_for
 
@@ -81,6 +82,7 @@ def dispatch_tick(
         Number of sessions spawned during this tick.
     """
     resolved_adapter = adapter or get_cmux_adapter()
+    reconcile(resolved_adapter)
     clients = load_clients()
     state = load_state()
     spawned = 0
