@@ -220,15 +220,22 @@ def config() -> None:
 
 
 @main.command()
+@click.option(
+    "--reap",
+    is_flag=True,
+    help="Also reconcile state with the live multiplexer and reap phantoms.",
+)
 @handle_errors
-def doctor() -> None:
+def doctor(reap: bool) -> None:
     """Run environment preflight checks and print a health report.
 
     Reports the resolved backend, backend binary/daemon availability,
     config file locations and validity, and state file parseability.
-    Exits non-zero if any check fails so CI pipelines can gate on it.
+    With ``--reap`` also reconciles cw's session state with the live
+    multiplexer, marking phantom sessions COMPLETED and reverting their
+    tickets to PENDING. Exits non-zero if any check fails.
     """
-    report = run_doctor()
+    report = run_doctor(reap=reap)
     click.echo(format_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)

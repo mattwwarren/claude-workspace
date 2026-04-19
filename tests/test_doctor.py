@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
     import pytest
 
+    from cw.models import ClientConfig
+
 
 class TestRunDoctorFakeBackend:
     """When CW_BACKEND=fake the backend binary check is a no-op."""
@@ -106,3 +108,61 @@ class TestDoctorCli:
         result = runner.invoke(main, ["doctor"])
         assert result.exit_code != 0
         assert "FAIL" in result.output
+
+
+def test_run_doctor_reap_flag_reconciles_and_reports(
+    tmp_config_dir: Path,
+    sample_client: ClientConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_doctor(reap=True) invokes reconcile and reports reaped sessions."""
+    from cw.cmux import FakeCmuxAdapter
+    from cw.config import load_state, save_state
+    from cw.doctor import run_doctor
+    from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id="phantom",
+                    name="client-a/impl",
+                    client="client-a",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="gone",
+                ),
+            ]
+        )
+    )
+    monkeypatch.setattr("cw.doctor.get_cmux_adapter", FakeCmuxAdapter)
+
+    report = run_doctor(reap=True)
+    reap_checks = [c for c in report.checks if c.name == "reconciliation"]
+    assert len(reap_checks) == 1
+    assert reap_checks[0].ok is True
+    detail = reap_checks[0].detail
+    assert "phantom" in detail or "client-a/impl" in detail
+
+    reloaded = load_state()
+    phantom = reloaded.find_by_name_or_id("phantom")
+    assert phantom is not None
+    assert phantom.status == SessionStatus.COMPLETED
+
+
+def test_cw_doctor_cli_reap_flag(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI `cw doctor --reap` forwards the flag."""
+    from click.testing import CliRunner
+
+    from cw.cli import main
+    from cw.cmux import FakeCmuxAdapter
+
+    monkeypatch.setattr("cw.doctor.get_cmux_adapter", FakeCmuxAdapter)
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor", "--reap"])
+    assert result.exit_code == 0
+    assert "reconciliation" in result.output
