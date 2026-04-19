@@ -174,7 +174,9 @@ def load_state() -> CwState:
     if not path.exists():
         return CwState()
     raw = json.loads(path.read_text())
-    # Migrate: zellij_pane -> surface_ref, drop zellij_tab (introduced in v0.4.x)
+    # Migration armor — do not delete. Users in the wild still have
+    # `sessions.json` files from the Zellij era (pre-0.4). The field
+    # rename runs every load so upgrades stay transparent.
     for session_raw in raw.get("sessions", []):
         if "zellij_pane" in session_raw and "surface_ref" not in session_raw:
             session_raw["surface_ref"] = session_raw.pop("zellij_pane")
