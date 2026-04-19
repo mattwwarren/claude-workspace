@@ -32,7 +32,6 @@ from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
     CompletionReason,
-    CwState,
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
@@ -324,7 +323,7 @@ def _display_sessions() -> None:
     """Display all tracked sessions."""
     state = load_state()
 
-    dead = _check_and_mark_dead_sessions(state)
+    dead = _check_and_mark_dead_sessions()
     for name in dead:
         click.echo(f"Reaped phantom session: {name}")
     if dead:
@@ -353,7 +352,7 @@ def _display_sessions() -> None:
         click.echo(f"{s.client:<18} {s.purpose:<10} {s.status:<14} {s.id:<10} {since}")
 
 
-def _check_and_mark_dead_sessions(_state: CwState) -> list[str]:
+def _check_and_mark_dead_sessions() -> list[str]:
     """Reconcile state with the live multiplexer and return reaped session names.
 
     Cheap passive reconciliation: called from every read path (``cw status``,
@@ -385,7 +384,7 @@ def _display_status() -> None:
     state = load_state()
     clients = load_clients()
 
-    dead = _check_and_mark_dead_sessions(state)
+    dead = _check_and_mark_dead_sessions()
     for name in dead:
         click.echo(f"Reaped phantom session: {name}")
     if dead:
