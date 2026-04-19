@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import click
 import yaml
@@ -19,8 +21,11 @@ from cw.models import (
     ClientConfig,
     CwState,
     OrchestratorConfig,
+    SessionOrigin,
     SessionPurpose,
 )
+
+logger = logging.getLogger(__name__)
 
 # Client names appear unquoted in shell commands (env var prefixes),
 # filesystem paths (queue dirs, history dirs), and Zellij tab names.
@@ -169,21 +174,65 @@ def get_client(name: str) -> ClientConfig:
 
 
 def load_state() -> CwState:
-    """Load persisted session state, migrating old field names if present."""
+    """Load persisted session state, applying schema migrations."""
     path = state_file()
     if not path.exists():
         return CwState()
     raw = json.loads(path.read_text())
-    # Migration armor — do not delete. Users in the wild still have
-    # `sessions.json` files from the Zellij era (pre-0.4). The field
-    # rename runs every load so upgrades stay transparent.
-    for session_raw in raw.get("sessions", []):
-        if "zellij_pane" in session_raw and "surface_ref" not in session_raw:
-            session_raw["surface_ref"] = session_raw.pop("zellij_pane")
-        else:
-            session_raw.pop("zellij_pane", None)
-        session_raw.pop("zellij_tab", None)
-    return CwState.model_validate(raw)
+    return CwState.model_validate(migrate_cw_state(raw))
+
+
+_VALID_SESSION_ORIGINS = frozenset(v.value for v in SessionOrigin)
+
+
+def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalise a raw sessions.json payload into a currently-valid shape.
+
+    The goal is to never brick the tool on a state file that was written by
+    an older (or briefly-diverged) version of cw. Unknown or renamed fields
+    are coerced; unknown enum values are reset to a safe default with a
+    warning rather than raising a validation error.
+    """
+    sessions = raw.get("sessions")
+    if isinstance(sessions, list):
+        for session_raw in sessions:
+            if not isinstance(session_raw, dict):
+                continue
+            _migrate_zellij_fields(session_raw)
+            _coerce_session_origin(session_raw)
+    return raw
+
+
+def _migrate_zellij_fields(session_raw: dict[str, Any]) -> None:
+    """Rename the pre-0.4 zellij_pane field and drop zellij_tab.
+
+    Migration armor — do not delete. Users in the wild still have
+    `sessions.json` files from the Zellij era; the rename runs every load
+    so upgrades stay transparent.
+    """
+    if "zellij_pane" in session_raw and "surface_ref" not in session_raw:
+        session_raw["surface_ref"] = session_raw.pop("zellij_pane")
+    else:
+        session_raw.pop("zellij_pane", None)
+    session_raw.pop("zellij_tab", None)
+
+
+def _coerce_session_origin(session_raw: dict[str, Any]) -> None:
+    """Reset unknown SessionOrigin values to 'user' with a warning.
+
+    A stale sessions.json containing, for example, `origin: "delegate"`
+    (a value that briefly existed in a branch but never landed) used to
+    crash every cw command at Pydantic validation. Coerce instead, so
+    users aren't locked out of their own state.
+    """
+    origin = session_raw.get("origin")
+    if origin is not None and origin not in _VALID_SESSION_ORIGINS:
+        logger.warning(
+            "session %s has unknown origin %r; coercing to 'user'",
+            session_raw.get("id", "<unknown>"),
+            origin,
+        )
+        session_raw["origin"] = SessionOrigin.USER.value
 
 
 def save_state(state: CwState) -> None:
