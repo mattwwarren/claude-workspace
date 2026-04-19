@@ -158,7 +158,7 @@ class RealCmuxAdapter:
     def list_surfaces(self) -> set[str]:
         """Return the set of live surface refs from cmux.
 
-        Stub implementation — full reconciliation query added in Task 2.
+        Stub implementation — full reconciliation query added in Task 3.
         Returns empty set on any error so callers treat "server down" as
         "no surfaces alive" rather than "all surfaces still alive".
         """
@@ -174,6 +174,7 @@ class FakeCmuxAdapter:
             "spawn": [],
             "close": [],
             "identify": [],
+            "list_surfaces": [],
         }
         self._live: set[str] = set()
 
@@ -202,7 +203,7 @@ class FakeCmuxAdapter:
 
     def list_surfaces(self) -> set[str]:
         """Return the current in-memory live-surface set (copy)."""
-        self.calls.setdefault("list_surfaces", []).append(())
+        self.calls["list_surfaces"].append(())
         return set(self._live)
 
 

@@ -112,7 +112,7 @@ class TmuxAdapter:
     def list_surfaces(self) -> set[str]:
         """Return the set of live pane refs from tmux.
 
-        Stub implementation — full reconciliation query added in Task 3.
+        Stub implementation — full reconciliation query added in Task 2.
         Returns empty set on any error so callers treat "tmux unreachable"
         as "no surfaces alive" rather than "all surfaces still alive".
         """
