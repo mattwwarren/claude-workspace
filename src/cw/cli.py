@@ -26,6 +26,7 @@ from cw.config import (
 from cw.daemon import run_watcher_tick
 from cw.dev_queue import add_ticket, list_tickets, resolve_client
 from cw.dispatch import run_dispatch_loop
+from cw.doctor import format_report, run_doctor
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
@@ -217,6 +218,21 @@ def done(session_name: str | None, cleanup: bool, force: bool) -> None:
 def config() -> None:
     """Show current configuration."""
     show_config()
+
+
+@main.command()
+@handle_errors
+def doctor() -> None:
+    """Run environment preflight checks and print a health report.
+
+    Reports the resolved backend, backend binary/daemon availability,
+    config file locations and validity, and state file parseability.
+    Exits non-zero if any check fails so CI pipelines can gate on it.
+    """
+    report = run_doctor()
+    click.echo(format_report(report))
+    if not report.ok:
+        raise click.exceptions.Exit(1)
 
 
 @main.command(name="init")
