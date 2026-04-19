@@ -28,8 +28,8 @@ from cw.models import (
 logger = logging.getLogger(__name__)
 
 # Client names appear unquoted in shell commands (env var prefixes),
-# filesystem paths (queue dirs, history dirs), and Zellij tab names.
-# Restrict to safe characters to prevent injection.
+# filesystem paths (queue dirs, history dirs), and multiplexer workspace
+# names. Restrict to safe characters to prevent injection.
 _SAFE_CLIENT_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 # Branch names: alphanumeric, slashes, dots, dashes, underscores.

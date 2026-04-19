@@ -1,7 +1,7 @@
 """Wrapper around Claude that signals cw on exit.
 
-Used as the pane command in Zellij layouts so ``cw`` can detect when
-Claude exits and transition the session to IDLE.
+Used as the pane command in the multiplexer workspace so ``cw`` can
+detect when Claude exits and transition the session to IDLE.
 """
 
 from __future__ import annotations

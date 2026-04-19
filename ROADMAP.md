@@ -10,7 +10,7 @@
 
 Core workflow: start → work → background → switch client → resume.
 
-- ✓ Zellij layout engine (tabs per client, panes per purpose)
+- ✓ Multiplexer layout engine (workspace per client, panes per purpose)
 - ✓ `cw` CLI for session lifecycle (start, bg, resume, list, switch)
 - ✓ Integration with existing handoff pipeline (`/session-done`)
 - ✓ Per-client config with workspace path mapping
@@ -65,8 +65,7 @@ Core workflow: start → work → background → switch client → resume.
 **Theme:** See everything at a glance.
 
 - ✓ `cw dashboard` rich TUI: client sidebar with session count badges, session table with Origin/Handoff columns, queue panel, plan progress in status line, confirm dialogs, session detail expand (`e` key)
-- ✓ Zellij tab rename: tabs show `[bg]` suffix when sessions are backgrounded, restored on resume
-- ✗ Zellij plugin (Rust/WASM): live status bar showing all session states, queue counts — scaffolding exists in `zellij-plugin/`, needs build fix and completion
+- ✓ Workspace rename: surfaces show `[bg]` suffix when sessions are backgrounded, restored on resume
 - ✓ Desktop notifications via `notify-send`: "sigma/review found 3 issues in PR #89"
 - ✗ Cost tracking: dropped — no feasible data source for Claude Code token usage
 - ✓ Session history: `cw history client` - timeline of all sessions, handoffs, and outcomes

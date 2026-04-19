@@ -27,7 +27,7 @@ See [docs/INSTALL.md](docs/INSTALL.md) for full installation guide.
 # Add your first project
 cw init my-project --path /path/to/repo
 
-# Start working (launches Zellij with impl/idea/debt panes)
+# Start working (launches a cmux surface with impl/idea/debt panes)
 cw start my-project
 
 # Background current session (auto-generates handoff context)
@@ -42,7 +42,8 @@ cw status
 
 ## Prerequisites
 
-- [Zellij](https://zellij.dev/) - Terminal multiplexer
+- A terminal multiplexer backend: [cmux](https://github.com/cmuxio/cmux) on
+  macOS (current default) or tmux on other platforms (coming in 0.6.0)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) - AI coding assistant
 - [uv](https://docs.astral.sh/uv/) - Python package manager
 - [peon-ping](https://github.com/PeonPing/peon-ping) - Sound notifications when Claude needs attention (optional)
@@ -52,7 +53,7 @@ cw status
 | Command | Description |
 |---------|-------------|
 | `cw init <name> --path <path>` | Add a new project |
-| `cw start <client>` | Start or resume sessions in Zellij |
+| `cw start <client>` | Start or resume sessions in the active multiplexer |
 | `cw bg` | Background current session (triggers handoff) |
 | `cw resume <session>` | Resume a backgrounded session |
 | `cw done <session>` | Mark a session as completed |
@@ -83,7 +84,7 @@ The core workflow is: **init** → **start** → **work** → **bg/resume** → 
 ```
 
 1. **`cw init`** registers a project (workspace path, branch, purposes)
-2. **`cw start`** launches a Zellij session with one Claude Code pane per purpose (impl, idea, debt). Each pane runs `cw run-claude` which starts Claude with purpose-specific prompts.
+2. **`cw start`** launches a multiplexer workspace with one Claude Code pane per purpose (impl, idea, debt). Each pane runs `cw run-claude` which starts Claude with purpose-specific prompts.
 3. **Work** happens inside each Claude Code pane — implementation, brainstorming, or debt cleanup.
 4. **`cw bg`** backgrounds all panes: injects `/session-done` into each Claude instance, waits for handoff files, then marks sessions as backgrounded.
 5. **`cw resume`** restarts a session with its handoff context auto-injected, so Claude picks up where it left off.
@@ -114,8 +115,8 @@ Planning Session          Queue              Execution Session
 cw start client-a
 cw start client-b
 
-# Each gets its own Zellij tab with separate Claude panes
-# Switch between clients using Zellij's tab navigation
+# Each gets its own multiplexer workspace with separate Claude panes
+# Switch between clients using the multiplexer's navigation
 
 # List all active sessions across clients
 cw list
@@ -142,7 +143,7 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options.
 
 `cw` manages two things:
 
-1. **Zellij layouts** - tabs per client, panes per purpose (impl, idea, debt)
+1. **Multiplexer layouts** - a workspace per client, panes per purpose (impl, idea, debt)
 2. **Session lifecycle** - start, background (with auto-handoff), and resume Claude Code sessions
 
 Claude Code stays native in every terminal pane. `cw` just orchestrates around it.

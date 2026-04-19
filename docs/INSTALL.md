@@ -10,7 +10,7 @@ Install these before installing cw:
 |------|----------|---------|---------|
 | [uv](https://docs.astral.sh/uv/) | Yes | Python package manager | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | [Python 3.13+](https://python.org/) | Yes | Runtime | Via uv: `uv python install 3.13` |
-| [Zellij](https://zellij.dev/) | Yes | Terminal multiplexer | `cargo install zellij` or package manager |
+| [cmux](https://github.com/cmuxio/cmux) (macOS) | Yes on macOS | Terminal multiplexer backend | See cmux install guide |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Yes | AI coding assistant | `npm install -g @anthropic-ai/claude-code` |
 | [peon-ping](https://github.com/PeonPing/peon-ping) | No | Sound notifications when Claude needs attention | `curl -fsSL peonping.com/install \| bash` |
 
@@ -20,8 +20,9 @@ Install these before installing cw:
 # Check each prerequisite
 uv --version          # >= 0.4.0
 python3 --version     # >= 3.13
-zellij --version      # any recent version
 claude --version      # any recent version
+# On macOS, verify cmux is running (its daemon socket exists)
+test -S ~/Library/Application\ Support/cmux/cmux.sock && echo cmux-ok
 peon status           # optional
 ```
 
@@ -110,7 +111,7 @@ _CW_COMPLETE=fish_source cw | source
 cw start my-project
 ```
 
-This launches a Zellij layout with panes for each session purpose (impl, idea, debt).
+This launches a multiplexer workspace with panes for each session purpose (impl, idea, debt).
 
 ## File Locations
 
@@ -118,7 +119,6 @@ This launches a Zellij layout with panes for each session purpose (impl, idea, d
 |------|----------|---------|
 | Client config | `~/.config/cw/clients.yaml` | Project definitions |
 | Session state | `~/.local/share/cw/sessions.json` | Active session tracking |
-| Zellij layouts | `~/.config/zellij/layouts/cw-*.kdl` | Generated layout files |
 | Event history | `~/.local/share/cw/history/` | Session event log |
 
 All paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME` if set.
@@ -182,13 +182,12 @@ cw requires Python 3.13+. Install it via uv:
 uv python install 3.13
 ```
 
-### Zellij not launching
+### Multiplexer not launching
 
-Verify Zellij is installed and accessible:
+On macOS, verify cmux is running and its socket is reachable:
 
 ```bash
-zellij --version
-which zellij
+test -S ~/Library/Application\ Support/cmux/cmux.sock && echo cmux-ok
 ```
 
 ### Permission errors on `~/.config/cw/`
