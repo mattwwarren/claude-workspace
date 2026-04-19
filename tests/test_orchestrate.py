@@ -14,6 +14,7 @@ from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket
 from cw.events import read_events, record_event
+from cw.exceptions import CwError
 from cw.models import (
     CompletionReason,
     CwState,
@@ -333,6 +334,34 @@ class TestRetireMergedPRs:
         # Second call is a no-op (cursor advanced).
         retired_second = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
         assert retired_second == []
+
+    def test_no_matches_skips_platform_adapter_resolution(
+        self,
+        tmp_orchestrate_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_runner: tuple[list[list[str]], object],
+    ) -> None:
+        """Regression: when no session matches, the adapter factory is not called.
+
+        `RealCmuxAdapter.__init__` crashes on non-Darwin. If
+        `retire_merged_prs` eagerly called `get_cmux_adapter()` before
+        checking whether any sessions needed closing, a Linux user with
+        zero matches would crash even though no adapter work is needed.
+        """
+        from cw import orchestrate as orch
+
+        def _boom() -> None:
+            msg = "RealCmuxAdapter requires macOS"
+            raise CwError(msg)
+
+        monkeypatch.setattr(orch, "get_cmux_adapter", _boom)
+
+        save_state(CwState(sessions=[]))
+        _seed_pr_merged("owner/other", 99)
+
+        _calls, runner = fake_runner
+        retired = orch.retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        assert retired == []
 
 
 # ---------------------------------------------------------------------------
