@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from cw.cmux import get_cmux_adapter
 from cw.config import load_clients, load_orchestrator_config, load_state
-from cw.dev_queue import _lock, load_dev_queue, load_plan, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.models import (
     OrchestratorEventType,
@@ -44,7 +44,7 @@ def _claim_next_pending(
     parameter is intentionally a *preference*, not a filter — see the
     fallback after the priority loop).
     """
-    with _lock():
+    with dev_queue_lock():
         store = load_dev_queue()
         if priority_ticket_ids:
             for ticket_id in priority_ticket_ids:
@@ -170,7 +170,7 @@ def consume_completed_sessions() -> int:
         return 0
 
     completed = 0
-    with _lock():
+    with dev_queue_lock():
         store = load_dev_queue()
         for event in events:
             ticket_id = event.payload.get("ticket_id")
