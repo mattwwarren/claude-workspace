@@ -34,7 +34,7 @@ def atomic_write_text(path: Path, text: str) -> None:
         dir=str(path.parent),
     )
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp_name, path)
     except BaseException:

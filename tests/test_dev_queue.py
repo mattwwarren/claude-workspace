@@ -574,10 +574,14 @@ class TestConcurrentAccess:
             while not stop.is_set():
                 save_plan(seed)
 
+        # load_plan() intentionally swallows parse errors and returns
+        # None, so the reader thread must call the validator directly
+        # to expose partial-write observations.
         def reader() -> None:
+            path = plan_path()
             while not stop.is_set():
                 try:
-                    load_plan()
+                    DispatchPlan.model_validate_json(path.read_text())
                 except (ValueError, OSError) as exc:
                     reader_errors.append(exc)
 
@@ -595,9 +599,6 @@ class TestConcurrentAccess:
         for t in threads:
             t.join(timeout=5)
 
-        # load_plan() swallows parse errors and returns None — so instead
-        # assert that load_plan kept returning the expected populated plan
-        # (no intermittent None from half-written files).
         assert not reader_errors, (
             f"Reader observed {len(reader_errors)} partial writes: {reader_errors[:3]}"
         )
