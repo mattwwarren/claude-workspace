@@ -19,8 +19,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
-from cw.dev_queue import _lock as _dev_queue_lock
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.models import (
     CompletionReason,
@@ -103,6 +102,14 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
     with ``crashed: True``, and reverts any RUNNING TicketTask whose
     ticket-id can be recovered from the session name back to PENDING so
     the dispatch loop will retry.
+
+    Partial-failure note: state and the dev queue are separate files. If
+    ``save_state`` succeeds but the subsequent dev-queue update raises,
+    the session will be COMPLETED while its TicketTask stays RUNNING.
+    The next ``reconcile()`` call will not pick this up because the
+    session is no longer ACTIVE/IDLE — so a stranded RUNNING task can
+    only be recovered by explicit operator action. This is an acceptable
+    tradeoff for a file-based, single-user tool.
     """
     state = load_state()
     drift = compute_drift(state, adapter)
@@ -113,6 +120,7 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
     now = datetime.now(UTC)
 
     ticket_ids_to_revert: list[str] = []
+    pending_events: list[dict[str, object]] = []
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
@@ -123,21 +131,22 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
             ticket_id = _ticket_id_for_session(session.name)
             if ticket_id:
                 ticket_ids_to_revert.append(ticket_id)
-        record_event(
-            OrchestratorEventType.SESSION_COMPLETED,
+        pending_events.append(
             {
                 "session_id": session.id,
                 "session_name": session.name,
                 "client": session.client,
                 "crashed": True,
-            },
+            }
         )
 
     save_state(state)
+    for payload in pending_events:
+        record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
     reverted: list[str] = []
     if ticket_ids_to_revert:
-        with _dev_queue_lock():
+        with dev_queue_lock():
             store = load_dev_queue()
             for task in store.tasks:
                 if (

@@ -116,6 +116,7 @@ def test_reconcile_marks_phantom_completed_crashed(
     assert s1.status == SessionStatus.COMPLETED
     assert s1.completed_reason == CompletionReason.CRASHED
     assert s1.completed_at is not None
+    assert report.reverted_ticket_ids == []
 
 
 def test_reconcile_reverts_daemon_session_ticket_to_pending(
