@@ -1,7 +1,10 @@
-"""cmux terminal multiplexer adapter.
+"""Terminal multiplexer adapters and factory.
 
-Platform: macOS-only for RealCmuxAdapter. All logic is testable on Linux
-via FakeCmuxAdapter injection.
+Defines the :class:`MultiplexerAdapter` protocol that every backend
+implements, plus the macOS-native :class:`RealCmuxAdapter` and the
+test-only :class:`FakeCmuxAdapter`. :func:`get_backend_adapter` is the
+one factory callers should use; legacy names (``CmuxAdapter``,
+``get_cmux_adapter``) are kept as aliases for one release.
 """
 
 from __future__ import annotations
@@ -42,8 +45,8 @@ def _find_socket() -> Path:
 
 
 @runtime_checkable
-class CmuxAdapter(Protocol):
-    """Protocol for cmux terminal multiplexer adapters."""
+class MultiplexerAdapter(Protocol):
+    """Protocol for terminal-multiplexer backends (cmux, tmux, fakes)."""
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Spawn a new surface in the given workspace running command.
@@ -59,6 +62,11 @@ class CmuxAdapter(Protocol):
     def identify(self) -> dict[str, Any]:
         """Return current focus context."""
         ...
+
+
+# Legacy alias. Keep for one release so downstream type hints that read
+# `from cw.cmux import CmuxAdapter` don't break mid-upgrade.
+CmuxAdapter = MultiplexerAdapter
 
 
 class RealCmuxAdapter:
@@ -167,6 +175,15 @@ class FakeCmuxAdapter:
         }
 
 
-def get_cmux_adapter() -> CmuxAdapter:
-    """Return RealCmuxAdapter on macOS. Raises CwError on other platforms."""
+def get_backend_adapter() -> MultiplexerAdapter:
+    """Return the active multiplexer adapter.
+
+    Today this is hard-coded to :class:`RealCmuxAdapter` (macOS only).
+    #37 replaces this with a 3-tier selector (env var → config →
+    platform default) and #38 plugs in :class:`TmuxAdapter` for Linux.
+    """
     return RealCmuxAdapter()
+
+
+# Legacy alias retained for one release alongside ``CmuxAdapter``.
+get_cmux_adapter = get_backend_adapter
