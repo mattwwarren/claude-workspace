@@ -8,7 +8,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cw.config import QUEUES_DIR
+from cw.config import queues_dir
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import QueueItem, QueueItemStatus, QueueStore, TaskSpec
 
@@ -20,17 +20,17 @@ if TYPE_CHECKING:
 
 
 def _queue_path(client: str) -> Path:
-    return QUEUES_DIR / f"{client}.json"
+    return queues_dir() / f"{client}.json"
 
 
 def _lock_path(client: str) -> Path:
-    return QUEUES_DIR / f".{client}.lock"
+    return queues_dir() / f".{client}.lock"
 
 
 @contextlib.contextmanager
 def _queue_lock(client: str) -> Iterator[None]:
     """Acquire an exclusive file lock for a client's queue."""
-    QUEUES_DIR.mkdir(parents=True, exist_ok=True)
+    queues_dir().mkdir(parents=True, exist_ok=True)
     lock = _lock_path(client)
     fd = lock.open("w")
     try:

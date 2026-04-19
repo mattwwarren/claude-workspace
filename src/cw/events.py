@@ -8,7 +8,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cw.config import EVENTS_DIR
+from cw.config import events_dir
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
@@ -18,23 +18,23 @@ if TYPE_CHECKING:
 
 def _inbox_path() -> Path:
     """Return the path to the global event inbox JSONL file."""
-    return EVENTS_DIR / "inbox.jsonl"
+    return events_dir() / "inbox.jsonl"
 
 
 def _cursor_path(consumer: str) -> Path:
     """Return the cursor file path for a named consumer."""
-    return EVENTS_DIR / "cursors" / f"{consumer}.json"
+    return events_dir() / "cursors" / f"{consumer}.json"
 
 
 def _lock_path() -> Path:
     """Return the lock file path for the event inbox."""
-    return EVENTS_DIR / ".inbox.lock"
+    return events_dir() / ".inbox.lock"
 
 
 @contextlib.contextmanager
 def _inbox_lock() -> Iterator[None]:
     """Acquire an exclusive file lock for the event inbox."""
-    EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    events_dir().mkdir(parents=True, exist_ok=True)
     lock = _lock_path()
     fd = lock.open("w")
     try:

@@ -10,13 +10,12 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from cw.config import (
-    REVIEW_MONITOR_DIR as _CONFIG_REVIEW_MONITOR_DIR,
-)
-from cw.config import (
-    STATE_DIR,
     load_clients,
     load_orchestrator_config,
     load_state,
+    pr_watcher_dir,
+    review_monitor_dir,
+    state_dir,
 )
 from cw.events import record_event
 from cw.models import OrchestratorEventType, SessionStatus
@@ -27,13 +26,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorEvent
-
-# Directory where review-monitor state files live (re-exported from
-# cw.config so tests can monkeypatch this module's reference directly).
-REVIEW_MONITOR_DIR = _CONFIG_REVIEW_MONITOR_DIR
-
-# Directory for persisted watcher snapshots (one file per client)
-PR_WATCHER_DIR = STATE_DIR / "pr_watcher"
 
 # CI-failure keywords to look for in delta_findings messages
 _CI_KEYWORDS = frozenset(
@@ -89,8 +81,9 @@ class ThrottleStore(BaseModel):
 
 def _load_snapshot(client_name: str) -> WatcherSnapshot:
     """Load a WatcherSnapshot for a client from disk, or return an empty one."""
-    PR_WATCHER_DIR.mkdir(parents=True, exist_ok=True)
-    path = PR_WATCHER_DIR / f"{client_name}.json"
+    watcher_dir = pr_watcher_dir()
+    watcher_dir.mkdir(parents=True, exist_ok=True)
+    path = watcher_dir / f"{client_name}.json"
     if not path.exists():
         return WatcherSnapshot()
     return WatcherSnapshot.model_validate_json(path.read_text())
@@ -98,14 +91,15 @@ def _load_snapshot(client_name: str) -> WatcherSnapshot:
 
 def _save_snapshot(client_name: str, snapshot: WatcherSnapshot) -> None:
     """Persist a WatcherSnapshot for a client."""
-    PR_WATCHER_DIR.mkdir(parents=True, exist_ok=True)
-    path = PR_WATCHER_DIR / f"{client_name}.json"
+    watcher_dir = pr_watcher_dir()
+    watcher_dir.mkdir(parents=True, exist_ok=True)
+    path = watcher_dir / f"{client_name}.json"
     path.write_text(snapshot.model_dump_json(indent=2))
 
 
 def _load_throttle() -> ThrottleStore:
     """Load the global ThrottleStore from disk."""
-    path = STATE_DIR / "pr_dispatch_throttle.json"
+    path = state_dir() / "pr_dispatch_throttle.json"
     if not path.exists():
         return ThrottleStore()
     return ThrottleStore.model_validate_json(path.read_text())
@@ -113,20 +107,21 @@ def _load_throttle() -> ThrottleStore:
 
 def _save_throttle(store: ThrottleStore) -> None:
     """Persist the global ThrottleStore."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    path = STATE_DIR / "pr_dispatch_throttle.json"
+    state_dir().mkdir(parents=True, exist_ok=True)
+    path = state_dir() / "pr_dispatch_throttle.json"
     path.write_text(store.model_dump_json(indent=2))
 
 
 def _load_monitor_files() -> list[dict[str, Any]]:
-    """Load all MonitorState JSON files from REVIEW_MONITOR_DIR.
+    """Load all MonitorState JSON files from the review-monitor directory.
 
     Returns a list of raw dicts, each corresponding to one file's contents.
     """
-    if not REVIEW_MONITOR_DIR.exists():
+    monitor_dir = review_monitor_dir()
+    if not monitor_dir.exists():
         return []
     result: list[dict[str, Any]] = []
-    for path in REVIEW_MONITOR_DIR.glob("*.json"):
+    for path in monitor_dir.glob("*.json"):
         try:
             raw: dict[str, Any] = json.loads(path.read_text())
             result.append(raw)

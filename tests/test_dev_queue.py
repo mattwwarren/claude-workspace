@@ -47,12 +47,8 @@ def tmp_dev_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", dev_queue_file)
     monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", dev_queue_lock)
-    monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_FILE", dev_queue_file)
-    monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_LOCK", dev_queue_lock)
     monkeypatch.setattr("cw.config.DEV_PLAN_FILE", dev_plan_file)
     monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", dev_plan_lock)
-    monkeypatch.setattr("cw.dev_queue.DEV_PLAN_FILE", dev_plan_file)
-    monkeypatch.setattr("cw.dev_queue.DEV_PLAN_LOCK", dev_plan_lock)
 
     return tmp_path
 

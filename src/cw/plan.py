@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from cw.config import DEV_PLAN_OUTPUT_DIR
+from cw.config import dev_plan_output_dir
 from cw.dev_queue import list_tickets, save_plan
 from cw.exceptions import CwError
 from cw.models import DispatchPlan
@@ -130,9 +130,10 @@ def run_planner(
         raise CwError(msg)
 
     correlation_id = uuid4().hex[:8]
-    DEV_PLAN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = DEV_PLAN_OUTPUT_DIR / f"plan-{correlation_id}.json"
-    prompt_path = DEV_PLAN_OUTPUT_DIR / f"prompt-{correlation_id}.txt"
+    output_dir = dev_plan_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"plan-{correlation_id}.json"
+    prompt_path = output_dir / f"prompt-{correlation_id}.txt"
     prompt_path.write_text(_format_tickets_prompt(pending, output_path))
 
     session_id = spawn_create_impl(

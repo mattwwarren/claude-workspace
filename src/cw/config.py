@@ -63,12 +63,79 @@ linear_prefix_map: {}
 """
 
 
+# Path accessors — read module-level globals at call time so monkeypatching
+# `cw.config.STATE_DIR` (etc.) reaches every consumer without needing to
+# patch each module's own binding. Never `from cw.config import STATE_DIR`
+# in a consumer; always call the accessor.
+
+
+def config_dir() -> Path:
+    return CONFIG_DIR
+
+
+def state_dir() -> Path:
+    return STATE_DIR
+
+
+def queues_dir() -> Path:
+    return QUEUES_DIR
+
+
+def events_dir() -> Path:
+    return EVENTS_DIR
+
+
+def history_dir() -> Path:
+    return HISTORY_DIR
+
+
+def pr_watcher_dir() -> Path:
+    return PR_WATCHER_DIR
+
+
+def review_monitor_dir() -> Path:
+    return REVIEW_MONITOR_DIR
+
+
+def clients_file() -> Path:
+    return CLIENTS_FILE
+
+
+def state_file() -> Path:
+    return STATE_FILE
+
+
+def orchestrator_config_file() -> Path:
+    return ORCHESTRATOR_CONFIG_FILE
+
+
+def dev_queue_file() -> Path:
+    return DEV_QUEUE_FILE
+
+
+def dev_queue_lock() -> Path:
+    return DEV_QUEUE_LOCK
+
+
+def dev_plan_file() -> Path:
+    return DEV_PLAN_FILE
+
+
+def dev_plan_lock() -> Path:
+    return DEV_PLAN_LOCK
+
+
+def dev_plan_output_dir() -> Path:
+    return DEV_PLAN_OUTPUT_DIR
+
+
 def load_clients() -> dict[str, ClientConfig]:
     """Load client configurations from ~/.config/cw/clients.yaml."""
-    if not CLIENTS_FILE.exists():
+    path = clients_file()
+    if not path.exists():
         return {}
 
-    raw = yaml.safe_load(CLIENTS_FILE.read_text())
+    raw = yaml.safe_load(path.read_text())
     if not raw or "clients" not in raw:
         return {}
 
@@ -103,9 +170,10 @@ def get_client(name: str) -> ClientConfig:
 
 def load_state() -> CwState:
     """Load persisted session state, migrating old field names if present."""
-    if not STATE_FILE.exists():
+    path = state_file()
+    if not path.exists():
         return CwState()
-    raw = json.loads(STATE_FILE.read_text())
+    raw = json.loads(path.read_text())
     # Migrate: zellij_pane -> surface_ref, drop zellij_tab (introduced in v0.4.x)
     for session_raw in raw.get("sessions", []):
         if "zellij_pane" in session_raw and "surface_ref" not in session_raw:
@@ -118,16 +186,17 @@ def load_state() -> CwState:
 
 def save_state(state: CwState) -> None:
     """Persist session state to disk."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(state.model_dump_json(indent=2))
+    state_dir().mkdir(parents=True, exist_ok=True)
+    state_file().write_text(state.model_dump_json(indent=2))
 
 
 def load_orchestrator_config() -> OrchestratorConfig:
     """Load orchestrator.yaml, creating with defaults if missing."""
-    if not ORCHESTRATOR_CONFIG_FILE.exists():
-        ORCHESTRATOR_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        ORCHESTRATOR_CONFIG_FILE.write_text(_DEFAULT_ORCHESTRATOR_YAML)
-    raw = yaml.safe_load(ORCHESTRATOR_CONFIG_FILE.read_text())
+    path = orchestrator_config_file()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_DEFAULT_ORCHESTRATOR_YAML)
+    raw = yaml.safe_load(path.read_text())
     if not raw:
         return OrchestratorConfig()
     return OrchestratorConfig.model_validate(raw)
@@ -135,28 +204,30 @@ def load_orchestrator_config() -> OrchestratorConfig:
 
 def ensure_config() -> None:
     """Create config directory and example file if missing."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if not CLIENTS_FILE.exists():
+    config_dir().mkdir(parents=True, exist_ok=True)
+    clients_path = clients_file()
+    if not clients_path.exists():
         example = (
             Path(__file__).parent.parent.parent / "config" / "clients.example.yaml"
         )
         if example.exists():
-            CLIENTS_FILE.write_text(example.read_text())
-            click.echo(f"Created default config at {CLIENTS_FILE}")
+            clients_path.write_text(example.read_text())
+            click.echo(f"Created default config at {clients_path}")
         else:
-            CLIENTS_FILE.write_text("clients: {}\n")
-            click.echo(f"Created empty config at {CLIENTS_FILE}")
+            clients_path.write_text("clients: {}\n")
+            click.echo(f"Created empty config at {clients_path}")
 
 
 def show_config() -> None:
     """Display current configuration."""
     clients = load_clients()
+    clients_path = clients_file()
     if not clients:
         click.echo("No clients configured.")
-        click.echo(f"Edit {CLIENTS_FILE} to add clients.")
+        click.echo(f"Edit {clients_path} to add clients.")
         return
 
-    click.echo(f"Config: {CLIENTS_FILE}\n")
+    click.echo(f"Config: {clients_path}\n")
     for name, client in sorted(clients.items()):
         click.echo(f"  {name}:")
         if client.is_worktree_client:
@@ -254,21 +325,22 @@ def init_client(
     _validate_init_inputs(name, workspace_path, default_branch, auto_purposes)
 
     # Ensure config dir exists
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config_dir().mkdir(parents=True, exist_ok=True)
+    clients_path = clients_file()
 
     # Round-trip parse-modify-write with ruamel.yaml (preserves comments)
     rt = YAML(typ="rt")
     rt.default_flow_style = False
 
-    if CLIENTS_FILE.exists():
-        content = CLIENTS_FILE.read_text()
+    if clients_path.exists():
+        content = clients_path.read_text()
         doc = rt.load(content) if content.strip() else rt.load(_EMPTY_CLIENTS_DOC)
     else:
         doc = rt.load(_EMPTY_CLIENTS_DOC)
 
     if not isinstance(doc, dict) or "clients" not in doc:
         msg = (
-            f"{CLIENTS_FILE} exists but has no 'clients:' key."
+            f"{clients_path} exists but has no 'clients:' key."
             " Add 'clients:' manually or delete the file to recreate."
         )
         raise CwError(msg)
@@ -279,7 +351,7 @@ def init_client(
         doc["clients"] = clients_map
 
     if name in clients_map:
-        msg = f"Client '{name}' already exists in {CLIENTS_FILE}"
+        msg = f"Client '{name}' already exists in {clients_path}"
         raise CwError(msg)
 
     # Build the new client entry
@@ -291,5 +363,5 @@ def init_client(
 
     clients_map[name] = entry
 
-    with CLIENTS_FILE.open("w") as f:
+    with clients_path.open("w") as f:
         rt.dump(doc, f)

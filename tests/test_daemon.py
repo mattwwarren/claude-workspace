@@ -63,32 +63,30 @@ def _make_monitor_file(
 
 @pytest.fixture
 def tmp_review_monitor_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect cw.daemon.REVIEW_MONITOR_DIR to a temp directory."""
+    """Redirect cw.config.REVIEW_MONITOR_DIR to a temp directory."""
     monitor_dir = tmp_path / "review-monitor"
     monitor_dir.mkdir(parents=True)
-    monkeypatch.setattr("cw.daemon.REVIEW_MONITOR_DIR", monitor_dir)
+    monkeypatch.setattr("cw.config.REVIEW_MONITOR_DIR", monitor_dir)
     return monitor_dir
 
 
 @pytest.fixture
 def tmp_pr_watcher_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect cw.daemon.PR_WATCHER_DIR to a temp directory."""
+    """Redirect cw.config.PR_WATCHER_DIR to a temp directory."""
     watcher_dir = tmp_path / "pr_watcher"
     watcher_dir.mkdir(parents=True)
-    monkeypatch.setattr("cw.daemon.PR_WATCHER_DIR", watcher_dir)
+    monkeypatch.setattr("cw.config.PR_WATCHER_DIR", watcher_dir)
     return watcher_dir
 
 
 @pytest.fixture
 def tmp_state_dir_for_daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect cw.daemon.STATE_DIR and cw.config.STATE_DIR to tmp_path."""
+    """Redirect cw.config.STATE_DIR and related paths to tmp_path."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
     events_dir = state_dir / "events"
     events_dir.mkdir(parents=True)
-    monkeypatch.setattr("cw.daemon.STATE_DIR", state_dir)
     monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
-    monkeypatch.setattr("cw.events.EVENTS_DIR", events_dir)
     monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
     return state_dir
 

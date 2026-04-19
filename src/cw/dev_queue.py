@@ -8,10 +8,10 @@ import json
 from typing import TYPE_CHECKING
 
 from cw.config import (
-    DEV_PLAN_FILE,
-    DEV_PLAN_LOCK,
-    DEV_QUEUE_FILE,
-    DEV_QUEUE_LOCK,
+    dev_plan_file,
+    dev_plan_lock,
+    dev_queue_file,
+    dev_queue_lock,
 )
 from cw.exceptions import CwError
 from cw.models import DevQueueStore, DispatchPlan, OrchestratorConfig, TicketTask
@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 @contextlib.contextmanager
 def _lock() -> Iterator[None]:
     """Acquire an exclusive file lock for the dev queue."""
-    DEV_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = DEV_QUEUE_LOCK.open("w")
+    dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+    fd = dev_queue_lock().open("w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -37,8 +37,8 @@ def _lock() -> Iterator[None]:
 @contextlib.contextmanager
 def _plan_lock() -> Iterator[None]:
     """Acquire an exclusive file lock for the dispatch plan."""
-    DEV_PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = DEV_PLAN_LOCK.open("w")
+    dev_plan_file().parent.mkdir(parents=True, exist_ok=True)
+    fd = dev_plan_lock().open("w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -49,7 +49,7 @@ def _plan_lock() -> Iterator[None]:
 
 def plan_path() -> Path:
     """Return the path to the persisted dispatch plan file."""
-    return DEV_PLAN_FILE
+    return dev_plan_file()
 
 
 def save_plan(plan: DispatchPlan) -> Path:
@@ -58,9 +58,10 @@ def save_plan(plan: DispatchPlan) -> Path:
     Returns the path the plan was written to.
     """
     with _plan_lock():
-        DEV_PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        DEV_PLAN_FILE.write_text(plan.model_dump_json(indent=2))
-    return DEV_PLAN_FILE
+        path = dev_plan_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(plan.model_dump_json(indent=2))
+    return path
 
 
 def load_plan() -> DispatchPlan | None:
@@ -70,26 +71,29 @@ def load_plan() -> DispatchPlan | None:
     Does not raise on validation errors — callers should fall back to
     enqueue order when None is returned.
     """
-    if not DEV_PLAN_FILE.exists():
+    path = dev_plan_file()
+    if not path.exists():
         return None
     try:
-        return DispatchPlan.model_validate_json(DEV_PLAN_FILE.read_text())
+        return DispatchPlan.model_validate_json(path.read_text())
     except (ValueError, OSError):
         return None
 
 
 def load_dev_queue() -> DevQueueStore:
     """Load the dev queue from disk, returning an empty store if missing."""
-    if not DEV_QUEUE_FILE.exists():
+    path = dev_queue_file()
+    if not path.exists():
         return DevQueueStore()
-    raw = json.loads(DEV_QUEUE_FILE.read_text())
+    raw = json.loads(path.read_text())
     return DevQueueStore.model_validate(raw)
 
 
 def save_dev_queue(store: DevQueueStore) -> None:
     """Persist the dev queue to disk."""
-    DEV_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DEV_QUEUE_FILE.write_text(store.model_dump_json(indent=2))
+    path = dev_queue_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(store.model_dump_json(indent=2))
 
 
 def add_ticket(task: TicketTask) -> None:

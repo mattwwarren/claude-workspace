@@ -13,14 +13,14 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from cw.config import EVENTS_DIR, load_state, save_state
+from cw.config import events_dir, load_state, save_state
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import SessionStatus
 
 
 def _idle_signal_path(client: str, purpose: str) -> Path:
     """Path to the idle signal file for a (client, purpose) pair."""
-    return EVENTS_DIR / f"{client}__{purpose}.idle"
+    return events_dir() / f"{client}__{purpose}.idle"
 
 
 def _detect_claude_session_id(workspace_path: str) -> str | None:
@@ -90,7 +90,7 @@ def signal_idle(
         session.claude_session_id = claude_session_id
     save_state(state)
 
-    EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    events_dir().mkdir(parents=True, exist_ok=True)
     signal_file = _idle_signal_path(client, purpose)
     payload: dict[str, object] = {
         "session_id": session.id,

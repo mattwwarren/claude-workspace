@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from cw.cmux import get_cmux_adapter
-from cw.config import REVIEW_MONITOR_DIR, load_state, save_state
+from cw.config import load_state, review_monitor_dir, save_state
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.models import (
@@ -379,7 +379,7 @@ def _count_unresolved(thread_status: dict[str, Any]) -> int:
 
 def _load_monitored_prs() -> list[MonitoredPR]:
     """Read review-monitor state files and summarise active PRs."""
-    monitor_dir = REVIEW_MONITOR_DIR
+    monitor_dir = review_monitor_dir()
     if not monitor_dir.exists():
         return []
     monitored: list[MonitoredPR] = []

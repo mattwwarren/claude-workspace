@@ -41,47 +41,14 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def tmp_orchestrate_dirs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> Path:
-    """Redirect every orchestrator-relevant path to tmp_path."""
-    config_dir = tmp_path / ".config" / "cw"
-    state_dir = tmp_path / ".local" / "share" / "cw"
-    config_dir.mkdir(parents=True)
-    state_dir.mkdir(parents=True)
+def tmp_orchestrate_dirs(tmp_config_dir: Path) -> Path:
+    """Return tmp_path; state isolation is handled by the autouse fixture.
 
-    clients_file = config_dir / "clients.yaml"
-    state_file = state_dir / "sessions.json"
-    history_dir = state_dir / "history"
-    history_dir.mkdir(parents=True)
-    queues_dir = state_dir / "queues"
-    queues_dir.mkdir(parents=True)
-    events_dir = state_dir / "events"
-    events_dir.mkdir(parents=True)
-    dev_queue_file = state_dir / "dev_queue.json"
-    dev_queue_lock = state_dir / ".dev_queue.lock"
-    review_monitor_dir = tmp_path / "review-monitor"
-    review_monitor_dir.mkdir(parents=True)
-
-    monkeypatch.setattr("cw.config.CONFIG_DIR", config_dir)
-    monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
-    monkeypatch.setattr("cw.config.CLIENTS_FILE", clients_file)
-    monkeypatch.setattr("cw.config.STATE_FILE", state_file)
-    monkeypatch.setattr("cw.config.HISTORY_DIR", history_dir)
-    monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
-    monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", dev_queue_file)
-    monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", dev_queue_lock)
-    monkeypatch.setattr("cw.config.REVIEW_MONITOR_DIR", review_monitor_dir)
-
-    monkeypatch.setattr("cw.events.EVENTS_DIR", events_dir)
-    monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_FILE", dev_queue_file)
-    monkeypatch.setattr("cw.dev_queue.DEV_QUEUE_LOCK", dev_queue_lock)
-    monkeypatch.setattr("cw.pr_responder.STATE_DIR", state_dir)
-    monkeypatch.setattr("cw.daemon.REVIEW_MONITOR_DIR", review_monitor_dir)
-    monkeypatch.setattr("cw.orchestrate.REVIEW_MONITOR_DIR", review_monitor_dir)
-
-    return tmp_path
+    Also creates the review-monitor directory so tests that seed monitor
+    files can write them.
+    """
+    (tmp_config_dir / "review-monitor").mkdir(parents=True, exist_ok=True)
+    return tmp_config_dir
 
 
 @pytest.fixture

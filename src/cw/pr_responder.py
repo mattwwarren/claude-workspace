@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from cw.cmux import get_cmux_adapter
-from cw.config import STATE_DIR, load_clients, load_state, save_state
+from cw.config import load_clients, load_state, save_state, state_dir
 from cw.events import advance_cursor, read_events
 from cw.models import (
     OrchestratorEventType,
@@ -50,17 +50,17 @@ class PRDispatchRecord(BaseModel):
 
 
 def load_dispatch_record() -> PRDispatchRecord:
-    """Load PRDispatchRecord from STATE_DIR, or return an empty one."""
-    path = STATE_DIR / _DISPATCH_FILE_NAME
+    """Load PRDispatchRecord from the state directory, or return an empty one."""
+    path = state_dir() / _DISPATCH_FILE_NAME
     if not path.exists():
         return PRDispatchRecord()
     return PRDispatchRecord.model_validate_json(path.read_text())
 
 
 def save_dispatch_record(record: PRDispatchRecord) -> None:
-    """Persist PRDispatchRecord to STATE_DIR."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    path = STATE_DIR / _DISPATCH_FILE_NAME
+    """Persist PRDispatchRecord to the state directory."""
+    state_dir().mkdir(parents=True, exist_ok=True)
+    path = state_dir() / _DISPATCH_FILE_NAME
     path.write_text(record.model_dump_json(indent=2))
 
 

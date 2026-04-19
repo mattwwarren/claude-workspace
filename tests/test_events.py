@@ -26,10 +26,9 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def tmp_events_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect cw.events.EVENTS_DIR (and cw.config.EVENTS_DIR) to tmp_path."""
+    """Redirect cw.config.EVENTS_DIR to tmp_path."""
     events_dir = tmp_path / ".local" / "share" / "cw" / "events"
     events_dir.mkdir(parents=True)
-    monkeypatch.setattr("cw.events.EVENTS_DIR", events_dir)
     monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
     return events_dir
 
