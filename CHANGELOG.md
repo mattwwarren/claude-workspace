@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+- Multiplexer/state reconciliation. Phantom sessions (tmux/cmux surfaces
+  that no longer exist) are detected and reaped automatically on `cw status`,
+  `cw list`, `cw start`, and at the top of each `dispatch_tick`. Explicit
+  reconciliation is available via `cw doctor --reap`.
+- `MultiplexerAdapter.list_surfaces()` on the adapter protocol; implemented
+  for tmux, cmux (macOS), and fake backends.
+- Public `dev_queue_lock` context manager in `cw.dev_queue` for callers
+  that need load → mutate → save around the queue.
+
+### Changed
+- `start_session`'s "Launching ... surfaces" message now names the active
+  backend (tmux/cmux/fake).
+- Dev-queue `TicketTask`s associated with reaped DAEMON sessions revert
+  from RUNNING to PENDING so the dispatch loop retries them.
+- `RealCmuxAdapter._call` now normalises socket `OSError` and
+  `json.JSONDecodeError` into `CwError`, giving callers a single
+  exception type to guard against backend failures.
+
 ## [0.6.0] — 2026-04-18
 
 The multi-platform bridge. `cw` now runs natively on Linux via tmux,
