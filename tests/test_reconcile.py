@@ -1,0 +1,91 @@
+"""Unit tests for cw.reconcile."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from cw.cmux import FakeCmuxAdapter
+from cw.models import (
+    ClientConfig,
+    CwState,
+    Session,
+    SessionPurpose,
+    SessionStatus,
+)
+from cw.reconcile import compute_drift
+
+
+def _mk_session(
+    sid: str,
+    surface_ref: str | None,
+    status: SessionStatus = SessionStatus.ACTIVE,
+) -> Session:
+    return Session(
+        id=sid,
+        name=f"client-a/{sid}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        status=status,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path="/tmp/ws"
+        ).workspace_path,
+        surface_ref=surface_ref,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+
+
+def test_compute_drift_empty_state_returns_empty_report() -> None:
+    adapter = FakeCmuxAdapter()
+    state = CwState()
+    report = compute_drift(state, adapter)
+    assert report.phantom_session_ids == []
+
+
+def test_compute_drift_flags_active_session_with_missing_surface() -> None:
+    adapter = FakeCmuxAdapter()  # no surfaces
+    state = CwState(sessions=[_mk_session("s1", "missing-ref")])
+    report = compute_drift(state, adapter)
+    assert report.phantom_session_ids == ["s1"]
+
+
+def test_compute_drift_ignores_backgrounded_completed_and_refless() -> None:
+    adapter = FakeCmuxAdapter()
+    state = CwState(
+        sessions=[
+            _mk_session("s-bg", "ref1", status=SessionStatus.BACKGROUNDED),
+            _mk_session("s-done", "ref2", status=SessionStatus.COMPLETED),
+            _mk_session("s-noref", None, status=SessionStatus.ACTIVE),
+        ]
+    )
+    report = compute_drift(state, adapter)
+    assert report.phantom_session_ids == []
+
+
+def test_compute_drift_respects_live_set() -> None:
+    adapter = FakeCmuxAdapter()
+    live_ref = adapter.spawn("ws", "echo hi")  # registers in live set
+    state = CwState(
+        sessions=[
+            _mk_session("alive", live_ref),
+            _mk_session("dead", "gone"),
+        ]
+    )
+    report = compute_drift(state, adapter)
+    assert report.phantom_session_ids == ["dead"]
+
+
+def test_compute_drift_empty_live_set_from_adapter_is_reconciled() -> None:
+    """Adapters return empty on backend outage. That's 'no surfaces alive' —
+    so everything ACTIVE/IDLE with a surface_ref is phantom. The reconciler
+    trusts the adapter; callers who want "don't touch state when backend is
+    down" must guard before calling.
+    """
+    adapter = FakeCmuxAdapter()
+    state = CwState(
+        sessions=[
+            _mk_session("s1", "r1"),
+            _mk_session("s2", "r2", status=SessionStatus.IDLE),
+        ]
+    )
+    report = compute_drift(state, adapter)
+    assert set(report.phantom_session_ids) == {"s1", "s2"}
