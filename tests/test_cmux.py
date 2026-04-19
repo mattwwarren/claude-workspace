@@ -547,3 +547,24 @@ class TestGetBackendAdapter:
         monkeypatch.setattr("cw.tmux.shutil.which", lambda _name: "/usr/bin/tmux")
         adapter = get_backend_adapter()
         assert isinstance(adapter, TmuxAdapter)
+
+
+def test_fake_adapter_list_surfaces_tracks_spawn_and_close() -> None:
+    """FakeCmuxAdapter tracks live surfaces via spawn/close."""
+    adapter = FakeCmuxAdapter()
+
+    assert adapter.list_surfaces() == set()
+
+    ref1 = adapter.spawn("ws-1", "echo hi")
+    ref2 = adapter.spawn("ws-1", "echo bye")
+    assert adapter.list_surfaces() == {ref1, ref2}
+
+    adapter.close(ref1)
+    assert adapter.list_surfaces() == {ref2}
+
+
+def test_fake_adapter_close_unknown_ref_is_noop() -> None:
+    """Closing a surface we never spawned must not raise."""
+    adapter = FakeCmuxAdapter()
+    adapter.close("never-spawned")  # must not raise
+    assert adapter.list_surfaces() == set()

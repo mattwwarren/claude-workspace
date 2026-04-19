@@ -66,6 +66,17 @@ class MultiplexerAdapter(Protocol):
         """Return current focus context."""
         ...
 
+    def list_surfaces(self) -> set[str]:
+        """Return the set of surface refs currently known to the backend.
+
+        Used by reconciliation to detect phantom sessions: any surface_ref
+        in cw state that is *not* in this set is assumed dead. Implementers
+        should return an empty set if the multiplexer server is unreachable,
+        so callers cannot accidentally interpret "server down" as "all
+        surfaces still alive".
+        """
+        ...
+
 
 # Legacy alias. Keep for one release so downstream type hints that read
 # `from cw.cmux import CmuxAdapter` don't break mid-upgrade.
@@ -144,6 +155,15 @@ class RealCmuxAdapter:
         """Return current focus context from system.identify."""
         return self._call("system.identify", {})
 
+    def list_surfaces(self) -> set[str]:
+        """Return the set of live surface refs from cmux.
+
+        Stub implementation — full reconciliation query added in Task 2.
+        Returns empty set on any error so callers treat "server down" as
+        "no surfaces alive" rather than "all surfaces still alive".
+        """
+        return set()
+
 
 class FakeCmuxAdapter:
     """In-memory adapter for testing. Records all calls; no real I/O."""
@@ -155,17 +175,20 @@ class FakeCmuxAdapter:
             "close": [],
             "identify": [],
         }
+        self._live: set[str] = set()
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Record call and return a deterministic fake surface ref."""
         self._counter += 1
         ref = f"fake-pane-{self._counter}"
         self.calls["spawn"].append((workspace, command, surface))
+        self._live.add(ref)
         return ref
 
     def close(self, surface_ref: str) -> None:
-        """Record call."""
+        """Record call and drop from live set (idempotent)."""
         self.calls["close"].append((surface_ref,))
+        self._live.discard(surface_ref)
 
     def identify(self) -> dict[str, Any]:
         """Record call and return stub focus context."""
@@ -176,6 +199,11 @@ class FakeCmuxAdapter:
                 "surface_id": "fake-pane-1",
             }
         }
+
+    def list_surfaces(self) -> set[str]:
+        """Return the current in-memory live-surface set (copy)."""
+        self.calls.setdefault("list_surfaces", []).append(())
+        return set(self._live)
 
 
 def _resolve_backend_name() -> BackendName:
