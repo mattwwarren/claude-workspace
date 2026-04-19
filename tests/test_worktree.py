@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -16,8 +17,6 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 
@@ -78,6 +77,49 @@ class TestWorktreePathFor:
         )
         result = worktree_path_for(client, "feat/search")
         assert result == tmp_path / "wt" / "feat-search"
+
+    def test_long_default_path_falls_back_to_hashed_base(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the default worktree path would exceed cmux's 64-char cap,
+        fall back to a short hash-based base under ``~/.cw/wt/``."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/home/u"))
+
+        # Mimic the failing real-world case from the bug report: a long
+        # workspace parent + a longish repo name.
+        ws = Path("/home/matthew/workspace/companies/infini-player")
+        client = ClientConfig(name="infini-player", workspace_path=ws)
+
+        result = worktree_path_for(client, "auto-dev/1")
+
+        # Must be under cmux's 64-char cap.
+        assert len(str(result)) <= 64, (
+            f"worktree path length {len(str(result))} exceeds cmux cap 64: {result}"
+        )
+        # Must be under the hash-based fallback root, not the sibling default.
+        assert str(result).startswith("/home/u/.cw/wt/")
+        # Branch slug preserved at the tail.
+        assert result.name == "auto-dev-1"
+
+    def test_short_default_path_unchanged(self) -> None:
+        """Short default paths keep the sibling-directory layout."""
+        ws = Path("/p/r")
+        client = ClientConfig(name="r", workspace_path=ws)
+        result = worktree_path_for(client, "main")
+        assert result == Path("/p/.worktrees/r/main")
+
+    def test_client_override_used_even_when_long(self) -> None:
+        """An explicit ``worktree_base`` is respected even if it makes the
+        resulting path exceed the cap — user choice wins over our fallback."""
+        override = Path("/this/is/a/deliberately/long/override/path/from/the/user")
+        client = ClientConfig(
+            name="test",
+            workspace_path=Path("/ws"),
+            worktree_base=override,
+        )
+        result = worktree_path_for(client, "feat/x")
+        assert result == override / "feat-x"
 
 
 class TestCreateWorktree:

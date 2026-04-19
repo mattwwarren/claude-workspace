@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.exceptions import WorktreeError
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import ClientConfig
+
+
+# cmux rejects worktree names longer than this; the full path is treated
+# as the name. Any default layout that would exceed this limit falls
+# back to a hash-derived short base under ~/.cw/wt/ so path length stays
+# bounded regardless of client name or workspace nesting depth.
+_WORKTREE_NAME_CAP = 64
+_HASH_BASE_SEGMENTS = (".cw", "wt")
+_WORKSPACE_HASH_CHARS = 8
 
 
 def slugify_branch(branch: str) -> str:
@@ -43,10 +52,33 @@ def resolve_worktree_base(client: ClientConfig) -> Path:
     return ws.parent / ".worktrees" / ws.name
 
 
+def _hashed_worktree_base(client: ClientConfig) -> Path:
+    """Return a short hash-derived worktree base for a client.
+
+    Used as a fallback when the default sibling layout would exceed
+    ``_WORKTREE_NAME_CAP``. Hash is stable per git directory so repeat
+    invocations resolve to the same location.
+    """
+    git_dir = _git_dir(client)
+    digest = hashlib.sha256(str(git_dir).encode("utf-8")).hexdigest()
+    return Path.home().joinpath(*_HASH_BASE_SEGMENTS, digest[:_WORKSPACE_HASH_CHARS])
+
+
 def worktree_path_for(client: ClientConfig, branch: str) -> Path:
-    """Return the full worktree path for a branch."""
+    """Return the full worktree path for a branch.
+
+    Falls back to a hash-derived short base under ``~/.cw/wt/`` when the
+    default layout would produce a path longer than cmux's 64-char
+    worktree-name cap. An explicit ``client.worktree_base`` is always
+    honoured, even if it produces a path over the cap — user choice
+    wins over the safety net.
+    """
+    slug = slugify_branch(branch)
     base = resolve_worktree_base(client)
-    return base / slugify_branch(branch)
+    candidate = base / slug
+    if client.worktree_base is not None or len(str(candidate)) <= _WORKTREE_NAME_CAP:
+        return candidate
+    return _hashed_worktree_base(client) / slug
 
 
 def _run_git(
