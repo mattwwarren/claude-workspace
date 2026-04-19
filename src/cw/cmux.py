@@ -97,22 +97,35 @@ class RealCmuxAdapter:
         self._counter: int = 0
 
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Send a JSON-RPC request and return the result dict."""
+        """Send a JSON-RPC request and return the result dict.
+
+        All failure modes — socket unreachable, short read, malformed JSON,
+        daemon-reported error — are normalised to ``CwError`` so callers can
+        rely on a single exception type.
+        """
         self._counter += 1
         req = json.dumps({"id": self._counter, "method": method, "params": params})
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            sock.connect(str(self._socket_path))
-            sock.sendall((req + "\n").encode())
-            response = b""
-            while not response.endswith(b"\n"):
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
+            try:
+                sock.connect(str(self._socket_path))
+                sock.sendall((req + "\n").encode())
+                response = b""
+                while not response.endswith(b"\n"):
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+            except OSError as exc:
+                msg = f"cmux socket error at {self._socket_path}: {exc}"
+                raise CwError(msg) from exc
         finally:
             sock.close()
-        raw: dict[str, Any] = json.loads(response.decode().strip())
+        try:
+            raw: dict[str, Any] = json.loads(response.decode().strip())
+        except json.JSONDecodeError as exc:
+            msg = f"cmux returned malformed JSON: {exc}"
+            raise CwError(msg) from exc
         if not raw.get("ok", True):
             err: dict[str, Any] = raw.get("error", {})
             msg = f"cmux error {err.get('code', 'unknown')}: {err.get('message', '')}"

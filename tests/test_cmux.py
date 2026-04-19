@@ -630,3 +630,92 @@ def test_real_cmux_list_surfaces_returns_empty_on_socket_error(
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
     assert adapter.list_surfaces() == set()
+
+
+def test_real_cmux_list_surfaces_skips_workspace_on_surface_list_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One workspace failing surface.list does not abort aggregation."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        if method == "workspace.list":
+            return {
+                "workspaces": [
+                    {"id": "ws-ok", "title": "a"},
+                    {"id": "ws-broken", "title": "b"},
+                ]
+            }
+        if method == "surface.list":
+            if params["workspace_id"] == "ws-broken":
+                raise CwError("permission denied")
+            return {"surfaces": [{"id": "surf-ok"}]}
+        raise AssertionError(f"unexpected call: {method}")
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    assert adapter.list_surfaces() == {"surf-ok"}
+
+
+def test_real_cmux_call_translates_os_error_to_cwerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_call converts socket OSError into CwError; callers get one exception type."""
+    import socket as socket_module
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    def fake_connect(self: socket_module.socket, address: object) -> None:
+        raise ConnectionRefusedError("no such file")
+
+    monkeypatch.setattr(socket_module.socket, "connect", fake_connect)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/nonexistent.sock"))
+
+    with pytest.raises(CwError, match="cmux socket error"):
+        adapter._call("whatever", {})
+
+
+def test_real_cmux_call_translates_json_decode_error_to_cwerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_call converts malformed JSON response into CwError."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    class FakeSock:
+        def connect(self, address: object) -> None:
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            return None
+
+        def recv(self, bufsize: int) -> bytes:
+            return b"not json\n"
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "socket.socket",
+        lambda *_args: FakeSock(),  # type: ignore[misc]
+    )
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    with pytest.raises(CwError, match="malformed JSON"):
+        adapter._call("whatever", {})
