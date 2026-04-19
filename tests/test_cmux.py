@@ -568,3 +568,65 @@ def test_fake_adapter_close_unknown_ref_is_noop() -> None:
     adapter = FakeCmuxAdapter()
     adapter.close("never-spawned")  # must not raise
     assert adapter.list_surfaces() == set()
+
+
+def test_real_cmux_list_surfaces_aggregates_across_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_surfaces calls workspace.list then surface.list for each workspace."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        calls.append((method, dict(params)))
+        if method == "workspace.list":
+            return {
+                "workspaces": [
+                    {"id": "ws-a", "title": "client-a"},
+                    {"id": "ws-b", "title": "client-b"},
+                ]
+            }
+        if method == "surface.list":
+            ws_id = params["workspace_id"]
+            if ws_id == "ws-a":
+                return {"surfaces": [{"id": "surf-a1"}, {"id": "surf-a2"}]}
+            return {"surfaces": [{"id": "surf-b1"}]}
+        raise AssertionError(f"unexpected call: {method}")
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    assert adapter.list_surfaces() == {"surf-a1", "surf-a2", "surf-b1"}
+    assert calls[0][0] == "workspace.list"
+    assert {c[1]["workspace_id"] for c in calls if c[0] == "surface.list"} == {
+        "ws-a",
+        "ws-b",
+    }
+
+
+def test_real_cmux_list_surfaces_returns_empty_on_socket_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the cmux socket is down, return empty set instead of raising."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        raise CwError("connection refused")
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+    assert adapter.list_surfaces() == set()

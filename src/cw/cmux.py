@@ -156,13 +156,31 @@ class RealCmuxAdapter:
         return self._call("system.identify", {})
 
     def list_surfaces(self) -> set[str]:
-        """Return the set of live surface refs from cmux.
+        """Return the set of live cmux surface IDs across all workspaces.
 
-        Stub implementation — full reconciliation query added in Task 3.
-        Returns empty set on any error so callers treat "server down" as
-        "no surfaces alive" rather than "all surfaces still alive".
+        Returns an empty set if the cmux socket is unreachable — the
+        reconciler uses that as a "can't tell" signal and leaves state
+        untouched (see :mod:`cw.reconcile`).
         """
-        return set()
+        try:
+            workspaces_raw = self._call("workspace.list", {})
+        except CwError:
+            return set()
+        workspaces: list[dict[str, Any]] = workspaces_raw.get("workspaces", [])
+        live: set[str] = set()
+        for ws in workspaces:
+            ws_id = ws.get("id")
+            if not ws_id:
+                continue
+            try:
+                resp = self._call("surface.list", {"workspace_id": ws_id})
+            except CwError:
+                continue
+            for surf in resp.get("surfaces", []):
+                surf_id = surf.get("id")
+                if surf_id:
+                    live.add(surf_id)
+        return live
 
 
 class FakeCmuxAdapter:
