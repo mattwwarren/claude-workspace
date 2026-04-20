@@ -13,7 +13,7 @@ import click
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cw.cmux import CmuxAdapter, get_cmux_adapter
+from cw.cmux import CmuxAdapter, _resolve_backend_name, get_cmux_adapter
 from cw.config import get_client, load_state, save_state
 from cw.exceptions import CwError
 from cw.handoff import extract_resumption_prompt, find_latest_handoff
@@ -26,6 +26,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.prompts import build_session_context, get_purpose_prompt
+from cw.reconcile import reconcile
 from cw.worktree import create_worktree, remove_worktree
 
 # Purposes that receive worktree cwd (impl works on the feature branch,
@@ -172,6 +173,10 @@ def start_session(
     client = get_client(client_name)
     state = load_state()
 
+    # Reap phantom sessions so we don't short-circuit on a dead "active" row.
+    reconcile(adapter)
+    state = load_state()
+
     # Auto-resolve worktree for worktree-mode clients
     worktree_path: Path | None = None
     worktree_branch: str | None = worktree
@@ -217,8 +222,9 @@ def start_session(
     for s in all_sessions.values():
         click.echo(f"  {s.name}")
 
-    # Spawn cmux surfaces for all purposes
-    click.echo(f"Launching cmux surfaces for {client_name}...")
+    # Spawn surfaces for all purposes
+    backend = _resolve_backend_name()
+    click.echo(f"Launching {backend.value} surfaces for {client_name}...")
     for purpose_str, session in all_sessions.items():
         pane_cmd = panes[purpose_str]["claude_cmd"]
         _spawn_session_surface(client, session, pane_cmd, adapter)

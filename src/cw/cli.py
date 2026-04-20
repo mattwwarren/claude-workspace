@@ -32,11 +32,9 @@ from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
     CompletionReason,
-    CwState,
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
-    Session,
     SessionPurpose,
     SessionStatus,
     TaskSpec,
@@ -55,6 +53,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
+from cw.reconcile import reconcile
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -221,15 +220,22 @@ def config() -> None:
 
 
 @main.command()
+@click.option(
+    "--reap",
+    is_flag=True,
+    help="Also reconcile state with the live multiplexer and reap phantoms.",
+)
 @handle_errors
-def doctor() -> None:
+def doctor(reap: bool) -> None:
     """Run environment preflight checks and print a health report.
 
     Reports the resolved backend, backend binary/daemon availability,
     config file locations and validity, and state file parseability.
-    Exits non-zero if any check fails so CI pipelines can gate on it.
+    With ``--reap`` also reconciles cw's session state with the live
+    multiplexer, marking phantom sessions COMPLETED and reverting their
+    tickets to PENDING. Exits non-zero if any check fails.
     """
-    report = run_doctor()
+    report = run_doctor(reap=reap)
     click.echo(format_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)
@@ -324,6 +330,12 @@ def _display_sessions() -> None:
     """Display all tracked sessions."""
     state = load_state()
 
+    dead = _check_and_mark_dead_sessions()
+    for name in dead:
+        click.echo(f"Reaped phantom session: {name}")
+    if dead:
+        state = load_state()
+
     if not state.sessions:
         click.echo("No sessions tracked.")
         return
@@ -347,13 +359,22 @@ def _display_sessions() -> None:
         click.echo(f"{s.client:<18} {s.purpose:<10} {s.status:<14} {s.id:<10} {since}")
 
 
-def _check_and_mark_dead_sessions(_state: CwState) -> list[Session]:
-    """Check active sessions for dead surfaces, mark them COMPLETED.
+def _check_and_mark_dead_sessions() -> list[str]:
+    """Reconcile state with the live multiplexer and return reaped session names.
 
-    Currently a stub — cmux health check will be implemented in a follow-up
-    ticket once the cmux surface liveness API is determined.
+    Cheap passive reconciliation: called from every read path (``cw status``,
+    ``cw list``, ``cw start``). The reconciler is idempotent and returns an
+    empty list when nothing changed. :func:`cw.reconcile.reconcile` refuses
+    to mass-reap when the adapter reports an empty live set while active
+    sessions still have surface refs (backend-outage guard), so this helper
+    is safe to run on every read path.
     """
-    return []
+    try:
+        adapter = get_cmux_adapter()
+    except CwError:
+        return []
+    report = reconcile(adapter)
+    return list(report.phantom_session_names)
 
 
 def _display_status() -> None:
@@ -361,9 +382,12 @@ def _display_status() -> None:
     state = load_state()
     clients = load_clients()
 
-    dead = _check_and_mark_dead_sessions(state)
-    for s in dead:
-        click.echo(f"Detected crashed session: {s.name} (crashed)")
+    dead = _check_and_mark_dead_sessions()
+    for name in dead:
+        click.echo(f"Reaped phantom session: {name}")
+    if dead:
+        # State mutated, reload so active/backgrounded lists reflect truth.
+        state = load_state()
 
     active = state.active_sessions()
     idled = state.idled_sessions()

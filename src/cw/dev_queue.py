@@ -12,7 +12,9 @@ from cw.config import (
     dev_plan_file,
     dev_plan_lock,
     dev_queue_file,
-    dev_queue_lock,
+)
+from cw.config import (
+    dev_queue_lock as _dev_queue_lock_file,
 )
 from cw.exceptions import CwError
 from cw.models import DevQueueStore, DispatchPlan, OrchestratorConfig, TicketTask
@@ -26,13 +28,19 @@ if TYPE_CHECKING:
 def _lock() -> Iterator[None]:
     """Acquire an exclusive file lock for the dev queue."""
     dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
-    fd = dev_queue_lock().open("w")
+    fd = _dev_queue_lock_file().open("w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
+
+
+# Public alias for callers that need the dev-queue lock directly (e.g. the
+# reconciler, which needs load → mutate → save around a RUNNING→PENDING
+# revert). Prefer higher-level helpers like ``add_ticket`` when available.
+dev_queue_lock = _lock
 
 
 @contextlib.contextmanager

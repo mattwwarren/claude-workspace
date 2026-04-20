@@ -363,9 +363,12 @@ class TestShowStatus:
         self,
         tmp_config_dir: Path,
         sample_state: CwState,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-        mock_cmux_adapter: object,
     ) -> None:
+        from cw.cmux import FakeCmuxAdapter
+
+        monkeypatch.setattr("cw.cli.get_cmux_adapter", FakeCmuxAdapter)
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
@@ -384,14 +387,24 @@ class TestShowStatus:
         assert "Active sessions:    1" in output
         assert "Backgrounded:       1" in output
 
-    def test_check_dead_sessions_stub_returns_empty(
+    def test_check_dead_sessions_reaps_phantom_with_surface_ref(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
-        mock_cmux_adapter: object,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """_check_and_mark_dead_sessions is stubbed — always returns empty list."""
+        """_check_and_mark_dead_sessions reaps sessions whose surface is gone."""
+        from cw.cmux import FakeCmuxAdapter
+
+        def _adapter_with_decoy() -> FakeCmuxAdapter:
+            # Non-empty live set prevents reconcile's outage guard from
+            # refusing to mutate state (see cw.reconcile._looks_like_backend_outage).
+            a = FakeCmuxAdapter()
+            a.spawn("decoy-ws", "echo")
+            return a
+
+        monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -417,10 +430,10 @@ class TestShowStatus:
         _display_status()
 
         output = capsys.readouterr().out
-        # Stub never detects crashes — session stays active
-        assert "Active sessions:    1" in output
+        # Real reconciler detects missing surface — session is reaped
+        assert "Reaped phantom session: test-client/impl" in output
         updated = load_state()
-        assert updated.sessions[0].status == SessionStatus.ACTIVE
+        assert updated.sessions[0].status == SessionStatus.COMPLETED
 
 
 class TestBgNotifyCli:
@@ -755,3 +768,50 @@ class TestQueueFailCli:
                 ["queue", "fail", "my-client", "bad-id"],
             )
             assert result.exit_code != 0
+
+
+def test_display_status_reconciles_phantom_active_sessions(
+    tmp_config_dir: Path,
+    sample_client: ClientConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`cw status` reports and reaps sessions with missing surfaces."""
+    from cw.cmux import FakeCmuxAdapter
+    from cw.config import load_state, save_state
+    from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id="phantom1",
+                    name="client-a/impl",
+                    client="client-a",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="gone",
+                ),
+            ]
+        )
+    )
+
+    # Non-empty live set prevents the outage guard from aborting reconcile;
+    # the "gone" surface_ref still isn't in the set so phantom1 is reaped.
+    def _adapter_with_decoy() -> FakeCmuxAdapter:
+        a = FakeCmuxAdapter()
+        a.spawn("decoy-ws", "echo")
+        return a
+
+    monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["status"])
+    assert result.exit_code == 0
+    assert "Reaped phantom session" in result.output
+    assert "client-a/impl" in result.output
+
+    reloaded = load_state()
+    reaped = reloaded.find_by_name_or_id("phantom1")
+    assert reaped is not None
+    assert reaped.status == SessionStatus.COMPLETED

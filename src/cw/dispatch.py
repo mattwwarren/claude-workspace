@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
 from cw.cmux import get_cmux_adapter
 from cw.config import load_clients, load_orchestrator_config, load_state
-from cw.dev_queue import _lock, load_dev_queue, load_plan, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.models import (
     OrchestratorEventType,
@@ -15,6 +16,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
+from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile
 from cw.spawn import spawn_create_impl
 from cw.worktree import worktree_path_for
 
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
     from cw.models import OrchestratorConfig, TicketTask
 
 _DISPATCH_CONSUMER = "dispatch"
+_log = logging.getLogger(__name__)
 
 
 def _claim_next_pending(
@@ -43,7 +46,7 @@ def _claim_next_pending(
     parameter is intentionally a *preference*, not a filter — see the
     fallback after the priority loop).
     """
-    with _lock():
+    with dev_queue_lock():
         store = load_dev_queue()
         if priority_ticket_ids:
             for ticket_id in priority_ticket_ids:
@@ -81,6 +84,10 @@ def dispatch_tick(
         Number of sessions spawned during this tick.
     """
     resolved_adapter = adapter or get_cmux_adapter()
+    try:
+        reconcile(resolved_adapter)
+    except Exception:
+        _log.exception("reconcile failed during dispatch_tick; continuing")
     clients = load_clients()
     state = load_state()
     spawned = 0
@@ -115,14 +122,14 @@ def dispatch_tick(
             if task is None:
                 break
 
-            branch = f"auto-dev/{task.ticket_id}"
+            branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
             worktree_path = worktree_path_for(client, branch)
             worktree_path.mkdir(parents=True, exist_ok=True)
 
             prompt_path = worktree_path / ".cw-prompt.txt"
             prompt_path.write_text(f"/auto-dev {task.ticket_id}")
 
-            label = f"auto-dev/{task.ticket_id}"
+            label = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
             session_id = spawn_create_impl(
                 client=client,
                 worktree=worktree_path,
@@ -168,7 +175,7 @@ def consume_completed_sessions() -> int:
         return 0
 
     completed = 0
-    with _lock():
+    with dev_queue_lock():
         store = load_dev_queue()
         for event in events:
             ticket_id = event.payload.get("ticket_id")

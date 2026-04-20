@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cw import __version__
-from cw.cmux import _resolve_backend_name
+from cw.cmux import _resolve_backend_name, get_cmux_adapter
 from cw.config import (
     clients_file,
     load_clients,
@@ -26,7 +26,9 @@ from cw.config import (
     state_file,
 )
 from cw.dev_queue import load_dev_queue
+from cw.exceptions import CwError
 from cw.models import BackendName
+from cw.reconcile import reconcile
 
 
 @dataclass(frozen=True)
@@ -131,8 +133,45 @@ def _check_dev_queue() -> CheckResult:
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
 
 
-def run_doctor() -> DoctorReport:
-    """Run every preflight check and return a populated report."""
+def _check_reconcile() -> CheckResult:
+    """Run reconciliation and describe the outcome as a check result."""
+    try:
+        adapter = get_cmux_adapter()
+    except CwError as exc:
+        return CheckResult(
+            "reconciliation",
+            ok=False,
+            detail=f"adapter unavailable: {exc}",
+        )
+    try:
+        reconcile_report = reconcile(adapter)
+    except CwError as exc:
+        return CheckResult(
+            "reconciliation",
+            ok=False,
+            detail=f"reconcile failed: {exc}",
+        )
+    reaped = len(reconcile_report.phantom_session_ids)
+    reverted = len(reconcile_report.reverted_ticket_ids)
+    if reaped == 0 and reverted == 0:
+        return CheckResult("reconciliation", ok=True, detail="no phantoms")
+    return CheckResult(
+        "reconciliation",
+        ok=True,
+        detail=(
+            f"reaped {reaped} session(s), reverted {reverted} ticket(s); "
+            f"ids: {reconcile_report.phantom_session_ids}"
+        ),
+    )
+
+
+def run_doctor(*, reap: bool = False) -> DoctorReport:
+    """Run every preflight check and return a populated report.
+
+    When *reap* is True, also run multiplexer/state reconciliation and
+    append a ``reconciliation`` check summarising the number of reaped
+    sessions and reverted tickets.
+    """
     backend = _resolve_backend_name()
     report = DoctorReport(version=__version__, backend=backend)
     report.checks.append(CheckResult("resolved backend", ok=True, detail=backend.value))
@@ -141,6 +180,8 @@ def run_doctor() -> DoctorReport:
     report.checks.append(_check_orchestrator_config())
     report.checks.append(_check_state_file())
     report.checks.append(_check_dev_queue())
+    if reap:
+        report.checks.append(_check_reconcile())
     return report
 
 

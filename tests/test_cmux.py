@@ -547,3 +547,182 @@ class TestGetBackendAdapter:
         monkeypatch.setattr("cw.tmux.shutil.which", lambda _name: "/usr/bin/tmux")
         adapter = get_backend_adapter()
         assert isinstance(adapter, TmuxAdapter)
+
+
+def test_fake_adapter_list_surfaces_tracks_spawn_and_close() -> None:
+    """FakeCmuxAdapter tracks live surfaces via spawn/close."""
+    adapter = FakeCmuxAdapter()
+
+    assert adapter.list_surfaces() == set()
+
+    ref1 = adapter.spawn("ws-1", "echo hi")
+    ref2 = adapter.spawn("ws-1", "echo bye")
+    assert adapter.list_surfaces() == {ref1, ref2}
+
+    adapter.close(ref1)
+    assert adapter.list_surfaces() == {ref2}
+
+
+def test_fake_adapter_close_unknown_ref_is_noop() -> None:
+    """Closing a surface we never spawned must not raise."""
+    adapter = FakeCmuxAdapter()
+    adapter.close("never-spawned")  # must not raise
+    assert adapter.list_surfaces() == set()
+
+
+def test_real_cmux_list_surfaces_aggregates_across_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_surfaces calls workspace.list then surface.list for each workspace."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        calls.append((method, dict(params)))
+        if method == "workspace.list":
+            return {
+                "workspaces": [
+                    {"id": "ws-a", "title": "client-a"},
+                    {"id": "ws-b", "title": "client-b"},
+                ]
+            }
+        if method == "surface.list":
+            ws_id = params["workspace_id"]
+            if ws_id == "ws-a":
+                return {"surfaces": [{"id": "surf-a1"}, {"id": "surf-a2"}]}
+            return {"surfaces": [{"id": "surf-b1"}]}
+        raise AssertionError(f"unexpected call: {method}")
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    assert adapter.list_surfaces() == {"surf-a1", "surf-a2", "surf-b1"}
+    assert calls[0][0] == "workspace.list"
+    assert {c[1]["workspace_id"] for c in calls if c[0] == "surface.list"} == {
+        "ws-a",
+        "ws-b",
+    }
+
+
+def test_real_cmux_list_surfaces_returns_empty_on_socket_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the cmux socket is down, return empty set instead of raising."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        raise CwError("connection refused")
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+    assert adapter.list_surfaces() == set()
+
+
+def test_real_cmux_list_surfaces_aborts_on_surface_list_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-workspace surface.list failure collapses the whole result to empty.
+
+    Partial enumeration would let the reconciler falsely treat surfaces in
+    the failing workspace as phantom while preserving the rest, so the
+    adapter must return all-or-nothing.
+    """
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        if method == "workspace.list":
+            return {
+                "workspaces": [
+                    {"id": "ws-ok", "title": "a"},
+                    {"id": "ws-broken", "title": "b"},
+                ]
+            }
+        if method == "surface.list":
+            if params["workspace_id"] == "ws-broken":
+                raise CwError("permission denied")
+            return {"surfaces": [{"id": "surf-ok"}]}
+        raise AssertionError(f"unexpected call: {method}")
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    assert adapter.list_surfaces() == set()
+
+
+def test_real_cmux_call_translates_os_error_to_cwerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_call converts socket OSError into CwError; callers get one exception type."""
+    import socket as socket_module
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    def fake_connect(self: socket_module.socket, address: object) -> None:
+        raise ConnectionRefusedError("no such file")
+
+    monkeypatch.setattr(socket_module.socket, "connect", fake_connect)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/nonexistent.sock"))
+
+    with pytest.raises(CwError, match="cmux socket error"):
+        adapter._call("whatever", {})
+
+
+def test_real_cmux_call_translates_json_decode_error_to_cwerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_call converts malformed JSON response into CwError."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+    from cw.exceptions import CwError
+
+    class FakeSock:
+        def connect(self, address: object) -> None:
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            return None
+
+        def recv(self, bufsize: int) -> bytes:
+            return b"not json\n"
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "socket.socket",
+        # FakeSock mimics the socket.socket protocol structurally; mypy
+        # cannot see that and flags the return type as incompatible.
+        lambda *_args: FakeSock(),  # type: ignore[misc]
+    )
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    with pytest.raises(CwError, match="malformed JSON"):
+        adapter._call("whatever", {})

@@ -66,6 +66,20 @@ class MultiplexerAdapter(Protocol):
         """Return current focus context."""
         ...
 
+    def list_surfaces(self) -> set[str]:
+        """Return the set of surface refs currently known to the backend.
+
+        Used by reconciliation to detect phantom sessions: any surface_ref
+        in cw state that is *not* in this set is assumed dead. The contract
+        is all-or-nothing — return a complete live set, or an empty set
+        if the backend is unreachable or only partially enumerable.
+        Partial results would cause selective false-positive reaping, so
+        implementers must not return a subset. ``cw.reconcile`` treats an
+        empty result as "possibly unreachable" and refuses to touch state
+        when any known session still has a surface_ref.
+        """
+        ...
+
 
 # Legacy alias. Keep for one release so downstream type hints that read
 # `from cw.cmux import CmuxAdapter` don't break mid-upgrade.
@@ -86,22 +100,35 @@ class RealCmuxAdapter:
         self._counter: int = 0
 
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Send a JSON-RPC request and return the result dict."""
+        """Send a JSON-RPC request and return the result dict.
+
+        All failure modes — socket unreachable, short read, malformed JSON,
+        daemon-reported error — are normalised to ``CwError`` so callers can
+        rely on a single exception type.
+        """
         self._counter += 1
         req = json.dumps({"id": self._counter, "method": method, "params": params})
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            sock.connect(str(self._socket_path))
-            sock.sendall((req + "\n").encode())
-            response = b""
-            while not response.endswith(b"\n"):
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
+            try:
+                sock.connect(str(self._socket_path))
+                sock.sendall((req + "\n").encode())
+                response = b""
+                while not response.endswith(b"\n"):
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+            except OSError as exc:
+                msg = f"cmux socket error at {self._socket_path}: {exc}"
+                raise CwError(msg) from exc
         finally:
             sock.close()
-        raw: dict[str, Any] = json.loads(response.decode().strip())
+        try:
+            raw: dict[str, Any] = json.loads(response.decode().strip())
+        except json.JSONDecodeError as exc:
+            msg = f"cmux returned malformed JSON: {exc}"
+            raise CwError(msg) from exc
         if not raw.get("ok", True):
             err: dict[str, Any] = raw.get("error", {})
             msg = f"cmux error {err.get('code', 'unknown')}: {err.get('message', '')}"
@@ -144,6 +171,32 @@ class RealCmuxAdapter:
         """Return current focus context from system.identify."""
         return self._call("system.identify", {})
 
+    def list_surfaces(self) -> set[str]:
+        """Return the set of live cmux surface IDs across all workspaces.
+
+        Returns an empty set on any enumeration failure (socket down,
+        ``workspace.list`` errors, or any ``surface.list`` call fails).
+        Partial results would let the reconciler falsely flag surfaces
+        from the failing workspace as phantom while preserving the rest,
+        so the adapter gives an all-or-nothing answer.
+        """
+        try:
+            workspaces_raw = self._call("workspace.list", {})
+            workspaces: list[dict[str, Any]] = workspaces_raw.get("workspaces", [])
+            live: set[str] = set()
+            for ws in workspaces:
+                ws_id = ws.get("id")
+                if not ws_id:
+                    continue
+                resp = self._call("surface.list", {"workspace_id": ws_id})
+                for surf in resp.get("surfaces", []):
+                    surf_id = surf.get("id")
+                    if surf_id:
+                        live.add(surf_id)
+        except CwError:
+            return set()
+        return live
+
 
 class FakeCmuxAdapter:
     """In-memory adapter for testing. Records all calls; no real I/O."""
@@ -154,18 +207,22 @@ class FakeCmuxAdapter:
             "spawn": [],
             "close": [],
             "identify": [],
+            "list_surfaces": [],
         }
+        self._live: set[str] = set()
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Record call and return a deterministic fake surface ref."""
         self._counter += 1
         ref = f"fake-pane-{self._counter}"
         self.calls["spawn"].append((workspace, command, surface))
+        self._live.add(ref)
         return ref
 
     def close(self, surface_ref: str) -> None:
-        """Record call."""
+        """Record call and drop from live set (idempotent)."""
         self.calls["close"].append((surface_ref,))
+        self._live.discard(surface_ref)
 
     def identify(self) -> dict[str, Any]:
         """Record call and return stub focus context."""
@@ -176,6 +233,11 @@ class FakeCmuxAdapter:
                 "surface_id": "fake-pane-1",
             }
         }
+
+    def list_surfaces(self) -> set[str]:
+        """Return the current in-memory live-surface set (copy)."""
+        self.calls["list_surfaces"].append(())
+        return set(self._live)
 
 
 def _resolve_backend_name() -> BackendName:

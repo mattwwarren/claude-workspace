@@ -108,3 +108,17 @@ class TmuxAdapter:
         except json.JSONDecodeError:
             return {"focused": {}}
         return parsed
+
+    def list_surfaces(self) -> set[str]:
+        """Return the set of live tmux pane refs across all sessions.
+
+        Empty set when the tmux server is not running — callers in
+        reconciliation rely on this invariant to avoid false positives.
+        """
+        result = self._run(
+            ["list-panes", "-a", "-F", _PANE_FORMAT],
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return set()
+        return {line for line in result.stdout.strip().splitlines() if line}

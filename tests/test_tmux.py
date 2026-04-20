@@ -140,6 +140,67 @@ class TestSubprocessWiring:
         assert adapter.identify() == {"focused": {}}
 
 
+def test_tmux_list_surfaces_parses_pane_refs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """list_surfaces parses `tmux list-panes -a -F` output into a set."""
+    monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert cmd[:4] == ["tmux", "list-panes", "-a", "-F"]
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="cw-client-a:0.0\ncw-client-a:0.1\ncw-client-b:1.0\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+    adapter = TmuxAdapter()
+
+    assert adapter.list_surfaces() == {
+        "cw-client-a:0.0",
+        "cw-client-a:0.1",
+        "cw-client-b:1.0",
+    }
+
+
+def test_tmux_list_surfaces_returns_empty_on_server_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If tmux server is not running, list-panes returns non-zero; we return empty."""
+    monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr="no server running on /tmp/tmux-1000/default\n",
+        )
+
+    monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+    adapter = TmuxAdapter()
+    assert adapter.list_surfaces() == set()
+
+
+def test_tmux_list_surfaces_returns_empty_when_no_panes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running tmux server with zero panes: returncode 0, stdout empty → empty set."""
+    monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+    adapter = TmuxAdapter()
+    assert adapter.list_surfaces() == set()
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 class TestTmuxIntegration:
