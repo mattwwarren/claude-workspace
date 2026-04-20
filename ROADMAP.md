@@ -43,7 +43,7 @@ Core workflow: start → work → background → switch client → resume.
 - ✓ Shared state directory per client: `~/.local/share/cw/clients/<name>/` with session summaries
 - ✓ `cw handoff impl→review` - impl generates a handoff, review auto-resumes with that context on the same branch
 - ✗ Session event hooks: "when impl backgrounds, notify review" — hook script generation works, but no active execution/routing
-- ✓ Health monitoring: detect dead/crashed Claude sessions, mark as completed, surface in `cw status`
+- ✓ Health monitoring: phantom-session reconciliation (0.6.2) detects dead/crashed Claude panes via `MultiplexerAdapter.list_surfaces`, reaps them from `sessions.json`, and reverts their dev-queue tickets to PENDING. Runs on `cw status`, `cw list`, `cw start`, every `dispatch_tick`, and on demand via `cw doctor --reap`.
 - ✓ `cw plan <client>` - show active plan progress across all sessions for a client — parser works, not yet integrated into TUI
 
 ---

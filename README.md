@@ -27,7 +27,7 @@ See [docs/INSTALL.md](docs/INSTALL.md) for full installation guide.
 # Add your first project
 cw init my-project --path /path/to/repo
 
-# Start working (launches a cmux surface with impl/idea/debt panes)
+# Start working (launches multiplexer surfaces with impl/idea/debt panes)
 cw start my-project
 
 # Background current session (auto-generates handoff context)
@@ -43,7 +43,9 @@ cw status
 ## Prerequisites
 
 - A terminal multiplexer backend: [cmux](https://github.com/cmuxio/cmux) on
-  macOS (current default) or tmux on other platforms (coming in 0.6.0)
+  macOS (default) or tmux on Linux / other platforms (default since 0.6.0).
+  Override with `CW_BACKEND=tmux|cmux|fake` or the `backend:` field in
+  `orchestrator.yaml`.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) - AI coding assistant
 - [uv](https://docs.astral.sh/uv/) - Python package manager
 - [peon-ping](https://github.com/PeonPing/peon-ping) - Sound notifications when Claude needs attention (optional)

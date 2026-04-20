@@ -1,8 +1,9 @@
 """tmux multiplexer adapter.
 
 Wraps the ``tmux`` CLI via :mod:`subprocess`. A workspace maps to a tmux
-session, a surface to a tmux pane. The same three-method protocol
-(:class:`cw.cmux.MultiplexerAdapter`) that the cmux backend implements.
+session, a surface to a tmux pane. Implements the
+:class:`cw.cmux.MultiplexerAdapter` protocol (``spawn``, ``close``,
+``identify``, ``list_surfaces``) alongside the cmux backend.
 """
 
 from __future__ import annotations

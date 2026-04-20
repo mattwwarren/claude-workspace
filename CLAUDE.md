@@ -132,8 +132,8 @@ cw list
 
 - **Keystroke injection**: `cw bg` injects `/session-done` into multiplexer panes. Fragile but zero-coupling to Claude Code internals.
 - **Flat JSON state**: Simple, human-readable. Single-user tool.
-- **Pluggable backend**: Multiplexer adapters implement a small protocol (`spawn`, `close`, `identify`). Today only the cmux adapter ships; tmux is planned for 0.6.0.
-- **On-demand health checks**: `cw status` and `cw start` detect crashed Claude panes via the multiplexer's surface listing. No background daemon needed.
+- **Pluggable backend**: Multiplexer adapters implement a small protocol (`spawn`, `close`, `identify`, `list_surfaces`). Backends: cmux (macOS default), tmux (Linux/other default, since 0.6.0), fake (for tests/CI). Selection via `CW_BACKEND` env → `orchestrator.yaml` `backend:` → platform default.
+- **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms — sessions in state but no longer backed by a live multiplexer surface — and reap them (DAEMON-origin tickets revert RUNNING → PENDING for retry). A transient-outage guard prevents mass-reaping when the adapter returns zero surfaces while state has many. Explicit force via `cw doctor --reap`. No background daemon needed.
 - **File-based locking**: Prevents concurrent state corruption from parallel session operations.
 - **Event history**: Audit trail for session lifecycle transitions.
 
