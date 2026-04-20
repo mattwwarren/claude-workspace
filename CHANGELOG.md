@@ -4,7 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.6.2] — 2026-04-19
+
+Phantom-session reconciliation. When tmux dies (machine sleep/restart)
+or cmux surfaces close, `sessions.json` used to drift from reality —
+dead sessions stayed ACTIVE/IDLE, blocking new dispatch and lying in
+`cw status`. This release adds multiplexer/state reconciliation with
+a transient-outage safety guard so a short cmux/tmux hiccup cannot
+mass-reap live sessions.
 
 ### Added
 - Multiplexer/state reconciliation. Phantom sessions (tmux/cmux surfaces
@@ -29,10 +36,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   surface refs — a transient cmux/tmux outage no longer marks every
   session COMPLETED/CRASHED. `compute_drift` stays pure; the guard
   lives only in the side-effecting path.
-- `RealCmuxAdapter.list_surfaces` now returns an empty set on any
-  enumeration failure (including per-workspace `surface.list` errors)
-  rather than a partial set, matching the all-or-nothing protocol
-  contract expected by the reconciler.
+- `RealCmuxAdapter.list_surfaces` returns an empty set on any enumeration
+  failure (including per-workspace `surface.list` errors) rather than a
+  partial set, matching the all-or-nothing protocol contract expected by
+  the reconciler.
 - `ReconcileReport` carries `phantom_session_names` alongside IDs so
   callers no longer need to reload state to resolve names.
 - `dispatch_tick` guards the reconcile call and logs failures instead
@@ -41,6 +48,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `except CwError` and wraps the reconcile call itself so that an
   unexpected failure is reported as a check result rather than
   crashing `cw doctor --reap`.
+
+## [0.6.1] — 2026-04-19
+
+Small correctness fixes for state durability on Linux and worktree path
+sizing for cmux.
+
+### Fixed
+- `fix(state)`: all JSON state files (sessions, dev queue, plan, cursors)
+  now write via atomic rename so a crash mid-write cannot leave a
+  truncated file behind (#46 / #48).
+- `fix(worktree)`: the default worktree path now stays under cmux's
+  64-character workspace-name cap, avoiding spawn failures when branch
+  names push the computed path over that limit (#47 / #49).
 
 ## [0.6.0] — 2026-04-18
 
