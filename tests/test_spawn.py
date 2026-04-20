@@ -144,6 +144,10 @@ class TestSpawnCreate:
         assert str(worktree) in command_arg
         assert prompt_content in command_arg
         assert surface_arg == "tab"
+        # Regression guard: claude's -w takes a worktree name, not a path. The
+        # spawn command must cd into the worktree instead of passing it via -w.
+        assert " -w " not in command_arg
+        assert command_arg.startswith("cd ")
 
     def test_cmux_workspace_overrides_client_name(
         self, tmp_config_dir: Path, tmp_path: Path

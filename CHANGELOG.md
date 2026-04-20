@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] — 2026-04-19
+
+Fixes a dispatch-spawn regression that made DAEMON-session spawning
+unusable: `spawn_create_impl` invoked `claude -w <worktree-path>`, but
+`claude -w` takes a worktree *name*, not a filesystem path — the
+leading `/` made the first segment empty and failed claude's name
+validator. This blocked `cw dev-queue run` entirely.
+
+### Fixed
+- `cw.spawn.spawn_create_impl` no longer passes `-w` to claude. The
+  worktree is already created by cw before dispatch, so the spawned
+  shell simply `cd`s into it and runs `claude --print …`. Same fix
+  applied to `cw.pr_responder._spawn_create_impl`.
+- Regression test added asserting the spawn command does not contain
+  `-w` and starts with `cd `.
+
 ## [0.6.2] — 2026-04-19
 
 Phantom-session reconciliation. When tmux dies (machine sleep/restart)

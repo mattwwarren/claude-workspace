@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -92,7 +93,10 @@ def _spawn_session(
     """
     prompt_content = prompt_file.read_text()
     workspace = client.cmux_workspace or client.name
-    command = f"claude -w {worktree} --print {prompt_content!r}"
+    # ``claude -w`` takes a worktree name, not a path — cd into the worktree
+    # instead. See cw.spawn.spawn_create_impl for the canonical pattern.
+    cwd = shlex.quote(str(worktree))
+    command = f"cd {cwd} && claude --print {prompt_content!r}"
     surface_ref = adapter.spawn(workspace, command, surface)
 
     sess = Session(

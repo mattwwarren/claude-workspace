@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
@@ -27,10 +28,16 @@ def spawn_create_impl(
 
     Separated from the Click command so tests and the dispatch loop can
     inject adapters directly.  Returns the new session's ID.
+
+    The worktree is established before dispatch (see ``cw.worktree``), so
+    the spawned shell just ``cd``s into it. ``claude -w`` is NOT used here
+    — that flag takes a worktree *name* and would create a nested worktree
+    from whatever directory the pane happened to start in.
     """
     prompt_content = prompt_file.read_text()
     workspace = client.cmux_workspace or client.name
-    command = f"claude -w {worktree} --print {prompt_content!r}"
+    cwd = shlex.quote(str(worktree))
+    command = f"cd {cwd} && claude --print {prompt_content!r}"
     surface_ref = adapter.spawn(workspace, command, surface)
 
     session_label = label or "daemon"
