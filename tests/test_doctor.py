@@ -136,7 +136,15 @@ def test_run_doctor_reap_flag_reconciles_and_reports(
             ]
         )
     )
-    monkeypatch.setattr("cw.doctor.get_cmux_adapter", FakeCmuxAdapter)
+
+    def _adapter_with_decoy() -> FakeCmuxAdapter:
+        # Non-empty live set bypasses reconcile's outage guard; "gone" still
+        # isn't live so phantom is still reaped.
+        a = FakeCmuxAdapter()
+        a.spawn("decoy-ws", "echo")
+        return a
+
+    monkeypatch.setattr("cw.doctor.get_cmux_adapter", _adapter_with_decoy)
 
     report = run_doctor(reap=True)
     reap_checks = [c for c in report.checks if c.name == "reconciliation"]
@@ -159,9 +167,10 @@ def test_cw_doctor_cli_reap_flag(
     from click.testing import CliRunner
 
     from cw.cli import main
-    from cw.cmux import FakeCmuxAdapter
 
-    monkeypatch.setattr("cw.doctor.get_cmux_adapter", FakeCmuxAdapter)
+    # Force fake backend so the binary/socket check passes on every platform
+    # (macOS default is cmux, whose socket does not exist in CI).
+    monkeypatch.setenv("CW_BACKEND", "fake")
     runner = CliRunner()
     result = runner.invoke(main, ["doctor", "--reap"])
     assert result.exit_code == 0

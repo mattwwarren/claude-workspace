@@ -70,10 +70,13 @@ class MultiplexerAdapter(Protocol):
         """Return the set of surface refs currently known to the backend.
 
         Used by reconciliation to detect phantom sessions: any surface_ref
-        in cw state that is *not* in this set is assumed dead. Implementers
-        should return an empty set if the multiplexer server is unreachable,
-        so callers cannot accidentally interpret "server down" as "all
-        surfaces still alive".
+        in cw state that is *not* in this set is assumed dead. The contract
+        is all-or-nothing — return a complete live set, or an empty set
+        if the backend is unreachable or only partially enumerable.
+        Partial results would cause selective false-positive reaping, so
+        implementers must not return a subset. ``cw.reconcile`` treats an
+        empty result as "possibly unreachable" and refuses to touch state
+        when any known session still has a surface_ref.
         """
         ...
 
@@ -171,28 +174,27 @@ class RealCmuxAdapter:
     def list_surfaces(self) -> set[str]:
         """Return the set of live cmux surface IDs across all workspaces.
 
-        Returns an empty set if the cmux socket is unreachable — the
-        reconciler uses that as a "can't tell" signal and leaves state
-        untouched (see :mod:`cw.reconcile`).
+        Returns an empty set on any enumeration failure (socket down,
+        ``workspace.list`` errors, or any ``surface.list`` call fails).
+        Partial results would let the reconciler falsely flag surfaces
+        from the failing workspace as phantom while preserving the rest,
+        so the adapter gives an all-or-nothing answer.
         """
         try:
             workspaces_raw = self._call("workspace.list", {})
+            workspaces: list[dict[str, Any]] = workspaces_raw.get("workspaces", [])
+            live: set[str] = set()
+            for ws in workspaces:
+                ws_id = ws.get("id")
+                if not ws_id:
+                    continue
+                resp = self._call("surface.list", {"workspace_id": ws_id})
+                for surf in resp.get("surfaces", []):
+                    surf_id = surf.get("id")
+                    if surf_id:
+                        live.add(surf_id)
         except CwError:
             return set()
-        workspaces: list[dict[str, Any]] = workspaces_raw.get("workspaces", [])
-        live: set[str] = set()
-        for ws in workspaces:
-            ws_id = ws.get("id")
-            if not ws_id:
-                continue
-            try:
-                resp = self._call("surface.list", {"workspace_id": ws_id})
-            except CwError:
-                continue
-            for surf in resp.get("surfaces", []):
-                surf_id = surf.get("id")
-                if surf_id:
-                    live.add(surf_id)
         return live
 
 

@@ -26,6 +26,7 @@ from cw.config import (
     state_file,
 )
 from cw.dev_queue import load_dev_queue
+from cw.exceptions import CwError
 from cw.models import BackendName
 from cw.reconcile import reconcile
 
@@ -136,13 +137,20 @@ def _check_reconcile() -> CheckResult:
     """Run reconciliation and describe the outcome as a check result."""
     try:
         adapter = get_cmux_adapter()
-    except Exception as exc:
+    except CwError as exc:
         return CheckResult(
             "reconciliation",
             ok=False,
             detail=f"adapter unavailable: {exc}",
         )
-    reconcile_report = reconcile(adapter)
+    try:
+        reconcile_report = reconcile(adapter)
+    except CwError as exc:
+        return CheckResult(
+            "reconciliation",
+            ok=False,
+            detail=f"reconcile failed: {exc}",
+        )
     reaped = len(reconcile_report.phantom_session_ids)
     reverted = len(reconcile_report.reverted_ticket_ids)
     if reaped == 0 and reverted == 0:

@@ -397,7 +397,14 @@ class TestShowStatus:
         """_check_and_mark_dead_sessions reaps sessions whose surface is gone."""
         from cw.cmux import FakeCmuxAdapter
 
-        monkeypatch.setattr("cw.cli.get_cmux_adapter", FakeCmuxAdapter)
+        def _adapter_with_decoy() -> FakeCmuxAdapter:
+            # Non-empty live set prevents reconcile's outage guard from
+            # refusing to mutate state (see cw.reconcile._looks_like_backend_outage).
+            a = FakeCmuxAdapter()
+            a.spawn("decoy-ws", "echo")
+            return a
+
+        monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -789,8 +796,14 @@ def test_display_status_reconciles_phantom_active_sessions(
         )
     )
 
-    # Force cli.py to use a fresh FakeCmuxAdapter so list_surfaces is empty.
-    monkeypatch.setattr("cw.cli.get_cmux_adapter", FakeCmuxAdapter)
+    # Non-empty live set prevents the outage guard from aborting reconcile;
+    # the "gone" surface_ref still isn't in the set so phantom1 is reaped.
+    def _adapter_with_decoy() -> FakeCmuxAdapter:
+        a = FakeCmuxAdapter()
+        a.spawn("decoy-ws", "echo")
+        return a
+
+    monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
 
     runner = CliRunner()
     result = runner.invoke(main, ["status"])

@@ -24,6 +24,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `RealCmuxAdapter._call` now normalises socket `OSError` and
   `json.JSONDecodeError` into `CwError`, giving callers a single
   exception type to guard against backend failures.
+- `reconcile()` refuses to mass-reap when the adapter reports zero live
+  surfaces but the persisted state still has ACTIVE/IDLE sessions with
+  surface refs — a transient cmux/tmux outage no longer marks every
+  session COMPLETED/CRASHED. `compute_drift` stays pure; the guard
+  lives only in the side-effecting path.
+- `RealCmuxAdapter.list_surfaces` now returns an empty set on any
+  enumeration failure (including per-workspace `surface.list` errors)
+  rather than a partial set, matching the all-or-nothing protocol
+  contract expected by the reconciler.
+- `ReconcileReport` carries `phantom_session_names` alongside IDs so
+  callers no longer need to reload state to resolve names.
+- `dispatch_tick` guards the reconcile call and logs failures instead
+  of halting the dispatch loop on a reconcile error.
+- `doctor._check_reconcile` narrowed its `except Exception` to
+  `except CwError` and wraps the reconcile call itself so that an
+  unexpected failure is reported as a check result rather than
+  crashing `cw doctor --reap`.
 
 ## [0.6.0] — 2026-04-18
 

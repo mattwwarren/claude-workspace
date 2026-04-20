@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
-from cw.reconcile import reconcile
+from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile
 from cw.spawn import spawn_create_impl
 from cw.worktree import worktree_path_for
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from cw.models import OrchestratorConfig, TicketTask
 
 _DISPATCH_CONSUMER = "dispatch"
+_log = logging.getLogger(__name__)
 
 
 def _claim_next_pending(
@@ -82,7 +84,10 @@ def dispatch_tick(
         Number of sessions spawned during this tick.
     """
     resolved_adapter = adapter or get_cmux_adapter()
-    reconcile(resolved_adapter)
+    try:
+        reconcile(resolved_adapter)
+    except Exception:
+        _log.exception("reconcile failed during dispatch_tick; continuing")
     clients = load_clients()
     state = load_state()
     spawned = 0
@@ -117,14 +122,14 @@ def dispatch_tick(
             if task is None:
                 break
 
-            branch = f"auto-dev/{task.ticket_id}"
+            branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
             worktree_path = worktree_path_for(client, branch)
             worktree_path.mkdir(parents=True, exist_ok=True)
 
             prompt_path = worktree_path / ".cw-prompt.txt"
             prompt_path.write_text(f"/auto-dev {task.ticket_id}")
 
-            label = f"auto-dev/{task.ticket_id}"
+            label = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
             session_id = spawn_create_impl(
                 client=client,
                 worktree=worktree_path,

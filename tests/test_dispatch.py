@@ -472,6 +472,9 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
     )
 
     adapter = FakeCmuxAdapter()
+    # Non-empty live set bypasses reconcile's outage guard; "dead" ref still
+    # isn't live so the phantom is reaped as intended.
+    adapter.spawn("decoy-ws", "echo")
 
     spawned = dispatch_tick(simple_config, adapter=adapter)
     assert spawned == 1

@@ -632,10 +632,15 @@ def test_real_cmux_list_surfaces_returns_empty_on_socket_error(
     assert adapter.list_surfaces() == set()
 
 
-def test_real_cmux_list_surfaces_skips_workspace_on_surface_list_error(
+def test_real_cmux_list_surfaces_aborts_on_surface_list_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One workspace failing surface.list does not abort aggregation."""
+    """A per-workspace surface.list failure collapses the whole result to empty.
+
+    Partial enumeration would let the reconciler falsely treat surfaces in
+    the failing workspace as phantom while preserving the rest, so the
+    adapter must return all-or-nothing.
+    """
     import sys
 
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -662,7 +667,7 @@ def test_real_cmux_list_surfaces_skips_workspace_on_surface_list_error(
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
 
-    assert adapter.list_surfaces() == {"surf-ok"}
+    assert adapter.list_surfaces() == set()
 
 
 def test_real_cmux_call_translates_os_error_to_cwerror(
@@ -713,6 +718,8 @@ def test_real_cmux_call_translates_json_decode_error_to_cwerror(
 
     monkeypatch.setattr(
         "socket.socket",
+        # FakeSock mimics the socket.socket protocol structurally; mypy
+        # cannot see that and flags the return type as incompatible.
         lambda *_args: FakeSock(),  # type: ignore[misc]
     )
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))

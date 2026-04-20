@@ -106,10 +106,12 @@ def test_reconcile_marks_phantom_completed_crashed(
     state = CwState(sessions=[_mk_session("s1", "missing-ref")])
     save_state(state)
 
-    adapter = FakeCmuxAdapter()  # empty live set → s1 is phantom
+    adapter = FakeCmuxAdapter()
+    adapter.spawn("ws", "echo decoy")  # keep live set non-empty to bypass outage guard
     report = reconcile(adapter)
 
     assert report.phantom_session_ids == ["s1"]
+    assert report.phantom_session_names == ["client-a/s1"]
     reloaded = load_state()
     s1 = reloaded.find_by_name_or_id("s1")
     assert s1 is not None
@@ -135,7 +137,9 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    report = reconcile(FakeCmuxAdapter())
+    adapter = FakeCmuxAdapter()
+    adapter.spawn("ws", "echo decoy")  # non-empty live set bypasses outage guard
+    report = reconcile(adapter)
 
     assert "TKT-1" in report.reverted_ticket_ids
     queue = load_dev_queue()
@@ -153,3 +157,34 @@ def test_reconcile_noop_when_no_phantoms(
     report = reconcile(adapter)
     assert report.phantom_session_ids == []
     assert report.reverted_ticket_ids == []
+
+
+def test_reconcile_refuses_to_mass_reap_on_empty_live_set(
+    tmp_config_dir: Path,
+) -> None:
+    """Transient backend outage: adapter returns empty, reconcile must abort.
+
+    Without this guard, a 5-second cmux/tmux restart during `cw status`
+    would mark every ACTIVE session COMPLETED+CRASHED irreversibly.
+    """
+    state = CwState(
+        sessions=[
+            _mk_session("s1", "r1"),
+            _mk_session("s2", "r2", status=SessionStatus.IDLE),
+        ]
+    )
+    save_state(state)
+
+    adapter = FakeCmuxAdapter()  # empty live set simulates backend outage
+    report = reconcile(adapter)
+
+    assert report.phantom_session_ids == []
+    assert report.phantom_session_names == []
+    assert report.reverted_ticket_ids == []
+
+    reloaded = load_state()
+    for sid in ("s1", "s2"):
+        s = reloaded.find_by_name_or_id(sid)
+        assert s is not None
+        assert s.status in {SessionStatus.ACTIVE, SessionStatus.IDLE}
+        assert s.completed_reason is None

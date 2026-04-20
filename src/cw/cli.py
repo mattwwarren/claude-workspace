@@ -364,26 +364,17 @@ def _check_and_mark_dead_sessions() -> list[str]:
 
     Cheap passive reconciliation: called from every read path (``cw status``,
     ``cw list``, ``cw start``). The reconciler is idempotent and returns an
-    empty list when nothing changed. When the adapter cannot reach its
-    backend (empty live set from ``list_surfaces``), everything active with
-    a surface_ref gets flagged — that is the intended behaviour: we treat
-    "backend unreachable" as "nothing running".
+    empty list when nothing changed. :func:`cw.reconcile.reconcile` refuses
+    to mass-reap when the adapter reports an empty live set while active
+    sessions still have surface refs (backend-outage guard), so this helper
+    is safe to run on every read path.
     """
     try:
         adapter = get_cmux_adapter()
     except CwError:
         return []
     report = reconcile(adapter)
-    if not report.phantom_session_ids:
-        return []
-    # load_state() again after reconcile so we can name the reaped sessions.
-    reloaded = load_state()
-    names: list[str] = []
-    for sid in report.phantom_session_ids:
-        sess = reloaded.find_by_name_or_id(sid)
-        if sess is not None:
-            names.append(sess.name)
-    return names
+    return list(report.phantom_session_names)
 
 
 def _display_status() -> None:

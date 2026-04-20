@@ -1237,7 +1237,10 @@ def test_start_session_reaps_phantom_before_existing_check(
         )
     )
 
-    adapter = FakeCmuxAdapter()  # empty live set
+    adapter = FakeCmuxAdapter()
+    # Non-empty live set bypasses reconcile's outage guard; "gone-ref" still
+    # isn't live so the phantom is still reaped.
+    adapter.spawn("decoy-ws", "echo")
     start_session(sample_client.name, "impl", adapter=adapter)
 
     reloaded = load_state()
@@ -1245,8 +1248,8 @@ def test_start_session_reaps_phantom_before_existing_check(
     phantom = reloaded.find_by_name_or_id("phantom")
     assert phantom is not None
     assert phantom.status == SessionStatus.COMPLETED
-    # New sessions spawned (at least one spawn call)
-    assert len(adapter.calls["spawn"]) >= 1
+    # New sessions spawned: at least one for impl beyond the decoy
+    assert len(adapter.calls["spawn"]) >= 2
 
 
 def test_start_session_launch_message_names_backend(

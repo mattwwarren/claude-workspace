@@ -4,12 +4,26 @@ The authoritative view of what is running lives in the multiplexer
 (tmux/cmux/fake). :func:`compute_drift` compares ``sessions.json`` against
 that view and returns a :class:`ReconcileReport` naming the sessions that
 have gone phantom — active/idle rows whose ``surface_ref`` no longer maps
-to any live surface. :func:`reconcile` (Task 5) applies the report under
-the state lock.
+to any live surface. :func:`reconcile` applies the report.
 
 The split is deliberate: ``compute_drift`` is pure and testable in
 isolation; ``reconcile`` does the side-effecting work (state mutation,
 event emission, dev-queue revert).
+
+Transient-outage safety: ``reconcile`` refuses to mutate state when the
+adapter reports *zero* live surfaces but the persisted state still
+contains ACTIVE/IDLE sessions with surface refs. A temporary multiplexer
+hiccup would otherwise irreversibly mark every session as CRASHED.
+``compute_drift`` stays pure and does not apply this guard — callers that
+want drift-without-side-effects still get the full phantom list.
+
+Race note: ``reconcile`` does ``load_state → mutate → save_state`` without
+a dedicated ``sessions.json`` file lock. This matches every other
+``save_state`` call site in the codebase (``cw.session``, ``cw.cli``, …);
+a unified state lock is a larger refactor tracked separately. In
+practice the race window is the in-memory mutation between load and save,
+and concurrent writers are rare in the single-user model this tool
+targets.
 """
 
 from __future__ import annotations
@@ -34,6 +48,14 @@ if TYPE_CHECKING:
     from cw.models import CwState
 
 
+# Session-name prefix for DAEMON sessions spawned by the dispatch loop. The
+# full name is ``<client>/<AUTO_DEV_LABEL_PREFIX><ticket_id>``; reconciliation
+# uses it to recover the ticket id when reverting phantom tickets. Defined
+# here (not in ``cw.dispatch``) to avoid a circular import — ``cw.dispatch``
+# imports :func:`reconcile` from this module.
+AUTO_DEV_LABEL_PREFIX = "auto-dev/"
+
+
 # Only these two statuses imply "the multiplexer should have a surface".
 # BACKGROUNDED sessions intentionally have no pane (that's the whole point);
 # COMPLETED is terminal. Both are ignored by reconciliation.
@@ -51,12 +73,16 @@ class ReconcileReport:
 
     ``phantom_session_ids`` — sessions whose ``surface_ref`` is not in the
     live set. Ordered by the original order in ``state.sessions``.
+    ``phantom_session_names`` — session names in the same order as
+    ``phantom_session_ids``. Populated by :func:`reconcile`; empty after
+    :func:`compute_drift`.
     ``reverted_ticket_ids`` — ticket IDs whose TicketTasks got reverted
-    from RUNNING to PENDING. Populated by :func:`reconcile`, empty after
+    from RUNNING to PENDING. Populated by :func:`reconcile`; empty after
     :func:`compute_drift`.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
+    phantom_session_names: list[str] = field(default_factory=list)
     reverted_ticket_ids: list[str] = field(default_factory=list)
 
 
@@ -67,7 +93,9 @@ def compute_drift(state: CwState, adapter: MultiplexerAdapter) -> ReconcileRepor
     - it has a ``surface_ref`` (None means it was never spawned), AND
     - that ref is not in ``adapter.list_surfaces()``.
 
-    This function does not mutate state.
+    This function does not mutate state. It also does not distinguish
+    "backend reports zero live surfaces" from "backend is unreachable";
+    that guard lives in :func:`reconcile`.
     """
     live = adapter.list_surfaces()
     phantoms: list[str] = []
@@ -81,17 +109,28 @@ def compute_drift(state: CwState, adapter: MultiplexerAdapter) -> ReconcileRepor
     return ReconcileReport(phantom_session_ids=phantoms)
 
 
-# Daemon session names follow "client/auto-dev/<ticket-id>" (see
-# src/cw/dispatch.py::dispatch_tick where the label is constructed).
-_AUTO_DEV_LABEL_PREFIX = "auto-dev/"
-
-
 def _ticket_id_for_session(session_name: str) -> str | None:
     """Extract the ticket id from a daemon session name, or None."""
     _, _, tail = session_name.partition("/")
-    if tail.startswith(_AUTO_DEV_LABEL_PREFIX):
-        return tail[len(_AUTO_DEV_LABEL_PREFIX) :]
+    if tail.startswith(AUTO_DEV_LABEL_PREFIX):
+        return tail[len(AUTO_DEV_LABEL_PREFIX) :]
     return None
+
+
+def _looks_like_backend_outage(state: CwState, live: set[str]) -> bool:
+    """True when the empty ``live`` set is almost certainly a backend outage.
+
+    If the adapter returned an empty set *and* the persisted state has at
+    least one ACTIVE/IDLE session that was once given a surface_ref, we
+    assume the multiplexer is unreachable rather than "somehow every
+    session died at once". Aborting here is the difference between a
+    5-second cmux restart and permanent data loss.
+    """
+    if live:
+        return False
+    return any(
+        s.surface_ref is not None and s.status in _LIVE_STATUSES for s in state.sessions
+    )
 
 
 def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
@@ -103,6 +142,10 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
     ticket-id can be recovered from the session name back to PENDING so
     the dispatch loop will retry.
 
+    Returns an empty report without mutating state when
+    :func:`_looks_like_backend_outage` matches — a transient multiplexer
+    restart must not trigger mass-reaping.
+
     Partial-failure note: state and the dev queue are separate files. If
     ``save_state`` succeeds but the subsequent dev-queue update raises,
     the session will be COMPLETED while its TicketTask stays RUNNING.
@@ -112,6 +155,10 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
     tradeoff for a file-based, single-user tool.
     """
     state = load_state()
+    live = adapter.list_surfaces()
+    if _looks_like_backend_outage(state, live):
+        return ReconcileReport()
+
     drift = compute_drift(state, adapter)
     if not drift.phantom_session_ids:
         return drift
@@ -121,12 +168,14 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
 
     ticket_ids_to_revert: list[str] = []
     pending_events: list[dict[str, object]] = []
+    phantom_names: list[str] = []
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
         session.status = SessionStatus.COMPLETED
         session.completed_reason = CompletionReason.CRASHED
         session.completed_at = now
+        phantom_names.append(session.name)
         if session.origin is SessionOrigin.DAEMON:
             ticket_id = _ticket_id_for_session(session.name)
             if ticket_id:
@@ -160,5 +209,6 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
 
     return ReconcileReport(
         phantom_session_ids=drift.phantom_session_ids,
+        phantom_session_names=phantom_names,
         reverted_ticket_ids=reverted,
     )
