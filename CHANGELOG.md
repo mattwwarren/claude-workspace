@@ -4,46 +4,55 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.3] — 2026-05-01
+## [0.6.4] — 2026-05-01
 
-Fixes a dispatch-spawn bug that made DAEMON-session spawning unusable
-end-to-end:
+Completes the dispatch-spawn fix started in 0.6.3. The earlier release
+addressed the surface-level `claude -w` validator error, but two
+deeper problems still made `cw dev-queue run` non-functional end-to-end:
 
-1. `spawn_create_impl` invoked `claude -w <worktree-path>`, but
-   `claude -w` takes a worktree *name*, not a filesystem path — the
-   leading `/` made the first segment empty and failed claude's name
-   validator.
-2. `dispatch_tick` only ran `worktree_path.mkdir(...)` — it never
-   created a real git worktree. Even with the `-w` issue fixed, the
-   spawned shell would have landed in a plain (non-repo) directory.
-3. The dispatch / pr_responder / plan call sites all wrote a prompt to
-   a temporary file and immediately read it back into the spawn command
-   string — pointless file roundtripping that obscured the real call.
+1. `dispatch_tick` only ran `worktree_path.mkdir(...)` — it never
+   created a real git worktree. Claude would have started in a plain
+   (non-repo) directory.
+2. The dispatch / pr_responder / plan call sites all wrote a prompt to
+   a temporary file and immediately read it back into the spawn
+   command string — pointless file roundtripping that obscured the
+   real call.
 
 ### Fixed
 - `cw.dispatch.dispatch_tick` now calls `create_worktree(client, branch)`
-  (idempotent — returns existing path if already created) instead of
-  `mkdir`-ing an empty directory. The spawned shell `cd`s into the
-  resulting worktree and runs `claude --print …`. `cw.pr_responder`
-  uses the same pattern for PR-event branches.
-- Regression test added asserting the spawn command does not contain
-  ` -w ` and starts with `cd `.
+  (idempotent — returns the existing path if already created) instead
+  of `mkdir`-ing an empty directory. `cw.pr_responder` uses the same
+  pattern for PR-event branches.
+- `cw.worktree._run_git` strips `GIT_*` from the subprocess env so
+  cw's git operations always target the client repo at *cwd*. Without
+  this, running cw from inside a git hook (e.g. a pre-commit pytest
+  run that exercises dispatch) would leak `GIT_DIR` / `GIT_INDEX_FILE`
+  and produce confusing "Not a directory" errors.
 
 ### Changed
-- `spawn_create_impl` and `pr_responder._spawn_session` now take a
-  ``prompt: str`` rather than a ``prompt_file: Path``. Callers inline
-  the prompt directly. The `cw spawn` CLI reads the file at the
+- `cw.spawn.spawn_create_impl` and `cw.pr_responder._spawn_session`
+  now take a `prompt: str` rather than a `prompt_file: Path`. Callers
+  inline the prompt directly. The `cw spawn` CLI reads the file at the
   user-facing boundary and passes the contents through.
 - `cw.plan` still persists the planner prompt to disk for audit /
   debugging but no longer reads it back to inline into the spawn.
 - `tests/conftest.py::make_git_repo` now initialises with an empty
   `main` commit (and a per-repo `user.email` / `user.name`) so callers
   that exercise `git worktree add` have something to branch from.
-- `cw.worktree._run_git` strips `GIT_*` from the subprocess env so
-  cw's git operations always target the client repo at *cwd*. Without
-  this, running cw from inside a git hook (e.g. a pre-commit pytest
-  run that exercises dispatch) would leak `GIT_DIR` / `GIT_INDEX_FILE`
-  and produce confusing "Not a directory" errors.
+
+## [0.6.3] — 2026-04-19
+
+Surface-level fix for a `cw dev-queue run` regression: dispatch was
+running `claude -w <absolute-worktree-path>`, but `claude -w` takes a
+worktree *name*. The absolute path's leading `/` made the first segment
+empty and failed claude's name validator, so no DAEMON session ever
+started. This release dropped the `-w` flag and `cd`s into the
+worktree path. (See 0.6.4 for the rest of the fix — the path itself
+was still just an empty directory rather than a real git worktree.)
+
+### Fixed
+- `cw.spawn.spawn_create_impl` and `cw.pr_responder._spawn_session`
+  no longer pass `-w` to claude.
 
 ## [0.6.2] — 2026-04-19
 
