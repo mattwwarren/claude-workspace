@@ -27,6 +27,7 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -42,11 +43,13 @@ def tmp_dispatch_dirs(tmp_config_dir: Path) -> Path:
 
 
 @pytest.fixture
-def workspace_dir(tmp_path: Path) -> Path:
-    """Return a workspace directory for a fake client."""
-    ws = tmp_path / "workspace" / "test-project"
-    ws.mkdir(parents=True)
-    return ws
+def workspace_dir(make_git_repo: Callable[[str], Path]) -> Path:
+    """Return a real git repo to host the fake client.
+
+    dispatch_tick now calls ``create_worktree`` on this dir, so it must
+    be a real git repo with at least one commit.
+    """
+    return make_git_repo("workspace/test-project")
 
 
 @pytest.fixture

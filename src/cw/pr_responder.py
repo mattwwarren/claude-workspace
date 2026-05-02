@@ -19,7 +19,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
-from cw.worktree import worktree_path_for
+from cw.worktree import create_worktree
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,7 +78,7 @@ def _spawn_session(
     *,
     client: ClientConfig,
     worktree: Path,
-    prompt_file: Path,
+    prompt: str,
     surface: str,
     label: str,
     adapter: CmuxAdapter,
@@ -91,12 +91,11 @@ def _spawn_session(
     Returns:
         The new session's ID.
     """
-    prompt_content = prompt_file.read_text()
     workspace = client.cmux_workspace or client.name
     # ``claude -w`` takes a worktree name, not a path — cd into the worktree
     # instead. See cw.spawn.spawn_create_impl for the canonical pattern.
     cwd = shlex.quote(str(worktree))
-    command = f"cd {cwd} && claude --print {prompt_content!r}"
+    command = f"cd {cwd} && claude --print {prompt!r}"
     surface_ref = adapter.spawn(workspace, command, surface)
 
     sess = Session(
@@ -187,20 +186,15 @@ def respond_to_pr_events(adapter: CmuxAdapter | None = None) -> int:
 
         client_cfg = clients[client_name]
 
-        # Resolve worktree path; ensure directory exists so prompt file can be written
-        worktree_path = worktree_path_for(client_cfg, branch)
-        worktree_path.mkdir(parents=True, exist_ok=True)
+        # Materialise a real git worktree for the PR branch (idempotent).
+        worktree_path = create_worktree(client_cfg, branch)
 
-        # Write prompt file
-        prompt_file = worktree_path / ".cw-pr-prompt.txt"
-        prompt_file.write_text(skill_cmd)
-
-        # Spawn session
+        # Spawn session — prompt is inlined directly; no on-disk file.
         session_label = f"{role}/{pr_number}"
         session_id = _spawn_session(
             client=client_cfg,
             worktree=worktree_path,
-            prompt_file=prompt_file,
+            prompt=skill_cmd,
             surface="split",
             label=session_label,
             adapter=resolved_adapter,

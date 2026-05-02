@@ -133,13 +133,16 @@ def run_planner(
     output_dir = dev_plan_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"plan-{correlation_id}.json"
+    prompt = _format_tickets_prompt(pending, output_path)
+    # Persist the prompt next to the planner's JSON output for audit /
+    # debugging. The spawned session reads the inlined string, not this file.
     prompt_path = output_dir / f"prompt-{correlation_id}.txt"
-    prompt_path.write_text(_format_tickets_prompt(pending, output_path))
+    prompt_path.write_text(prompt)
 
     session_id = spawn_create_impl(
         client=client,
         worktree=client.workspace_path,
-        prompt_file=prompt_path,
+        prompt=prompt,
         surface="split",
         label=f"plan-{correlation_id}",
         adapter=adapter,

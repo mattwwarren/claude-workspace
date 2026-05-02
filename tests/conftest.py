@@ -159,18 +159,32 @@ def sample_handoff_file(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
-    """Factory fixture to create git repos in tmp_path."""
+    """Factory fixture to create git repos in tmp_path.
+
+    Initialises with a single empty commit on ``main`` so callers that
+    invoke ``git worktree add`` (notably dispatch / pr_responder tests)
+    have a real commit to branch from. Sets per-repo user.name/email so
+    the commit succeeds without a global git config (CI runners often
+    lack one).
+    """
 
     def _make(name: str) -> Path:
         repo = tmp_path / name
         repo.mkdir(parents=True, exist_ok=True)
         clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        subprocess.run(
-            ["git", "init", str(repo)],
-            capture_output=True,
-            check=True,
-            env=clean_env,
-        )
+
+        def _git(*args: str) -> None:
+            subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True,
+                check=True,
+                env=clean_env,
+            )
+
+        _git("init", "-b", "main")
+        _git("config", "user.email", "test@example.com")
+        _git("config", "user.name", "cw test")
+        _git("commit", "--allow-empty", "-m", "initial")
         return repo
 
     return _make

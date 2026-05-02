@@ -1138,14 +1138,16 @@ def _spawn_create_impl(
     """Create a daemon-spawned session.
 
     Separated from the Click command so tests can inject adapters directly.
-    Returns the new session's ID.
+    Reads the prompt from disk at this CLI boundary and inlines it into the
+    spawn — keeping all file IO at the user-facing edge. Delegates the
+    actual spawn to :func:`cw.spawn.spawn_create_impl`.
 
-    Delegates to :func:`cw.spawn.spawn_create_impl`.
+    Returns the new session's ID.
     """
     return spawn_create_impl(
         client=client,
         worktree=worktree,
-        prompt_file=prompt_file,
+        prompt=prompt_file.read_text(),
         surface=surface,
         label=label,
         adapter=adapter,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -105,11 +106,13 @@ def adapter() -> FakeCmuxAdapter:
 
 
 @pytest.fixture
-def client_workspace(tmp_path: Path) -> Path:
-    """A real workspace directory for the default test client."""
-    workspace = tmp_path / "workspace" / "myproject"
-    workspace.mkdir(parents=True, exist_ok=True)
-    return workspace
+def client_workspace(make_git_repo: Callable[[str], Path]) -> Path:
+    """A real git repo for the default test client.
+
+    pr_responder now materialises the PR branch via ``create_worktree``,
+    so the workspace must be a real git repo with at least one commit.
+    """
+    return make_git_repo("workspace/myproject")
 
 
 @pytest.fixture

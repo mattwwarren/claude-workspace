@@ -18,7 +18,7 @@ from cw.models import (
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile
 from cw.spawn import spawn_create_impl
-from cw.worktree import worktree_path_for
+from cw.worktree import create_worktree
 
 if TYPE_CHECKING:
     from cw.cmux import CmuxAdapter
@@ -123,17 +123,18 @@ def dispatch_tick(
                 break
 
             branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
-            worktree_path = worktree_path_for(client, branch)
-            worktree_path.mkdir(parents=True, exist_ok=True)
-
-            prompt_path = worktree_path / ".cw-prompt.txt"
-            prompt_path.write_text(f"/auto-dev {task.ticket_id}")
+            # Create a real git worktree (idempotent — returns existing path
+            # if already created). Replaces a previous bug where dispatch
+            # made an empty directory and relied on ``claude -w`` to turn
+            # it into a worktree, which never worked because that flag
+            # takes a name rather than a path.
+            worktree_path = create_worktree(client, branch)
 
             label = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
             session_id = spawn_create_impl(
                 client=client,
                 worktree=worktree_path,
-                prompt_file=prompt_path,
+                prompt=f"/auto-dev {task.ticket_id}",
                 surface="split",
                 label=label,
                 adapter=resolved_adapter,

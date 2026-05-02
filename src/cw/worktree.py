@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -95,8 +96,16 @@ def _run_git(
     cwd: Path,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git command in the given directory."""
+    """Run a git command in the given directory.
+
+    Strips ``GIT_*`` from the environment so cw's git operations target
+    the client repo at *cwd* and never inherit a parent process's repo
+    selection. Without this, running cw from inside a git hook (e.g. a
+    pre-commit pytest run) would leak ``GIT_DIR`` / ``GIT_INDEX_FILE``
+    into the subprocess and produce confusing "Not a directory" errors.
+    """
     cmd = ["git", *args]
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         return subprocess.run(
             cmd,
@@ -104,6 +113,7 @@ def _run_git(
             text=True,
             check=check,
             cwd=str(cwd),
+            env=clean_env,
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.strip() if e.stderr else str(e)

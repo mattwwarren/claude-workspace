@@ -19,7 +19,7 @@ def spawn_create_impl(
     *,
     client: ClientConfig,
     worktree: Path,
-    prompt_file: Path,
+    prompt: str,
     surface: str,
     label: str | None,
     adapter: CmuxAdapter,
@@ -27,17 +27,18 @@ def spawn_create_impl(
     """Create a daemon-spawned session.
 
     Separated from the Click command so tests and the dispatch loop can
-    inject adapters directly.  Returns the new session's ID.
+    inject adapters directly. Returns the new session's ID.
 
-    The worktree is established before dispatch (see ``cw.worktree``), so
-    the spawned shell just ``cd``s into it. ``claude -w`` is NOT used here
-    — that flag takes a worktree *name* and would create a nested worktree
-    from whatever directory the pane happened to start in.
+    Callers pass the prompt as a string. The CLI ``cw spawn`` reads it
+    from a file at the user-facing boundary; everything else inlines
+    directly. ``claude -w`` is NOT used — that flag takes a worktree
+    *name* and creates a nested worktree at a path cw cannot track. The
+    worktree is established by the caller (``create_worktree`` / the
+    interactive start path) and we just ``cd`` the spawned shell into it.
     """
-    prompt_content = prompt_file.read_text()
     workspace = client.cmux_workspace or client.name
     cwd = shlex.quote(str(worktree))
-    command = f"cd {cwd} && claude --print {prompt_content!r}"
+    command = f"cd {cwd} && claude --print {prompt!r}"
     surface_ref = adapter.spawn(workspace, command, surface)
 
     session_label = label or "daemon"
