@@ -1362,20 +1362,24 @@ class TestStartSessionParentLinkage:
         )
 
         state = load_state()
-        # Original parent session + 3 new worker sessions
+        # Original parent session + 3 new sessions (impl, idea, debt)
         assert len(state.sessions) == 4
         new_sessions = [s for s in state.sessions if s.id != "parent01"]
         assert len(new_sessions) == 3
 
-        # Every new session links back to parent
-        for new_s in new_sessions:
-            assert new_s.parent_session_id == "parent01"
+        # Only the impl session links back to the parent
+        impl_session = next(s for s in new_sessions if s.purpose == SessionPurpose.IMPL)
+        non_impl_sessions = [
+            s for s in new_sessions if s.purpose != SessionPurpose.IMPL
+        ]
+        assert impl_session.parent_session_id == "parent01"
+        for non_impl in non_impl_sessions:
+            assert non_impl.parent_session_id is None
 
-        # Parent accumulates all worker IDs
+        # Parent accumulates only the impl session's ID (1 entry per start call)
         updated_parent = state.find_by_name_or_id("parent01")
         assert updated_parent is not None
-        new_ids = {s.id for s in new_sessions}
-        assert set(updated_parent.worker_session_ids) == new_ids
+        assert updated_parent.worker_session_ids == [impl_session.id]
 
     def test_two_workers_from_same_parent(
         self,
@@ -1421,8 +1425,8 @@ class TestStartSessionParentLinkage:
         state = load_state()
         updated_parent = state.find_by_name_or_id("parent02")
         assert updated_parent is not None
-        # Parent should have accumulated 6 worker IDs total (3 + 3)
-        assert len(updated_parent.worker_session_ids) == 6
+        # Parent accumulates 1 impl session ID per start call: 2 total
+        assert len(updated_parent.worker_session_ids) == 2
 
     def test_nonexistent_parent_raises_cw_error(
         self,
@@ -1509,3 +1513,111 @@ class TestStartSessionParentLinkage:
         for s in state.sessions:
             assert s.parent_session_id is None
             assert s.worker_session_ids == []
+
+    def test_parent_with_existing_active_session_raises(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """CwError raised when --parent collides with an existing ACTIVE session."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        parent_session = Session(
+            id="parent04",
+            name="test-client/debt",
+            client="test-client",
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        # Pre-create an active impl session to trigger the short-circuit path
+        existing_impl = Session(
+            id="existing-impl",
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        save_state(CwState(sessions=[parent_session, existing_impl]))
+
+        with pytest.raises(CwError, match="already active"):
+            start_session(
+                "test-client", "impl", parent="parent04", adapter=mock_cmux_adapter
+            )
+
+        # No new sessions and parent's worker_session_ids unchanged
+        state = load_state()
+        assert len(state.sessions) == 2
+        updated_parent = state.find_by_name_or_id("parent04")
+        assert updated_parent is not None
+        assert updated_parent.worker_session_ids == []
+
+    def test_parent_with_existing_backgrounded_session_raises(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """CwError raised when --parent collides with existing BACKGROUNDED session."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        parent_session = Session(
+            id="parent05",
+            name="test-client/debt",
+            client="test-client",
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        # Pre-create a backgrounded impl session to trigger the short-circuit path
+        existing_impl = Session(
+            id="existing-impl-bg",
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.BACKGROUNDED,
+            workspace_path=sample_client.workspace_path,
+        )
+        save_state(CwState(sessions=[parent_session, existing_impl]))
+
+        err_match = "Cannot apply --parent to existing backgrounded session"
+        with pytest.raises(CwError, match=err_match):
+            start_session(
+                "test-client", "impl", parent="parent05", adapter=mock_cmux_adapter
+            )
+
+        # No new sessions and parent's worker_session_ids unchanged
+        state = load_state()
+        assert len(state.sessions) == 2
+        updated_parent = state.find_by_name_or_id("parent05")
+        assert updated_parent is not None
+        assert updated_parent.worker_session_ids == []
+
+    def test_parent_validation_runs_before_short_circuit(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """Bad parent ID raises CwError even when an active session would
+        short-circuit."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        # Pre-create an active impl session that would normally short-circuit
+        existing_impl = Session(
+            id="existing-impl-sc",
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        save_state(CwState(sessions=[existing_impl]))
+
+        # The bad parent ID error must fire BEFORE the active-session short-circuit
+        with pytest.raises(CwError, match="Parent session not found: bad-id"):
+            start_session(
+                "test-client", "impl", parent="bad-id", adapter=mock_cmux_adapter
+            )

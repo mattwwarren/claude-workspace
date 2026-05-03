@@ -198,25 +198,39 @@ def start_session(
         worktree_path = create_worktree(client, worktree)
         click.echo(f"Worktree ready: {worktree_path}")
 
-    # Check for existing backgrounded session
-    existing = state.find_session(client_name, purpose)
-
-    if existing and existing.status == SessionStatus.BACKGROUNDED:
-        click.echo(f"Found backgrounded session: {existing.name}")
-        resume_session(existing.name, adapter=adapter)
-        return
-
-    if existing and existing.status == SessionStatus.ACTIVE:
-        click.echo(f"Session already active: {existing.name}")
-        return
-
-    # Validate parent session before creating any new sessions
+    # Validate parent session FIRST so a bad ID always errors, even when
+    # a short-circuit would otherwise fire.
     parent_session: Session | None = None
     if parent is not None:
         parent_session = state.find_by_name_or_id(parent)
         if parent_session is None:
             msg = f"Parent session not found: {parent}"
             raise CwError(msg)
+
+    # Check for existing backgrounded session
+    existing = state.find_session(client_name, purpose)
+
+    if existing and existing.status == SessionStatus.BACKGROUNDED:
+        if parent is not None:
+            msg = (
+                f"Cannot apply --parent to existing backgrounded session "
+                f"{existing.name}. Resume without --parent, or complete the "
+                f"existing session first."
+            )
+            raise CwError(msg)
+        click.echo(f"Found backgrounded session: {existing.name}")
+        resume_session(existing.name, adapter=adapter)
+        return
+
+    if existing and existing.status == SessionStatus.ACTIVE:
+        if parent is not None:
+            msg = (
+                f"Cannot apply --parent — session {existing.name} is already "
+                f"active. Complete or background it first."
+            )
+            raise CwError(msg)
+        click.echo(f"Session already active: {existing.name}")
+        return
 
     # Create sessions for ALL purposes
     all_sessions = _create_all_purpose_sessions(
@@ -227,14 +241,12 @@ def start_session(
         worktree_branch=worktree_branch,
     )
 
-    # Bidirectional linkage: set parent_session_id on each new session,
-    # append each new session's ID to the parent's worker_session_ids.
-    # Both mutations happen before the single save_state call so the
-    # persisted state is always consistent.
+    # Bidirectional linkage: only the impl session is a worker entry.
+    # One cw start call = one worker ID in parent.worker_session_ids.
     if parent_session is not None:
-        for new_session in all_sessions.values():
-            new_session.parent_session_id = parent_session.id
-            parent_session.worker_session_ids.append(new_session.id)
+        impl_session = all_sessions["impl"]
+        impl_session.parent_session_id = parent_session.id
+        parent_session.worker_session_ids.append(impl_session.id)
 
     save_state(state)
     panes = _build_pane_args(all_sessions, client=client)
