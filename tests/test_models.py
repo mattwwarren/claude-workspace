@@ -358,6 +358,64 @@ class TestCwState:
         assert s.idle_at is None
 
 
+class TestSessionLinkageFields:
+    def test_defaults_are_none_and_empty(self) -> None:
+        s = Session(
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+        )
+        assert s.parent_session_id is None
+        assert s.worker_session_ids == []
+
+    def test_worker_session_ids_instances_are_independent(self) -> None:
+        s1 = Session(
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+        )
+        s2 = Session(
+            name="c/idea",
+            client="c",
+            purpose=SessionPurpose.IDEA,
+            workspace_path=Path("/dev/null"),
+        )
+        s1.worker_session_ids.append("abc123")
+        assert s2.worker_session_ids == []
+
+    def test_linkage_fields_populated_round_trip(self) -> None:
+        s = Session(
+            id="parent01",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+            parent_session_id="root0001",
+            worker_session_ids=["abc123", "def456"],
+        )
+        json_str = s.model_dump_json()
+        restored = Session.model_validate_json(json_str)
+        assert restored.parent_session_id == "root0001"
+        assert restored.worker_session_ids == ["abc123", "def456"]
+        assert restored == s
+
+    def test_default_linkage_fields_round_trip(self) -> None:
+        s = Session(
+            id="solo0001",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+        )
+        json_str = s.model_dump_json()
+        restored = Session.model_validate_json(json_str)
+        assert restored.parent_session_id is None
+        assert restored.worker_session_ids == []
+        assert restored == s
+
+
 class TestCompletionReason:
     def test_enum_values(self) -> None:
         assert CompletionReason.USER.value == "user"
