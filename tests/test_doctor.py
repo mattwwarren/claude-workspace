@@ -353,6 +353,39 @@ class TestCheckLinkageDanglingWorker:
         assert not dw.ok
         assert "remove" in dw.detail.lower() or "worker_session_ids" in dw.detail
 
+    def test_multiple_dangling_workers_all_listed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Each missing worker ID appears in detail; the join doesn't drop entries."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-multi",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        worker_session_ids=["gone-a", "gone-b", "gone-c"],
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
+        assert not dw.ok
+        assert "gone-a" in dw.detail
+        assert "gone-b" in dw.detail
+        assert "gone-c" in dw.detail
+
 
 class TestCheckLinkageDanglingParent:
     """Dangling parent: worker's parent_session_id is not in state."""
@@ -418,6 +451,49 @@ class TestCheckLinkageDanglingParent:
         assert not dp.ok
         hint_words = {"parent_session_id", "restore", "clear"}
         assert any(w in dp.detail for w in hint_words)
+
+    def test_multiple_dangling_parents_all_listed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Each worker referencing a missing parent appears in detail."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="worker-a",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="ghost-1",
+                    ),
+                    Session(
+                        id="worker-b",
+                        name="client/idea",
+                        client="client",
+                        purpose=SessionPurpose.IDEA,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="ghost-2",
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        dp = next(c for c in report.checks if c.name == "linkage/dangling-parent")
+        assert not dp.ok
+        assert "worker-a" in dp.detail
+        assert "worker-b" in dp.detail
+        assert "ghost-1" in dp.detail
+        assert "ghost-2" in dp.detail
 
 
 class TestCheckLinkageAsymmetric:

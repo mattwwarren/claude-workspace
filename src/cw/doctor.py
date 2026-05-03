@@ -27,7 +27,7 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
-from cw.models import BackendName, CwState
+from cw.models import BackendName, CwState, Session
 from cw.reconcile import reconcile
 
 
@@ -116,13 +116,24 @@ def _check_orchestrator_config() -> CheckResult:
     return CheckResult("orchestrator.yaml", ok=True, detail=str(path))
 
 
-def _check_state_file() -> CheckResult:
+def _check_state_file() -> tuple[CheckResult, CwState | None]:
+    """Verify sessions.json parses, returning the loaded state for downstream consumers.
+
+    Returning the parsed state avoids a second ``load_state()`` call in
+    ``run_doctor``: linkage checks reuse the same parsed object. On parse
+    failure the second tuple element is ``None`` and downstream checks that
+    need state should skip themselves; the failure is already visible via
+    the returned ``CheckResult``.
+    """
     path = state_file()
     try:
-        load_state()
+        state = load_state()
     except Exception as exc:
-        return CheckResult("sessions.json", ok=False, detail=f"load failed: {exc}")
-    return CheckResult("sessions.json", ok=True, detail=str(path))
+        return (
+            CheckResult("sessions.json", ok=False, detail=f"load failed: {exc}"),
+            None,
+        )
+    return CheckResult("sessions.json", ok=True, detail=str(path)), state
 
 
 def _check_dev_queue() -> CheckResult:
@@ -148,7 +159,9 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
     All three results are always returned; each is ``ok=True`` when no drift
     of that type is detected.
     """
+    # Indexes built once: O(1) membership and lookup throughout the function.
     session_ids = {s.id for s in state.sessions}
+    session_by_id: dict[str, Session] = {s.id: s for s in state.sessions}
 
     # --- dangling-worker: orchestrator.worker_session_ids → missing session ---
     dangling_worker_msgs: list[str] = [
@@ -188,17 +201,18 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
             claimed_by.setdefault(sess.parent_session_id, set()).add(sess.id)
 
     # Forward check: orchestrator lists a worker, but worker doesn't claim it back.
-    # Skip workers already caught as dangling to avoid double-reporting.
-    fwd_msgs: list[str] = [
-        f"orchestrator {sess.id!r} lists worker {wid!r},"
-        f" but worker's parent_session_id is {w.parent_session_id!r}"
-        " — update parent_session_id on the worker"
-        for sess in state.sessions
-        for wid in sess.worker_session_ids
-        if wid in session_ids
-        for w in (state.find_by_name_or_id(wid),)
-        if w is not None and w.parent_session_id != sess.id
-    ]
+    # Workers already caught as dangling are skipped (wid not in session_by_id).
+    fwd_msgs: list[str] = []
+    for sess in state.sessions:
+        for wid in sess.worker_session_ids:
+            worker = session_by_id.get(wid)
+            if worker is None or worker.parent_session_id == sess.id:
+                continue
+            fwd_msgs.append(
+                f"orchestrator {sess.id!r} lists worker {wid!r},"
+                f" but worker's parent_session_id is {worker.parent_session_id!r}"
+                " — update parent_session_id on the worker"
+            )
 
     # Reverse check: worker claims this session as parent, but session
     # doesn't list the worker in its worker_session_ids.
@@ -270,15 +284,14 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_backend_binary(backend))
     report.checks.append(_check_config_file())
     report.checks.append(_check_orchestrator_config())
-    report.checks.append(_check_state_file())
+    state_check, link_state = _check_state_file()
+    report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
 
-    # Linkage checks: always run, cheap, independent of reap.
-    try:
-        link_state = load_state()
-    except Exception:
-        link_state = None
-
+    # Linkage checks reuse the state already loaded by _check_state_file.
+    # If state failed to load, state_check is ok=False and the user sees the
+    # underlying problem; skipping linkage is correct (cascading from a
+    # failed parse would just spam noise).
     if link_state is not None:
         report.checks.extend(_check_linkage(link_state))
 
