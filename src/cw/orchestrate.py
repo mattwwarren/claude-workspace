@@ -11,6 +11,12 @@ This module closes the loop on the orchestrator pipeline:
   current state -- pending dev-queue tickets, running sessions, monitored
   PRs, and recent events -- shared between the TUI dashboard and the
   ``cw orchestrate status [--json]`` CLI.
+
+* :func:`orchestrator_workers` returns a list of worker sessions for an
+  orchestrator session, with missing-session sentinels for drift cases.
+
+* :func:`orchestrator_parent` resolves a worker session to its parent
+  orchestrator session.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from cw.cmux import get_cmux_adapter
 from cw.config import load_state, review_monitor_dir, save_state
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
+from cw.exceptions import CwError
 from cw.models import (
     CompletionReason,
     OrchestratorEvent,
@@ -441,4 +448,123 @@ def orchestrator_status() -> OrchestratorStatus:
         running_sessions=running,
         monitored_prs=monitored,
         recent_events=recent,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Worker / parent inspection
+# ---------------------------------------------------------------------------
+
+
+def _last_activity(sess: Session) -> datetime:
+    """Return the most recent non-None timestamp from a session's lifecycle fields."""
+    optional = (sess.idle_at, sess.backgrounded_at, sess.resumed_at, sess.completed_at)
+    extra = [ts for ts in optional if ts is not None]
+    return max([sess.started_at, *extra])
+
+
+class WorkerEntry(BaseModel):
+    """Lightweight view of one worker session for the workers subcommand."""
+
+    id: str
+    status: str
+    branch: str | None = None
+    last_activity: datetime
+    missing: bool = False
+
+
+class MissingWorkerEntry(BaseModel):
+    """Sentinel for a worker whose session record has been removed from state."""
+
+    id: str
+    missing: bool = True
+
+
+class ParentEntry(BaseModel):
+    """Lightweight view of the parent session for the parent subcommand."""
+
+    id: str
+    status: str
+    surface_ref: str | None = None
+
+
+def orchestrator_workers(
+    orchestrator_id: str,
+) -> tuple[list[WorkerEntry], list[MissingWorkerEntry]]:
+    """Return (present_workers, missing_workers) for an orchestrator session.
+
+    Looks up the orchestrator by ID or name, iterates its
+    ``worker_session_ids``, and classifies each as present (in state) or
+    missing (dropped from state — drift case for ``cw doctor``).
+
+    Args:
+        orchestrator_id: Session ID or name of the orchestrator.
+
+    Returns:
+        A tuple of (present_workers, missing_workers).
+
+    Raises:
+        CwError: If ``orchestrator_id`` does not match any session.
+    """
+    state = load_state()
+    orch = state.find_by_name_or_id(orchestrator_id)
+    if orch is None:
+        msg = f"No session found matching {orchestrator_id!r}"
+        raise CwError(msg)
+
+    present: list[WorkerEntry] = []
+    missing: list[MissingWorkerEntry] = []
+
+    for worker_id in orch.worker_session_ids:
+        worker = state.find_by_name_or_id(worker_id)
+        if worker is None:
+            missing.append(MissingWorkerEntry(id=worker_id))
+        else:
+            present.append(
+                WorkerEntry(
+                    id=worker.id,
+                    status=worker.status.value,
+                    branch=worker.branch,
+                    last_activity=_last_activity(worker),
+                )
+            )
+
+    return present, missing
+
+
+def orchestrator_parent(worker_id: str) -> ParentEntry | None:
+    """Return the parent session of a worker, or None if there is no parent.
+
+    Args:
+        worker_id: Session ID or name of the worker session.
+
+    Returns:
+        A :class:`ParentEntry` if a parent exists and is found in state,
+        or ``None`` if the worker has no ``parent_session_id``.
+
+    Raises:
+        CwError: If ``worker_id`` does not match any session, or if the
+            parent session ID is set but its record is missing from state.
+    """
+    state = load_state()
+    worker = state.find_by_name_or_id(worker_id)
+    if worker is None:
+        msg = f"No session found matching {worker_id!r}"
+        raise CwError(msg)
+
+    if worker.parent_session_id is None:
+        return None
+
+    parent = state.find_by_name_or_id(worker.parent_session_id)
+    if parent is None:
+        msg = (
+            f"Parent session {worker.parent_session_id!r} not found in state"
+            " (drift — run 'cw doctor' to inspect)"
+        )
+        raise CwError(msg)
+
+    return ParentEntry(
+        id=parent.id,
+        status=parent.status.value,
+        surface_ref=parent.surface_ref,
     )

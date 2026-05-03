@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from click.testing import CliRunner
 
+from cw.cli import main
 from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket
@@ -26,8 +28,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.orchestrate import (
+    MissingWorkerEntry,
     OrchestratorStatus,
+    WorkerEntry,
+    orchestrator_parent,
     orchestrator_status,
+    orchestrator_workers,
     retire_merged_prs,
 )
 from cw.pr_responder import PRDispatchRecord, save_dispatch_record
@@ -483,3 +489,364 @@ class TestOrchestratorStatus:
         assert "generated_at" in parsed
         assert "running_sessions" in parsed
         assert parsed["running_sessions"][0]["id"] == "s1"
+
+
+# ---------------------------------------------------------------------------
+# Tests: orchestrator_workers
+# ---------------------------------------------------------------------------
+
+
+def _make_worker(
+    session_id: str,
+    workspace: Path,
+    *,
+    branch: str | None = "feat/x",
+    parent_id: str | None = None,
+    status: SessionStatus = SessionStatus.ACTIVE,
+) -> Session:
+    return Session(
+        id=session_id,
+        name=f"test-client/impl/{session_id}",
+        client="test-client",
+        purpose=SessionPurpose.IMPL,
+        status=status,
+        workspace_path=workspace,
+        surface_ref=f"pane-{session_id}",
+        branch=branch,
+        started_at=datetime(2025, 3, 1, 10, 0, 0, tzinfo=UTC),
+        parent_session_id=parent_id,
+    )
+
+
+class TestOrchestratorWorkers:
+    def test_no_workers_returns_empty(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """orchestrator_workers on a session with no workers returns empty lists."""
+        orch = _make_session("orch01", workspace)
+        save_state(CwState(sessions=[orch]))
+
+        present, missing = orchestrator_workers("orch01")
+        assert present == []
+        assert missing == []
+
+    def test_no_workers_cli_exits_zero_human(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """cw orchestrate workers <id> with no workers: exit 0, empty output."""
+        orch = _make_session("orch02", workspace)
+        save_state(CwState(sessions=[orch]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "workers", "orch02"])
+        assert result.exit_code == 0
+        assert result.output.strip() == ""
+
+    def test_no_workers_cli_exits_zero_json(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """cw orchestrate workers --json with no workers: exit 0, empty JSON array."""
+        orch = _make_session("orch03", workspace)
+        save_state(CwState(sessions=[orch]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "workers", "orch03", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data == []
+
+    def test_workers_present_returned(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Workers in state appear in present list with correct fields."""
+        orch = _make_session("orch10", workspace)
+        orch.worker_session_ids = ["wrk01", "wrk02"]
+        worker1 = _make_worker("wrk01", workspace, parent_id="orch10", branch="feat/a")
+        worker2 = _make_worker("wrk02", workspace, parent_id="orch10", branch="feat/b")
+        save_state(CwState(sessions=[orch, worker1, worker2]))
+
+        present, missing = orchestrator_workers("orch10")
+        assert len(present) == 2
+        assert missing == []
+        ids = {w.id for w in present}
+        assert ids == {"wrk01", "wrk02"}
+        for w in present:
+            assert isinstance(w, WorkerEntry)
+            assert w.status == "active"
+            assert w.branch is not None
+            assert w.last_activity is not None
+
+    def test_missing_worker_labelled(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """A worker ID not in state appears as a MissingWorkerEntry."""
+        orch = _make_session("orch11", workspace)
+        orch.worker_session_ids = ["wrk10", "ghost99"]
+        worker = _make_worker("wrk10", workspace, parent_id="orch11")
+        save_state(CwState(sessions=[orch, worker]))
+
+        present, missing = orchestrator_workers("orch11")
+        assert len(present) == 1
+        assert present[0].id == "wrk10"
+        assert len(missing) == 1
+        assert isinstance(missing[0], MissingWorkerEntry)
+        assert missing[0].id == "ghost99"
+        assert missing[0].missing is True
+
+    def test_missing_worker_in_human_output(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Human output labels missing workers as 'status=missing'."""
+        orch = _make_session("orch12", workspace)
+        orch.worker_session_ids = ["ghost88"]
+        save_state(CwState(sessions=[orch]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "workers", "orch12"])
+        assert result.exit_code == 0
+        assert "ghost88" in result.output
+        assert "missing" in result.output
+
+    def test_missing_worker_in_json_output(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """JSON output includes missing sentinel for deleted worker sessions."""
+        orch = _make_session("orch13", workspace)
+        orch.worker_session_ids = ["ghost77"]
+        save_state(CwState(sessions=[orch]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "workers", "orch13", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 1
+        assert data[0]["id"] == "ghost77"
+        assert data[0]["missing"] is True
+
+    def test_json_output_round_trips_present_worker(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """--json output for present workers contains expected keys."""
+        orch = _make_session("orch14", workspace)
+        orch.worker_session_ids = ["wrk20"]
+        worker = _make_worker("wrk20", workspace, parent_id="orch14", branch="feat/z")
+        save_state(CwState(sessions=[orch, worker]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "workers", "orch14", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 1
+        entry = data[0]
+        assert entry["id"] == "wrk20"
+        assert entry["status"] == "active"
+        assert entry["branch"] == "feat/z"
+        assert "last_activity" in entry
+        assert "missing" not in entry
+
+    def test_unknown_orchestrator_exits_nonzero(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Unknown orchestrator ID raises CwError; CLI exits nonzero."""
+        save_state(CwState(sessions=[]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "workers", "no-such-id"])
+        assert result.exit_code != 0
+        assert "no-such-id" in result.output
+
+    def test_unknown_orchestrator_error_direct(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """orchestrator_workers raises CwError for unknown ID."""
+        save_state(CwState(sessions=[]))
+
+        with pytest.raises(CwError, match="no-such-id"):
+            orchestrator_workers("no-such-id")
+
+    def test_lookup_by_name(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """orchestrate workers accepts session name as well as ID."""
+        orch = _make_session("orch15", workspace)
+        save_state(CwState(sessions=[orch]))
+
+        # Use the name field for lookup (set by _make_session).
+        present, missing = orchestrator_workers(orch.name)
+        assert present == []
+        assert missing == []
+
+    def test_worker_branch_none_shown_in_human_output(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """A worker with branch=None shows '(none)' in human output."""
+        orch = _make_session("orch16", workspace)
+        orch.worker_session_ids = ["wrk30"]
+        worker = _make_worker("wrk30", workspace, parent_id="orch16", branch=None)
+        save_state(CwState(sessions=[orch, worker]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "workers", "orch16"])
+        assert result.exit_code == 0
+        assert "(none)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Tests: orchestrator_parent
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorParent:
+    def test_no_parent_returns_none(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Worker with no parent_session_id returns None from orchestrator_parent."""
+        worker = _make_worker("wrk50", workspace)
+        save_state(CwState(sessions=[worker]))
+
+        result = orchestrator_parent("wrk50")
+        assert result is None
+
+    def test_no_parent_cli_human_prints_no_parent(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """cw orchestrate parent <id> with no parent: exits 0, prints 'no parent'."""
+        worker = _make_worker("wrk51", workspace)
+        save_state(CwState(sessions=[worker]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "parent", "wrk51"])
+        assert result.exit_code == 0
+        assert "no parent" in result.output
+
+    def test_no_parent_cli_json_prints_null(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """cw orchestrate parent --json with no parent: exits 0, prints 'null'."""
+        worker = _make_worker("wrk52", workspace)
+        save_state(CwState(sessions=[worker]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "parent", "wrk52", "--json"])
+        assert result.exit_code == 0
+        assert result.output.strip() == "null"
+
+    def test_parent_resolved_correctly(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Worker with parent_session_id resolves to the parent session."""
+        orch = _make_session("orch50", workspace)
+        orch.worker_session_ids = ["wrk60"]
+        worker = _make_worker("wrk60", workspace, parent_id="orch50")
+        save_state(CwState(sessions=[orch, worker]))
+
+        entry = orchestrator_parent("wrk60")
+        assert entry is not None
+        assert entry.id == "orch50"
+        assert entry.status == "active"
+
+    def test_parent_json_output_round_trips(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """--json output for parent contains expected keys."""
+        orch = _make_session("orch51", workspace)
+        orch.worker_session_ids = ["wrk61"]
+        worker = _make_worker("wrk61", workspace, parent_id="orch51")
+        save_state(CwState(sessions=[orch, worker]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "parent", "wrk61", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["id"] == "orch51"
+        assert data["status"] == "active"
+        assert "surface_ref" in data
+
+    def test_missing_parent_exits_nonzero(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Worker whose parent has been deleted: CwError, CLI exits nonzero."""
+        worker = _make_worker("wrk70", workspace, parent_id="deleted-parent")
+        save_state(CwState(sessions=[worker]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "parent", "wrk70"])
+        assert result.exit_code != 0
+        assert "deleted-parent" in result.output or "not found" in result.output
+
+    def test_missing_parent_raises_cwerror_direct(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """orchestrator_parent raises CwError (not crashes) for missing parent."""
+        worker = _make_worker("wrk71", workspace, parent_id="gone-parent")
+        save_state(CwState(sessions=[worker]))
+
+        with pytest.raises(CwError, match="gone-parent"):
+            orchestrator_parent("wrk71")
+
+    def test_unknown_worker_exits_nonzero(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Unknown worker ID raises CwError; CLI exits nonzero."""
+        save_state(CwState(sessions=[]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "parent", "no-such-worker"])
+        assert result.exit_code != 0
+        assert "no-such-worker" in result.output
+
+    def test_lookup_worker_by_name(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """orchestrate parent accepts session name as well as ID."""
+        orch = _make_session("orch52", workspace)
+        orch.worker_session_ids = ["wrk80"]
+        worker = _make_worker("wrk80", workspace, parent_id="orch52")
+        save_state(CwState(sessions=[orch, worker]))
+
+        # Lookup worker by name.
+        entry = orchestrator_parent(worker.name)
+        assert entry is not None
+        assert entry.id == "orch52"

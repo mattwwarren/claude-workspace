@@ -40,7 +40,15 @@ from cw.models import (
     TaskSpec,
     TicketTask,
 )
-from cw.orchestrate import OrchestratorStatus, orchestrator_status, retire_merged_prs
+from cw.orchestrate import (
+    MissingWorkerEntry,
+    OrchestratorStatus,
+    WorkerEntry,
+    orchestrator_parent,
+    orchestrator_status,
+    orchestrator_workers,
+    retire_merged_prs,
+)
 from cw.plan import run_planner
 from cw.queue import (
     add_item,
@@ -1126,6 +1134,84 @@ def orchestrate_watch(
         level=level,
         home=str(Path.home()),
     )
+
+
+def _format_workers_human(
+    present: list[WorkerEntry],
+    missing: list[MissingWorkerEntry],
+) -> str:
+    """Render worker lists as a human-readable string."""
+
+    def _present_line(w: WorkerEntry) -> str:
+        branch = w.branch if w.branch is not None else "(none)"
+        ts = w.last_activity.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return f"  {w.id}  status={w.status}  branch={branch}  last_activity={ts}"
+
+    lines = [_present_line(w) for w in present]
+    lines.extend(f"  {m.id}  status=missing" for m in missing)
+    return "\n".join(lines)
+
+
+@orchestrate.command(name="workers")
+@click.argument("orchestrator_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+@handle_errors
+def orchestrate_workers(orchestrator_id: str, as_json: bool) -> None:
+    """List worker sessions belonging to ORCHESTRATOR_ID.
+
+    Shows id, status, branch, and last activity for each worker.
+    Workers whose session records have been deleted are labelled 'missing'.
+    Drift repair is handled by 'cw doctor'.
+    """
+    present, missing = orchestrator_workers(orchestrator_id)
+    if as_json:
+        present_dicts: list[dict[str, object]] = [
+            {
+                "id": w.id,
+                "status": w.status,
+                "branch": w.branch,
+                "last_activity": w.last_activity.isoformat(),
+            }
+            for w in present
+        ]
+        missing_dicts: list[dict[str, object]] = [
+            {"id": m.id, "missing": True} for m in missing
+        ]
+        click.echo(json.dumps(present_dicts + missing_dicts, indent=2))
+    else:
+        if not present and not missing:
+            return
+        click.echo(_format_workers_human(present, missing))
+
+
+@orchestrate.command(name="parent")
+@click.argument("worker_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+@handle_errors
+def orchestrate_parent(worker_id: str, as_json: bool) -> None:
+    """Resolve WORKER_ID to its parent orchestrator session.
+
+    Exits 0 with empty output (or null JSON) if the worker has no parent.
+    Exits nonzero if the parent session ID is set but the record is missing
+    from state (drift -- run 'cw doctor' to inspect).
+    """
+    entry = orchestrator_parent(worker_id)
+    if entry is None:
+        if as_json:
+            click.echo("null")
+        else:
+            click.echo("no parent")
+        return
+    if as_json:
+        data: dict[str, object] = {
+            "id": entry.id,
+            "status": entry.status,
+            "surface_ref": entry.surface_ref,
+        }
+        click.echo(json.dumps(data, indent=2))
+    else:
+        surface = entry.surface_ref if entry.surface_ref is not None else "(none)"
+        click.echo(f"{entry.id}  status={entry.status}  surface_ref={surface}")
 
 
 # --- Spawn command group ---
