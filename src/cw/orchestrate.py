@@ -470,11 +470,15 @@ class WorkerEntry(BaseModel):
     status: str
     branch: str | None = None
     last_activity: datetime
-    missing: bool = False
 
 
 class MissingWorkerEntry(BaseModel):
-    """Sentinel for a worker whose session record has been removed from state."""
+    """Sentinel for a worker whose session record has been removed from state.
+
+    Returned in the second element of ``orchestrator_workers`` so callers can
+    discriminate by type rather than inspecting a shared field. ``missing``
+    is fixed True to give JSON consumers an explicit drift marker.
+    """
 
     id: str
     missing: bool = True

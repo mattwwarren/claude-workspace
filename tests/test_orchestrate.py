@@ -582,7 +582,9 @@ class TestOrchestratorWorkers:
             assert isinstance(w, WorkerEntry)
             assert w.status == "active"
             assert w.branch is not None
-            assert w.last_activity is not None
+            # _last_activity falls back to started_at when no other timestamps
+            # are set; _make_worker pins that to a fixed value.
+            assert w.last_activity == datetime(2025, 3, 1, 10, 0, 0, tzinfo=UTC)
 
     def test_missing_worker_labelled(
         self,
@@ -808,7 +810,11 @@ class TestOrchestratorParent:
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrate", "parent", "wrk70"])
         assert result.exit_code != 0
-        assert "deleted-parent" in result.output or "not found" in result.output
+        # Both substrings should appear: the missing parent ID is named, and
+        # the user is told it's not found. Disjunction would mask a regression
+        # where one of the two was dropped from the message.
+        assert "deleted-parent" in result.output
+        assert "not found" in result.output
 
     def test_missing_parent_raises_cwerror_direct(
         self,
@@ -850,3 +856,18 @@ class TestOrchestratorParent:
         entry = orchestrator_parent(worker.name)
         assert entry is not None
         assert entry.id == "orch52"
+
+    def test_parent_handles_none_surface_ref(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """ParentEntry.surface_ref is None when the parent session has no surface."""
+        orch = _make_session("orch53", workspace, surface_ref=None)
+        orch.worker_session_ids = ["wrk81"]
+        worker = _make_worker("wrk81", workspace, parent_id="orch53")
+        save_state(CwState(sessions=[orch, worker]))
+
+        entry = orchestrator_parent("wrk81")
+        assert entry is not None
+        assert entry.surface_ref is None
