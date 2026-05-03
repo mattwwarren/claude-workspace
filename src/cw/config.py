@@ -18,6 +18,7 @@ from ruamel.yaml.comments import CommentedMap
 from cw.atomic import atomic_write_text
 from cw.exceptions import CwError
 from cw.models import (
+    CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
     ClientConfig,
     CwState,
@@ -201,6 +202,9 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
                 continue
             _migrate_zellij_fields(session_raw)
             _coerce_session_origin(session_raw)
+            _migrate_v1_linkage_fields(session_raw)
+    # Bump persisted schema_version to current after all migration steps.
+    raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
 
 
@@ -234,6 +238,18 @@ def _coerce_session_origin(session_raw: dict[str, Any]) -> None:
             origin,
         )
         session_raw["origin"] = SessionOrigin.USER.value
+
+
+def _migrate_v1_linkage_fields(session_raw: dict[str, Any]) -> None:
+    """Fill parent_session_id and worker_session_ids introduced in schema v2.
+
+    Idempotent: if the fields are already present they are left untouched,
+    so a v2 file round-trips without modification.
+    """
+    if "parent_session_id" not in session_raw:
+        session_raw["parent_session_id"] = None
+    if "worker_session_ids" not in session_raw:
+        session_raw["worker_session_ids"] = []
 
 
 def save_state(state: CwState) -> None:

@@ -45,7 +45,7 @@ class QueueItemStatus(StrEnum):
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
-CW_STATE_SCHEMA_VERSION = 1
+CW_STATE_SCHEMA_VERSION = 2
 DEV_QUEUE_SCHEMA_VERSION = 1
 
 
@@ -219,6 +219,8 @@ class Session(BaseModel):
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None
     completed_at: datetime | None = None
+    parent_session_id: str | None = None
+    worker_session_ids: list[str] = Field(default_factory=list)
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [

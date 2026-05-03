@@ -617,3 +617,56 @@ class TestMigrateCwState:
         )
         state = load_state()
         assert state.sessions[0].origin == SessionOrigin.USER
+
+    def test_v1_to_v2_fills_linkage_fields(self) -> None:
+        raw = {
+            "schema_version": 1,
+            "sessions": [{"id": "s1"}],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["parent_session_id"] is None
+        assert session["worker_session_ids"] == []
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v2_file_is_idempotent(self) -> None:
+        raw = {
+            "schema_version": 2,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": "root0001",
+                    "worker_session_ids": ["abc123"],
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["parent_session_id"] == "root0001"
+        assert session["worker_session_ids"] == ["abc123"]
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_multiple_sessions_all_get_linkage_fields(self) -> None:
+        raw = {
+            "schema_version": 1,
+            "sessions": [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}],
+        }
+        migrated = migrate_cw_state(raw)
+        for session in migrated["sessions"]:
+            assert session["parent_session_id"] is None
+            assert session["worker_session_ids"] == []
+
+    def test_v1_zellij_and_linkage_both_migrate(self) -> None:
+        raw = {
+            "schema_version": 1,
+            "sessions": [{"id": "s1", "zellij_pane": "0:1.0"}],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        # Zellij armor ran
+        assert session["surface_ref"] == "0:1.0"
+        assert "zellij_pane" not in session
+        # Linkage fields filled
+        assert session["parent_session_id"] is None
+        assert session["worker_session_ids"] == []
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
