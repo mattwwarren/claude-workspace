@@ -27,7 +27,7 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
-from cw.models import BackendName
+from cw.models import BackendName, CwState
 from cw.reconcile import reconcile
 
 
@@ -133,6 +133,95 @@ def _check_dev_queue() -> CheckResult:
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
 
 
+def _check_linkage(state: CwState) -> list[CheckResult]:
+    """Detect parent/worker linkage drift in session state.
+
+    Returns one :class:`CheckResult` per drift type:
+
+    * ``linkage/dangling-worker`` — an orchestrator's ``worker_session_ids``
+      references a session ID absent from state.
+    * ``linkage/dangling-parent`` — a worker's ``parent_session_id`` points at
+      a session absent from state.
+    * ``linkage/asymmetric`` — one side knows about the link but the other
+      side doesn't (forward-only or reverse-only reference).
+
+    All three results are always returned; each is ``ok=True`` when no drift
+    of that type is detected.
+    """
+    session_ids = {s.id for s in state.sessions}
+
+    # --- dangling-worker: orchestrator.worker_session_ids → missing session ---
+    dangling_worker_msgs: list[str] = [
+        f"orchestrator {sess.id!r} references missing worker {wid!r}"
+        " — remove the stale ID from worker_session_ids"
+        for sess in state.sessions
+        for wid in sess.worker_session_ids
+        if wid not in session_ids
+    ]
+
+    if dangling_worker_msgs:
+        dw_detail = "; ".join(dangling_worker_msgs)
+        dw_result = CheckResult("linkage/dangling-worker", ok=False, detail=dw_detail)
+    else:
+        dw_result = CheckResult("linkage/dangling-worker", ok=True, detail="")
+
+    # --- dangling-parent: worker.parent_session_id → missing session ---
+    dangling_parent_msgs: list[str] = [
+        f"worker {sess.id!r} references missing parent {sess.parent_session_id!r}"
+        " — clear parent_session_id or restore the parent session"
+        for sess in state.sessions
+        if sess.parent_session_id is not None
+        and sess.parent_session_id not in session_ids
+    ]
+
+    if dangling_parent_msgs:
+        dp_detail = "; ".join(dangling_parent_msgs)
+        dp_result = CheckResult("linkage/dangling-parent", ok=False, detail=dp_detail)
+    else:
+        dp_result = CheckResult("linkage/dangling-parent", ok=True, detail="")
+
+    # --- asymmetric: one side of the link is missing ---
+    # Build a map: parent_id → {set of worker IDs that claim it as parent}
+    claimed_by: dict[str, set[str]] = {}
+    for sess in state.sessions:
+        if sess.parent_session_id is not None and sess.parent_session_id in session_ids:
+            claimed_by.setdefault(sess.parent_session_id, set()).add(sess.id)
+
+    # Forward check: orchestrator lists a worker, but worker doesn't claim it back.
+    # Skip workers already caught as dangling to avoid double-reporting.
+    fwd_msgs: list[str] = [
+        f"orchestrator {sess.id!r} lists worker {wid!r},"
+        f" but worker's parent_session_id is {w.parent_session_id!r}"
+        " — update parent_session_id on the worker"
+        for sess in state.sessions
+        for wid in sess.worker_session_ids
+        if wid in session_ids
+        for w in (state.find_by_name_or_id(wid),)
+        if w is not None and w.parent_session_id != sess.id
+    ]
+
+    # Reverse check: worker claims this session as parent, but session
+    # doesn't list the worker in its worker_session_ids.
+    rev_msgs: list[str] = [
+        f"worker {wid!r} claims parent {sess.id!r},"
+        f" but {sess.id!r}'s worker_session_ids does not include it"
+        " — add the worker ID to worker_session_ids"
+        for sess in state.sessions
+        for wid in claimed_by.get(sess.id, set())
+        if wid not in sess.worker_session_ids
+    ]
+
+    asym_msgs = fwd_msgs + rev_msgs
+
+    if asym_msgs:
+        asym_detail = "; ".join(asym_msgs)
+        asym_result = CheckResult("linkage/asymmetric", ok=False, detail=asym_detail)
+    else:
+        asym_result = CheckResult("linkage/asymmetric", ok=True, detail="")
+
+    return [dw_result, dp_result, asym_result]
+
+
 def _check_reconcile() -> CheckResult:
     """Run reconciliation and describe the outcome as a check result."""
     try:
@@ -171,6 +260,9 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     When *reap* is True, also run multiplexer/state reconciliation and
     append a ``reconciliation`` check summarising the number of reaped
     sessions and reverted tickets.
+
+    Linkage drift checks (parent/worker reference integrity) are always run,
+    independent of the *reap* flag.
     """
     backend = _resolve_backend_name()
     report = DoctorReport(version=__version__, backend=backend)
@@ -180,6 +272,16 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_orchestrator_config())
     report.checks.append(_check_state_file())
     report.checks.append(_check_dev_queue())
+
+    # Linkage checks: always run, cheap, independent of reap.
+    try:
+        link_state = load_state()
+    except Exception:
+        link_state = None
+
+    if link_state is not None:
+        report.checks.extend(_check_linkage(link_state))
+
     if reap:
         report.checks.append(_check_reconcile())
     return report

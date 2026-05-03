@@ -175,3 +175,437 @@ def test_cw_doctor_cli_reap_flag(
     result = runner.invoke(main, ["doctor", "--reap"])
     assert result.exit_code == 0
     assert "reconciliation" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Linkage drift detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckLinkageHealthy:
+    """Healthy states produce ok=True for all linkage check results."""
+
+    def test_empty_state_all_linkage_ok(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """No sessions → no drift, all three linkage checks pass."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(CwState(sessions=[]))
+        report = run_doctor()
+        linkage_checks = [c for c in report.checks if c.name.startswith("linkage/")]
+        assert len(linkage_checks) == 3
+        assert all(c.ok for c in linkage_checks)
+
+    def test_sessions_without_linkage_all_ok(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Sessions with no parent/worker fields → all linkage checks pass."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="sess-a",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                    ),
+                    Session(
+                        id="sess-b",
+                        name="client/idea",
+                        client="client",
+                        purpose=SessionPurpose.IDEA,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        linkage_checks = [c for c in report.checks if c.name.startswith("linkage/")]
+        assert len(linkage_checks) == 3
+        assert all(c.ok for c in linkage_checks)
+
+    def test_valid_bidirectional_linkage_all_ok(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Orchestrator + workers with consistent bidirectional refs → all pass."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-1",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        worker_session_ids=["worker-1", "worker-2"],
+                    ),
+                    Session(
+                        id="worker-1",
+                        name="client/worker-1",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="orch-1",
+                    ),
+                    Session(
+                        id="worker-2",
+                        name="client/worker-2",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="orch-1",
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        linkage_checks = [c for c in report.checks if c.name.startswith("linkage/")]
+        assert len(linkage_checks) == 3
+        assert all(c.ok for c in linkage_checks)
+
+
+class TestCheckLinkageDanglingWorker:
+    """Dangling worker: orchestrator lists a worker ID not in state."""
+
+    def test_dangling_worker_flagged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-1",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        worker_session_ids=["worker-gone"],
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
+        assert not dw.ok
+        assert "orch-1" in dw.detail
+        assert "worker-gone" in dw.detail
+
+    def test_dangling_worker_includes_remediation_hint(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-2",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        worker_session_ids=["missing-id"],
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
+        assert not dw.ok
+        assert "remove" in dw.detail.lower() or "worker_session_ids" in dw.detail
+
+
+class TestCheckLinkageDanglingParent:
+    """Dangling parent: worker's parent_session_id is not in state."""
+
+    def test_dangling_parent_flagged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="worker-orphan",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="orch-gone",
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        dp = next(c for c in report.checks if c.name == "linkage/dangling-parent")
+        assert not dp.ok
+        assert "worker-orphan" in dp.detail
+        assert "orch-gone" in dp.detail
+
+    def test_dangling_parent_includes_remediation_hint(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="worker-x",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="no-such-parent",
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        dp = next(c for c in report.checks if c.name == "linkage/dangling-parent")
+        assert not dp.ok
+        hint_words = {"parent_session_id", "restore", "clear"}
+        assert any(w in dp.detail for w in hint_words)
+
+
+class TestCheckLinkageAsymmetric:
+    """Asymmetric linkage: one side has the reference, other side doesn't."""
+
+    def test_forward_only_asymmetry_flagged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Orchestrator lists worker, but worker has no parent_session_id."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-f",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        worker_session_ids=["worker-f"],
+                    ),
+                    Session(
+                        id="worker-f",
+                        name="client/worker-f",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        # parent_session_id deliberately absent
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        asym = next(c for c in report.checks if c.name == "linkage/asymmetric")
+        assert not asym.ok
+        assert "orch-f" in asym.detail
+        assert "worker-f" in asym.detail
+
+    def test_forward_only_wrong_parent_flagged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Orchestrator lists worker, but worker points at a different parent."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-a",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        worker_session_ids=["worker-q"],
+                    ),
+                    Session(
+                        id="orch-b",
+                        name="client/idea",
+                        client="client",
+                        purpose=SessionPurpose.IDEA,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                    ),
+                    Session(
+                        id="worker-q",
+                        name="client/worker-q",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="orch-b",  # points at wrong orchestrator
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        asym = next(c for c in report.checks if c.name == "linkage/asymmetric")
+        assert not asym.ok
+        assert "orch-a" in asym.detail
+        assert "worker-q" in asym.detail
+
+    def test_reverse_only_asymmetry_flagged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Worker claims parent, but parent's worker_session_ids omits the worker."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-r",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        # worker_session_ids deliberately empty
+                    ),
+                    Session(
+                        id="worker-r",
+                        name="client/worker-r",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        parent_session_id="orch-r",
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        asym = next(c for c in report.checks if c.name == "linkage/asymmetric")
+        assert not asym.ok
+        assert "worker-r" in asym.detail
+        assert "orch-r" in asym.detail
+
+
+class TestCheckLinkageIndependence:
+    """Linkage checks are independent of other doctor sections."""
+
+    def test_linkage_skipped_when_state_load_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """If state.json is corrupt, linkage checks are skipped (not crashed)."""
+        from cw.config import state_file
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        # Write corrupt JSON to the state file
+        state_file().parent.mkdir(parents=True, exist_ok=True)
+        state_file().write_text("{not valid json}")
+
+        # Doctor should not raise; linkage section simply absent
+        report = run_doctor()
+        linkage_checks = [c for c in report.checks if c.name.startswith("linkage/")]
+        assert linkage_checks == []
+
+    def test_drift_does_not_affect_other_checks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """Dangling worker drift only fails the linkage check, not unrelated ones."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="orch-iso",
+                        name="client/impl",
+                        client="client",
+                        purpose=SessionPurpose.IMPL,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=sample_client.workspace_path,
+                        worker_session_ids=["missing-worker"],
+                    ),
+                ]
+            )
+        )
+        report = run_doctor()
+        # The non-linkage checks (backend, config, state, dev-queue) are still ok
+        non_linkage = [c for c in report.checks if not c.name.startswith("linkage/")]
+        assert all(c.ok for c in non_linkage)
+        # Linkage dangling-worker is not ok
+        dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
+        assert not dw.ok
