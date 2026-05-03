@@ -1318,3 +1318,194 @@ class TestBackgroundAllSessions:
         save_state(state)
 
         background_all_sessions()  # Should not raise
+
+
+class TestStartSessionParentLinkage:
+    """Tests for bidirectional parent/worker linkage via start_session --parent."""
+
+    def _write_clients_file(
+        self, tmp_config_dir: Path, sample_client: ClientConfig
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+    def test_parent_linkage_bidirectional(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """Worker sessions get parent_session_id; parent gains all worker IDs.
+
+        The parent has purpose=DEBT so start_session("impl") doesn't see it
+        as an existing ACTIVE impl session and short-circuit to noop.
+        """
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        # Use debt purpose for parent so it doesn't collide with new impl sessions
+        parent_session = Session(
+            id="parent01",
+            name="test-client/debt",
+            client="test-client",
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        save_state(CwState(sessions=[parent_session]))
+
+        start_session(
+            "test-client", "impl", parent="parent01", adapter=mock_cmux_adapter
+        )
+
+        state = load_state()
+        # Original parent session + 3 new worker sessions
+        assert len(state.sessions) == 4
+        new_sessions = [s for s in state.sessions if s.id != "parent01"]
+        assert len(new_sessions) == 3
+
+        # Every new session links back to parent
+        for new_s in new_sessions:
+            assert new_s.parent_session_id == "parent01"
+
+        # Parent accumulates all worker IDs
+        updated_parent = state.find_by_name_or_id("parent01")
+        assert updated_parent is not None
+        new_ids = {s.id for s in new_sessions}
+        assert set(updated_parent.worker_session_ids) == new_ids
+
+    def test_two_workers_from_same_parent(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """Calling start_session twice with the same parent accumulates worker IDs.
+
+        The parent has purpose=DEBT to avoid colliding with the new impl sessions
+        created in each call.  After the first call, the three new sessions are
+        marked COMPLETED so the second call creates three more.
+        """
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        parent_session = Session(
+            id="parent02",
+            name="test-client/debt",
+            client="test-client",
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        save_state(CwState(sessions=[parent_session]))
+
+        # First call: start_session creates 3 worker sessions
+        start_session(
+            "test-client", "impl", parent="parent02", adapter=mock_cmux_adapter
+        )
+
+        # Mark new sessions completed so the second call isn't blocked by ACTIVE check
+        state = load_state()
+        for s in state.sessions:
+            if s.id != "parent02":
+                s.status = SessionStatus.COMPLETED
+        save_state(state)
+
+        # Second call: creates another 3 worker sessions
+        start_session(
+            "test-client", "impl", parent="parent02", adapter=mock_cmux_adapter
+        )
+
+        state = load_state()
+        updated_parent = state.find_by_name_or_id("parent02")
+        assert updated_parent is not None
+        # Parent should have accumulated 6 worker IDs total (3 + 3)
+        assert len(updated_parent.worker_session_ids) == 6
+
+    def test_nonexistent_parent_raises_cw_error(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """Unknown parent ID raises CwError before any state is written."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        save_state(CwState())
+
+        with pytest.raises(CwError, match="Parent session not found: no-such-id"):
+            start_session(
+                "test-client", "impl", parent="no-such-id", adapter=mock_cmux_adapter
+            )
+
+        # No new sessions written to state
+        state = load_state()
+        assert state.sessions == []
+
+    def test_crash_mid_write_leaves_state_unchanged(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If save_state raises after mutations, state file is unchanged.
+
+        The atomic write path (write temp + os.replace) means either the old
+        file or the new file is visible — never a partial write. We simulate
+        the save raising to verify the original state is preserved on disk.
+        """
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        # debt parent avoids colliding with start_session("impl") active-check
+        parent_session = Session(
+            id="parent03",
+            name="test-client/debt",
+            client="test-client",
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        initial_state = CwState(sessions=[parent_session])
+        save_state(initial_state)
+
+        # Patch save_state to raise on the first call after session creation
+        call_count = 0
+
+        def failing_save(state: CwState) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                msg = "Simulated disk failure"
+                raise OSError(msg)
+
+        monkeypatch.setattr("cw.session.save_state", failing_save)
+
+        with pytest.raises(OSError, match="Simulated disk failure"):
+            start_session(
+                "test-client", "impl", parent="parent03", adapter=mock_cmux_adapter
+            )
+
+        # State on disk is unchanged — still just the parent session
+        state = load_state()
+        assert len(state.sessions) == 1
+        assert state.sessions[0].id == "parent03"
+        assert state.sessions[0].worker_session_ids == []
+
+    def test_start_without_parent_unchanged(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """start_session without --parent works as before (regression guard)."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        start_session("test-client", "impl", adapter=mock_cmux_adapter)
+
+        state = load_state()
+        assert len(state.sessions) == 3
+        for s in state.sessions:
+            assert s.parent_session_id is None
+            assert s.worker_session_ids == []

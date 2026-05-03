@@ -56,6 +56,7 @@ class TestCli:
                 "my-client",
                 "impl",
                 worktree=None,
+                parent=None,
             )
 
     def test_start_with_purpose(self) -> None:
@@ -66,6 +67,7 @@ class TestCli:
                 "my-client",
                 "idea",
                 worktree=None,
+                parent=None,
             )
 
     def test_start_with_worktree(self) -> None:
@@ -79,7 +81,29 @@ class TestCli:
                 "my-client",
                 "impl",
                 worktree="feat/search",
+                parent=None,
             )
+
+    def test_start_with_parent(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.start_session") as mock_start:
+            runner.invoke(
+                main,
+                ["start", "--parent", "abc12345", "my-client"],
+            )
+            mock_start.assert_called_once_with(
+                "my-client",
+                "impl",
+                worktree=None,
+                parent="abc12345",
+            )
+
+    def test_start_without_parent_passes_none(self) -> None:
+        runner = CliRunner()
+        with patch("cw.cli.start_session") as mock_start:
+            runner.invoke(main, ["start", "my-client"])
+            _, kwargs = mock_start.call_args
+            assert kwargs.get("parent") is None
 
     def test_bg_dispatches(self) -> None:
         runner = CliRunner()
