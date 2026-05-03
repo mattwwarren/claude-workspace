@@ -670,3 +670,25 @@ class TestMigrateCwState:
         assert session["parent_session_id"] is None
         assert session["worker_session_ids"] == []
         assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_no_sessions_key_still_bumps_schema_version(self) -> None:
+        # A state with no sessions key at all is legitimately empty; schema
+        # version should still be stamped so re-saves are at current version.
+        raw: dict[str, int] = {"schema_version": 1}
+        migrated = migrate_cw_state(raw)
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_missing_schema_version_gets_stamped(self) -> None:
+        # A file without schema_version (very old or hand-crafted) should be
+        # stamped with the current version after migration runs.
+        raw = {"sessions": [{"id": "s1"}]}
+        migrated = migrate_cw_state(raw)
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_non_list_sessions_does_not_bump_version(self) -> None:
+        # Malformed payload: sessions is not a list. The corruption must NOT
+        # be certified as fully migrated — schema_version stays unchanged so
+        # the problem surfaces downstream.
+        raw = {"schema_version": 1, "sessions": "oops"}
+        migrated = migrate_cw_state(raw)
+        assert migrated["schema_version"] == 1
