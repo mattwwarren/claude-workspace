@@ -27,7 +27,7 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
-from cw.models import BackendName
+from cw.models import BackendName, CwState, Session
 from cw.reconcile import reconcile
 
 
@@ -116,13 +116,24 @@ def _check_orchestrator_config() -> CheckResult:
     return CheckResult("orchestrator.yaml", ok=True, detail=str(path))
 
 
-def _check_state_file() -> CheckResult:
+def _check_state_file() -> tuple[CheckResult, CwState | None]:
+    """Verify sessions.json parses, returning the loaded state for downstream consumers.
+
+    Returning the parsed state avoids a second ``load_state()`` call in
+    ``run_doctor``: linkage checks reuse the same parsed object. On parse
+    failure the second tuple element is ``None`` and downstream checks that
+    need state should skip themselves; the failure is already visible via
+    the returned ``CheckResult``.
+    """
     path = state_file()
     try:
-        load_state()
+        state = load_state()
     except Exception as exc:
-        return CheckResult("sessions.json", ok=False, detail=f"load failed: {exc}")
-    return CheckResult("sessions.json", ok=True, detail=str(path))
+        return (
+            CheckResult("sessions.json", ok=False, detail=f"load failed: {exc}"),
+            None,
+        )
+    return CheckResult("sessions.json", ok=True, detail=str(path)), state
 
 
 def _check_dev_queue() -> CheckResult:
@@ -131,6 +142,98 @@ def _check_dev_queue() -> CheckResult:
     except Exception as exc:
         return CheckResult("dev_queue.json", ok=False, detail=f"load failed: {exc}")
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
+
+
+def _check_linkage(state: CwState) -> list[CheckResult]:
+    """Detect parent/worker linkage drift in session state.
+
+    Returns one :class:`CheckResult` per drift type:
+
+    * ``linkage/dangling-worker`` — an orchestrator's ``worker_session_ids``
+      references a session ID absent from state.
+    * ``linkage/dangling-parent`` — a worker's ``parent_session_id`` points at
+      a session absent from state.
+    * ``linkage/asymmetric`` — one side knows about the link but the other
+      side doesn't (forward-only or reverse-only reference).
+
+    All three results are always returned; each is ``ok=True`` when no drift
+    of that type is detected.
+    """
+    # Indexes built once: O(1) membership and lookup throughout the function.
+    session_ids = {s.id for s in state.sessions}
+    session_by_id: dict[str, Session] = {s.id: s for s in state.sessions}
+
+    # --- dangling-worker: orchestrator.worker_session_ids → missing session ---
+    dangling_worker_msgs: list[str] = [
+        f"orchestrator {sess.id!r} references missing worker {wid!r}"
+        " — remove the stale ID from worker_session_ids"
+        for sess in state.sessions
+        for wid in sess.worker_session_ids
+        if wid not in session_ids
+    ]
+
+    if dangling_worker_msgs:
+        dw_detail = "; ".join(dangling_worker_msgs)
+        dw_result = CheckResult("linkage/dangling-worker", ok=False, detail=dw_detail)
+    else:
+        dw_result = CheckResult("linkage/dangling-worker", ok=True, detail="")
+
+    # --- dangling-parent: worker.parent_session_id → missing session ---
+    dangling_parent_msgs: list[str] = [
+        f"worker {sess.id!r} references missing parent {sess.parent_session_id!r}"
+        " — clear parent_session_id or restore the parent session"
+        for sess in state.sessions
+        if sess.parent_session_id is not None
+        and sess.parent_session_id not in session_ids
+    ]
+
+    if dangling_parent_msgs:
+        dp_detail = "; ".join(dangling_parent_msgs)
+        dp_result = CheckResult("linkage/dangling-parent", ok=False, detail=dp_detail)
+    else:
+        dp_result = CheckResult("linkage/dangling-parent", ok=True, detail="")
+
+    # --- asymmetric: one side of the link is missing ---
+    # Build a map: parent_id → {set of worker IDs that claim it as parent}
+    claimed_by: dict[str, set[str]] = {}
+    for sess in state.sessions:
+        if sess.parent_session_id is not None and sess.parent_session_id in session_ids:
+            claimed_by.setdefault(sess.parent_session_id, set()).add(sess.id)
+
+    # Forward check: orchestrator lists a worker, but worker doesn't claim it back.
+    # Workers already caught as dangling are skipped (wid not in session_by_id).
+    fwd_msgs: list[str] = []
+    for sess in state.sessions:
+        for wid in sess.worker_session_ids:
+            worker = session_by_id.get(wid)
+            if worker is None or worker.parent_session_id == sess.id:
+                continue
+            fwd_msgs.append(
+                f"orchestrator {sess.id!r} lists worker {wid!r},"
+                f" but worker's parent_session_id is {worker.parent_session_id!r}"
+                " — update parent_session_id on the worker"
+            )
+
+    # Reverse check: worker claims this session as parent, but session
+    # doesn't list the worker in its worker_session_ids.
+    rev_msgs: list[str] = [
+        f"worker {wid!r} claims parent {sess.id!r},"
+        f" but {sess.id!r}'s worker_session_ids does not include it"
+        " — add the worker ID to worker_session_ids"
+        for sess in state.sessions
+        for wid in claimed_by.get(sess.id, set())
+        if wid not in sess.worker_session_ids
+    ]
+
+    asym_msgs = fwd_msgs + rev_msgs
+
+    if asym_msgs:
+        asym_detail = "; ".join(asym_msgs)
+        asym_result = CheckResult("linkage/asymmetric", ok=False, detail=asym_detail)
+    else:
+        asym_result = CheckResult("linkage/asymmetric", ok=True, detail="")
+
+    return [dw_result, dp_result, asym_result]
 
 
 def _check_reconcile() -> CheckResult:
@@ -171,6 +274,9 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     When *reap* is True, also run multiplexer/state reconciliation and
     append a ``reconciliation`` check summarising the number of reaped
     sessions and reverted tickets.
+
+    Linkage drift checks (parent/worker reference integrity) are always run,
+    independent of the *reap* flag.
     """
     backend = _resolve_backend_name()
     report = DoctorReport(version=__version__, backend=backend)
@@ -178,8 +284,17 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_backend_binary(backend))
     report.checks.append(_check_config_file())
     report.checks.append(_check_orchestrator_config())
-    report.checks.append(_check_state_file())
+    state_check, link_state = _check_state_file()
+    report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
+
+    # Linkage checks reuse the state already loaded by _check_state_file.
+    # If state failed to load, state_check is ok=False and the user sees the
+    # underlying problem; skipping linkage is correct (cascading from a
+    # failed parse would just spam noise).
+    if link_state is not None:
+        report.checks.extend(_check_linkage(link_state))
+
     if reap:
         report.checks.append(_check_reconcile())
     return report
