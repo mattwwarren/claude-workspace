@@ -18,6 +18,7 @@ from ruamel.yaml.comments import CommentedMap
 from cw.atomic import atomic_write_text
 from cw.exceptions import CwError
 from cw.models import (
+    CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
     ClientConfig,
     CwState,
@@ -195,12 +196,20 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
     warning rather than raising a validation error.
     """
     sessions = raw.get("sessions")
+    if "sessions" in raw and not isinstance(sessions, list):
+        # Malformed payload — leave schema_version untouched so the
+        # corruption surfaces downstream rather than getting a false
+        # "fully migrated" stamp.
+        return raw
     if isinstance(sessions, list):
         for session_raw in sessions:
             if not isinstance(session_raw, dict):
                 continue
             _migrate_zellij_fields(session_raw)
             _coerce_session_origin(session_raw)
+            _fill_linkage_field_defaults(session_raw)
+    # Bump persisted schema_version to current after all migration steps.
+    raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
 
 
@@ -234,6 +243,21 @@ def _coerce_session_origin(session_raw: dict[str, Any]) -> None:
             origin,
         )
         session_raw["origin"] = SessionOrigin.USER.value
+
+
+def _fill_linkage_field_defaults(session_raw: dict[str, Any]) -> None:
+    """Fill parent_session_id and worker_session_ids introduced in schema v2.
+
+    Runs unconditionally and is idempotent: if the fields are already present
+    they are left untouched, so a v2 file round-trips without modification.
+    The canonical source of truth for these defaults is the Session Pydantic
+    model; this helper exists only to ensure the on-disk file gets the keys
+    explicitly so re-saves don't lose them.
+    """
+    if "parent_session_id" not in session_raw:
+        session_raw["parent_session_id"] = None
+    if "worker_session_ids" not in session_raw:
+        session_raw["worker_session_ids"] = []
 
 
 def save_state(state: CwState) -> None:
