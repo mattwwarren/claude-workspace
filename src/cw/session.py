@@ -156,6 +156,7 @@ def start_session(
     purpose: str,
     *,
     worktree: str | None = None,
+    parent: str | None = None,
     adapter: CmuxAdapter | None = None,
 ) -> None:
     """Start or resume a Claude Code session for a client.
@@ -164,6 +165,7 @@ def start_session(
         client_name: Name of the client to start.
         purpose: Session purpose (impl, idea, debt, explore).
         worktree: Optional git branch for worktree isolation.
+        parent: Optional parent session ID for bidirectional linkage.
         adapter: CmuxAdapter instance. Defaults to get_cmux_adapter() (macOS only).
                  Inject FakeCmuxAdapter for tests.
     """
@@ -196,15 +198,37 @@ def start_session(
         worktree_path = create_worktree(client, worktree)
         click.echo(f"Worktree ready: {worktree_path}")
 
+    # Validate parent session FIRST so a bad ID always errors, even when
+    # a short-circuit would otherwise fire.
+    parent_session: Session | None = None
+    if parent is not None:
+        parent_session = state.find_by_name_or_id(parent)
+        if parent_session is None:
+            msg = f"Parent session not found: {parent}"
+            raise CwError(msg)
+
     # Check for existing backgrounded session
     existing = state.find_session(client_name, purpose)
 
     if existing and existing.status == SessionStatus.BACKGROUNDED:
+        if parent is not None:
+            msg = (
+                f"Cannot apply --parent to existing backgrounded session "
+                f"{existing.name}. Resume without --parent, or complete the "
+                f"existing session first."
+            )
+            raise CwError(msg)
         click.echo(f"Found backgrounded session: {existing.name}")
         resume_session(existing.name, adapter=adapter)
         return
 
     if existing and existing.status == SessionStatus.ACTIVE:
+        if parent is not None:
+            msg = (
+                f"Cannot apply --parent — session {existing.name} is already "
+                f"active. Complete or background it first."
+            )
+            raise CwError(msg)
         click.echo(f"Session already active: {existing.name}")
         return
 
@@ -216,6 +240,14 @@ def start_session(
         worktree_path=worktree_path,
         worktree_branch=worktree_branch,
     )
+
+    # Bidirectional linkage: only the impl session is a worker entry.
+    # One cw start call = one worker ID in parent.worker_session_ids.
+    if parent_session is not None:
+        impl_session = all_sessions["impl"]
+        impl_session.parent_session_id = parent_session.id
+        parent_session.worker_session_ids.append(impl_session.id)
+
     save_state(state)
     panes = _build_pane_args(all_sessions, client=client)
 

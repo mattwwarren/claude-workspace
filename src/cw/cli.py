@@ -125,10 +125,15 @@ def main() -> None:
     default=None,
     help="Git branch for worktree isolation (e.g. feat/search).",
 )
+@click.option(
+    "--parent",
+    default=None,
+    help="Parent session ID to link as a worker session.",
+)
 @handle_errors
-def start(client: str, purpose: str, worktree: str | None) -> None:
+def start(client: str, purpose: str, worktree: str | None, parent: str | None) -> None:
     """Start or resume a Claude Code session for a client."""
-    start_session(client, purpose, worktree=worktree)
+    start_session(client, purpose, worktree=worktree, parent=parent)
 
 
 @main.command()
