@@ -42,10 +42,18 @@ jobs:
         run: uv run ruff format --check src/ tests/
 
       - name: Type check
-        run: uv run mypy src/
+        run: uv run mypy --strict src/
 
-      - name: Test (unit)
-        run: uv run pytest tests/ -v --tb=short -m 'not integration'
+      - name: Test (unit) with coverage
+        run: uv run pytest tests/ -v --tb=short -m 'not integration' --cov=cw --cov-report=term --cov-report=xml --cov-fail-under=88
 
       - name: Test (tmux integration)
         run: uv run pytest tests/ -v --tb=short -m integration
+
+      - name: Upload coverage artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
