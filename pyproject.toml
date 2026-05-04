@@ -53,7 +53,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "integration: end-to-end tests that shell out to external tools (tmux, cmux)",
-    "cmux: requires a live cmux daemon (macOS only); run nightly via .github/workflows/nightly.yml",
+    "cmux: cmux JSON-RPC wire-format tests; run on the regular CI matrix against a mock daemon (see tests/test_cmux_wire.py)",
 ]
 
 [tool.ruff]
