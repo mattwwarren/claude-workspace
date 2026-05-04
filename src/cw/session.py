@@ -23,6 +23,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     Session,
+    SessionPurpose,
     SessionStatus,
 )
 from cw.prompts import build_session_context, get_purpose_prompt
@@ -179,6 +180,24 @@ def start_session(
     reconcile(adapter)
     state = load_state()
 
+    # Validate parent session FIRST so a bad ID always errors, even when
+    # a short-circuit would otherwise fire — and BEFORE worktree creation
+    # so a bad --parent on a worktree-mode client doesn't orphan an on-disk
+    # worktree.
+    parent_session: Session | None = None
+    if parent is not None:
+        parent_session = state.find_by_name_or_id(parent)
+        if parent_session is None:
+            msg = f"Parent session not found: {parent}"
+            raise CwError(msg)
+        # --parent links the impl session to the parent. If the client
+        # config excludes 'impl' from auto_purposes there's nothing to link.
+        if SessionPurpose.IMPL not in client.auto_purposes:
+            msg = (
+                "--parent requires the client config to include 'impl' in auto_purposes"
+            )
+            raise CwError(msg)
+
     # Auto-resolve worktree for worktree-mode clients
     worktree_path: Path | None = None
     worktree_branch: str | None = worktree
@@ -197,15 +216,6 @@ def start_session(
         click.echo(f"Creating worktree for branch '{worktree}'...")
         worktree_path = create_worktree(client, worktree)
         click.echo(f"Worktree ready: {worktree_path}")
-
-    # Validate parent session FIRST so a bad ID always errors, even when
-    # a short-circuit would otherwise fire.
-    parent_session: Session | None = None
-    if parent is not None:
-        parent_session = state.find_by_name_or_id(parent)
-        if parent_session is None:
-            msg = f"Parent session not found: {parent}"
-            raise CwError(msg)
 
     # Check for existing backgrounded session
     existing = state.find_session(client_name, purpose)
