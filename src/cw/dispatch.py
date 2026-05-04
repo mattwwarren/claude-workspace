@@ -72,6 +72,7 @@ def dispatch_tick(
     adapter: CmuxAdapter | None = None,
     *,
     use_plan: bool = False,
+    parent: str | None = None,
 ) -> int:
     """Run one dispatch tick.
 
@@ -79,6 +80,16 @@ def dispatch_tick(
     sessions are currently ACTIVE or IDLE and compare against the
     per-client cap from *config*.  If below the cap, claim one pending
     task and spawn a Claude session for it.
+
+    Args:
+        config: Orchestrator config (per-client caps, tick interval).
+        adapter: Optional CmuxAdapter for testing.
+        use_plan: If True, respect the persisted DispatchPlan ordering.
+        parent: Optional parent session ID. When set, every spawned
+            worker is linked to it (``parent_session_id`` +
+            bidirectional ``worker_session_ids``) so ``cw orchestrate
+            workers`` can list dispatched workers as first-class
+            sessions.
 
     Returns:
         Number of sessions spawned during this tick.
@@ -134,10 +145,11 @@ def dispatch_tick(
             session_id = spawn_create_impl(
                 client=client,
                 worktree=worktree_path,
-                prompt=f"/auto-dev {task.ticket_id}",
+                prompt=f"/auto-dev {task.ticket_id} --headless",
                 surface="split",
                 label=label,
                 adapter=resolved_adapter,
+                parent=parent,
             )
 
             record_event(
@@ -205,6 +217,7 @@ def run_dispatch_loop(
     once: bool = False,
     adapter: CmuxAdapter | None = None,
     use_plan: bool = False,
+    parent: str | None = None,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -216,6 +229,9 @@ def run_dispatch_loop(
         use_plan: If True, load the persisted DispatchPlan and use its
             ordering to claim tasks.  Falls back to enqueue order when no
             plan is found (load_plan returns None).
+        parent: Optional orchestrator session ID. Threaded into each
+            dispatch tick so spawned workers are linked back to the
+            caller's session.
     """
     config = load_orchestrator_config()
 
@@ -228,7 +244,12 @@ def run_dispatch_loop(
 
     while True:
         consume_completed_sessions()
-        dispatch_tick(config, adapter=resolved_adapter, use_plan=use_plan)
+        dispatch_tick(
+            config,
+            adapter=resolved_adapter,
+            use_plan=use_plan,
+            parent=parent,
+        )
 
         if once:
             return

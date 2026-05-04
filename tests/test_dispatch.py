@@ -136,6 +136,86 @@ class TestDispatchTickSpawnsSession:
         # Adapter should have been called
         assert len(adapter.calls["spawn"]) == 1
 
+    def test_dispatch_tick_appends_headless_flag(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """dispatch_tick spawns auto-dev with the --headless flag.
+
+        Workers spawned via cw dev-queue must run headless so their
+        machine-readable AUTO_DEV_RESULT block is parseable by the
+        orchestrator.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
+
+        adapter = FakeCmuxAdapter()
+        dispatch_tick(simple_config, adapter=adapter)
+
+        assert len(adapter.calls["spawn"]) == 1
+        _workspace, command, _surface = adapter.calls["spawn"][0]
+        assert "/auto-dev GEN-300 --headless" in command
+
+    def test_dispatch_tick_links_workers_to_parent(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        cap2_config: OrchestratorConfig,
+    ) -> None:
+        """dispatch_tick with parent= writes bidirectional linkage on every worker."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Seed an orchestrator session as the parent.
+        parent_workspace = tmp_dispatch_dirs / "workspace" / "orch"
+        parent_workspace.mkdir(parents=True)
+        parent = Session(
+            name="orch/impl",
+            client="orch",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=parent_workspace,
+        )
+        state = load_state()
+        state.sessions.append(parent)
+        save_state(state)
+
+        for i in range(2):
+            add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
+
+        adapter = FakeCmuxAdapter()
+        spawned = dispatch_tick(cap2_config, adapter=adapter, parent=parent.id)
+        assert spawned == 2
+
+        state = load_state()
+        workers = [s for s in state.sessions if s.origin == SessionOrigin.DAEMON]
+        assert len(workers) == 2
+        for w in workers:
+            assert w.parent_session_id == parent.id
+
+        refreshed_parent = state.find_by_name_or_id(parent.id)
+        assert refreshed_parent is not None
+        worker_ids = {w.id for w in workers}
+        assert worker_ids.issubset(set(refreshed_parent.worker_session_ids))
+
+    def test_dispatch_tick_no_parent_leaves_linkage_empty(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Direct CLI run (no orchestrator): parent=None → no linkage, no error."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-400", client="test-client"))
+
+        adapter = FakeCmuxAdapter()
+        dispatch_tick(simple_config, adapter=adapter)  # parent omitted
+
+        state = load_state()
+        worker = state.sessions[0]
+        assert worker.parent_session_id is None
+        assert worker.worker_session_ids == []
+
 
 # ---------------------------------------------------------------------------
 # TestPerClientCapRespected

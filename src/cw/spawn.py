@@ -6,6 +6,7 @@ import shlex
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
+from cw.exceptions import CwError
 from cw.models import Session, SessionOrigin, SessionPurpose
 
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ def spawn_create_impl(
     surface: str,
     label: str | None,
     adapter: CmuxAdapter,
+    parent: str | None = None,
 ) -> str:
     """Create a daemon-spawned session.
 
@@ -35,7 +37,21 @@ def spawn_create_impl(
     *name* and creates a nested worktree at a path cw cannot track. The
     worktree is established by the caller (``create_worktree`` / the
     interactive start path) and we just ``cd`` the spawned shell into it.
+
+    When *parent* is supplied, write bidirectional linkage in the same
+    state save: ``sess.parent_session_id = parent.id`` and append
+    ``sess.id`` to ``parent.worker_session_ids``. Raises :class:`CwError`
+    if the parent session is not in state.
     """
+    state = load_state()
+
+    parent_session: Session | None = None
+    if parent is not None:
+        parent_session = state.find_by_name_or_id(parent)
+        if parent_session is None:
+            msg = f"Parent session not found: {parent}"
+            raise CwError(msg)
+
     workspace = client.cmux_workspace or client.name
     cwd = shlex.quote(str(worktree))
     command = f"cd {cwd} && claude --print {prompt!r}"
@@ -52,7 +68,10 @@ def spawn_create_impl(
         surface_ref=surface_ref,
     )
 
-    state = load_state()
+    if parent_session is not None:
+        sess.parent_session_id = parent_session.id
+        parent_session.worker_session_ids.append(sess.id)
+
     state.sessions.append(sess)
     save_state(state)
     return sess.id
