@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- `cw doctor` now exits non-zero when parent/worker linkage drift is
+  detected (stale `worker_session_ids`, mismatched `parent_session_id`,
+  or asymmetric references). Previously such states passed silently.
+  Run `cw doctor --reap` to inspect the reported drift; remediation
+  hints are included in each `linkage/*` check's detail.
+
 ## [0.6.4] — 2026-05-01
 
 Completes the dispatch-spawn fix started in 0.6.3. The earlier release

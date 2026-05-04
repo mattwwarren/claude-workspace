@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, Session
 
 
 class TestRunDoctorFakeBackend:
@@ -292,12 +292,13 @@ class TestCheckLinkageHealthy:
 class TestCheckLinkageDanglingWorker:
     """Dangling worker: orchestrator lists a worker ID not in state."""
 
-    def test_dangling_worker_flagged(
+    def test_dangling_worker_flagged_with_remediation_hint(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
     ) -> None:
+        """Single dangling worker: flag both IDs and surface remediation hint."""
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
@@ -322,35 +323,7 @@ class TestCheckLinkageDanglingWorker:
         assert not dw.ok
         assert "orch-1" in dw.detail
         assert "worker-gone" in dw.detail
-
-    def test_dangling_worker_includes_remediation_hint(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-    ) -> None:
-        from cw.config import save_state
-        from cw.models import CwState, Session, SessionPurpose, SessionStatus
-
-        monkeypatch.setenv("CW_BACKEND", "fake")
-        save_state(
-            CwState(
-                sessions=[
-                    Session(
-                        id="orch-2",
-                        name="client/impl",
-                        client="client",
-                        purpose=SessionPurpose.IMPL,
-                        status=SessionStatus.ACTIVE,
-                        workspace_path=sample_client.workspace_path,
-                        worker_session_ids=["missing-id"],
-                    ),
-                ]
-            )
-        )
-        report = run_doctor()
-        dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
-        assert not dw.ok
+        # Remediation hint is included alongside the IDs.
         assert "remove" in dw.detail.lower() or "worker_session_ids" in dw.detail
 
     def test_multiple_dangling_workers_all_listed(
@@ -382,6 +355,7 @@ class TestCheckLinkageDanglingWorker:
         report = run_doctor()
         dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
         assert not dw.ok
+        assert "orch-multi" in dw.detail
         assert "gone-a" in dw.detail
         assert "gone-b" in dw.detail
         assert "gone-c" in dw.detail
@@ -390,12 +364,13 @@ class TestCheckLinkageDanglingWorker:
 class TestCheckLinkageDanglingParent:
     """Dangling parent: worker's parent_session_id is not in state."""
 
-    def test_dangling_parent_flagged(
+    def test_dangling_parent_flagged_with_remediation_hint(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
     ) -> None:
+        """Single dangling parent: flag both IDs and surface remediation hint."""
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
@@ -420,35 +395,7 @@ class TestCheckLinkageDanglingParent:
         assert not dp.ok
         assert "worker-orphan" in dp.detail
         assert "orch-gone" in dp.detail
-
-    def test_dangling_parent_includes_remediation_hint(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-    ) -> None:
-        from cw.config import save_state
-        from cw.models import CwState, Session, SessionPurpose, SessionStatus
-
-        monkeypatch.setenv("CW_BACKEND", "fake")
-        save_state(
-            CwState(
-                sessions=[
-                    Session(
-                        id="worker-x",
-                        name="client/impl",
-                        client="client",
-                        purpose=SessionPurpose.IMPL,
-                        status=SessionStatus.ACTIVE,
-                        workspace_path=sample_client.workspace_path,
-                        parent_session_id="no-such-parent",
-                    ),
-                ]
-            )
-        )
-        report = run_doctor()
-        dp = next(c for c in report.checks if c.name == "linkage/dangling-parent")
-        assert not dp.ok
+        # Remediation hint is included alongside the IDs.
         hint_words = {"parent_session_id", "restore", "clear"}
         assert any(w in dp.detail for w in hint_words)
 
@@ -685,3 +632,117 @@ class TestCheckLinkageIndependence:
         # Linkage dangling-worker is not ok
         dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
         assert not dw.ok
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for _check_linkage (no run_doctor / state-file roundtrip)
+# ---------------------------------------------------------------------------
+
+
+def _mk_session(
+    sid: str,
+    workspace_path: Path,
+    *,
+    parent_session_id: str | None = None,
+    worker_session_ids: list[str] | None = None,
+) -> Session:
+    """Build a minimal Session for linkage testing."""
+    from cw.models import Session, SessionPurpose, SessionStatus
+
+    return Session(
+        id=sid,
+        name=f"client/{sid}",
+        client="client",
+        purpose=SessionPurpose.IMPL,
+        status=SessionStatus.ACTIVE,
+        workspace_path=workspace_path,
+        parent_session_id=parent_session_id,
+        worker_session_ids=worker_session_ids or [],
+    )
+
+
+class TestCheckLinkageDirect:
+    """Direct tests of _check_linkage(state) — bypass state-file roundtrip."""
+
+    def test_clean_state_returns_three_ok_results(self, tmp_path: Path) -> None:
+        """Empty state and well-linked state both produce all-ok results."""
+        from cw.doctor import _check_linkage
+        from cw.models import CwState
+
+        results = _check_linkage(CwState(sessions=[]))
+        assert len(results) == 3
+        assert all(r.ok for r in results)
+        assert {r.name for r in results} == {
+            "linkage/dangling-worker",
+            "linkage/dangling-parent",
+            "linkage/asymmetric",
+        }
+
+        # Bidirectional valid linkage also clean.
+        state = CwState(
+            sessions=[
+                _mk_session("orch", tmp_path, worker_session_ids=["w1"]),
+                _mk_session("w1", tmp_path, parent_session_id="orch"),
+            ]
+        )
+        results = _check_linkage(state)
+        assert all(r.ok for r in results)
+
+    def test_dangling_worker_detected(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_linkage
+        from cw.models import CwState
+
+        state = CwState(
+            sessions=[
+                _mk_session("orch", tmp_path, worker_session_ids=["ghost"]),
+            ]
+        )
+        results = {r.name: r for r in _check_linkage(state)}
+        dw = results["linkage/dangling-worker"]
+        assert not dw.ok
+        assert "orch" in dw.detail
+        assert "ghost" in dw.detail
+        # Other two checks remain clean — drift is isolated to dangling-worker.
+        assert results["linkage/dangling-parent"].ok
+        assert results["linkage/asymmetric"].ok
+
+    def test_dangling_parent_detected(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_linkage
+        from cw.models import CwState
+
+        state = CwState(
+            sessions=[
+                _mk_session("worker", tmp_path, parent_session_id="ghost-parent"),
+            ]
+        )
+        results = {r.name: r for r in _check_linkage(state)}
+        dp = results["linkage/dangling-parent"]
+        assert not dp.ok
+        assert "worker" in dp.detail
+        assert "ghost-parent" in dp.detail
+        assert results["linkage/dangling-worker"].ok
+        assert results["linkage/asymmetric"].ok
+
+    def test_multiple_danglers_all_listed(self, tmp_path: Path) -> None:
+        """Mixed drift: multiple dangling workers and parents in one state."""
+        from cw.doctor import _check_linkage
+        from cw.models import CwState
+
+        state = CwState(
+            sessions=[
+                _mk_session("orch", tmp_path, worker_session_ids=["gone-1", "gone-2"]),
+                _mk_session("worker-a", tmp_path, parent_session_id="ghost-a"),
+                _mk_session("worker-b", tmp_path, parent_session_id="ghost-b"),
+            ]
+        )
+        results = {r.name: r for r in _check_linkage(state)}
+        dw = results["linkage/dangling-worker"]
+        dp = results["linkage/dangling-parent"]
+        assert not dw.ok
+        assert "gone-1" in dw.detail
+        assert "gone-2" in dw.detail
+        assert not dp.ok
+        assert "ghost-a" in dp.detail
+        assert "ghost-b" in dp.detail
+        assert "worker-a" in dp.detail
+        assert "worker-b" in dp.detail
