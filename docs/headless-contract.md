@@ -78,6 +78,8 @@ AUTO_DEV_RESULT>>>
 
 Parsers should locate the LAST occurrence of `<<<AUTO_DEV_RESULT\n` in stdout and read JSON until the matching `\nAUTO_DEV_RESULT>>>` line. Anything between is valid JSON. Anything outside is narrative.
 
+The skill emits **exactly one** sentinel block per invocation. If the parser finds multiple complete blocks in one invocation's stdout, treat it as a skill bug per §6 (6). The "LAST occurrence" rule is purely defensive — for the case where narrative text above the block happens to contain the literal sentinel string.
+
 **Interactive mode:** this block is NOT emitted. Absence of sentinels in stdout is itself a signal that the run was not headless (or the skill failed before reaching the emit step — see §6).
 
 ### 3.2 Schema
@@ -117,8 +119,7 @@ Parsers should locate the LAST occurrence of `<<<AUTO_DEV_RESULT\n` in stdout an
   },
   "friction_highlights": [],
   "blocker": null,
-  "prior_pr_warnings": [],
-  "next_actions": []
+  "next_actions": ["wait_for_ci"]
 }
 ```
 
@@ -126,10 +127,10 @@ Parsers should locate the LAST occurrence of `<<<AUTO_DEV_RESULT\n` in stdout an
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | int | Currently `1`. Increment on field add/remove or semantics change. |
+| `schema_version` | int | Currently `1`. Bump rules in §8. |
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
 | `status` | string enum | See §4. |
-| `stage_reached` | string | Pipeline-stage marker, e.g. `stage1_plan`, `stage3_review`, `stage5_post_create`. |
+| `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
 | `scope.tier` | `"small"` \| `"large"` | Per the Guard Matrix in `commands/auto-dev.md`. |
 | `scope.files` | int | File count touched (or planned, if exited pre-impl). |
 | `scope.lines_estimate` | int | Plan-time line estimate. |
@@ -140,14 +141,13 @@ Parsers should locate the LAST occurrence of `<<<AUTO_DEV_RESULT\n` in stdout an
 | `worktree_path` | string \| null | Absolute path; `null` if no worktree was created. |
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
 | `commits` | string[] | Commit SHAs created during this run. |
-| `pr` | object \| null | Populated only when status = `shipped`. |
+| `pr` | object \| null | Non-null **only** when `status = shipped`. All other statuses — including `review_pending_approval` (whether reached via the large-scope path or the §5.1 downgrade), `merge_gate_blocked`, `plan_pending_approval`, the rejects, and `blocked` — leave `pr` as `null`. `branch` may still be non-null on these (see `branch` row). |
 | `review.must_fix_initial` | int | MUST_FIX count from first review pass. |
 | `review.should_fix` | int | SHOULD_FIX count carried out of the loop. |
 | `review.fix_cycles_used` | int | 0 when first pass was clean. |
 | `health` | object | See §5. |
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
 | `blocker` | object \| null | See §4.2. Populated when `status = "blocked"`. |
-| `prior_pr_warnings` | string[] | Notes carried forward from PR Hygiene Sweep (always empty in headless). |
 | `next_actions` | string[] | Advisory list cw can act on without prose-parsing. See §4.3. |
 
 ---
@@ -180,7 +180,7 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
 
-Unknown `blocker.reason` values are reserved for future use; consumers should treat them as opaque strings and surface verbatim.
+`blocker.reason` is an **open enum** — the producer may add new reasons without a `schema_version` bump. Consumers MUST treat unknown reasons as opaque strings and surface verbatim. (Unlike `status`, which is closed: see §4 and §8.)
 
 ### 4.3 `next_actions` Vocabulary
 
@@ -188,12 +188,12 @@ Advisory only. cw acts on these without parsing prose.
 
 | Action | When | Consumer behavior |
 |---|---|---|
-| `wait_for_ci` | `status = shipped` with auto-merge pending | cw polls CI; on success the orchestrator job is done. |
+| `wait_for_ci` | `status = shipped` (always — `shipped` implies auto-merge enabled per §4.1) | cw polls CI; on success the orchestrator job is done. |
 | `user_approve_plan` | `status = plan_pending_approval` | Notify user that a large-scope plan is in Linear awaiting approval. |
 | `user_approve_review` | `status = review_pending_approval` | Notify user that a branch is pushed for review. |
-| `resolve_merge_gate` | `status = merge_gate_blocked` | Wait for the prior pipeline PR to merge, then resume (see §7). |
+| `resolve_merge_gate` | `status = merge_gate_blocked` | Notify user that the prior pipeline PR must merge first. The user then manually re-invokes `/auto-dev` for this ticket; no automatic re-dispatch exists. |
 
-Empty list for terminal-success and terminal-reject (`shipped` with no auto-merge, `scope_exceeded`, `forbidden_area`, `blocked`).
+Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`.
 
 ---
 
@@ -223,6 +223,8 @@ A degraded agent is one that returned ANY of:
 - `Could work be incomplete?: MAYBE` or `YES`
 - `Recommendation: EXIT_FOR_HUMAN_REVIEW`
 
+**Scan scope:** every agent that ran to completion in the pipeline — plan, impl, each reviewer in the parallel review fan-out, every fix-loop cycle (cycles 1–5, all included), and prep-pr. A fix-loop cycle that itself reports degradation triggers `downgrade_applied`; this is independent from `fix_loop_escalated` (§5.2). If an agent did not emit a Health Check block at all, treat that agent as degraded — missing data is not healthy data.
+
 ### 5.2 `health` Subfields
 
 | Field | Notes |
@@ -247,27 +249,17 @@ The skill can fail to emit a complete sentinel block. cw must handle:
 3. **Block present but JSON does not parse** — skill bug. Same handling as (1); include the raw block in `details`.
 4. **`schema_version` higher than parser supports** — skill upgraded ahead of cw. Surface verbatim and refuse to act on `next_actions`; do not auto-merge or auto-route.
 5. **Unknown `status` value** — same as (4).
+6. **Multiple complete sentinel blocks in one invocation's stdout** — skill bug (the contract is exactly one per invocation; see §3.1). Same handling as (1), with `reason: "multiple_result_blocks"` and `details` containing the count and the LAST block's raw payload.
 
 Parser must NEVER act on a partial parse — if any of the above fire, treat the run as blocked and require human attention.
 
 ---
 
-## 7. Resume Protocol (Reserved — Not Yet Implemented)
+## 7. Resume Protocol (Reserved — Not Yet Specified)
 
-`--resume` flag handling is tracked as global-claude issue **#2** and cw issue **#59**. When implemented, the contract will be:
+Resume (`--resume`) is **not yet specified**. Tracked in global-claude#2 and cw#59. No contract exists until those issues ship.
 
-- cw injects the prior `<<<AUTO_DEV_RESULT` payload (the JSON only, sentinels stripped) at one of:
-  - File: `<worktree>/.auto-dev/prior-result.json` (leading candidate)
-  - Env var: `AUTO_DEV_PRIOR_RESULT=<base64>`
-  - Final mechanism is a cw-side decision in #59.
-- Skill reads it on startup, jumps to `stage_reached + 1`, continues with the same `ticket_id`, `branch`, `worktree_path`.
-- Resumable from:
-  - `plan_pending_approval` → start at S2 using approved plan from Linear.
-  - `review_pending_approval` → start at S4 using existing branch.
-  - `merge_gate_blocked` → re-check S4a, then S4b if clear.
-- `blocked` is NOT auto-resumable; human must clear and re-dispatch.
-
-Until #2 lands, cw must treat all non-terminal exits as fully manual recovery (the user must re-invoke `/auto-dev` themselves or skip the ticket).
+Until then, cw must treat all non-terminal exits as fully manual recovery: the user re-invokes `/auto-dev` themselves or skips the ticket. Consumers MUST NOT implement speculative resume handling against any draft mechanism (file-injection, env var, etc.) — when this section is filled in, the contract will be authoritative and will not pre-honor guesses.
 
 ---
 
@@ -278,23 +270,25 @@ Until #2 lands, cw must treat all non-terminal exits as fully manual recovery (t
 **Bump to 2 required when:**
 - Any field is removed or renamed.
 - Any existing field's type or semantics change.
-- A new value is added to a closed enum (`status`, `blocker.reason`).
+- A new value is added to a closed enum (`status`, `stage_reached`).
+- A new optional field is added that consumers cannot ignore without a behavior change (e.g., a new `health.*` subfield that drives routing the way `health.downgrade_applied` does today).
 
 **No bump required when:**
-- A new optional field is added to `health`, `pr`, `review`, or the top level.
+- A new purely-advisory optional field is added to `health`, `pr`, `review`, or the top level (one consumers may ignore with no behavior change).
 - A new `next_actions` entry is added (parsers already treat unknown actions as advisory).
+- A new `blocker.reason` value is added (open enum — see §4.2).
 
-When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. The skill must not emit a higher `schema_version` than the deployed cw parser supports — coordinate the rollout.
+When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. The skill SHOULD coordinate rollout so it does not emit a higher `schema_version` than deployed parsers support; this is a deployment-process concern (no in-band negotiation mechanism exists today). Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
 
 ---
 
 ## 9. Cross-References
 
-- Producer source: `commands/auto-dev.md` in `mattwwarren/global-claude`. Sections "Headless Mode", "Health Check Protocol", "Appendix: Structured Output" are authoritative for skill behavior.
-- Consumer arc:
-  - cw#56 — `[orchestrator P1.A] Headless dispatch via cw start --parent`
-  - cw#57 — `[orchestrator P1.B] Parse <<<AUTO_DEV_RESULT sentinel + persist on Session`
-  - cw#58 — `[orchestrator P1.C] Queue side-effects per /auto-dev status code`
-  - cw#59 — `[orchestrator P1.D] Resume detection on cw start --parent re-invoke`
-- Substrate (cw 0.8.0 milestone, prerequisite for #56–#59): cw#52–#55.
-- Skill-side resume implementation: global-claude#2.
+- **Producer source (canonical for behavior):** `commands/auto-dev.md` in `mattwwarren/global-claude`. Sections "Headless Mode", "Health Check Protocol", "Appendix: Structured Output". Where this doc duplicates a producer value (e.g. the §2 fix-loop hard-cap, the §5 "every agent emits Health Check" requirement), the producer wins on disputes — open an issue to reconcile.
+- **Consumer arc** (titles current as of this commit; canonical text lives on GitHub):
+  - cw#56 — https://github.com/mattwwarren/claude-workspace/issues/56
+  - cw#57 — https://github.com/mattwwarren/claude-workspace/issues/57
+  - cw#58 — https://github.com/mattwwarren/claude-workspace/issues/58
+  - cw#59 — https://github.com/mattwwarren/claude-workspace/issues/59
+- **Substrate** (cw 0.8.0 milestone, prerequisite for #56–#59): cw#52–#55.
+- **Skill-side resume implementation:** https://github.com/mattwwarren/global-claude/issues/2.
