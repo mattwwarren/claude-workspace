@@ -159,8 +159,7 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
     All three results are always returned; each is ``ok=True`` when no drift
     of that type is detected.
     """
-    # Indexes built once: O(1) membership and lookup throughout the function.
-    session_ids = {s.id for s in state.sessions}
+    # Index built once: O(1) membership (via .keys()) and lookup throughout.
     session_by_id: dict[str, Session] = {s.id: s for s in state.sessions}
 
     # --- dangling-worker: orchestrator.worker_session_ids → missing session ---
@@ -169,7 +168,7 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
         " — remove the stale ID from worker_session_ids"
         for sess in state.sessions
         for wid in sess.worker_session_ids
-        if wid not in session_ids
+        if wid not in session_by_id
     ]
 
     if dangling_worker_msgs:
@@ -184,7 +183,7 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
         " — clear parent_session_id or restore the parent session"
         for sess in state.sessions
         if sess.parent_session_id is not None
-        and sess.parent_session_id not in session_ids
+        and sess.parent_session_id not in session_by_id
     ]
 
     if dangling_parent_msgs:
@@ -197,8 +196,9 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
     # Build a map: parent_id → {set of worker IDs that claim it as parent}
     claimed_by: dict[str, set[str]] = {}
     for sess in state.sessions:
-        if sess.parent_session_id is not None and sess.parent_session_id in session_ids:
-            claimed_by.setdefault(sess.parent_session_id, set()).add(sess.id)
+        parent_id = sess.parent_session_id
+        if parent_id is not None and parent_id in session_by_id:
+            claimed_by.setdefault(parent_id, set()).add(sess.id)
 
     # Forward check: orchestrator lists a worker, but worker doesn't claim it back.
     # Workers already caught as dangling are skipped (wid not in session_by_id).
