@@ -40,24 +40,30 @@ jobs:
           echo "## cask info"
           brew info --cask cmux 2>&1 | head -40 || true
 
-      - name: Launch cmux app (spawns daemon)
+      - name: Launch cmux daemon
         run: |
-          # The cmux cask installs a GUI .app; the daemon (and its unix
-          # socket) come up when the bundle is launched. `-g` keeps it
-          # background so CI doesn't try to bring a window forward.
+          # `cmux <path>` opens a workspace and "launches cmux if needed"
+          # per its help output. CLI-native — avoids the LaunchServices
+          # registration problem that bit `open -ga cmux` (run 25318255048).
           mkdir -p "$HOME/Library/Application Support/cmux"
-          open -ga cmux
+          cmux "$HOME" || true
           for _ in $(seq 1 30); do
             if [ -S "$HOME/Library/Application Support/cmux/cmux.sock" ]; then
-              echo "cmux socket ready"
-              exit 0
+              echo "cmux socket appeared"
+              # Sanity-check via the daemon's own ping RPC before declaring victory.
+              if cmux ping; then
+                echo "cmux daemon responsive"
+                exit 0
+              fi
+              echo "::error::socket exists but cmux ping failed"
+              exit 1
             fi
             sleep 1
           done
           echo "::error::cmux socket never appeared after 30s"
           exit 1
 
-      - name: Stop cmux app
+      - name: Stop cmux daemon
         if: always()
         run: |
           osascript -e 'tell application "cmux" to quit' 2>/dev/null || true
