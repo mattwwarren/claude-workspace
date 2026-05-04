@@ -7,11 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
-- `cw doctor` now exits non-zero when parent/worker linkage drift is
-  detected (stale `worker_session_ids`, mismatched `parent_session_id`,
-  or asymmetric references). Previously such states passed silently.
-  Run `cw doctor --reap` to inspect the reported drift; remediation
-  hints are included in each `linkage/*` check's detail.
+- Documenting prior behavior: since the linkage-drift detection in #68,
+  `cw doctor` reports parent/worker linkage drift (stale
+  `worker_session_ids`, mismatched `parent_session_id`, or asymmetric
+  references) as failed checks, which contribute to the overall doctor
+  exit code. Run `cw doctor` to inspect the report; remediation hints
+  are included in each `linkage/*` check's detail. `cw doctor --reap`
+  additionally reconciles phantom sessions detected via the surface
+  liveness check.
 
 ## [0.6.4] — 2026-05-01
 

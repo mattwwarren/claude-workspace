@@ -664,8 +664,8 @@ def _mk_session(
 class TestCheckLinkageDirect:
     """Direct tests of _check_linkage(state) — bypass state-file roundtrip."""
 
-    def test_clean_state_returns_three_ok_results(self, tmp_path: Path) -> None:
-        """Empty state and well-linked state both produce all-ok results."""
+    def test_empty_state_returns_three_ok_results(self) -> None:
+        """Empty state produces three named ok results."""
         from cw.doctor import _check_linkage
         from cw.models import CwState
 
@@ -678,7 +678,11 @@ class TestCheckLinkageDirect:
             "linkage/asymmetric",
         }
 
-        # Bidirectional valid linkage also clean.
+    def test_clean_bidirectional_linkage_passes(self, tmp_path: Path) -> None:
+        """Orchestrator and worker referencing each other produce all-ok."""
+        from cw.doctor import _check_linkage
+        from cw.models import CwState
+
         state = CwState(
             sessions=[
                 _mk_session("orch", tmp_path, worker_session_ids=["w1"]),
@@ -703,6 +707,9 @@ class TestCheckLinkageDirect:
         assert "orch" in dw.detail
         assert "ghost" in dw.detail
         # Other two checks remain clean — drift is isolated to dangling-worker.
+        # asymmetric stays ok because the forward check skips ghost workers
+        # via `session_by_id.get(wid)` returning None (no session to inspect
+        # for back-reference), so the missing-back-reference path never fires.
         assert results["linkage/dangling-parent"].ok
         assert results["linkage/asymmetric"].ok
 
