@@ -23,8 +23,9 @@ If any required tools are missing, stop and tell the user what needs to be insta
 
 - **uv**: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **Python 3.13+**: `uv python install 3.13`
-- **cmux** (macOS): see https://github.com/cmuxio/cmux for install; verify
-  the daemon is running (its Unix socket must exist).
+- **cmux** (macOS): `brew tap manaflow-ai/cmux && brew install --cask cmux`
+  (upstream: https://github.com/manaflow-ai/cmux). After install, launch the
+  app once so the daemon comes up and creates its Unix socket.
 - **Claude Code**: `npm install -g @anthropic-ai/claude-code`
 
 Optional: check for peon-ping (`peon status`) - not required but provides sound notifications when Claude needs attention.

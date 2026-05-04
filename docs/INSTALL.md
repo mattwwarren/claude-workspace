@@ -10,7 +10,7 @@ Install these before installing cw:
 |------|----------|---------|---------|
 | [uv](https://docs.astral.sh/uv/) | Yes | Python package manager | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | [Python 3.13+](https://python.org/) | Yes | Runtime | Via uv: `uv python install 3.13` |
-| [cmux](https://github.com/cmuxio/cmux) (macOS) | Yes on macOS | Terminal multiplexer backend | See cmux install guide |
+| [cmux](https://github.com/manaflow-ai/cmux) (macOS) | Yes on macOS | Terminal multiplexer backend | `brew tap manaflow-ai/cmux && brew install --cask cmux` |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Yes | AI coding assistant | `npm install -g @anthropic-ai/claude-code` |
 | [peon-ping](https://github.com/PeonPing/peon-ping) | No | Sound notifications when Claude needs attention | `curl -fsSL peonping.com/install \| bash` |
 
