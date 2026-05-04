@@ -248,7 +248,6 @@ def start_session(
         impl_session.parent_session_id = parent_session.id
         parent_session.worker_session_ids.append(impl_session.id)
 
-    save_state(state)
     panes = _build_pane_args(all_sessions, client=client)
 
     for s in all_sessions.values():
@@ -261,6 +260,9 @@ def start_session(
         pane_cmd = panes[purpose_str]["claude_cmd"]
         _spawn_session_surface(client, session, pane_cmd, adapter)
 
+    # Single end-to-end persist: state hits disk only after every surface
+    # has been spawned. If any spawn raises, on-disk state is unchanged
+    # (no partial-success window where sessions exist without surface_ref).
     save_state(state)
 
 
