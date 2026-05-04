@@ -1,9 +1,21 @@
 name: Nightly (cmux integration)
 
+# Manual-trigger only. Hosted GitHub macOS runners can install cmux but
+# can't run it: cmux is a GUI .app cask and the daemon dies during init
+# on the runner's stripped-down desktop session — sock file is created,
+# then connections refuse with "Broken pipe (errno 32)" before any RPC
+# completes. See runs 25318104275, 25318255048, 25318344296, 25318537122
+# for the full failure trail. The install/launch wiring below is correct
+# as far as it gets — `lsregister` + `cmux <path>` produces a socket on
+# disk — and is preserved here so a self-hosted macOS runner (option A
+# in the discussion that landed this file) can flip the schedule back
+# on without redoing the discovery work.
+#
+# Until that runner exists, real-cmux contract testing happens in
+# `tests/test_cmux_real.py` against a mock-daemon fixture (option C) on
+# the regular CI matrix — see the `cmux` pytest marker in pyproject.toml.
+
 on:
-  schedule:
-    # 09:00 UTC daily (~02:00 PT / ~05:00 ET) — off peak
-    - cron: "0 9 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -26,18 +38,16 @@ jobs:
         run: |
           brew tap manaflow-ai/cmux
           brew install --cask cmux
-          # GitHub macOS runners don't auto-index newly-installed .app
-          # bundles; both `open -ga cmux` and the cmux CLI's internal
-          # launch fail with "Unable to find application named 'cmux'"
-          # without this. Register the bundle with LaunchServices so it's
-          # findable by name. (Discovered via runs 25318255048 + 25318344296.)
+          # Hosted runners don't auto-index freshly-cask-installed .app
+          # bundles; without this both `open -ga cmux` and the cmux CLI's
+          # own launch logic fail with "Unable to find application named
+          # 'cmux'" (runs 25318255048, 25318344296).
           LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
           "$LSREG" -f /Applications/cmux.app
 
       - name: Diagnose cmux install
         run: |
-          # Self-documenting diagnostics so future failures don't require
-          # spelunking through closed Actions logs.
+          # Self-documenting: future failures shouldn't require log spelunking.
           echo "## which cmux"
           which cmux || true
           echo "## cmux --help"
@@ -50,19 +60,19 @@ jobs:
       - name: Launch cmux daemon
         run: |
           # `cmux <path>` opens a workspace and "launches cmux if needed"
-          # per its help output. CLI-native — avoids the LaunchServices
-          # registration problem that bit `open -ga cmux` (run 25318255048).
+          # per the CLI help — CLI-native, avoids `open -ga` LaunchServices
+          # quirks. On a real macOS desktop this brings the daemon up; on
+          # hosted runners it gets as far as creating the socket file.
           mkdir -p "$HOME/Library/Application Support/cmux"
           cmux "$HOME" || true
           for _ in $(seq 1 30); do
             if [ -S "$HOME/Library/Application Support/cmux/cmux.sock" ]; then
               echo "cmux socket appeared"
-              # Sanity-check via the daemon's own ping RPC before declaring victory.
               if cmux ping; then
                 echo "cmux daemon responsive"
                 exit 0
               fi
-              echo "::error::socket exists but cmux ping failed"
+              echo "::error::socket exists but cmux ping failed (likely a hosted-runner GUI-session limitation; run on a self-hosted Mac)"
               exit 1
             fi
             sleep 1
