@@ -141,7 +141,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `worktree_path` | string \| null | Absolute path; `null` if no worktree was created. |
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
 | `commits` | string[] | Commit SHAs created during this run. |
-| `pr` | object \| null | `null` for all statuses except `shipped`. On the §5.1 downgrade (small + degraded → `review_pending_approval`), `branch` is non-null but `pr` is `null`. |
+| `pr` | object \| null | Non-null **only** when `status = shipped`. All other statuses — including `review_pending_approval` (whether reached via the large-scope path or the §5.1 downgrade), `merge_gate_blocked`, `plan_pending_approval`, the rejects, and `blocked` — leave `pr` as `null`. `branch` may still be non-null on these (see `branch` row). |
 | `review.must_fix_initial` | int | MUST_FIX count from first review pass. |
 | `review.should_fix` | int | SHOULD_FIX count carried out of the loop. |
 | `review.fix_cycles_used` | int | 0 when first pass was clean. |
@@ -191,7 +191,7 @@ Advisory only. cw acts on these without parsing prose.
 | `wait_for_ci` | `status = shipped` (always — `shipped` implies auto-merge enabled per §4.1) | cw polls CI; on success the orchestrator job is done. |
 | `user_approve_plan` | `status = plan_pending_approval` | Notify user that a large-scope plan is in Linear awaiting approval. |
 | `user_approve_review` | `status = review_pending_approval` | Notify user that a branch is pushed for review. |
-| `resolve_merge_gate` | `status = merge_gate_blocked` | Notify user that the prior pipeline PR must merge before re-dispatch. **No automatic resume** until §7 is specified. |
+| `resolve_merge_gate` | `status = merge_gate_blocked` | Notify user that the prior pipeline PR must merge first. The user then manually re-invokes `/auto-dev` for this ticket; no automatic re-dispatch exists. |
 
 Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`.
 
@@ -223,7 +223,7 @@ A degraded agent is one that returned ANY of:
 - `Could work be incomplete?: MAYBE` or `YES`
 - `Recommendation: EXIT_FOR_HUMAN_REVIEW`
 
-**Scan scope:** every agent that ran to completion in the pipeline — plan, impl, each reviewer in the parallel review fan-out, every fix-loop cycle (cycles 2–5 included), and prep-pr. A fix-loop cycle that itself reports degradation triggers `downgrade_applied`; this is independent from `fix_loop_escalated` (§5.2). If an agent did not emit a Health Check block at all, treat that agent as degraded — missing data is not healthy data.
+**Scan scope:** every agent that ran to completion in the pipeline — plan, impl, each reviewer in the parallel review fan-out, every fix-loop cycle (cycles 1–5, all included), and prep-pr. A fix-loop cycle that itself reports degradation triggers `downgrade_applied`; this is independent from `fix_loop_escalated` (§5.2). If an agent did not emit a Health Check block at all, treat that agent as degraded — missing data is not healthy data.
 
 ### 5.2 `health` Subfields
 
