@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -9,7 +10,11 @@ import pytest
 from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue, save_plan
-from cw.dispatch import consume_completed_sessions, dispatch_tick
+from cw.dispatch import (
+    consume_completed_sessions,
+    dispatch_tick,
+    persist_last_result,
+)
 from cw.events import record_event
 from cw.models import (
     ClientConfig,
@@ -28,7 +33,6 @@ from cw.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +349,69 @@ class TestConsumeCompletesTasks:
         # Second consume: cursor advanced, no new events
         completed2 = consume_completed_sessions()
         assert completed2 == 0
+
+
+class TestPersistLastResult:
+    @staticmethod
+    def _seed_session(session_id: str = "sess0001") -> Session:
+        s = Session(
+            id=session_id,
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/tmp/wt"),
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+        )
+        save_state(CwState(sessions=[s]))
+        return s
+
+    def test_persists_parsed_result(self, tmp_dispatch_dirs: Path) -> None:
+        self._seed_session("sess0001")
+        stdout = (
+            "narrative\n"
+            "<<<AUTO_DEV_RESULT\n"
+            '{"schema_version": 1, "ticket_id": "GEN-1", "status": "shipped",'
+            ' "stage_reached": "stage5_post_create",'
+            ' "scope": {"tier": "small", "files": 1, "lines_estimate": 5,'
+            ' "lines_actual": 5, "forbidden_touched": false},'
+            ' "plan_source": "linear_existing", "branch": "dev/gen-1",'
+            ' "worktree_path": "/tmp/wt", "fork_point_sha": "abc",'
+            ' "commits": ["c1"],'
+            ' "pr": {"number": 1, "url": "https://example.com",'
+            ' "auto_merge": true, "base": "main"},'
+            ' "review": {"must_fix_initial": 0, "should_fix": 0,'
+            ' "fix_cycles_used": 0},'
+            ' "health": {"lowest_agent_confidence": "HIGH",'
+            ' "any_incomplete_risk": false, "shortcuts": [],'
+            ' "recommendation": "PROCEED", "downgrade_applied": false,'
+            ' "fix_loop_escalated": false},'
+            ' "friction_highlights": [], "blocker": null,'
+            ' "next_actions": ["wait_for_ci"]}\n'
+            "AUTO_DEV_RESULT>>>\n"
+        )
+        assert persist_last_result("sess0001", stdout) is True
+        state = load_state()
+        assert state.sessions[0].last_result is not None
+        assert state.sessions[0].last_result["status"] == "shipped"
+
+    def test_persists_blocked_for_missing_sentinel(
+        self,
+        tmp_dispatch_dirs: Path,
+    ) -> None:
+        self._seed_session("sess0002")
+        assert persist_last_result("sess0002", "no sentinel here\n") is True
+        state = load_state()
+        assert state.sessions[0].last_result is not None
+        assert state.sessions[0].last_result["status"] == "blocked"
+        assert state.sessions[0].last_result["blocker"]["reason"] == "no_result_emitted"
+
+    def test_returns_false_when_session_missing(
+        self,
+        tmp_dispatch_dirs: Path,
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        assert persist_last_result("nope0000", "anything") is False
 
 
 # ---------------------------------------------------------------------------

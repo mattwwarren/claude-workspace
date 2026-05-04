@@ -685,6 +685,38 @@ class TestMigrateCwState:
         migrated = migrate_cw_state(raw)
         assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
 
+    def test_v2_to_v3_fills_last_result_default(self) -> None:
+        raw = {
+            "schema_version": 2,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["last_result"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v3_last_result_preserved_idempotently(self) -> None:
+        existing = {"schema_version": 1, "status": "shipped"}
+        raw = {
+            "schema_version": 3,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": existing,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["last_result"] == existing
+
     def test_non_list_sessions_does_not_bump_version(self) -> None:
         # Malformed payload: sessions is not a list. The corruption must NOT
         # be certified as fully migrated — schema_version stays unchanged so

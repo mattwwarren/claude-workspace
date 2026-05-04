@@ -416,6 +416,29 @@ class TestSessionLinkageFields:
         assert restored == s
 
 
+class TestSessionLastResult:
+    def test_default_is_none(self) -> None:
+        s = Session(
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+        )
+        assert s.last_result is None
+
+    def test_round_trip_preserves_dict(self) -> None:
+        payload = {"schema_version": 1, "status": "shipped", "ticket_id": "X"}
+        s = Session(
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+            last_result=payload,
+        )
+        restored = Session.model_validate_json(s.model_dump_json())
+        assert restored.last_result == payload
+
+
 class TestCompletionReason:
     def test_enum_values(self) -> None:
         assert CompletionReason.USER.value == "user"

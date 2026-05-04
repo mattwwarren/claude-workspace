@@ -45,7 +45,7 @@ class QueueItemStatus(StrEnum):
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
-CW_STATE_SCHEMA_VERSION = 2
+CW_STATE_SCHEMA_VERSION = 3
 DEV_QUEUE_SCHEMA_VERSION = 1
 
 
@@ -221,6 +221,13 @@ class Session(BaseModel):
     completed_at: datetime | None = None
     parent_session_id: str | None = None
     worker_session_ids: list[str] = Field(default_factory=list)
+    # Sentinel-block summary parsed from a headless /auto-dev worker's stdout
+    # at completion time. ``None`` for any session that didn't run headless or
+    # whose stdout could not be parsed. Stored as a raw dict (rather than the
+    # AutoDevResult Pydantic model) so the persisted state file remains
+    # readable when the result schema bumps independently of cw's CW_STATE
+    # schema. See ``cw.auto_dev_result`` for the parser.
+    last_result: dict[str, Any] | None = None
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [

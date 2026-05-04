@@ -6,8 +6,9 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import AutoDevResult, parse_stdout
 from cw.cmux import get_cmux_adapter
-from cw.config import load_clients, load_orchestrator_config, load_state
+from cw.config import load_clients, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.models import (
@@ -205,10 +206,49 @@ def consume_completed_sessions() -> int:
         if completed:
             save_dev_queue(store)
 
+    # Persist sentinel-block summaries on Sessions whose completion event
+    # carried captured stdout. Producer side (worker stdout capture) is
+    # gated on the orchestrator P1.A wiring; this consumer is forward-
+    # compatible with events that lack a ``stdout`` payload.
+    for event in events:
+        session_id = event.payload.get("session_id")
+        stdout = event.payload.get("stdout")
+        if isinstance(session_id, str) and isinstance(stdout, str):
+            persist_last_result(session_id, stdout)
+
     # Advance cursor to the last event processed
     advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
 
     return completed
+
+
+def persist_last_result(session_id: str, stdout: str) -> bool:
+    """Parse *stdout* and write the result onto the matching Session.
+
+    Returns True if a session was updated, False if no match or if parsing
+    yielded nothing actionable. Never raises — parser failures surface as
+    a synthetic blocker dict on ``Session.last_result`` so post-hoc
+    inspection still has something to look at.
+    """
+    parsed = parse_stdout(stdout)
+    state = load_state()
+    target = None
+    for session in state.sessions:
+        if session.id == session_id:
+            target = session
+            break
+    if target is None:
+        _log.warning(
+            "persist_last_result: session %s not found in state",
+            session_id,
+        )
+        return False
+    if isinstance(parsed, AutoDevResult):
+        target.last_result = parsed.model_dump(mode="json")
+    else:
+        target.last_result = parsed.model_dump(mode="json")
+    save_state(state)
+    return True
 
 
 def run_dispatch_loop(
