@@ -208,6 +208,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _migrate_zellij_fields(session_raw)
             _coerce_session_origin(session_raw)
             _fill_linkage_field_defaults(session_raw)
+            _fill_last_result_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -258,6 +259,17 @@ def _fill_linkage_field_defaults(session_raw: dict[str, Any]) -> None:
         session_raw["parent_session_id"] = None
     if "worker_session_ids" not in session_raw:
         session_raw["worker_session_ids"] = []
+
+
+def _fill_last_result_default(session_raw: dict[str, Any]) -> None:
+    """Fill last_result introduced in schema v3.
+
+    Idempotent like the linkage defaults helper. Sessions that pre-date the
+    headless auto-dev parser have no last_result on disk; setting None
+    explicitly keeps the on-disk shape stable across re-saves.
+    """
+    if "last_result" not in session_raw:
+        session_raw["last_result"] = None
 
 
 def save_state(state: CwState) -> None:
