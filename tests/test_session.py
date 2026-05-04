@@ -1731,3 +1731,42 @@ class TestStartSessionParentLinkage:
         updated_parent = state.find_by_name_or_id("parent06")
         assert updated_parent is not None
         assert updated_parent.worker_session_ids == []
+
+    def test_parent_validation_runs_before_worktree_creation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """Bad --parent on a worktree-mode client must error BEFORE
+        create_worktree runs, so no on-disk worktree is orphaned.
+
+        Pins Item 2's stated motivation: a regression that re-orders parent
+        validation back below worktree creation would call create_worktree
+        and leave an orphaned worktree on disk before the validation error
+        fires. This spy catches that regression.
+        """
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+            f"    branch: main\n"
+        )
+
+        create_worktree_calls: list[tuple[object, ...]] = []
+
+        def spy_create_worktree(*args: object, **kwargs: object) -> Path:
+            create_worktree_calls.append(args)
+            msg = "create_worktree should not have been called"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.session.create_worktree", spy_create_worktree)
+
+        with pytest.raises(CwError, match="Parent session not found: bad-id"):
+            start_session(
+                "test-client", "impl", parent="bad-id", adapter=mock_cmux_adapter
+            )
+
+        assert create_worktree_calls == []
