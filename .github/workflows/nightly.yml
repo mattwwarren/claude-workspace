@@ -26,6 +26,13 @@ jobs:
         run: |
           brew tap manaflow-ai/cmux
           brew install --cask cmux
+          # GitHub macOS runners don't auto-index newly-installed .app
+          # bundles; both `open -ga cmux` and the cmux CLI's internal
+          # launch fail with "Unable to find application named 'cmux'"
+          # without this. Register the bundle with LaunchServices so it's
+          # findable by name. (Discovered via runs 25318255048 + 25318344296.)
+          LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+          "$LSREG" -f /Applications/cmux.app
 
       - name: Diagnose cmux install
         run: |
