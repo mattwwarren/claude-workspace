@@ -1660,3 +1660,74 @@ class TestStartSessionParentLinkage:
             start_session(
                 "test-client", "impl", parent="bad-id", adapter=mock_cmux_adapter
             )
+
+    def test_parent_validation_runs_before_backgrounded_short_circuit(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """Bad parent ID raises CwError even when a backgrounded session would
+        short-circuit (resume path)."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+
+        # Pre-create a backgrounded impl session that would normally trigger
+        # the resume_session short-circuit path.
+        existing_impl = Session(
+            id="existing-impl-bg-sc",
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.BACKGROUNDED,
+            workspace_path=sample_client.workspace_path,
+        )
+        save_state(CwState(sessions=[existing_impl]))
+
+        # Bad parent ID must error BEFORE resume_session is invoked.
+        with pytest.raises(CwError, match="Parent session not found: bad-id"):
+            start_session(
+                "test-client", "impl", parent="bad-id", adapter=mock_cmux_adapter
+            )
+
+        # Existing session must remain BACKGROUNDED — short-circuit never ran.
+        state = load_state()
+        assert len(state.sessions) == 1
+        assert state.sessions[0].status == SessionStatus.BACKGROUNDED
+
+    def test_parent_requires_impl_in_auto_purposes(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """--parent raises CwError when client.auto_purposes excludes 'impl'."""
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+            f"    auto_purposes: [idea, debt]\n"
+        )
+
+        parent_session = Session(
+            id="parent06",
+            name="test-client/debt",
+            client="test-client",
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client.workspace_path,
+        )
+        save_state(CwState(sessions=[parent_session]))
+
+        err_match = "--parent requires the client config to include 'impl'"
+        with pytest.raises(CwError, match=err_match):
+            start_session(
+                "test-client", "impl", parent="parent06", adapter=mock_cmux_adapter
+            )
+
+        # No new sessions created and parent unchanged.
+        state = load_state()
+        assert len(state.sessions) == 1
+        updated_parent = state.find_by_name_or_id("parent06")
+        assert updated_parent is not None
+        assert updated_parent.worker_session_ids == []
