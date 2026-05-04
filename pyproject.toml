@@ -53,6 +53,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "integration: end-to-end tests that shell out to external tools (tmux, cmux)",
+    "cmux: requires a live cmux daemon (macOS only); run nightly via .github/workflows/nightly.yml",
 ]
 
 [tool.ruff]

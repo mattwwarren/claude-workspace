@@ -1,0 +1,57 @@
+name: Nightly (cmux integration)
+
+on:
+  schedule:
+    # 09:00 UTC daily (~02:00 PT / ~05:00 ET) — off peak
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  cmux-integration:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Install cmux
+        run: |
+          brew tap manaflow-ai/cmux
+          brew install --cask cmux
+
+      - name: Start cmux daemon
+        run: |
+          # cmux expects its socket at ~/Library/Application Support/cmux/cmux.sock
+          # TODO: confirm the actual daemon launch command (e.g. `cmux daemon &`)
+          mkdir -p "$HOME/Library/Application Support/cmux"
+          cmux daemon &
+          for _ in $(seq 1 20); do
+            if [ -S "$HOME/Library/Application Support/cmux/cmux.sock" ]; then
+              echo "cmux socket ready"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::cmux socket never appeared"
+          exit 1
+
+      - name: Test (cmux integration)
+        run: uv run pytest tests/ -v --tb=short -m cmux
+
+      - name: Upload cmux logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: cmux-logs
+          path: |
+            ~/Library/Logs/cmux/**
+            ~/Library/Application Support/cmux/**/*.log
+          if-no-files-found: ignore
