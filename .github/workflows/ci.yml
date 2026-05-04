@@ -17,6 +17,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # diff-cover needs main's history to compute the patch diff
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
@@ -49,6 +52,12 @@ jobs:
 
       - name: Test (tmux integration)
         run: uv run pytest tests/ -v --tb=short -m integration
+
+      - name: Patch coverage (diff-cover vs origin/main)
+        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest'
+        run: |
+          git fetch origin main --depth=0 || git fetch origin main
+          uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90
 
       - name: Upload coverage artifact
         if: matrix.os == 'ubuntu-latest'
