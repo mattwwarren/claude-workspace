@@ -33,15 +33,29 @@ jobs:
           # TODO: confirm the actual daemon launch command (e.g. `cmux daemon &`)
           mkdir -p "$HOME/Library/Application Support/cmux"
           cmux daemon &
+          DAEMON_PID=$!
+          echo "DAEMON_PID=$DAEMON_PID" >> "$GITHUB_ENV"
           for _ in $(seq 1 20); do
             if [ -S "$HOME/Library/Application Support/cmux/cmux.sock" ]; then
-              echo "cmux socket ready"
+              # Verify daemon is still alive after socket appears.
+              if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+                echo "::error::cmux daemon exited after socket appeared"
+                exit 1
+              fi
+              echo "cmux socket ready (pid=$DAEMON_PID)"
               exit 0
             fi
             sleep 0.5
           done
           echo "::error::cmux socket never appeared"
           exit 1
+
+      - name: Stop cmux daemon
+        if: always()
+        run: |
+          if [ -n "${DAEMON_PID:-}" ]; then
+            kill "$DAEMON_PID" 2>/dev/null || true
+          fi
 
       - name: Test (cmux integration)
         run: uv run pytest tests/ -v --tb=short -m cmux
