@@ -1274,6 +1274,45 @@ def test_start_session_launch_message_names_backend(
     assert "Launching tmux surfaces" in out
 
 
+def test_start_session_spawn_failure_leaves_state_unchanged(
+    tmp_config_dir: Path,
+    sample_client: ClientConfig,
+) -> None:
+    """If spawn raises mid-loop, on-disk state is unchanged from pre-call.
+
+    Pins the invariant from issue #63: state persists once at the end after
+    every surface has been spawned. Partial-success window (sessions linked
+    on disk without surface_ref) must not exist.
+    """
+    clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+    clients_file.write_text(
+        f"clients:\n"
+        f"  test-client:\n"
+        f"    workspace_path: {sample_client.workspace_path}\n"
+    )
+
+    # Snapshot pre-call state file (empty initially).
+    pre_state = load_state()
+    pre_session_count = len(pre_state.sessions)
+
+    # Adapter that fails on the second spawn — first one succeeds, then boom.
+    class FlakyAdapter(FakeCmuxAdapter):
+        def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
+            if len(self.calls["spawn"]) >= 1:
+                msg = "simulated spawn failure"
+                raise CwError(msg)
+            return super().spawn(workspace, command, surface)
+
+    adapter = FlakyAdapter()
+
+    with pytest.raises(CwError, match="simulated spawn failure"):
+        start_session("test-client", "impl", adapter=adapter)
+
+    # Post-call: state file must be unchanged (no partial sessions persisted).
+    post_state = load_state()
+    assert len(post_state.sessions) == pre_session_count
+
+
 class TestBackgroundAllSessions:
     def test_backgrounds_all_active(
         self,
