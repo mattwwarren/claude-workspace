@@ -926,10 +926,28 @@ def dev_queue_status(client: str | None) -> None:
     default=False,
     help="Respect the persisted DispatchPlan ordering when claiming tasks.",
 )
+@click.option(
+    "--parent",
+    default=None,
+    help=(
+        "Orchestrator session ID. Spawned workers are linked back via "
+        "parent_session_id + worker_session_ids."
+    ),
+)
 @handle_errors
-def dev_queue_run(max_parallel: int | None, once: bool, use_plan: bool) -> None:
+def dev_queue_run(
+    max_parallel: int | None,
+    once: bool,
+    use_plan: bool,
+    parent: str | None,
+) -> None:
     """Run the dispatch loop, spawning sessions for pending tickets."""
-    run_dispatch_loop(max_parallel=max_parallel, once=once, use_plan=use_plan)
+    run_dispatch_loop(
+        max_parallel=max_parallel,
+        once=once,
+        use_plan=use_plan,
+        parent=parent,
+    )
 
 
 _PLAN_DEFAULT_TIMEOUT = 300

@@ -204,6 +204,77 @@ class TestSpawnCreate:
         # FakeCmuxAdapter returns "fake-pane-1" for first spawn call
         assert state.sessions[0].surface_ref == "fake-pane-1"
 
+    def test_parent_linkage_writes_both_directions(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """spawn create with parent: worker.parent_session_id set and parent's
+        worker_session_ids list contains the new worker id (single state save).
+        """
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        adapter = FakeCmuxAdapter()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        # Seed a parent orchestrator session in state.
+        parent_workspace = tmp_path / "workspace" / "orch"
+        parent_workspace.mkdir(parents=True)
+        parent = Session(
+            name="orch/impl",
+            client="orch",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=parent_workspace,
+        )
+        state = load_state()
+        state.sessions.append(parent)
+        save_state(state)
+
+        worker_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-9 --headless",
+            surface="split",
+            label="auto-dev-GEN-9",
+            adapter=adapter,
+            parent=parent.id,
+        )
+
+        state = load_state()
+        worker = state.find_by_name_or_id(worker_id)
+        assert worker is not None
+        assert worker.parent_session_id == parent.id
+        refreshed_parent = state.find_by_name_or_id(parent.id)
+        assert refreshed_parent is not None
+        assert worker_id in refreshed_parent.worker_session_ids
+
+    def test_parent_not_found_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """spawn create with bogus parent ID: CwError, no session created, no spawn."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        adapter = FakeCmuxAdapter()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        with pytest.raises(CwError, match="Parent session not found"):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev GEN-9 --headless",
+                surface="split",
+                label=None,
+                adapter=adapter,
+                parent="does-not-exist",
+            )
+
+        # No worker session persisted, no surface spawned.
+        state = load_state()
+        assert state.sessions == []
+        assert adapter.calls["spawn"] == []
+
 
 class TestSpawnClose:
     """Tests for the spawn close business logic."""
