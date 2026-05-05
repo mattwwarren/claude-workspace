@@ -32,11 +32,14 @@ _WORKSPACE_HASH_CHARS = 8
 
 
 def slugify_branch(branch: str) -> str:
-    """Convert a branch name to a filesystem-safe slug.
+    """Convert a branch name to a worktree-safe slug.
 
-    Slashes become hyphens: ``feat/search`` -> ``feat-search``.
+    Collapses any run of disallowed characters into a single hyphen, then
+    strips leading/trailing hyphens. The allowed charset (``[A-Za-z0-9._-]``)
+    matches ``claude -w``'s worktree-name validator — anything outside this
+    set (path separators, ``#``, spaces, unicode) becomes ``-``.
     """
-    return re.sub(r"[/\\]+", "-", branch).strip("-")
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-")
 
 
 def _git_dir(client: ClientConfig) -> Path:
