@@ -86,7 +86,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ticket_id": "GEN-1234",
   "status": "shipped",
   "stage_reached": "stage5_post_create",
@@ -127,7 +127,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | int | Currently `1`. Bump rules in §8. |
+| `schema_version` | int | Currently `2` (legacy `1` still accepted during the rollout window). Bump rules in §8. |
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
 | `status` | string enum | See §4. |
 | `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
@@ -167,6 +167,7 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `scope_exceeded` | `--scope-limit small` rejected a Large ticket before impl started. |
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started. |
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details. |
+| `no_op` | Pre-flight detected the ticket already satisfied (or otherwise not work-bearing); no plan, no branch, no PR. Introduced at `schema_version=2`. Rationale: terse, neutral wording — does not presume the cause (already-merged dupe, invalid ticket, code already covers it). The actor (skill / cw) decides what to do via `next_actions` (typically `close_issue_as_completed`). |
 
 ### 4.2 `blocker.reason` (when `status = "blocked"`)
 
@@ -192,8 +193,9 @@ Advisory only. cw acts on these without parsing prose.
 | `user_approve_plan` | `status = plan_pending_approval` | Notify user that a large-scope plan is in Linear awaiting approval. |
 | `user_approve_review` | `status = review_pending_approval` | Notify user that a branch is pushed for review. |
 | `resolve_merge_gate` | `status = merge_gate_blocked` | Notify user that the prior pipeline PR must merge first. The user then manually re-invokes `/auto-dev` for this ticket; no automatic re-dispatch exists. |
+| `close_issue_as_completed` | `status = no_op` | Close the ticket as already completed (the work was a no-op because the system is already in the desired state). Consumer chooses how to close — Linear "Done", GitHub `gh issue close --reason completed`, etc. |
 
-Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`.
+Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`. `next_actions` is otherwise an open vocabulary — parsers MUST pass unknown actions through unchanged (do not act on them, do not reject the payload).
 
 ---
 
@@ -265,9 +267,16 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 
 ## 8. Versioning
 
-`schema_version: 1` is the current contract.
+`schema_version: 2` is the current contract. Parsers also accept `schema_version: 1` during the rollout window (the skill upgrades after this; old worker emissions still in flight must keep parsing).
 
-**Bump to 2 required when:**
+**Version history:**
+
+| Version | Changes |
+|---|---|
+| 1 | Initial contract. |
+| 2 | Added `no_op` status (§4.1) and `close_issue_as_completed` advisory action (§4.3). v1-tagged payloads with `status=no_op` are rejected as `validation_failed`. |
+
+**Bump required when:**
 - Any field is removed or renamed.
 - Any existing field's type or semantics change.
 - A new value is added to a closed enum (`status`, `stage_reached`).
@@ -278,7 +287,9 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 - A new `next_actions` entry is added (parsers already treat unknown actions as advisory).
 - A new `blocker.reason` value is added (open enum — see §4.2).
 
-When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. The skill SHOULD coordinate rollout so it does not emit a higher `schema_version` than deployed parsers support; this is a deployment-process concern (no in-band negotiation mechanism exists today). Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
+**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`).
+
+When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. **Order matters:** the parser must accept the new version BEFORE the skill emits it, otherwise in-flight emissions land in deployed parsers that don't recognize them. Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
 
 ---
 

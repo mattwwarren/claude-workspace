@@ -206,6 +206,40 @@ def _forbidden_area_payload() -> dict[str, Any]:
     return p
 
 
+def _no_op_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "ticket_id": "GEN-8",
+        "status": "no_op",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 0,
+            "lines_estimate": 0,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "linear_existing",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": ["close_issue_as_completed"],
+    }
+
+
 def _blocked_payload() -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -264,6 +298,7 @@ def _wrap_sentinel(payload: dict[str, Any]) -> str:
         _scope_exceeded_payload,
         _forbidden_area_payload,
         _blocked_payload,
+        _no_op_payload,
     ],
 )
 class TestStatusRoundTrips:
@@ -312,6 +347,16 @@ class TestSentinelFailureModes:
         result = parse_stdout(_wrap_sentinel(payload))
         assert isinstance(result, BlockedResult)
         assert result.blocker.reason == "schema_version_unsupported"
+
+    def test_schema_v2_accepted(self) -> None:
+        # A v1-shape payload should round-trip cleanly under schema_version=2;
+        # the only v2-exclusive surface is the no_op status, but every other
+        # field is unchanged.
+        payload = _shipped_payload()
+        payload["schema_version"] = 2
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.schema_version == 2
 
     def test_missing_schema_version(self) -> None:
         payload = _shipped_payload()
@@ -478,6 +523,30 @@ class TestInvariants:
     def test_terminal_reject_rejects_next_actions(self) -> None:
         p = _scope_exceeded_payload()
         p["next_actions"] = ["something"]
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_no_op_rejected_at_schema_v1(self) -> None:
+        # Per §8: new status values only valid at the version that introduced
+        # them. A v1-tagged payload with status=no_op is a producer bug —
+        # surface as validation_failed rather than silently accepting.
+        p = _no_op_payload()
+        p["schema_version"] = 1
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "validation_failed"
+
+    def test_no_op_rejects_branch(self) -> None:
+        # no_op is a pre-branch status — emitting a branch is a contract
+        # violation.
+        p = _no_op_payload()
+        p["branch"] = "dev/sneak"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_no_op_rejects_pr(self) -> None:
+        p = _no_op_payload()
+        p["pr"] = {"number": 1, "url": "x", "auto_merge": True, "base": "main"}
         with pytest.raises(ValidationError):
             AutoDevResult.model_validate(p)
 
