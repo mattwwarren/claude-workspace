@@ -6,15 +6,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-04
+
+First release of the **0.8.0 milestone** — substrate for autonomous
+`/auto-dev` dispatch via `cw`. This release ships parent/worker session
+linkage, the headless contract parser, the structured `AutoDevResult`
+sentinel, and the dispatch path that wires it all together.
+
+Skipping 0.7.0 — the work landed under a 0.8.0 milestone tag (cw#52–#55
+substrate, cw#56–#59 dispatch arc) and a single-digit-up bump matches
+the surface-area change.
+
+### Added
+- **Spawn API + bidirectional parent-child persistence** (#53, #65). New
+  `cw.spawn` module owns session creation; parent and worker sessions
+  reference each other via `parent_session_id` / `worker_session_ids`
+  fields on `Session`. Replaces the ad-hoc state writes in `start_session`.
+- **State schema v2** (#62). `Session` gains linkage fields. Migration
+  is automatic on read; old states are upgraded in place.
+- **Doctor linkage drift detection** (#55, #68). `cw doctor` reports
+  stale `worker_session_ids`, mismatched `parent_session_id`, and
+  asymmetric references as failed checks contributing to the exit code.
+  Each `linkage/*` check carries a remediation hint. `cw doctor --reap`
+  additionally reconciles phantom sessions via the surface liveness
+  check.
+- **Dispatch headless mode** (#78). `dispatch_tick` spawns daemon
+  workers with `--headless` and threads `parent_session_id` through so
+  the worker's `AutoDevResult` lands on the parent.
+- **AutoDevResult sentinel parser** (#57, #80). `cw.auto_dev_result`
+  parses the `<<<AUTO_DEV_RESULT … AUTO_DEV_RESULT>>>` block emitted by
+  headless `/auto-dev`, validates §3-§5 invariants, and persists the
+  result on the worker `Session`. Six failure modes return synthetic
+  `BlockedResult` rather than raising.
+- **AutoDevResult `schema_version: 2`** (#82). Adds the `no_op` status
+  (skill detected the ticket already satisfied; no plan, no branch, no
+  PR) and `close_issue_as_completed` advisory `next_actions` value.
+  v1-tagged payloads with v2-only statuses are rejected as
+  `validation_failed`. Parser accepts both v1 and v2 during the rollout
+  window.
+- **Headless `/auto-dev` contract spec** (#60, #69). New
+  `docs/headless-contract.md` documents the producer/consumer surface
+  the skill emits and `cw` consumes. Source of truth for cross-repo
+  drift checks.
+- **Project `/ship-it` command** (#61). `.claude/commands/ship-it.md`
+  used by the auto-dev pipeline's `/prep-pr` integration.
+
 ### Changed
-- Documenting prior behavior: since the linkage-drift detection in #68,
-  `cw doctor` reports parent/worker linkage drift (stale
-  `worker_session_ids`, mismatched `parent_session_id`, or asymmetric
-  references) as failed checks, which contribute to the overall doctor
-  exit code. Run `cw doctor` to inspect the report; remediation hints
-  are included in each `linkage/*` check's detail. `cw doctor --reap`
-  additionally reconciles phantom sessions detected via the surface
-  liveness check.
+- **CI hardening**:
+  - `mypy --strict` enforced project-wide (#73).
+  - 88% baseline coverage gate (#73).
+  - 90% **patch** coverage enforced via `diff-cover` on PRs (#79).
+  - Nightly cmux smoke run scaffolded (#73), launching cmux via the
+    macOS `.app` bundle (#74).
+- **Worktree slug charset** (#84). `slugify_branch` now matches
+  `claude -w`'s validator (`[A-Za-z0-9._-]+`) instead of just collapsing
+  path separators. Unblocks GitHub-issue ticket ids like `#7` from
+  `cw dev-queue` dispatch.
+
+### Fixed
+- **`start_session` parent edge cases** (#64, #72). Idempotent on
+  re-spawn; rejects parent IDs that don't exist; rejects self-parent.
+- **`start_session` dual `save_state`** (#63, #70). Single atomic
+  write — earlier flow wrote twice and could leave linkage half-applied
+  on crash.
+- **Dead `WorkerEntry.missing` field** (#66). Removed; tests tightened.
+
+### Removed
+- `WorkerEntry.missing` (#66) — never read by any consumer.
 
 ## [0.6.4] — 2026-05-01
 
