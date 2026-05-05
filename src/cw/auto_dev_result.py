@@ -28,7 +28,9 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 _log = logging.getLogger(__name__)
 
-SUPPORTED_SCHEMA_VERSION = 1
+# v1 is the legacy shape; v2 adds the `no_op` status. Both are accepted during
+# the rollout window — see docs/headless-contract.md §8.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
 _CLOSE_SENTINEL = "AUTO_DEV_RESULT>>>"
@@ -55,7 +57,12 @@ Status = Literal[
     "scope_exceeded",
     "forbidden_area",
     "blocked",
+    "no_op",
 ]
+# Statuses introduced after v1. Emitting one under schema_version=1 is a
+# producer bug — it would silently degrade for downstream tools that key off
+# the version field.
+_V2_STATUSES: frozenset[str] = frozenset({"no_op"})
 StageReached = Literal[
     "stage1_plan",
     "stage2_impl",
@@ -115,14 +122,14 @@ _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
     {"scope_exceeded", "forbidden_area", "blocked"},
 )
 _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
-    {"plan_pending_approval", "scope_exceeded", "forbidden_area"},
+    {"plan_pending_approval", "scope_exceeded", "forbidden_area", "no_op"},
 )
 
 
 class AutoDevResult(BaseModel):
     """Parsed sentinel block. All cross-field invariants from §3-§5 enforced."""
 
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     ticket_id: str
     status: Status
     stage_reached: StageReached
@@ -141,6 +148,15 @@ class AutoDevResult(BaseModel):
 
     @model_validator(mode="after")
     def _check_invariants(self) -> AutoDevResult:
+        # §8 status/version compat: v2-introduced statuses cannot ride on a
+        # v1-tagged payload.
+        if self.schema_version < 2 and self.status in _V2_STATUSES:
+            msg = (
+                f"status={self.status!r} requires schema_version>=2, "
+                f"got {self.schema_version}"
+            )
+            raise ValueError(msg)
+
         # §3.3 pr: non-null iff status == shipped
         if self.status == "shipped" and self.pr is None:
             msg = "pr must be non-null when status is 'shipped'"
@@ -307,11 +323,11 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
     # the field is missing or non-int. Pre-validate before handing to Pydantic
     # so the caller gets a structured surface instead of a ValidationError.
     raw_version = payload.get("schema_version")
-    if not isinstance(raw_version, int) or raw_version != SUPPORTED_SCHEMA_VERSION:
+    if not isinstance(raw_version, int) or raw_version not in SUPPORTED_SCHEMA_VERSIONS:
         _log.warning(
-            "auto-dev sentinel schema_version=%r unsupported (parser supports %d)",
+            "auto-dev sentinel schema_version=%r unsupported (parser supports %s)",
             raw_version,
-            SUPPORTED_SCHEMA_VERSION,
+            sorted(SUPPORTED_SCHEMA_VERSIONS),
         )
         return BlockedResult(
             blocker=Blocker(
@@ -319,7 +335,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
                 reason="schema_version_unsupported",
                 details=(
                     f"got schema_version={raw_version!r}, "
-                    f"parser supports {SUPPORTED_SCHEMA_VERSION}"
+                    f"parser supports {sorted(SUPPORTED_SCHEMA_VERSIONS)}"
                 ),
             ),
         )
@@ -335,6 +351,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         "scope_exceeded",
         "forbidden_area",
         "blocked",
+        "no_op",
     }:
         return BlockedResult(
             blocker=Blocker(
