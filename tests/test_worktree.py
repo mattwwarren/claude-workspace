@@ -36,6 +36,28 @@ class TestSlugifyBranch:
     def test_trailing_slash_stripped(self) -> None:
         assert slugify_branch("feat/") == "feat"
 
+    def test_hash_replaced(self) -> None:
+        # Regression: GitHub issue ids like "#7" used to leak through and
+        # break `claude -w` worktree path validation (issue #83). The double
+        # hyphen is fine — claude's segment validator allows `-`; readability
+        # is the lesser concern.
+        assert slugify_branch("auto-dev-#7") == "auto-dev--7"
+
+    def test_hash_run_collapses(self) -> None:
+        assert slugify_branch("auto-dev-##7") == "auto-dev--7"
+
+    def test_leading_hash_stripped(self) -> None:
+        assert slugify_branch("#7") == "7"
+
+    def test_spaces_replaced(self) -> None:
+        assert slugify_branch("feat search bar") == "feat-search-bar"
+
+    def test_unicode_replaced(self) -> None:
+        assert slugify_branch("feat-café") == "feat-caf"
+
+    def test_dots_and_underscores_preserved(self) -> None:
+        assert slugify_branch("v1.2_beta") == "v1.2_beta"
+
 
 class TestGitDir:
     def test_legacy_client(self, tmp_path: Path) -> None:
