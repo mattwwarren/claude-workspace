@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-05-04
+
+Patch release — fixes a queue-accounting bug introduced in 0.8.0 that
+caused every `cw dev-queue` task to stay `RUNNING` forever.
+
+### Fixed
+- **`session.completed` events now carry `ticket_id`** (#94, #95). The
+  reconciler emitted `SESSION_COMPLETED` without the `ticket_id` field,
+  so `consume_completed_sessions` skipped every event and dev-queue
+  tasks never transitioned to `COMPLETED`. Concurrency-cap accounting
+  treated stranded `RUNNING` tasks as live, progressively starving
+  available slots until the queue would refuse to dispatch anything new.
+  - **Producer side:** the reconciler now includes `ticket_id` in the
+    emitted payload whenever the session name parses as auto-dev,
+    mirroring what `session.spawned` already does.
+  - **Consumer side:** `consume_completed_sessions` falls back to
+    parsing `ticket_id` from `session_name` when the payload lacks it.
+    Drains historical `RUNNING` tasks whose completion events predate
+    the producer-side fix — no manual queue-file surgery needed.
+- `ticket_id_for_session` is now public (renamed from
+  `_ticket_id_for_session`) so dispatch and reconcile share the parsing
+  helper rather than duplicating the prefix logic.
+
 ## [0.8.0] — 2026-05-04
 
 First release of the **0.8.0 milestone** — substrate for autonomous
