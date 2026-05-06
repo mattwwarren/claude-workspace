@@ -109,7 +109,7 @@ def compute_drift(state: CwState, adapter: MultiplexerAdapter) -> ReconcileRepor
     return ReconcileReport(phantom_session_ids=phantoms)
 
 
-def _ticket_id_for_session(session_name: str) -> str | None:
+def ticket_id_for_session(session_name: str) -> str | None:
     """Extract the ticket id from a daemon session name, or None."""
     _, _, tail = session_name.partition("/")
     if tail.startswith(AUTO_DEV_LABEL_PREFIX):
@@ -176,18 +176,18 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
         session.completed_reason = CompletionReason.CRASHED
         session.completed_at = now
         phantom_names.append(session.name)
-        if session.origin is SessionOrigin.DAEMON:
-            ticket_id = _ticket_id_for_session(session.name)
-            if ticket_id:
-                ticket_ids_to_revert.append(ticket_id)
-        pending_events.append(
-            {
-                "session_id": session.id,
-                "session_name": session.name,
-                "client": session.client,
-                "crashed": True,
-            }
-        )
+        ticket_id = ticket_id_for_session(session.name)
+        if ticket_id and session.origin is SessionOrigin.DAEMON:
+            ticket_ids_to_revert.append(ticket_id)
+        payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "crashed": True,
+        }
+        if ticket_id:
+            payload["ticket_id"] = ticket_id
+        pending_events.append(payload)
 
     save_state(state)
     for payload in pending_events:

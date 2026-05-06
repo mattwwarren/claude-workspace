@@ -249,6 +249,40 @@ class TestConsumeCompletesTasks:
         completed = consume_completed_sessions()
         assert completed == 0
 
+    def test_consume_recovers_ticket_id_from_session_name(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Events without explicit ticket_id are recovered from session_name.
+
+        Drains historical RUNNING tasks whose completion events predate the
+        producer-side fix — see GitHub issue #94.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-700",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": "abc123",
+                "session_name": "test-client/auto-dev/GEN-700",
+                "client": "test-client",
+                "crashed": True,
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+
     def test_consume_advances_cursor(
         self,
         tmp_dispatch_dirs: Path,

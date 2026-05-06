@@ -8,11 +8,13 @@ from pathlib import Path
 from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.events import read_events
 from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
     DevQueueStore,
+    OrchestratorEventType,
     QueueItemStatus,
     Session,
     SessionOrigin,
@@ -144,6 +146,15 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     assert "TKT-1" in report.reverted_ticket_ids
     queue = load_dev_queue()
     assert queue.tasks[0].status == QueueItemStatus.PENDING
+
+    # The emitted SESSION_COMPLETED event must carry ticket_id so the
+    # dispatch consumer can mark queue tasks COMPLETED downstream.
+    events = read_events(
+        consumer="test-reconcile-emits-ticket-id",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(events) == 1
+    assert events[0].payload.get("ticket_id") == "TKT-1"
 
 
 def test_reconcile_noop_when_no_phantoms(
