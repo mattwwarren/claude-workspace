@@ -157,6 +157,39 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     assert events[0].payload.get("ticket_id") == "TKT-1"
 
 
+def test_reconcile_clears_session_id_on_revert(
+    tmp_config_dir: Path,
+) -> None:
+    """Revert clears the stamped session_id so respawn gets a clean slate.
+
+    If the stale session_id lingered on the reverted task, the next
+    dispatch_tick would briefly leave it on a freshly RUNNING task before
+    re-stamping with the new session_id, opening a window where a
+    last-second event from the OLD session could match. Clearing on
+    revert closes the window. See GitHub issue #97.
+    """
+    sess = _mk_session("sess-old", "dead-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TKT-CLEAR"
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TKT-CLEAR",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="old-session",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    adapter = FakeCmuxAdapter()
+    adapter.spawn("ws", "echo decoy")
+    reconcile(adapter)
+
+    queue = load_dev_queue()
+    assert queue.tasks[0].status == QueueItemStatus.PENDING
+    assert queue.tasks[0].session_id is None
+
+
 def test_reconcile_noop_when_no_phantoms(
     tmp_config_dir: Path,
 ) -> None:
