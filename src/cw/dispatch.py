@@ -17,7 +17,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
-from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile
+from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
 from cw.spawn import spawn_create_impl
 from cw.worktree import create_worktree
 
@@ -193,6 +193,14 @@ def consume_completed_sessions() -> int:
         store = load_dev_queue()
         for event in events:
             ticket_id = event.payload.get("ticket_id")
+            if not ticket_id:
+                # Fallback: recover ticket_id from the session_name for events
+                # produced before the reconciler emitted ticket_id explicitly.
+                # Drains historical RUNNING tasks whose completion events
+                # predate the producer-side fix.
+                session_name = event.payload.get("session_name")
+                if isinstance(session_name, str):
+                    ticket_id = ticket_id_for_session(session_name)
             if not ticket_id:
                 continue
             for task in store.tasks:
