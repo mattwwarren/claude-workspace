@@ -153,6 +153,22 @@ def dispatch_tick(
                 parent=parent,
             )
 
+            # Stamp session_id on the queued task so the completion consumer
+            # can match SESSION_COMPLETED events to the correct (current)
+            # session and reject stale events from prior crashed sessions
+            # for the same ticket. See GitHub issue #97.
+            with dev_queue_lock():
+                store = load_dev_queue()
+                for stored_task in store.tasks:
+                    if (
+                        stored_task.ticket_id == task.ticket_id
+                        and stored_task.client == client.name
+                        and stored_task.status == QueueItemStatus.RUNNING
+                    ):
+                        stored_task.session_id = session_id
+                        break
+                save_dev_queue(store)
+
             record_event(
                 OrchestratorEventType.SESSION_SPAWNED,
                 {
@@ -192,6 +208,17 @@ def consume_completed_sessions() -> int:
     with dev_queue_lock():
         store = load_dev_queue()
         for event in events:
+            # Crashed events are emitted by reconcile only. For DAEMON
+            # sessions reconcile has already reverted the task
+            # RUNNING → PENDING; marking the task COMPLETED here would
+            # shadow that revert and (worse) match the next freshly-
+            # respawned RUNNING task for the same ticket_id, falsely
+            # retiring a still-running session. For non-DAEMON crashed
+            # sessions reconcile does not touch the queue, so a blanket
+            # skip is conservative-safe (no queue task is expected to
+            # match anyway). See GitHub issue #97.
+            if event.payload.get("crashed"):
+                continue
             ticket_id = event.payload.get("ticket_id")
             if not ticket_id:
                 # Fallback: recover ticket_id from the session_name for events
@@ -203,14 +230,26 @@ def consume_completed_sessions() -> int:
                     ticket_id = ticket_id_for_session(session_name)
             if not ticket_id:
                 continue
+            event_session_id = event.payload.get("session_id")
             for task in store.tasks:
+                if task.ticket_id != ticket_id:
+                    continue
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                # Disambiguate stale events: when the event carries a
+                # session_id and the task has been stamped with one, they
+                # must agree. Either side missing a session_id falls back to
+                # ticket_id-only matching for backward compatibility with
+                # legacy tasks/events that predate the field.
                 if (
-                    task.ticket_id == ticket_id
-                    and task.status == QueueItemStatus.RUNNING
+                    isinstance(event_session_id, str)
+                    and task.session_id is not None
+                    and task.session_id != event_session_id
                 ):
-                    task.status = QueueItemStatus.COMPLETED
-                    completed += 1
-                    break
+                    continue
+                task.status = QueueItemStatus.COMPLETED
+                completed += 1
+                break
         if completed:
             save_dev_queue(store)
 

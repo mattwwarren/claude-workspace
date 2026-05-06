@@ -203,6 +203,11 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
                     and task.status == QueueItemStatus.RUNNING
                 ):
                     task.status = QueueItemStatus.PENDING
+                    # Drop the stamp from the prior (now-crashed) session so
+                    # the next dispatch_tick can re-stamp with the freshly
+                    # spawned session_id without a window where the task
+                    # carries a stale id. See GitHub issue #97.
+                    task.session_id = None
                     reverted.append(task.ticket_id)
             if reverted:
                 save_dev_queue(store)

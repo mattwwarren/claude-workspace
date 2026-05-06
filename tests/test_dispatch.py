@@ -202,6 +202,33 @@ class TestDispatchTickSpawnsSession:
         worker_ids = {w.id for w in workers}
         assert worker_ids.issubset(set(refreshed_parent.worker_session_ids))
 
+    def test_dispatch_tick_stamps_session_id_on_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """After spawn, the task carries the session_id from the spawner.
+
+        The completion consumer relies on this stamp to disambiguate
+        SESSION_COMPLETED events when an older session for the same ticket
+        crashed and was respawned. See GitHub issue #97.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-STAMP", client="test-client"))
+
+        adapter = FakeCmuxAdapter()
+        dispatch_tick(simple_config, adapter=adapter)
+
+        store = load_dev_queue()
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].session_id is not None
+        # The stamped session_id must match the spawned session in state.
+        spawned_state = load_state()
+        assert len(spawned_state.sessions) == 1
+        assert running[0].session_id == spawned_state.sessions[0].id
+
     def test_dispatch_tick_no_parent_leaves_linkage_empty(
         self,
         tmp_dispatch_dirs: Path,
@@ -342,7 +369,9 @@ class TestConsumeCompletesTasks:
         """Events without explicit ticket_id are recovered from session_name.
 
         Drains historical RUNNING tasks whose completion events predate the
-        producer-side fix — see GitHub issue #94.
+        producer-side fix — see GitHub issue #94. Only non-crashed events go
+        through this path; crashed events are skipped (see
+        ``test_consume_skips_crashed_events``).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -359,7 +388,173 @@ class TestConsumeCompletesTasks:
                 "session_id": "abc123",
                 "session_name": "test-client/auto-dev/GEN-700",
                 "client": "test-client",
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+
+    def test_consume_skips_crashed_events(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """crashed: true events must not mark tasks COMPLETED.
+
+        Reconcile is the authoritative actor for crashed sessions — it
+        reverts the task RUNNING → PENDING. The consumer must be a no-op
+        for these events; otherwise it shadows reconcile's revert and
+        falsely matches a freshly-respawned task with the same ticket_id.
+        See GitHub issue #97.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-CRASH",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-CRASH",
+                "session_id": "old-session",
+                "client": "test-client",
                 "crashed": True,
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
+
+    def test_consume_skips_crashed_events_via_session_name_fallback(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Crashed events are skipped before the session_name fallback runs.
+
+        Belt-and-suspenders: even if a crashed event lacks ticket_id and
+        only carries session_name, it must not be drained.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-CRASH-FB",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": "old-session",
+                "session_name": "test-client/auto-dev/GEN-CRASH-FB",
+                "client": "test-client",
+                "crashed": True,
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
+
+    def test_consume_rejects_event_with_mismatched_session_id(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A SESSION_COMPLETED event from an old session does not match a
+        respawn that already has a fresh session_id stamped on the task.
+
+        This guards the second failure mode in GitHub issue #97: stale
+        non-crashed events carrying an older session_id must not falsely
+        complete a freshly-respawned task.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-STALE",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="new-session",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-STALE",
+                "session_id": "old-session",
+                "client": "test-client",
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 0
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
+
+    def test_consume_completes_when_session_id_matches(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Matching session_id on event and task completes the task."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-MATCH",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="current-session",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-MATCH",
+                "session_id": "current-session",
+                "client": "test-client",
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+
+    def test_consume_falls_back_to_ticket_id_when_task_has_no_session_id(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Legacy tasks without session_id still match by ticket_id alone."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Task predates the session_id field — session_id stays None.
+        task = TicketTask(
+            ticket_id="GEN-LEGACY",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-LEGACY",
+                "session_id": "any-session",
+                "client": "test-client",
             },
         )
 
@@ -667,3 +862,94 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
     phantom = reloaded.find_by_name_or_id("phantom-daemon")
     assert phantom is not None
     assert phantom.status == SessionStatus.COMPLETED
+
+
+def test_crash_revert_respawn_rejects_old_event_completes_new(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+    simple_config: OrchestratorConfig,
+) -> None:
+    """End-to-end: crash → reconcile revert → respawn → consumer disambiguates.
+
+    Composes the three actors into the exact failure mode from GitHub
+    issue #97:
+
+    1. Task RUNNING with session_id="old-session" (phantom DAEMON session
+       in state).
+    2. dispatch_tick triggers reconcile, which reverts the task to
+       PENDING and clears session_id, then claims it again and stamps
+       the freshly-spawned session_id.
+    3. The reconcile-emitted SESSION_COMPLETED event (session_id="old",
+       crashed=True) is consumed and SKIPPED by the crashed guard — the
+       newly-RUNNING task stays RUNNING.
+    4. A subsequent SESSION_COMPLETED event matching the NEW session_id
+       is consumed and correctly completes the task.
+    """
+    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+    # Step 1: pre-existing phantom DAEMON session + RUNNING task with
+    # the old session's id stamped.
+    save_state(
+        CwState(
+            sessions=[
+                Session(
+                    id="old-session",
+                    name=f"{sample_client_config.name}/auto-dev/TKT-RACE",
+                    client=sample_client_config.name,
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client_config.workspace_path,
+                    surface_ref="dead",
+                ),
+            ]
+        )
+    )
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="TKT-RACE",
+                    client=sample_client_config.name,
+                    status=QueueItemStatus.RUNNING,
+                    session_id="old-session",
+                ),
+            ]
+        )
+    )
+
+    adapter = FakeCmuxAdapter()
+    adapter.spawn("decoy-ws", "echo")  # non-empty live set bypasses outage guard
+
+    # Step 2: tick triggers reconcile (revert + emit crashed event), then
+    # claims and respawns the same ticket with a new session id.
+    spawned = dispatch_tick(simple_config, adapter=adapter)
+    assert spawned == 1
+
+    queue = load_dev_queue()
+    running = queue.running()
+    assert len(running) == 1
+    new_session_id = running[0].session_id
+    assert new_session_id is not None
+    assert new_session_id != "old-session"
+
+    # Step 3: consume the queued events. The reconcile-emitted crashed
+    # event is skipped; the task stays RUNNING.
+    consume_completed_sessions()
+    queue = load_dev_queue()
+    assert queue.tasks[0].status == QueueItemStatus.RUNNING
+    assert queue.tasks[0].session_id == new_session_id
+
+    # Step 4: a real completion event for the NEW session arrives and
+    # correctly completes the task.
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {
+            "ticket_id": "TKT-RACE",
+            "session_id": new_session_id,
+            "client": sample_client_config.name,
+        },
+    )
+    completed = consume_completed_sessions()
+    assert completed == 1
+    assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED

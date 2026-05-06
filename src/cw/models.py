@@ -138,6 +138,13 @@ class TicketTask(BaseModel):
     scope_hint: str | None = None
     status: QueueItemStatus = QueueItemStatus.PENDING
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # Stamped by dispatch_tick after spawn_create_impl returns; cleared on
+    # reconcile revert. Used by consume_completed_sessions to disambiguate
+    # SESSION_COMPLETED events from old (crashed) sessions that share a
+    # ticket_id with a freshly-respawned task. None for legacy tasks
+    # persisted before this field existed — consumer falls back to
+    # ticket_id-only matching in that case.
+    session_id: str | None = None
 
 
 class DispatchPlan(BaseModel):
