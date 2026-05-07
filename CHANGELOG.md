@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-05-06
+
+Patch release — fixes a queue-accounting bug discovered while validating
+0.8.1 end-to-end. With 0.8.1's producer fix in place, `SESSION_COMPLETED`
+events now carry `ticket_id` — but `consume_completed_sessions` was
+matching on `ticket_id` alone, so a `crashed: true` event from a prior
+(reconcile-reverted) session could falsely COMPLETE a freshly-respawned
+task for the same ticket.
+
+### Fixed
+- **`consume_completed_sessions` now skips `crashed: true` events** and
+  matches non-crashed events on `session_id` when both sides have one
+  (#97, #98). Reconcile is the authoritative path for crashed sessions
+  (RUNNING → PENDING revert); the consumer no longer shadows that with a
+  spurious COMPLETED transition. Stale events from older sessions for
+  the same `ticket_id` are rejected via `session_id` disagreement.
+  - `TicketTask` gains a nullable `session_id` field stamped by
+    `dispatch_tick` after spawn returns and cleared by `reconcile` on
+    revert. Legacy tasks/events without the field fall back to
+    `ticket_id`-only matching for backward compatibility.
+
+### Known issues
+- Reconcile still has no clean-completion signal — workers that exit
+  successfully (`/auto-dev` returns to a bash prompt inside the tmux
+  pane) sit `RUNNING` indefinitely, and tmux-session kills are still
+  observed as `crashed: true` (now correctly skipped, but the queue
+  task ping-pongs RUNNING ↔ PENDING via dispatch respawn). Tracked in
+  #99 — not blocking this release; #98's fix prevents the false
+  COMPLETED transitions that previously masked the issue.
+
 ## [0.8.1] — 2026-05-04
 
 Patch release — fixes a queue-accounting bug introduced in 0.8.0 that
