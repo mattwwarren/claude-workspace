@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -771,6 +772,79 @@ def run_claude(extra_args: tuple[str, ...]) -> None:
     run_claude_wrapper(extra_args)
 
 
+@main.command(name="signal-stop")
+@handle_errors
+def signal_stop() -> None:
+    """Emit SESSION_COMPLETED on a Stop hook fire.
+
+    Reads the hook JSON from stdin, extracts ``cwd`` (the worktree path),
+    reads ``<cwd>/.claude/cw-context.json`` for cw correlation IDs,
+    transitions the matching Session to COMPLETED, and posts a
+    ``session.completed`` event to the inbox so the dispatch consumer
+    can transition the matching TicketTask to COMPLETED.
+
+    Wired in via ``.claude/settings.local.json`` written by spawn into
+    each dispatched session's worktree. Bypasses env-var loss under
+    ``claude --bg`` (see GitHub issue #133, design in #147).
+
+    Idempotent: a session already COMPLETED is a no-op (re-firing the
+    Stop hook on a subsequent turn won't double-record).
+
+    Best-effort: a missing or unreadable context file is a silent no-op
+    so hook execution never blocks claude from exiting.
+    """
+    try:
+        stdin_text = sys.stdin.read()
+    except (OSError, ValueError):
+        return
+    if not stdin_text:
+        return
+    try:
+        hook_payload = json.loads(stdin_text)
+    except json.JSONDecodeError:
+        return
+    cwd_value = hook_payload.get("cwd") if isinstance(hook_payload, dict) else None
+    if not isinstance(cwd_value, str):
+        return
+    context_path = Path(cwd_value) / ".claude" / "cw-context.json"
+    if not context_path.is_file():
+        return
+    try:
+        context = json.loads(context_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(context, dict):
+        return
+
+    cw_session_id = context.get("session_id")
+    if not isinstance(cw_session_id, str):
+        return
+
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == cw_session_id), None)
+    if session is None or session.status == SessionStatus.COMPLETED:
+        return
+
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = datetime.now(UTC)
+    session.completed_reason = CompletionReason.NORMAL
+    claude_session_id = hook_payload.get("session_id")
+    if isinstance(claude_session_id, str):
+        session.claude_session_id = claude_session_id
+    save_state(state)
+
+    payload: dict[str, object] = {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": context.get("client"),
+        "ticket_id": context.get("ticket_id"),
+        "claude_session_id": claude_session_id,
+        "hook_event": hook_payload.get("hook_event_name"),
+        "crashed": False,
+    }
+    record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+
 @main.command(name="pane-exited")
 @click.option("--client", "-c", required=True, help="Client name.")
 @click.option("--purpose", "-p", required=True, help="Session purpose.")
@@ -1042,22 +1116,19 @@ def _format_status_human(status: OrchestratorStatus) -> str:
         for t in status.pending_tickets
     )
 
-    lines.append("")
-    lines.append(f"Running sessions:  {len(status.running_sessions)}")
+    lines.extend(("", f"Running sessions:  {len(status.running_sessions)}"))
     lines.extend(
         f"  - {s.id}  {s.name}  status={s.status}" for s in status.running_sessions
     )
 
-    lines.append("")
-    lines.append(f"Monitored PRs:     {len(status.monitored_prs)}")
+    lines.extend(("", f"Monitored PRs:     {len(status.monitored_prs)}"))
     lines.extend(
         f"  - {pr.repo}#{pr.pr_number}  status={pr.status}"
         f"  unresolved={pr.unresolved_threads}"
         for pr in status.monitored_prs
     )
 
-    lines.append("")
-    lines.append(f"Recent events:     {len(status.recent_events)}")
+    lines.extend(("", f"Recent events:     {len(status.recent_events)}"))
     lines.extend(
         f"  - {e.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {e.id}  {e.type}"
         for e in status.recent_events
@@ -1256,7 +1327,7 @@ def _spawn_create_impl(
     return spawn_create_impl(
         client=client,
         worktree=worktree,
-        prompt=prompt_file.read_text(),
+        prompt=prompt_file.read_text(encoding="utf-8"),
         surface=surface,
         label=label,
         adapter=adapter,

@@ -151,6 +151,7 @@ def dispatch_tick(
                 label=label,
                 adapter=resolved_adapter,
                 parent=parent,
+                ticket_id=task.ticket_id,
             )
 
             # Stamp session_id on the queued task so the completion consumer
