@@ -827,6 +827,12 @@ def signal_stop() -> None:
 
     Best-effort: a missing or unreadable context file is a silent no-op
     so hook execution never blocks claude from exiting.
+
+    Defers when the hook payload carries a non-empty ``background_tasks``
+    list: the Stop hook fires at every main-agent turn boundary, and
+    dispatching a ``run_in_background: true`` subagent ends the parent's
+    turn while the subagent is still running. Completing the session
+    here would orphan the subagent. See issue #151.
     """
     try:
         stdin_text = sys.stdin.read()
@@ -853,6 +859,19 @@ def signal_stop() -> None:
 
     cw_session_id = context.get("session_id")
     if not isinstance(cw_session_id, str):
+        return
+
+    bg_tasks = hook_payload.get("background_tasks")
+    if isinstance(bg_tasks, list) and bg_tasks:
+        # Turn boundary with pending background work — leave the session
+        # in its current status; another Stop hook will fire when the bg
+        # work drains (the contract `claude --bg + run_in_background: true`
+        # relies on: the subagent's result arrives as the next main-agent
+        # turn, which then ends, firing Stop again with background_tasks
+        # empty). Without this guard, dispatching a run_in_background: true
+        # subagent causes the parent to be marked COMPLETED and, for
+        # DAEMON-origin sessions, killed via `claude stop`, orphaning the
+        # in-flight subagent. See issue #151.
         return
 
     state = load_state()
