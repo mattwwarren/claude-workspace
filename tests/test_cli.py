@@ -42,10 +42,12 @@ if TYPE_CHECKING:
 
 class TestCli:
     def test_version(self) -> None:
+        from cw import __version__
+
         runner = CliRunner()
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.8.3" in result.output
+        assert __version__ in result.output
 
     def test_help(self) -> None:
         runner = CliRunner()
