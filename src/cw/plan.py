@@ -20,8 +20,8 @@ from cw.spawn import spawn_create_impl
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.cmux import CmuxAdapter
     from cw.models import ClientConfig, TicketTask
+    from cw.native_daemon import NativeDaemonClient
 
 
 _DEFAULT_TIMEOUT_SECONDS = 300
@@ -100,7 +100,7 @@ class PlanResult:
 def run_planner(
     *,
     client: ClientConfig,
-    adapter: CmuxAdapter,
+    native_daemon: NativeDaemonClient | None = None,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
     poll_interval: float = _POLL_INTERVAL_SECONDS,
     client_filter: str | None = None,
@@ -108,9 +108,9 @@ def run_planner(
     """Spawn the /orchestrate-plan skill and collect its DispatchPlan output.
 
     Args:
-        client: Target client whose cmux workspace hosts the planner session.
-        adapter: cmux adapter used to spawn the session (FakeCmuxAdapter in
-            tests).
+        client: Target client whose worktree hosts the planner session.
+        native_daemon: Optional NativeDaemonClient (FakeNativeDaemonClient in
+            tests). Defaults to ``get_native_daemon_client()`` at call time.
         timeout_seconds: How long to wait for the planner to write its
             output JSON file before giving up.
         poll_interval: Seconds between output-path existence checks.
@@ -143,9 +143,8 @@ def run_planner(
         client=client,
         worktree=client.workspace_path,
         prompt=prompt,
-        surface="split",
         label=f"plan-{correlation_id}",
-        adapter=adapter,
+        native_daemon=native_daemon,
     )
 
     appeared = _wait_for_plan_output(

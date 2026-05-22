@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import json
-import shlex
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
 from cw.models import Session, SessionOrigin, SessionPurpose
+from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.cmux import CmuxAdapter
     from cw.models import ClientConfig
+    from cw.native_daemon import NativeDaemonClient
 
 
 _HOOK_SETTINGS_TEMPLATE = {
@@ -69,26 +69,26 @@ def spawn_create_impl(
     client: ClientConfig,
     worktree: Path,
     prompt: str,
-    surface: str,
     label: str | None,
-    adapter: CmuxAdapter,
+    native_daemon: NativeDaemonClient | None = None,
     parent: str | None = None,
     ticket_id: str | None = None,
 ) -> str:
-    """Create a daemon-spawned session.
+    """Create a daemon-spawned session via the native Claude background daemon.
 
-    Separated from the Click command so tests and the dispatch loop can
-    inject adapters directly. Returns the new session's ID.
+    Replaces the prior tmux/cmux-based path (see GitHub issue #150). The
+    worktree must already exist; cwd is passed to ``claude --bg`` so the
+    spawned agent inherits the right project context, picks up the
+    injected ``.claude/settings.local.json`` Stop hook, and reads the
+    correlation file at ``.claude/cw-context.json`` when signaling
+    completion.
 
-    Callers pass the prompt as a string. The CLI ``cw spawn`` reads it
-    from a file at the user-facing boundary; everything else inlines
-    directly. ``claude -w`` is NOT used — that flag takes a worktree
-    *name* and creates a nested worktree at a path cw cannot track. The
-    worktree is established by the caller (``create_worktree`` / the
-    interactive start path) and we just ``cd`` the spawned shell into it.
+    Returns the new cw session id. The Claude short session id (8 hex
+    chars) is stored on the Session as ``surface_ref`` so reconcile can
+    check liveness against the daemon's roster.
 
-    When *parent* is supplied, write bidirectional linkage in the same
-    state save: ``sess.parent_session_id = parent.id`` and append
+    When *parent* is supplied, writes bidirectional linkage in the same
+    state save: ``sess.parent_session_id = parent.id`` and appends
     ``sess.id`` to ``parent.worker_session_ids``. Raises :class:`CwError`
     if the parent session is not in state.
     """
@@ -101,12 +101,6 @@ def spawn_create_impl(
             msg = f"Parent session not found: {parent}"
             raise CwError(msg)
 
-    workspace = client.cmux_workspace or client.name
-    cwd = shlex.quote(str(worktree))
-
-    # Pre-create the Session so we can pass its ID into the spawned command
-    # via CW_SESSION_ID. The wrapper uses that to disambiguate when multiple
-    # daemon sessions share the same (client, purpose=impl) pair.
     session_label = label or "daemon"
     sess = Session(
         name=f"{client.name}/{session_label}",
@@ -119,8 +113,8 @@ def spawn_create_impl(
 
     # Inject Stop-hook config + correlation context into the worktree so
     # the spawned session emits a SESSION_COMPLETED event when its agent
-    # turn finishes — works even under ``claude --bg`` where env vars are
-    # not propagated. See GitHub issue #147.
+    # turn finishes — works under ``claude --bg`` where env vars are not
+    # propagated. See GitHub issue #147.
     _write_hook_context(
         worktree,
         session_id=sess.id,
@@ -130,14 +124,8 @@ def spawn_create_impl(
         ticket_id=ticket_id,
     )
 
-    env_prefix = (
-        f"CW_CLIENT={shlex.quote(client.name)} "
-        f"CW_PURPOSE={shlex.quote(SessionPurpose.IMPL.value)} "
-        f"CW_SESSION_ID={shlex.quote(sess.id)} "
-    )
-    command = f"cd {cwd} && {env_prefix}cw run-claude -- --print {prompt!r}"
-    surface_ref = adapter.spawn(workspace, command, surface)
-    sess.surface_ref = surface_ref
+    daemon = native_daemon or get_native_daemon_client()
+    sess.surface_ref = daemon.spawn_bg(cwd=worktree, prompt=prompt)
 
     if parent_session is not None:
         sess.parent_session_id = parent_session.id

@@ -1,21 +1,28 @@
-"""Reconcile cw session state with live multiplexer surfaces.
+"""Reconcile cw session state with live worker backends.
 
-The authoritative view of what is running lives in the multiplexer
-(tmux/cmux/fake). :func:`compute_drift` compares ``sessions.json`` against
-that view and returns a :class:`ReconcileReport` naming the sessions that
-have gone phantom — active/idle rows whose ``surface_ref`` no longer maps
-to any live surface. :func:`reconcile` applies the report.
+A cw session is "live" if its ``surface_ref`` is registered with at least
+one backend that supplies a liveness oracle. Today there are two:
+
+- the multiplexer (tmux/cmux/fake) for interactive sessions and legacy
+  daemon-via-tmux paths;
+- the native Claude background daemon for dispatched workers spawned via
+  ``claude --bg`` (see GitHub issue #150).
+
+:func:`compute_drift` unions both backends' live sets and returns a
+:class:`ReconcileReport` naming the sessions whose ``surface_ref``
+appears in neither. :func:`reconcile` applies the report.
 
 The split is deliberate: ``compute_drift`` is pure and testable in
 isolation; ``reconcile`` does the side-effecting work (state mutation,
 event emission, dev-queue revert).
 
-Transient-outage safety: ``reconcile`` refuses to mutate state when the
-adapter reports *zero* live surfaces but the persisted state still
+Transient-outage safety: ``reconcile`` refuses to mutate state when
+*both* backends report zero live entries but the persisted state still
 contains ACTIVE/IDLE sessions with surface refs. A temporary multiplexer
-hiccup would otherwise irreversibly mark every session as CRASHED.
-``compute_drift`` stays pure and does not apply this guard — callers that
-want drift-without-side-effects still get the full phantom list.
+hiccup, or a missing/unreadable native roster, would otherwise
+irreversibly mark every session as CRASHED. ``compute_drift`` stays pure
+and does not apply this guard — callers that want drift-without-side-
+effects still get the full phantom list.
 
 Race note: ``reconcile`` does ``load_state → mutate → save_state`` without
 a dedicated ``sessions.json`` file lock. This matches every other
@@ -42,10 +49,12 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
+from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
     from cw.cmux import MultiplexerAdapter
     from cw.models import CwState
+    from cw.native_daemon import NativeDaemonClient
 
 
 # Session-name prefix for DAEMON sessions spawned by the dispatch loop. The
@@ -86,26 +95,40 @@ class ReconcileReport:
     reverted_ticket_ids: list[str] = field(default_factory=list)
 
 
-def compute_drift(state: CwState, adapter: MultiplexerAdapter) -> ReconcileReport:
+def compute_drift(
+    state: CwState,
+    adapter: MultiplexerAdapter,
+    native_daemon: NativeDaemonClient | None = None,
+) -> ReconcileReport:
     """Return a report naming sessions whose surface is no longer live.
 
     An ACTIVE or IDLE session is phantom when:
     - it has a ``surface_ref`` (None means it was never spawned), AND
-    - that ref is not in ``adapter.list_surfaces()``.
+    - that ref is not in the multiplexer's live set, AND
+    - that ref is not in the native daemon's live set.
+
+    The two backends are unioned so a daemon-origin session with a short
+    Claude session id passes liveness via the roster, while an
+    interactive session with a tmux pane ref passes via the adapter.
 
     This function does not mutate state. It also does not distinguish
-    "backend reports zero live surfaces" from "backend is unreachable";
+    "backend reports zero live entries" from "backend is unreachable";
     that guard lives in :func:`reconcile`.
     """
-    live = adapter.list_surfaces()
+    daemon = native_daemon or get_native_daemon_client()
+    tmux_live = adapter.list_surfaces()
+    native_live = daemon.list_live_session_short_ids()
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
             continue
         if session.surface_ref is None:
             continue
-        if session.surface_ref not in live:
-            phantoms.append(session.id)
+        if session.surface_ref in tmux_live:
+            continue
+        if session.surface_ref in native_live:
+            continue
+        phantoms.append(session.id)
     return ReconcileReport(phantom_session_ids=phantoms)
 
 
@@ -117,23 +140,33 @@ def ticket_id_for_session(session_name: str) -> str | None:
     return None
 
 
-def _looks_like_backend_outage(state: CwState, live: set[str]) -> bool:
-    """True when the empty ``live`` set is almost certainly a backend outage.
+def _looks_like_backend_outage(
+    state: CwState, tmux_live: set[str], native_live: set[str]
+) -> bool:
+    """True when both backends are empty and the state still has live refs.
 
-    If the adapter returned an empty set *and* the persisted state has at
-    least one ACTIVE/IDLE session that was once given a surface_ref, we
-    assume the multiplexer is unreachable rather than "somehow every
-    session died at once". Aborting here is the difference between a
-    5-second cmux restart and permanent data loss.
+    If either backend returned a non-empty set, treat its absence on the
+    other as "the other backend has nothing live", not an outage — the
+    common case is dispatch using only the native daemon while the
+    multiplexer is idle (or vice versa).
+
+    If both backends are empty *and* the persisted state has at least one
+    ACTIVE/IDLE session that was once given a surface_ref, assume the
+    backends are unreachable rather than "somehow every session died at
+    once". Aborting here is the difference between a 5-second restart and
+    permanent data loss.
     """
-    if live:
+    if tmux_live or native_live:
         return False
     return any(
         s.surface_ref is not None and s.status in _LIVE_STATUSES for s in state.sessions
     )
 
 
-def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
+def reconcile(
+    adapter: MultiplexerAdapter,
+    native_daemon: NativeDaemonClient | None = None,
+) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
     Flips phantom ACTIVE/IDLE sessions to COMPLETED with
@@ -144,7 +177,7 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
 
     Returns an empty report without mutating state when
     :func:`_looks_like_backend_outage` matches — a transient multiplexer
-    restart must not trigger mass-reaping.
+    restart (or a missing native roster) must not trigger mass-reaping.
 
     Partial-failure note: state and the dev queue are separate files. If
     ``save_state`` succeeds but the subsequent dev-queue update raises,
@@ -154,12 +187,14 @@ def reconcile(adapter: MultiplexerAdapter) -> ReconcileReport:
     only be recovered by explicit operator action. This is an acceptable
     tradeoff for a file-based, single-user tool.
     """
+    daemon = native_daemon or get_native_daemon_client()
     state = load_state()
-    live = adapter.list_surfaces()
-    if _looks_like_backend_outage(state, live):
+    tmux_live = adapter.list_surfaces()
+    native_live = daemon.list_live_session_short_ids()
+    if _looks_like_backend_outage(state, tmux_live, native_live):
         return ReconcileReport()
 
-    drift = compute_drift(state, adapter)
+    drift = compute_drift(state, adapter, daemon)
     if not drift.phantom_session_ids:
         return drift
 

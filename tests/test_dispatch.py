@@ -33,6 +33,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -122,7 +123,8 @@ class TestDispatchTickSpawnsSession:
         add_ticket(task)
 
         adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
 
         assert spawned == 1
 
@@ -140,8 +142,8 @@ class TestDispatchTickSpawnsSession:
         assert sess.origin == SessionOrigin.DAEMON
         assert "GEN-100" in sess.name
 
-        # Adapter should have been called
-        assert len(adapter.calls["spawn"]) == 1
+        # Native daemon should have been called
+        assert len(daemon.spawn_calls) == 1
 
     def test_dispatch_tick_appends_headless_flag(
         self,
@@ -159,11 +161,12 @@ class TestDispatchTickSpawnsSession:
         add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
 
         adapter = FakeCmuxAdapter()
-        dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
 
-        assert len(adapter.calls["spawn"]) == 1
-        _workspace, command, _surface = adapter.calls["spawn"][0]
-        assert "/auto-dev GEN-300 --headless" in command
+        assert len(daemon.spawn_calls) == 1
+        _cwd, prompt = daemon.spawn_calls[0]
+        assert prompt == "/auto-dev GEN-300 --headless"
 
     def test_dispatch_tick_links_workers_to_parent(
         self,
@@ -191,7 +194,10 @@ class TestDispatchTickSpawnsSession:
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
         adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(cap2_config, adapter=adapter, parent=parent.id)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(
+            cap2_config, adapter=adapter, native_daemon=daemon, parent=parent.id
+        )
         assert spawned == 2
 
         state = load_state()
@@ -221,7 +227,8 @@ class TestDispatchTickSpawnsSession:
         add_ticket(TicketTask(ticket_id="GEN-STAMP", client="test-client"))
 
         adapter = FakeCmuxAdapter()
-        dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
 
         store = load_dev_queue()
         running = store.running()
@@ -243,7 +250,10 @@ class TestDispatchTickSpawnsSession:
         add_ticket(TicketTask(ticket_id="GEN-400", client="test-client"))
 
         adapter = FakeCmuxAdapter()
-        dispatch_tick(simple_config, adapter=adapter)  # parent omitted
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(
+            simple_config, adapter=adapter, native_daemon=daemon
+        )  # parent omitted
 
         state = load_state()
         worker = state.sessions[0]
@@ -270,10 +280,11 @@ class TestPerClientCapRespected:
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
         adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(cap2_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(cap2_config, adapter=adapter, native_daemon=daemon)
 
         assert spawned == 2
-        assert len(adapter.calls["spawn"]) == 2
+        assert len(daemon.spawn_calls) == 2
 
         store = load_dev_queue()
         assert len(store.running()) == 2
@@ -298,17 +309,18 @@ class TestNoDoubleDispatch:
         add_ticket(TicketTask(ticket_id="GEN-200", client="test-client"))
 
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
 
         # First tick claims the task
-        spawned1 = dispatch_tick(simple_config, adapter=adapter)
+        spawned1 = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
         assert spawned1 == 1
 
         # Second tick: running_count=1 >= cap=1, should skip
-        spawned2 = dispatch_tick(simple_config, adapter=adapter)
+        spawned2 = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
         assert spawned2 == 0
 
         # Only one spawn call total
-        assert len(adapter.calls["spawn"]) == 1
+        assert len(daemon.spawn_calls) == 1
 
         store = load_dev_queue()
         assert len(store.running()) == 1
@@ -704,7 +716,8 @@ class TestDispatchTickReturnsCount:
         add_ticket(TicketTask(ticket_id="GEN-501", client="test-client"))
 
         adapter = FakeCmuxAdapter()
-        count = dispatch_tick(cap2_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        count = dispatch_tick(cap2_config, adapter=adapter, native_daemon=daemon)
 
         assert count == 2
 
@@ -718,7 +731,8 @@ class TestDispatchTickReturnsCount:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         adapter = FakeCmuxAdapter()
-        count = dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        count = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
 
         assert count == 0
 
@@ -747,11 +761,12 @@ class TestDispatchTickReturnsCount:
         add_ticket(TicketTask(ticket_id="GEN-600", client="test-client"))
 
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         # cap=1, running=1 => should not spawn
-        count = dispatch_tick(simple_config, adapter=adapter)
+        count = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
 
         assert count == 0
-        assert len(adapter.calls["spawn"]) == 0
+        assert len(daemon.spawn_calls) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -788,8 +803,11 @@ class TestDispatchTickWithPlan:
         )
 
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         # cap=2 => should claim C first, then A
-        spawned = dispatch_tick(cap2_config, adapter=adapter, use_plan=True)
+        spawned = dispatch_tick(
+            cap2_config, adapter=adapter, native_daemon=daemon, use_plan=True
+        )
         assert spawned == 2
 
         store = load_dev_queue()
@@ -809,7 +827,10 @@ class TestDispatchTickWithPlan:
         add_ticket(TicketTask(ticket_id="GEN-SECOND", client="test-client"))
 
         adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(simple_config, adapter=adapter, use_plan=True)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(
+            simple_config, adapter=adapter, native_daemon=daemon, use_plan=True
+        )
         assert spawned == 1
 
         store = load_dev_queue()
@@ -835,7 +856,10 @@ class TestDispatchTickWithPlan:
         )
 
         adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(cap2_config, adapter=adapter, use_plan=True)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(
+            cap2_config, adapter=adapter, native_daemon=daemon, use_plan=True
+        )
         # cap=2: claims B first (per plan), then A (fallback)
         assert spawned == 2
 
@@ -893,11 +917,12 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
     )
 
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     # Non-empty live set bypasses reconcile's outage guard; "dead" ref still
     # isn't live so the phantom is reaped as intended.
     adapter.spawn("decoy-ws", "echo")
 
-    spawned = dispatch_tick(simple_config, adapter=adapter)
+    spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
     assert spawned == 1
 
     reloaded = load_state()
@@ -962,10 +987,11 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
 
     adapter = FakeCmuxAdapter()
     adapter.spawn("decoy-ws", "echo")  # non-empty live set bypasses outage guard
+    daemon = FakeNativeDaemonClient()
 
     # Step 2: tick triggers reconcile (revert + emit crashed event), then
     # claims and respawns the same ticket with a new session id.
-    spawned = dispatch_tick(simple_config, adapter=adapter)
+    spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
     assert spawned == 1
 
     queue = load_dev_queue()
@@ -1002,8 +1028,8 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
 # ---------------------------------------------------------------------------
 
 
-class _RaisingAdapter(FakeCmuxAdapter):
-    """Adapter whose ``spawn`` always raises the configured exception.
+class _RaisingNativeDaemon(FakeNativeDaemonClient):
+    """Native daemon whose ``spawn_bg`` always raises the configured exception.
 
     Used to exercise the spawn-failure containment added for issue #149:
     a single failure must not crash dispatch_tick.
@@ -1013,9 +1039,8 @@ class _RaisingAdapter(FakeCmuxAdapter):
         super().__init__()
         self._exc = exc
 
-    def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
-        # Record the attempt for parity with FakeCmuxAdapter call-tracking.
-        self.calls["spawn"].append((workspace, command, surface))
+    def spawn_bg(self, *, cwd: Path, prompt: str) -> str:
+        self.spawn_calls.append((cwd, prompt))
         raise self._exc
 
 
@@ -1023,9 +1048,9 @@ class TestDispatchTickSpawnErrors:
     """Spawn failure inside dispatch_tick is contained, not propagated.
 
     The dispatch loop is the substrate the dev queue runs on; a single
-    spawn failure (subprocess error, worktree error, adapter exception)
-    used to kill the entire loop and leave a half-claimed task at
-    ``status=RUNNING, session_id=None``.  These tests pin the new
+    spawn failure (subprocess error, worktree error, native-daemon
+    exception) used to kill the entire loop and leave a half-claimed task
+    at ``status=RUNNING, session_id=None``.  These tests pin the new
     behaviour: log + revert task to PENDING + don't propagate.
     """
 
@@ -1039,16 +1064,17 @@ class TestDispatchTickSpawnErrors:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-149A", client="test-client"))
 
-        adapter = _RaisingAdapter(
+        adapter = FakeCmuxAdapter()
+        daemon = _RaisingNativeDaemon(
             subprocess.CalledProcessError(
                 returncode=1,
-                cmd=["tmux", "split-window"],
-                output=b"no space for new pane",
+                cmd=["claude", "--bg"],
+                output=b"daemon unreachable",
             ),
         )
 
         caplog.set_level(logging.ERROR, logger="cw.dispatch")
-        spawned = dispatch_tick(simple_config, adapter=adapter)
+        spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
 
         assert spawned == 0
 
@@ -1083,12 +1109,13 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.create_worktree", _boom)
 
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
 
         caplog.set_level(logging.ERROR, logger="cw.dispatch")
-        spawned = dispatch_tick(simple_config, adapter=adapter)
+        spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
 
         assert spawned == 0
-        assert adapter.calls["spawn"] == []
+        assert daemon.spawn_calls == []
 
         queue = load_dev_queue()
         task = queue.tasks[0]
