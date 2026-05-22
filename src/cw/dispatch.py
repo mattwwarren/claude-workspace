@@ -143,7 +143,7 @@ def dispatch_tick(
                 # worked because that flag takes a name rather than a path.
                 worktree_path = create_worktree(client, branch)
 
-                label = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
+                label = branch
                 session_id = spawn_create_impl(
                     client=client,
                     worktree=worktree_path,

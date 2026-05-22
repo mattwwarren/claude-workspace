@@ -1009,7 +1009,7 @@ class _RaisingAdapter(FakeCmuxAdapter):
     a single failure must not crash dispatch_tick.
     """
 
-    def __init__(self, exc: BaseException) -> None:
+    def __init__(self, exc: Exception) -> None:
         super().__init__()
         self._exc = exc
 
@@ -1061,7 +1061,7 @@ class TestDispatchTickSpawnErrors:
         assert any(
             "spawn failed" in record.getMessage().lower()
             for record in caplog.records
-            if record.name == "cw.dispatch"
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
 
     def test_worktree_error_does_not_crash_loop(
@@ -1098,5 +1098,5 @@ class TestDispatchTickSpawnErrors:
         assert any(
             "spawn failed" in record.getMessage().lower()
             for record in caplog.records
-            if record.name == "cw.dispatch"
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
