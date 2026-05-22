@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -281,6 +282,72 @@ class TestSpawnCreate:
         state = load_state()
         assert state.sessions == []
         assert adapter.calls["spawn"] == []
+
+
+class TestHookContextInjection:
+    """Tests for the Stop-hook + cw-context file injection (issue #147)."""
+
+    def test_writes_settings_and_context_files(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """spawn_create_impl writes .claude/settings.local.json + cw-context.json."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        adapter = FakeCmuxAdapter()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        session_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 137 --headless",
+            surface="split",
+            label="auto-dev/137",
+            adapter=adapter,
+            ticket_id="137",
+        )
+
+        settings_path = worktree / ".claude" / "settings.local.json"
+        context_path = worktree / ".claude" / "cw-context.json"
+        assert settings_path.exists()
+        assert context_path.exists()
+
+        settings = json.loads(settings_path.read_text())
+        stop_hooks = settings["hooks"]["Stop"]
+        assert any(
+            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+        )
+
+        context = json.loads(context_path.read_text())
+        assert context["session_id"] == session_id
+        assert context["session_name"] == "test-client/auto-dev/137"
+        assert context["client"] == "test-client"
+        assert context["purpose"] == "impl"
+        assert context["ticket_id"] == "137"
+
+    def test_ticket_id_optional_writes_null(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """When no ticket_id is supplied, cw-context.json carries null."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        adapter = FakeCmuxAdapter()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="just do it",
+            surface="split",
+            label=None,
+            adapter=adapter,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["ticket_id"] is None
 
 
 class TestSpawnClose:
