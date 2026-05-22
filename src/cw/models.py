@@ -28,6 +28,7 @@ class CompletionReason(StrEnum):
     USER = "user"
     HANDOFF = "handoff"
     CRASHED = "crashed"
+    NORMAL = "normal"
 
 
 class SessionOrigin(StrEnum):

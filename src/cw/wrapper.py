@@ -1,21 +1,50 @@
 """Wrapper around Claude that signals cw on exit.
 
 Used as the pane command in the multiplexer workspace so ``cw`` can
-detect when Claude exits and transition the session to IDLE.
+detect when Claude exits and transition the session to IDLE or COMPLETED.
+
+Two modes:
+
+- **Interactive** — no ``--print`` in args. The wrapper passes stdin/stdout
+  through unchanged and signals IDLE on exit (legacy behavior).
+- **Headless** (``--print`` in args) — the wrapper captures stdout (tee'd
+  to the parent's stdout so terminal observers still see it), parses for
+  the ``<<<AUTO_DEV_RESULT…>>>`` sentinel block on exit, and signals
+  SESSION_COMPLETED when a result is found. See issue #99 for why we do
+  this here instead of from reconcile.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import AutoDevResult, parse_stdout
 from cw.config import events_dir, load_state, save_state
+from cw.events import record_event as record_orchestrator_event
 from cw.history import EventType, HistoryEvent, record_event
-from cw.models import SessionStatus
+from cw.models import (
+    CompletionReason,
+    OrchestratorEventType,
+    SessionStatus,
+)
+
+if TYPE_CHECKING:
+    from cw.models import CwState, Session
+
+_log = logging.getLogger(__name__)
+
+# Sliding-window cap for captured stdout in headless mode. The sentinel block
+# lives at the tail of stdout, so we keep the last N bytes and let earlier
+# noise fall off. 1 MiB comfortably holds any realistic auto-dev run.
+_TAIL_CAPTURE_BYTES = 1_048_576
 
 
 def _idle_signal_path(client: str, purpose: str) -> Path:
@@ -34,7 +63,6 @@ def _detect_claude_session_id(workspace_path: str) -> str | None:
     project_dir = Path.home() / ".claude" / "projects" / encoded
     if not project_dir.is_dir():
         return None
-    # Find the most recently modified .jsonl file
     candidates = sorted(
         project_dir.glob("*.jsonl"),
         key=lambda p: p.stat().st_mtime,
@@ -45,30 +73,116 @@ def _detect_claude_session_id(workspace_path: str) -> str | None:
     return candidates[0].stem
 
 
-def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
-    """Run Claude and signal IDLE on exit.
+def _is_headless(args: tuple[str, ...]) -> bool:
+    """True when ``--print`` appears in the args passed to claude."""
+    return "--print" in args or "-p" in args
 
-    Reads ``CW_CLIENT`` and ``CW_PURPOSE`` from the environment.  If
-    either is missing, runs Claude once and exits (no IDLE signaling).
+
+def _write_passthrough(chunk: bytes) -> None:
+    """Tee a chunk to fd 1 (parent stdout). Best-effort — errors are swallowed.
+
+    fd 1 may be closed or redirected to a non-writable target. Capture
+    still completes; only the user-visible tee is degraded.
+    """
+    with contextlib.suppress(OSError):
+        os.write(1, chunk)
+
+
+def _run_claude_streaming(
+    args: list[str],
+    *,
+    max_capture_bytes: int = _TAIL_CAPTURE_BYTES,
+) -> tuple[int, str]:
+    """Run claude with stdout streamed to parent and captured into a bounded buffer.
+
+    Returns ``(returncode, captured_text)``. The captured text is the last
+    ``max_capture_bytes`` of stdout, decoded with replacement. stderr is
+    inherited from the parent so terminal observers see errors live.
+    """
+    buf = bytearray()
+    proc = subprocess.Popen(
+        ["claude", *args],
+        stdout=subprocess.PIPE,
+        bufsize=0,
+    )
+    assert proc.stdout is not None  # noqa: S101 - guaranteed by PIPE above
+    try:
+        while True:
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                break
+            _write_passthrough(chunk)
+            buf.extend(chunk)
+            if len(buf) > max_capture_bytes:
+                del buf[: len(buf) - max_capture_bytes]
+    finally:
+        returncode = proc.wait()
+    return returncode, buf.decode("utf-8", errors="replace")
+
+
+def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
+    """Run Claude and signal cw on exit.
+
+    Reads ``CW_CLIENT`` and ``CW_PURPOSE`` from the environment. If either
+    is missing, runs Claude once and exits (no signaling).
+
+    In headless mode (``--print`` in args), captures stdout and parses for
+    the AUTO_DEV_RESULT sentinel block. If parsed, signals
+    SESSION_COMPLETED; otherwise falls back to SESSION_IDLED.
     """
     client = os.environ.get("CW_CLIENT")
     purpose = os.environ.get("CW_PURPOSE")
+    session_id_env = os.environ.get("CW_SESSION_ID")
 
     claude_args = list(extra_args)
-    # Resolve workspace path for session ID detection
     workspace_path = os.getcwd()
-    result = subprocess.run(["claude", *claude_args], check=False)
+
+    if _is_headless(extra_args):
+        returncode, captured = _run_claude_streaming(claude_args)
+    else:
+        result = subprocess.run(["claude", *claude_args], check=False)
+        returncode = result.returncode
+        captured = ""
 
     if not client or not purpose:
-        sys.exit(result.returncode)
+        sys.exit(returncode)
 
     claude_session_id = _detect_claude_session_id(workspace_path)
+
+    if captured and returncode == 0:
+        parsed = parse_stdout(captured)
+        if isinstance(parsed, AutoDevResult):
+            signal_completed(
+                client,
+                purpose,
+                result=parsed,
+                session_id=session_id_env,
+                claude_session_id=claude_session_id,
+            )
+            return
+
     signal_idle(
         client,
         purpose,
-        exit_code=result.returncode,
+        exit_code=returncode,
         claude_session_id=claude_session_id,
+        session_id=session_id_env,
     )
+
+
+def _resolve_session(
+    client: str,
+    purpose: str,
+    *,
+    session_id: str | None,
+    state: CwState,
+) -> Session | None:
+    """Look up the session by explicit ID first, then by (client, purpose)."""
+    if session_id:
+        for s in state.sessions:
+            if s.id == session_id:
+                return s
+    return state.find_session(client, purpose)
 
 
 def signal_idle(
@@ -77,10 +191,11 @@ def signal_idle(
     *,
     exit_code: int = 0,
     claude_session_id: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     """Transition the session to IDLE and write an event signal file."""
     state = load_state()
-    session = state.find_session(client, purpose)
+    session = _resolve_session(client, purpose, session_id=session_id, state=state)
     if session is None or session.status != SessionStatus.ACTIVE:
         return
 
@@ -113,3 +228,55 @@ def signal_idle(
             metadata={"exit_code": str(exit_code)},
         ),
     )
+
+
+def signal_completed(
+    client: str,
+    purpose: str,
+    *,
+    result: AutoDevResult,
+    session_id: str | None = None,
+    claude_session_id: str | None = None,
+) -> None:
+    """Transition the session to COMPLETED and emit SESSION_COMPLETED.
+
+    Idempotent: a no-op when the session is already COMPLETED (e.g. when
+    reconcile got there first via the phantom-pane path). Persists the
+    parsed ``result`` to ``session.last_result`` so the daemon's
+    consume_completed_sessions can route by status.
+    """
+    state = load_state()
+    session = _resolve_session(client, purpose, session_id=session_id, state=state)
+    if session is None:
+        _log.debug(
+            "signal_completed: no session found for client=%s purpose=%s id=%s",
+            client,
+            purpose,
+            session_id,
+        )
+        return
+    if session.status == SessionStatus.COMPLETED:
+        _log.debug(
+            "signal_completed: session %s already COMPLETED — no-op",
+            session.id,
+        )
+        return
+
+    now = datetime.now(UTC)
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = now
+    session.completed_reason = CompletionReason.NORMAL
+    session.last_result = result.model_dump(mode="json")
+    if claude_session_id:
+        session.claude_session_id = claude_session_id
+    save_state(state)
+
+    payload: dict[str, object] = {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": client,
+        "crashed": False,
+        "status": result.status,
+        "ticket_id": result.ticket_id,
+    }
+    record_orchestrator_event(OrchestratorEventType.SESSION_COMPLETED, payload)

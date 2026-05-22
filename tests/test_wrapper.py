@@ -5,19 +5,85 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from cw.auto_dev_result import AutoDevResult
 from cw.config import events_dir, load_state, save_state
+from cw.events import read_events
 from cw.history import EventType, load_history
-from cw.models import CwState, Session, SessionPurpose, SessionStatus
+from cw.models import (
+    CompletionReason,
+    CwState,
+    OrchestratorEventType,
+    Session,
+    SessionPurpose,
+    SessionStatus,
+)
 from cw.wrapper import (
     _detect_claude_session_id,
     _idle_signal_path,
+    _is_headless,
+    _run_claude_streaming,
     run_claude_wrapper,
+    signal_completed,
     signal_idle,
 )
+
+
+def _make_result(
+    *,
+    status: str = "shipped",
+    ticket_id: str = "T-1",
+) -> AutoDevResult:
+    """Build a minimal AutoDevResult that satisfies §3-§5 invariants."""
+    payload: dict[str, Any] = {
+        "schema_version": 2,
+        "ticket_id": ticket_id,
+        "status": status,
+        "stage_reached": "stage4b_pr_create",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 8,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": "auto-dev/T-1",
+        "fork_point_sha": "abc123",
+        "commits": ["c1"],
+        "pr": {
+            "number": 42,
+            "url": "https://example.com/pr/42",
+            "auto_merge": True,
+            "base": "main",
+        },
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "recommendation": "PROCEED",
+        },
+        "next_actions": ["wait_for_ci"],
+    }
+    if status == "no_op":
+        payload["status"] = "no_op"
+        payload["branch"] = None
+        payload["pr"] = None
+        payload["next_actions"] = []
+        payload["stage_reached"] = "stage1_plan"
+        payload["scope"]["lines_actual"] = None
+        payload["commits"] = []
+    return AutoDevResult.model_validate(payload)
+
+
+def _sentinel_stdout(result: AutoDevResult, *, prefix: str = "log line\n") -> str:
+    """Wrap a result payload in the AUTO_DEV_RESULT sentinel block."""
+    body = result.model_dump_json()
+    return f"{prefix}<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
 
 
 class TestIdleSignalPath:
@@ -284,3 +350,338 @@ class TestDetectClaudeSessionId:
             result = _detect_claude_session_id(workspace)
 
         assert result is None
+
+
+class TestIsHeadless:
+    def test_print_flag_long(self) -> None:
+        assert _is_headless(("--print", "hi"))
+
+    def test_print_flag_short(self) -> None:
+        assert _is_headless(("-p", "hi"))
+
+    def test_no_print_flag(self) -> None:
+        assert not _is_headless(("--resume",))
+
+    def test_empty_args(self) -> None:
+        assert not _is_headless(())
+
+
+class TestSignalCompleted:
+    def _seed_active_session(self, sid: str = "w1") -> Session:
+        sess = Session(
+            id=sid,
+            name="c/auto-dev/T-1",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+        return sess
+
+    def test_flips_active_to_completed(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_completed transitions ACTIVE → COMPLETED with NORMAL reason."""
+        self._seed_active_session("w1")
+        result = _make_result(status="shipped", ticket_id="T-1")
+
+        signal_completed("c", "impl", result=result, session_id="w1")
+
+        updated = load_state()
+        sess = updated.sessions[0]
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.completed_reason == CompletionReason.NORMAL
+        assert sess.completed_at is not None
+        assert sess.last_result is not None
+        assert sess.last_result["status"] == "shipped"
+        assert sess.last_result["ticket_id"] == "T-1"
+
+    def test_emits_session_completed_event(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_completed records SESSION_COMPLETED with crashed=False and status."""
+        self._seed_active_session("w2")
+        result = _make_result(status="no_op", ticket_id="T-9")
+
+        signal_completed("c", "impl", result=result, session_id="w2")
+
+        events = read_events(event_types=[OrchestratorEventType.SESSION_COMPLETED])
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["session_id"] == "w2"
+        assert ev.payload["client"] == "c"
+        assert ev.payload["crashed"] is False
+        assert ev.payload["status"] == "no_op"
+        assert ev.payload["ticket_id"] == "T-9"
+
+    def test_idempotent_when_already_completed(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_completed no-ops when session already COMPLETED."""
+        sess = Session(
+            id="done1",
+            name="c/auto-dev/T-1",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.COMPLETED,
+            completed_reason=CompletionReason.CRASHED,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+        result = _make_result(status="shipped", ticket_id="T-1")
+
+        signal_completed("c", "impl", result=result, session_id="done1")
+
+        updated = load_state()
+        # Original completion reason preserved (no overwrite from idempotency path).
+        assert updated.sessions[0].completed_reason == CompletionReason.CRASHED
+        assert updated.sessions[0].last_result is None
+        # No event emitted.
+        events = read_events(event_types=[OrchestratorEventType.SESSION_COMPLETED])
+        assert events == []
+
+    def test_no_session_is_noop(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_completed silently no-ops when no session exists."""
+        save_state(CwState(sessions=[]))
+        result = _make_result(status="shipped", ticket_id="T-1")
+        # Should not raise.
+        signal_completed("c", "impl", result=result, session_id="missing")
+
+    def test_session_id_lookup_disambiguates(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """When multiple impl sessions for one client exist, CW_SESSION_ID picks one."""
+        # Two ACTIVE impl sessions for same client (simulating parallel dispatch).
+        a = Session(
+            id="aaa",
+            name="c/auto-dev/T-1",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        b = Session(
+            id="bbb",
+            name="c/auto-dev/T-2",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[a, b]))
+        result = _make_result(status="shipped", ticket_id="T-2")
+
+        signal_completed("c", "impl", result=result, session_id="bbb")
+
+        updated = load_state()
+        sess_a = next(s for s in updated.sessions if s.id == "aaa")
+        sess_b = next(s for s in updated.sessions if s.id == "bbb")
+        assert sess_a.status == SessionStatus.ACTIVE
+        assert sess_b.status == SessionStatus.COMPLETED
+
+
+class TestHeadlessWrapper:
+    def test_print_with_sentinel_signals_completed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """--print + AUTO_DEV_RESULT in stdout → SESSION_COMPLETED, not IDLED."""
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "h1")
+
+        sess = Session(
+            id="h1",
+            name="c/auto-dev/T-1",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        result = _make_result(status="shipped", ticket_id="T-1")
+        captured = _sentinel_stdout(result)
+
+        with patch(
+            "cw.wrapper._run_claude_streaming",
+            return_value=(0, captured),
+        ):
+            run_claude_wrapper(("--print", "/auto-dev T-1 --headless"))
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.COMPLETED
+        assert updated.sessions[0].completed_reason == CompletionReason.NORMAL
+        # No IDLE signal file written for the completed path.
+        assert not _idle_signal_path("c", "impl").exists()
+
+    def test_print_without_sentinel_falls_back_to_idle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """--print but no sentinel block → falls back to signal_idle."""
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "h2")
+
+        sess = Session(
+            id="h2",
+            name="c/auto-dev/T-2",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        with patch(
+            "cw.wrapper._run_claude_streaming",
+            return_value=(0, "just some output, no sentinel here\n"),
+        ):
+            run_claude_wrapper(("--print", "/auto-dev T-2"))
+
+        updated = load_state()
+        # Idle path was taken, not completed.
+        assert updated.sessions[0].status == SessionStatus.IDLE
+
+    def test_print_nonzero_exit_skips_completed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """Nonzero exit code skips SESSION_COMPLETED even if sentinel is present.
+
+        A worker that crashed mid-write may still have emitted a partial
+        sentinel; we'd rather let reconcile's phantom-pane path handle it.
+        """
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "h3")
+
+        sess = Session(
+            id="h3",
+            name="c/auto-dev/T-3",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        result = _make_result(status="shipped", ticket_id="T-3")
+        captured = _sentinel_stdout(result)
+
+        with patch(
+            "cw.wrapper._run_claude_streaming",
+            return_value=(1, captured),
+        ):
+            run_claude_wrapper(("--print", "/auto-dev T-3"))
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.IDLE
+
+    def test_no_print_uses_subprocess_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """Interactive mode keeps subprocess.run + signal_idle, no streaming."""
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+
+        sess = Session(
+            id="i1",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        with (
+            patch("cw.wrapper.subprocess.run") as mock_run,
+            patch("cw.wrapper._run_claude_streaming") as mock_stream,
+        ):
+            mock_run.return_value = type("R", (), {"returncode": 0})()
+            run_claude_wrapper(("--resume",))
+
+        mock_stream.assert_not_called()
+        mock_run.assert_called_once_with(["claude", "--resume"], check=False)
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.IDLE
+
+
+class _FakeStdout:
+    """Drip-feed bytes chunk-by-chunk to mimic Popen.stdout."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    def read(self, _size: int) -> bytes:
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+
+class _FakePopen:
+    def __init__(self, chunks: list[bytes], returncode: int = 0) -> None:
+        self.stdout = _FakeStdout(chunks)
+        self._returncode = returncode
+
+    def wait(self) -> int:
+        return self._returncode
+
+
+class TestRunClaudeStreaming:
+    def test_captures_stdout_up_to_cap(self) -> None:
+        """Streaming run keeps only the tail when output exceeds the cap."""
+        chunks = [b"A" * 50, b"TAIL_MARKER"]
+
+        with (
+            patch("cw.wrapper.subprocess.Popen", return_value=_FakePopen(chunks)),
+            patch("cw.wrapper._write_passthrough"),  # silence stdout tee
+        ):
+            rc, captured = _run_claude_streaming([], max_capture_bytes=20)
+
+        assert rc == 0
+        # Tail-truncated buffer keeps the last 20 bytes, which must include the
+        # marker emitted at the very end.
+        assert "TAIL_MARKER" in captured
+        assert len(captured) <= 20
+
+    def test_captures_full_stdout_under_cap(self) -> None:
+        """Output below the cap is captured in full."""
+        chunks = [b"short output\n"]
+
+        with (
+            patch("cw.wrapper.subprocess.Popen", return_value=_FakePopen(chunks)),
+            patch("cw.wrapper._write_passthrough"),
+        ):
+            rc, captured = _run_claude_streaming([], max_capture_bytes=1024)
+
+        assert rc == 0
+        assert captured == "short output\n"
+
+    def test_propagates_returncode(self) -> None:
+        """Non-zero returncode from claude is surfaced unchanged."""
+        with (
+            patch(
+                "cw.wrapper.subprocess.Popen",
+                return_value=_FakePopen([b""], returncode=7),
+            ),
+            patch("cw.wrapper._write_passthrough"),
+        ):
+            rc, captured = _run_claude_streaming([])
+
+        assert rc == 7
+        assert captured == ""

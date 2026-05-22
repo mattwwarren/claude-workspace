@@ -54,9 +54,10 @@ def spawn_create_impl(
 
     workspace = client.cmux_workspace or client.name
     cwd = shlex.quote(str(worktree))
-    command = f"cd {cwd} && claude --print {prompt!r}"
-    surface_ref = adapter.spawn(workspace, command, surface)
 
+    # Pre-create the Session so we can pass its ID into the spawned command
+    # via CW_SESSION_ID. The wrapper uses that to disambiguate when multiple
+    # daemon sessions share the same (client, purpose=impl) pair.
     session_label = label or "daemon"
     sess = Session(
         name=f"{client.name}/{session_label}",
@@ -65,8 +66,16 @@ def spawn_create_impl(
         origin=SessionOrigin.DAEMON,
         workspace_path=client.workspace_path,
         worktree_path=worktree,
-        surface_ref=surface_ref,
     )
+
+    env_prefix = (
+        f"CW_CLIENT={shlex.quote(client.name)} "
+        f"CW_PURPOSE={shlex.quote(SessionPurpose.IMPL.value)} "
+        f"CW_SESSION_ID={shlex.quote(sess.id)} "
+    )
+    command = f"cd {cwd} && {env_prefix}cw run-claude -- --print {prompt!r}"
+    surface_ref = adapter.spawn(workspace, command, surface)
+    sess.surface_ref = surface_ref
 
     if parent_session is not None:
         sess.parent_session_id = parent_session.id
