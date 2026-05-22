@@ -42,4 +42,9 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 
 | # | Title | Status |
 |---|---|---|
+| [0000](0000-native-supervisor-migration.md) | Migrate session lifecycle to `claude --bg` + supervisor | Accepted |
 | [0001](0001-parked-tasks-pin-their-session.md) | Parked tasks pin their Session | Accepted |
+
+ADR-0000 is the foundational record — the trajectory it captures is
+assumed as ground truth by every subsequent ADR. Future ADRs start
+at 0002 and number sequentially.

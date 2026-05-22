@@ -2,6 +2,8 @@
 
 **Status:** Accepted
 **Driven by:** #58
+**Builds on:** [ADR-0000](0000-native-supervisor-migration.md) — assumes
+`claude --bg <id>` is the resume primitive.
 
 ## Decision
 
