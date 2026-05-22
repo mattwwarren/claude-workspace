@@ -1134,6 +1134,54 @@ class TestDoneSession:
         assert updated.sessions[0].completed_reason == CompletionReason.USER
         assert updated.sessions[0].completed_at is not None
 
+    def test_cleanup_failure_prevents_completed_transition(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_cmux_adapter: FakeCmuxAdapter,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.exceptions import WorktreeError
+
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+        wt_path = (
+            sample_client.workspace_path.parent / ".worktrees" / "feat-cleanup-fail"
+        )
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0006",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=wt_path,
+                    branch="feat/cleanup-fail",
+                )
+            ]
+        )
+        save_state(state)
+
+        def mock_remove_worktree(
+            client: object, branch: str, force: bool = False
+        ) -> None:
+            raise WorktreeError("worktree has uncommitted changes")
+
+        monkeypatch.setattr("cw.session.remove_worktree", mock_remove_worktree)
+
+        with pytest.raises(WorktreeError):
+            done_session("test-client/impl", cleanup=True)
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.ACTIVE
+
 
 class TestBackgroundNotify:
     def test_notify_calls_adapter_spawn(
