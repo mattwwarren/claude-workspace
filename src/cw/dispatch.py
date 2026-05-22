@@ -17,6 +17,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
+from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
 from cw.spawn import spawn_create_impl
 from cw.worktree import create_worktree
@@ -24,6 +25,7 @@ from cw.worktree import create_worktree
 if TYPE_CHECKING:
     from cw.cmux import CmuxAdapter
     from cw.models import OrchestratorConfig, TicketTask
+    from cw.native_daemon import NativeDaemonClient
 
 _DISPATCH_CONSUMER = "dispatch"
 _log = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ def dispatch_tick(
     *,
     use_plan: bool = False,
     parent: str | None = None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> int:
     """Run one dispatch tick.
 
@@ -96,8 +99,9 @@ def dispatch_tick(
         Number of sessions spawned during this tick.
     """
     resolved_adapter = adapter or get_cmux_adapter()
+    resolved_native_daemon = native_daemon or get_native_daemon_client()
     try:
-        reconcile(resolved_adapter)
+        reconcile(resolved_adapter, resolved_native_daemon)
     except Exception:
         _log.exception("reconcile failed during dispatch_tick; continuing")
     clients = load_clients()
@@ -148,9 +152,8 @@ def dispatch_tick(
                     client=client,
                     worktree=worktree_path,
                     prompt=f"/auto-dev {task.ticket_id} --headless",
-                    surface="split",
                     label=label,
-                    adapter=resolved_adapter,
+                    native_daemon=resolved_native_daemon,
                     parent=parent,
                     ticket_id=task.ticket_id,
                 )
@@ -338,6 +341,7 @@ def run_dispatch_loop(
     adapter: CmuxAdapter | None = None,
     use_plan: bool = False,
     parent: str | None = None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -352,6 +356,10 @@ def run_dispatch_loop(
         parent: Optional orchestrator session ID. Threaded into each
             dispatch tick so spawned workers are linked back to the
             caller's session.
+        native_daemon: Optional NativeDaemonClient for testing. Defaults
+            to ``get_native_daemon_client()`` at call time. Used for
+            spawning dispatched workers and the native side of
+            reconcile.
     """
     config = load_orchestrator_config()
 
@@ -361,6 +369,7 @@ def run_dispatch_loop(
         config = config.model_copy(update={"per_client_max_parallel": overridden})
 
     resolved_adapter = adapter or get_cmux_adapter()
+    resolved_native_daemon = native_daemon or get_native_daemon_client()
 
     while True:
         consume_completed_sessions()
@@ -369,6 +378,7 @@ def run_dispatch_loop(
             adapter=resolved_adapter,
             use_plan=use_plan,
             parent=parent,
+            native_daemon=resolved_native_daemon,
         )
 
         if once:

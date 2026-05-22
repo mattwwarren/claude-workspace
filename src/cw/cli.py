@@ -37,11 +37,13 @@ from cw.models import (
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TaskSpec,
     TicketTask,
 )
+from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
@@ -412,7 +414,7 @@ def _check_and_mark_dead_sessions() -> list[str]:
     Cheap passive reconciliation: called from every read path (``cw status``,
     ``cw list``, ``cw start``). The reconciler is idempotent and returns an
     empty list when nothing changed. :func:`cw.reconcile.reconcile` refuses
-    to mass-reap when the adapter reports an empty live set while active
+    to mass-reap when both backends report empty live sets while active
     sessions still have surface refs (backend-outage guard), so this helper
     is safe to run on every read path.
     """
@@ -420,7 +422,7 @@ def _check_and_mark_dead_sessions() -> list[str]:
         adapter = get_cmux_adapter()
     except CwError:
         return []
-    report = reconcile(adapter)
+    report = reconcile(adapter, get_native_daemon_client())
     return list(report.phantom_session_names)
 
 
@@ -877,6 +879,15 @@ def signal_stop() -> None:
     }
     record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
+    # Native bg workers stay registered with the Claude daemon as
+    # ``idle`` after their turn ends; without an explicit stop they
+    # accumulate in roster.json across dispatches (the very failure
+    # mode that motivated GitHub issue #150 in the first place). The
+    # stop call is best-effort: native_daemon.stop logs and swallows
+    # missing-binary / timeout errors rather than failing the hook.
+    if session.origin is SessionOrigin.DAEMON and session.surface_ref is not None:
+        get_native_daemon_client().stop(session.surface_ref)
+
 
 @main.command(name="pane-exited")
 @click.option("--client", "-c", required=True, help="Client name.")
@@ -1064,18 +1075,19 @@ def _run_plan_impl(
     *,
     client_name: str,
     timeout: int,
-    adapter: CmuxAdapter,
     client_filter: str | None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> int:
     """Spawn the planner, persist the result, and report status.
 
-    Separated from the Click command so tests can inject the cmux adapter
-    directly.  Returns 0 on success, 1 on validation/timeout failure.
+    Separated from the Click command so tests can inject a fake native
+    daemon client directly.  Returns 0 on success, 1 on validation/timeout
+    failure.
     """
     client_config = get_client(client_name)
     result = run_planner(
         client=client_config,
-        adapter=adapter,
+        native_daemon=native_daemon,
         timeout_seconds=timeout,
         client_filter=client_filter,
     )
@@ -1119,11 +1131,9 @@ def dev_queue_plan(client: str, timeout: int, filter_client: str | None) -> None
 
     On validation failure or timeout, the dev queue is left unchanged.
     """
-    adapter = get_cmux_adapter()
     exit_code = _run_plan_impl(
         client_name=client,
         timeout=timeout,
-        adapter=adapter,
         client_filter=filter_client,
     )
     if exit_code != 0:
@@ -1344,16 +1354,15 @@ def _spawn_create_impl(
     client: ClientConfig,
     worktree: Path,
     prompt_file: Path,
-    surface: str,
     label: str | None,
-    adapter: CmuxAdapter,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> str:
     """Create a daemon-spawned session.
 
-    Separated from the Click command so tests can inject adapters directly.
-    Reads the prompt from disk at this CLI boundary and inlines it into the
-    spawn — keeping all file IO at the user-facing edge. Delegates the
-    actual spawn to :func:`cw.spawn.spawn_create_impl`.
+    Separated from the Click command so tests can inject a fake daemon
+    client directly. Reads the prompt from disk at this CLI boundary and
+    inlines it into the spawn — keeping all file IO at the user-facing
+    edge. Delegates the actual spawn to :func:`cw.spawn.spawn_create_impl`.
 
     Returns the new session's ID.
     """
@@ -1361,9 +1370,8 @@ def _spawn_create_impl(
         client=client,
         worktree=worktree,
         prompt=prompt_file.read_text(encoding="utf-8"),
-        surface=surface,
         label=label,
-        adapter=adapter,
+        native_daemon=native_daemon,
     )
 
 
@@ -1371,10 +1379,15 @@ def _spawn_close_impl(
     *,
     session_id: str,
     adapter: CmuxAdapter,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
-    Separated from the Click command so tests can inject adapters directly.
+    Routes the underlying-backend close call based on session origin: a
+    DAEMON-origin session was spawned via ``claude --bg`` and is stopped
+    via the native daemon, while a USER-origin session lives in the
+    multiplexer and is closed via the adapter. Separated from the Click
+    command so tests can inject both clients directly.
     """
     state = load_state()
     sess = state.find_by_name_or_id(session_id)
@@ -1386,7 +1399,11 @@ def _spawn_close_impl(
         raise CwError(msg)
 
     if sess.surface_ref is not None:
-        adapter.close(sess.surface_ref)
+        if sess.origin is SessionOrigin.DAEMON:
+            daemon = native_daemon or get_native_daemon_client()
+            daemon.stop(sess.surface_ref)
+        else:
+            adapter.close(sess.surface_ref)
 
     sess.status = SessionStatus.COMPLETED
     sess.completed_at = datetime.now(UTC)
@@ -1398,13 +1415,6 @@ def _spawn_close_impl(
 @click.option("--client", "-c", default=None, help="Client name.")
 @click.option("--worktree", "-w", default=None, help="Worktree path.")
 @click.option("--prompt-file", "-f", default=None, help="Path to prompt file.")
-@click.option(
-    "--surface",
-    "-s",
-    default="split",
-    type=click.Choice(["split", "tab"]),
-    help="Surface type.",
-)
 @click.option("--label", "-l", default=None, help="Session label (default: daemon).")
 @click.pass_context
 @handle_errors
@@ -1413,7 +1423,6 @@ def spawn(
     client: str | None,
     worktree: str | None,
     prompt_file: str | None,
-    surface: str,
     label: str | None,
 ) -> None:
     """Spawn a daemon-managed Claude session or manage spawned sessions.
@@ -1445,14 +1454,11 @@ def spawn(
     # At this point client/worktree/prompt_file are guaranteed non-None
     # (the `if missing` guard above raised CwError if any were absent).
     client_config = get_client(cast("str", client))
-    adapter = get_cmux_adapter()
     session_id = _spawn_create_impl(
         client=client_config,
         worktree=Path(cast("str", worktree)),
         prompt_file=Path(cast("str", prompt_file)),
-        surface=surface,
         label=label,
-        adapter=adapter,
     )
     click.echo(session_id)
 

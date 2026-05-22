@@ -22,6 +22,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
     pass
@@ -51,7 +52,7 @@ def _make_prompt_file(tmp_path: Path, content: str = "Do the thing.") -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Unit-level tests (no Click runner, adapter injected directly)
+# Unit-level tests (no Click runner, fake daemon client injected directly)
 # ---------------------------------------------------------------------------
 
 
@@ -66,7 +67,7 @@ class TestSpawnCreate:
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path, "Implement the feature.")
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree" / "feat-branch"
         worktree.mkdir(parents=True)
 
@@ -74,9 +75,8 @@ class TestSpawnCreate:
             client=client,
             worktree=worktree,
             prompt_file=prompt_file,
-            surface="split",
             label="my-task",
-            adapter=adapter,
+            native_daemon=daemon,
         )
 
         # Session persisted
@@ -101,7 +101,7 @@ class TestSpawnCreate:
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path)
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True)
 
@@ -109,93 +109,53 @@ class TestSpawnCreate:
             client=client,
             worktree=worktree,
             prompt_file=prompt_file,
-            surface="split",
             label=None,
-            adapter=adapter,
+            native_daemon=daemon,
         )
 
         state = load_state()
         assert state.sessions[0].name == "test-client/daemon"
 
-    def test_adapter_receives_correct_spawn_args(
+    def test_daemon_receives_cwd_and_prompt(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """spawn create: adapter.spawn is called with workspace, command, surface."""
-        from cw.cli import _spawn_create_impl
+        """spawn_bg gets the worktree path and the raw prompt verbatim.
+
+        Regression guard: the old tmux path inlined env vars and a ``cd``
+        prefix into a shell command string. The native path passes cwd
+        separately and the prompt unmodified — no shell wrapping, no
+        ``cw run-claude`` indirection.
+        """
+        from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path, name="acme")
-        prompt_content = "Fix the login bug."
-        prompt_file = _make_prompt_file(tmp_path, prompt_content)
-        adapter = FakeCmuxAdapter()
+        prompt = "Fix the login bug."
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True)
 
-        _spawn_create_impl(
+        spawn_create_impl(
             client=client,
             worktree=worktree,
-            prompt_file=prompt_file,
-            surface="tab",
+            prompt=prompt,
             label=None,
-            adapter=adapter,
+            native_daemon=daemon,
         )
 
-        assert len(adapter.calls["spawn"]) == 1
-        workspace_arg, command_arg, surface_arg = adapter.calls["spawn"][0]
-        assert workspace_arg == "acme"
-        assert str(worktree) in command_arg
-        assert prompt_content in command_arg
-        assert surface_arg == "tab"
-        # Regression guard: claude's -w takes a worktree name, not a path. The
-        # spawn command must cd into the worktree instead of passing it via -w.
-        assert " -w " not in command_arg
-        assert command_arg.startswith("cd ")
-        # Daemon spawns go through `cw run-claude` so the wrapper can emit a
-        # SESSION_COMPLETED on clean exit (issue #99). Env vars carry the
-        # session identity through to the wrapper.
-        assert "cw run-claude -- --print" in command_arg
-        assert "CW_CLIENT=acme" in command_arg
-        assert "CW_PURPOSE=impl" in command_arg
-        assert "CW_SESSION_ID=" in command_arg
+        assert len(daemon.spawn_calls) == 1
+        cwd_arg, prompt_arg = daemon.spawn_calls[0]
+        assert cwd_arg == worktree
+        assert prompt_arg == prompt
 
-    def test_cmux_workspace_overrides_client_name(
+    def test_surface_ref_stores_native_short_id(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """spawn create: cmux_workspace field is used as workspace arg if set."""
-        from cw.cli import _spawn_create_impl
-
-        workspace = tmp_path / "workspace" / "acme"
-        workspace.mkdir(parents=True)
-        client = ClientConfig(
-            name="acme",
-            workspace_path=workspace,
-            cmux_workspace="my-custom-ws",
-        )
-        prompt_file = _make_prompt_file(tmp_path)
-        adapter = FakeCmuxAdapter()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
-
-        _spawn_create_impl(
-            client=client,
-            worktree=worktree,
-            prompt_file=prompt_file,
-            surface="split",
-            label=None,
-            adapter=adapter,
-        )
-
-        workspace_arg, _cmd, _surface = adapter.calls["spawn"][0]
-        assert workspace_arg == "my-custom-ws"
-
-    def test_surface_ref_stored_from_adapter(
-        self, tmp_config_dir: Path, tmp_path: Path
-    ) -> None:
-        """spawn create: surface_ref on session matches the adapter return value."""
+        """surface_ref carries the short Claude session id returned by spawn_bg."""
         from cw.cli import _spawn_create_impl
 
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path)
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True)
 
@@ -203,14 +163,13 @@ class TestSpawnCreate:
             client=client,
             worktree=worktree,
             prompt_file=prompt_file,
-            surface="split",
             label=None,
-            adapter=adapter,
+            native_daemon=daemon,
         )
 
         state = load_state()
-        # FakeCmuxAdapter returns "fake-pane-1" for first spawn call
-        assert state.sessions[0].surface_ref == "fake-pane-1"
+        # FakeNativeDaemonClient yields "00000001" for first spawn call.
+        assert state.sessions[0].surface_ref == "00000001"
 
     def test_parent_linkage_writes_both_directions(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -221,7 +180,7 @@ class TestSpawnCreate:
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True)
 
@@ -242,9 +201,8 @@ class TestSpawnCreate:
             client=client,
             worktree=worktree,
             prompt="/auto-dev GEN-9 --headless",
-            surface="split",
             label="auto-dev-GEN-9",
-            adapter=adapter,
+            native_daemon=daemon,
             parent=parent.id,
         )
 
@@ -263,7 +221,7 @@ class TestSpawnCreate:
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True)
 
@@ -272,16 +230,15 @@ class TestSpawnCreate:
                 client=client,
                 worktree=worktree,
                 prompt="/auto-dev GEN-9 --headless",
-                surface="split",
                 label=None,
-                adapter=adapter,
+                native_daemon=daemon,
                 parent="does-not-exist",
             )
 
-        # No worker session persisted, no surface spawned.
+        # No worker session persisted, no spawn called.
         state = load_state()
         assert state.sessions == []
-        assert adapter.calls["spawn"] == []
+        assert daemon.spawn_calls == []
 
 
 class TestHookContextInjection:
@@ -294,7 +251,7 @@ class TestHookContextInjection:
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True)
 
@@ -302,9 +259,8 @@ class TestHookContextInjection:
             client=client,
             worktree=worktree,
             prompt="/auto-dev 137 --headless",
-            surface="split",
             label="auto-dev/137",
-            adapter=adapter,
+            native_daemon=daemon,
             ticket_id="137",
         )
 
@@ -333,7 +289,7 @@ class TestHookContextInjection:
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True)
 
@@ -341,9 +297,8 @@ class TestHookContextInjection:
             client=client,
             worktree=worktree,
             prompt="just do it",
-            surface="split",
             label=None,
-            adapter=adapter,
+            native_daemon=daemon,
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
@@ -365,7 +320,7 @@ class TestSpawnClose:
             origin=SessionOrigin.DAEMON,
             status=SessionStatus.ACTIVE,
             workspace_path=workspace,
-            surface_ref="fake-pane-99",
+            surface_ref="abc12345",
         )
         state = CwState(sessions=[sess])
         save_state(state)
@@ -379,8 +334,9 @@ class TestSpawnClose:
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id=sess.id, adapter=adapter)
+        _spawn_close_impl(session_id=sess.id, adapter=adapter, native_daemon=daemon)
 
         state = load_state()
         closed = state.find_by_name_or_id(sess.id)
@@ -389,19 +345,47 @@ class TestSpawnClose:
         assert closed.completed_reason == CompletionReason.USER
         assert closed.completed_at is not None
 
-    def test_adapter_close_called_with_surface_ref(
+    def test_daemon_close_routes_through_native_daemon(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """spawn close: adapter.close receives the session's surface_ref."""
+        """DAEMON-origin sessions get stopped via claude stop, not adapter.close."""
         from cw.cli import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id=sess.id, adapter=adapter)
+        _spawn_close_impl(session_id=sess.id, adapter=adapter, native_daemon=daemon)
 
-        assert len(adapter.calls["close"]) == 1
-        assert adapter.calls["close"][0] == ("fake-pane-99",)
+        assert daemon.stop_calls == ["abc12345"]
+        assert adapter.calls["close"] == []
+
+    def test_user_origin_close_routes_through_adapter(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """USER-origin sessions still close via the multiplexer adapter."""
+        from cw.cli import _spawn_close_impl
+
+        workspace = tmp_path / "workspace" / "test-client"
+        workspace.mkdir(parents=True)
+        sess = Session(
+            id="user0001",
+            name="test-client/impl",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.USER,
+            status=SessionStatus.ACTIVE,
+            workspace_path=workspace,
+            surface_ref="tmux-pane-7",
+        )
+        save_state(CwState(sessions=[sess]))
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_close_impl(session_id="user0001", adapter=adapter, native_daemon=daemon)
+
+        assert adapter.calls["close"] == [("tmux-pane-7",)]
+        assert daemon.stop_calls == []
 
     def test_missing_session_raises_cw_error(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -410,9 +394,12 @@ class TestSpawnClose:
         from cw.cli import _spawn_close_impl
 
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         error_msg = ""
         try:
-            _spawn_close_impl(session_id="nonexistent", adapter=adapter)
+            _spawn_close_impl(
+                session_id="nonexistent", adapter=adapter, native_daemon=daemon
+            )
         except CwError as exc:
             error_msg = str(exc)
         else:
@@ -439,14 +426,17 @@ class TestSpawnClose:
         )
         save_state(CwState(sessions=[sess]))
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
 
         with pytest.raises(CwError, match="already completed"):
-            _spawn_close_impl(session_id="done1234", adapter=adapter)
+            _spawn_close_impl(
+                session_id="done1234", adapter=adapter, native_daemon=daemon
+            )
 
-    def test_no_surface_ref_skips_adapter_close(
+    def test_no_surface_ref_skips_backend_close(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """spawn close: adapter.close NOT called if surface_ref is None."""
+        """spawn close: neither backend is invoked when surface_ref is None."""
         from cw.cli import _spawn_close_impl
 
         workspace = tmp_path / "workspace" / "test-client"
@@ -463,10 +453,12 @@ class TestSpawnClose:
         )
         save_state(CwState(sessions=[sess]))
         adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id="nosurf1", adapter=adapter)
+        _spawn_close_impl(session_id="nosurf1", adapter=adapter, native_daemon=daemon)
 
         assert adapter.calls["close"] == []
+        assert daemon.stop_calls == []
         state = load_state()
         closed = state.find_by_name_or_id("nosurf1")
         assert closed is not None
@@ -479,7 +471,7 @@ class TestSpawnClose:
 
 
 class TestSpawnCLI:
-    """CLI-layer tests using CliRunner (adapter injected via env/monkeypatch)."""
+    """CLI-layer tests using CliRunner."""
 
     def test_spawn_create_missing_client_shows_error(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -22,6 +22,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import compute_drift, reconcile
 
 
@@ -46,20 +47,23 @@ def _mk_session(
 
 def test_compute_drift_empty_state_returns_empty_report() -> None:
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     state = CwState()
-    report = compute_drift(state, adapter)
+    report = compute_drift(state, adapter, daemon)
     assert report.phantom_session_ids == []
 
 
 def test_compute_drift_flags_active_session_with_missing_surface() -> None:
     adapter = FakeCmuxAdapter()  # no surfaces
+    daemon = FakeNativeDaemonClient()
     state = CwState(sessions=[_mk_session("s1", "missing-ref")])
-    report = compute_drift(state, adapter)
+    report = compute_drift(state, adapter, daemon)
     assert report.phantom_session_ids == ["s1"]
 
 
 def test_compute_drift_ignores_backgrounded_completed_and_refless() -> None:
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     state = CwState(
         sessions=[
             _mk_session("s-bg", "ref1", status=SessionStatus.BACKGROUNDED),
@@ -67,12 +71,13 @@ def test_compute_drift_ignores_backgrounded_completed_and_refless() -> None:
             _mk_session("s-noref", None, status=SessionStatus.ACTIVE),
         ]
     )
-    report = compute_drift(state, adapter)
+    report = compute_drift(state, adapter, daemon)
     assert report.phantom_session_ids == []
 
 
 def test_compute_drift_respects_live_set() -> None:
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     live_ref = adapter.spawn("ws", "echo hi")  # registers in live set
     state = CwState(
         sessions=[
@@ -80,24 +85,45 @@ def test_compute_drift_respects_live_set() -> None:
             _mk_session("dead", "gone"),
         ]
     )
-    report = compute_drift(state, adapter)
+    report = compute_drift(state, adapter, daemon)
     assert report.phantom_session_ids == ["dead"]
 
 
-def test_compute_drift_empty_live_set_from_adapter_is_reconciled() -> None:
-    """Adapters return empty on backend outage. That's 'no surfaces alive' —
-    so everything ACTIVE/IDLE with a surface_ref is phantom. The reconciler
-    trusts the adapter; callers who want "don't touch state when backend is
-    down" must guard before calling.
+def test_compute_drift_native_daemon_live_set_counts_as_alive() -> None:
+    """A surface_ref present in the native daemon's roster is not phantom.
+
+    Daemon-origin workers spawned via ``claude --bg`` store the short
+    Claude session id as ``surface_ref``. Reconcile must consider them
+    alive via the native roster even though the multiplexer adapter has
+    no record of them.
     """
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
+    native_ref = daemon.spawn_bg(cwd=Path("/tmp"), prompt="x")
+    state = CwState(
+        sessions=[
+            _mk_session("native-alive", native_ref),
+            _mk_session("native-dead", "no-such-short-id"),
+        ]
+    )
+    report = compute_drift(state, adapter, daemon)
+    assert report.phantom_session_ids == ["native-dead"]
+
+
+def test_compute_drift_empty_live_set_from_both_backends_is_reconciled() -> None:
+    """Both backends empty: every ACTIVE/IDLE session with a surface_ref is
+    phantom. The reconciler trusts the backends; callers who want
+    "don't touch state when backends are down" must guard before calling.
+    """
+    adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     state = CwState(
         sessions=[
             _mk_session("s1", "r1"),
             _mk_session("s2", "r2", status=SessionStatus.IDLE),
         ]
     )
-    report = compute_drift(state, adapter)
+    report = compute_drift(state, adapter, daemon)
     assert set(report.phantom_session_ids) == {"s1", "s2"}
 
 
@@ -109,8 +135,9 @@ def test_reconcile_marks_phantom_completed_crashed(
     save_state(state)
 
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     adapter.spawn("ws", "echo decoy")  # keep live set non-empty to bypass outage guard
-    report = reconcile(adapter)
+    report = reconcile(adapter, daemon)
 
     assert report.phantom_session_ids == ["s1"]
     assert report.phantom_session_names == ["client-a/s1"]
@@ -140,8 +167,9 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     adapter.spawn("ws", "echo decoy")  # non-empty live set bypasses outage guard
-    report = reconcile(adapter)
+    report = reconcile(adapter, daemon)
 
     assert "TKT-1" in report.reverted_ticket_ids
     queue = load_dev_queue()
@@ -182,8 +210,9 @@ def test_reconcile_clears_session_id_on_revert(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     adapter.spawn("ws", "echo decoy")
-    reconcile(adapter)
+    reconcile(adapter, daemon)
 
     queue = load_dev_queue()
     assert queue.tasks[0].status == QueueItemStatus.PENDING
@@ -194,11 +223,12 @@ def test_reconcile_noop_when_no_phantoms(
     tmp_config_dir: Path,
 ) -> None:
     adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     live_ref = adapter.spawn("ws", "echo")
     sess = _mk_session("alive", live_ref)
     save_state(CwState(sessions=[sess]))
 
-    report = reconcile(adapter)
+    report = reconcile(adapter, daemon)
     assert report.phantom_session_ids == []
     assert report.reverted_ticket_ids == []
 
@@ -206,10 +236,11 @@ def test_reconcile_noop_when_no_phantoms(
 def test_reconcile_refuses_to_mass_reap_on_empty_live_set(
     tmp_config_dir: Path,
 ) -> None:
-    """Transient backend outage: adapter returns empty, reconcile must abort.
+    """Transient backend outage: both backends empty, reconcile must abort.
 
-    Without this guard, a 5-second cmux/tmux restart during `cw status`
-    would mark every ACTIVE session COMPLETED+CRASHED irreversibly.
+    Without this guard, a 5-second multiplexer restart (or a missing
+    native roster) during ``cw status`` would mark every ACTIVE session
+    COMPLETED+CRASHED irreversibly.
     """
     state = CwState(
         sessions=[
@@ -220,7 +251,8 @@ def test_reconcile_refuses_to_mass_reap_on_empty_live_set(
     save_state(state)
 
     adapter = FakeCmuxAdapter()  # empty live set simulates backend outage
-    report = reconcile(adapter)
+    daemon = FakeNativeDaemonClient()  # native roster also empty
+    report = reconcile(adapter, daemon)
 
     assert report.phantom_session_ids == []
     assert report.phantom_session_names == []
@@ -232,3 +264,24 @@ def test_reconcile_refuses_to_mass_reap_on_empty_live_set(
         assert s is not None
         assert s.status in {SessionStatus.ACTIVE, SessionStatus.IDLE}
         assert s.completed_reason is None
+
+
+def test_reconcile_with_only_native_live_proceeds(
+    tmp_config_dir: Path,
+) -> None:
+    """Non-empty native live set bypasses the outage guard even when the
+    multiplexer is empty.
+
+    The outage guard only fires when *both* backends are empty. After the
+    issue #150 migration, dispatched workers register with the native
+    daemon and the multiplexer is empty in normal operation — so a
+    phantom must still be reaped.
+    """
+    save_state(CwState(sessions=[_mk_session("dead-native", "missing-short-id")]))
+
+    adapter = FakeCmuxAdapter()  # empty
+    daemon = FakeNativeDaemonClient()
+    daemon.spawn_bg(cwd=Path("/tmp"), prompt="decoy")  # native side non-empty
+    report = reconcile(adapter, daemon)
+
+    assert report.phantom_session_ids == ["dead-native"]

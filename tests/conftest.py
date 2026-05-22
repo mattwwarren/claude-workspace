@@ -12,6 +12,7 @@ import pytest
 
 from cw.cmux import FakeCmuxAdapter
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,6 +55,16 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.DEV_PLAN_FILE", state_dir / "dev_plan.json")
     monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", state_dir / ".dev_plan.lock")
     monkeypatch.setattr("cw.config.DEV_PLAN_OUTPUT_DIR", state_dir / "plan_output")
+
+    # Redirect the native-daemon roster path so tests don't read the
+    # user's real ~/.claude/daemon/roster.json. RealNativeDaemonClient
+    # tolerates a missing file (returns empty set), so this isolates the
+    # native side of reconcile for any test that doesn't explicitly
+    # inject a fake daemon client.
+    monkeypatch.setattr(
+        "cw.native_daemon._ROSTER_PATH",
+        tmp_path / ".claude" / "daemon" / "roster.json",
+    )
 
     return tmp_path
 
@@ -135,6 +146,12 @@ def sample_state(sample_client: ClientConfig) -> CwState:
 def mock_cmux_adapter() -> FakeCmuxAdapter:
     """A FakeCmuxAdapter for testing session operations."""
     return FakeCmuxAdapter()
+
+
+@pytest.fixture
+def mock_native_daemon() -> FakeNativeDaemonClient:
+    """A FakeNativeDaemonClient for testing daemon-origin spawn and reconcile."""
+    return FakeNativeDaemonClient()
 
 
 @pytest.fixture
