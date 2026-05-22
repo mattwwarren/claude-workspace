@@ -134,53 +134,85 @@ def dispatch_tick(
             if task is None:
                 break
 
-            branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
-            # Create a real git worktree (idempotent — returns existing path
-            # if already created). Replaces a previous bug where dispatch
-            # made an empty directory and relied on ``claude -w`` to turn
-            # it into a worktree, which never worked because that flag
-            # takes a name rather than a path.
-            worktree_path = create_worktree(client, branch)
+            try:
+                branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
+                # Create a real git worktree (idempotent — returns existing
+                # path if already created). Replaces a previous bug where
+                # dispatch made an empty directory and relied on
+                # ``claude -w`` to turn it into a worktree, which never
+                # worked because that flag takes a name rather than a path.
+                worktree_path = create_worktree(client, branch)
 
-            label = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
-            session_id = spawn_create_impl(
-                client=client,
-                worktree=worktree_path,
-                prompt=f"/auto-dev {task.ticket_id} --headless",
-                surface="split",
-                label=label,
-                adapter=resolved_adapter,
-                parent=parent,
-                ticket_id=task.ticket_id,
-            )
+                label = branch
+                session_id = spawn_create_impl(
+                    client=client,
+                    worktree=worktree_path,
+                    prompt=f"/auto-dev {task.ticket_id} --headless",
+                    surface="split",
+                    label=label,
+                    adapter=resolved_adapter,
+                    parent=parent,
+                    ticket_id=task.ticket_id,
+                )
 
-            # Stamp session_id on the queued task so the completion consumer
-            # can match SESSION_COMPLETED events to the correct (current)
-            # session and reject stale events from prior crashed sessions
-            # for the same ticket. See GitHub issue #97.
-            with dev_queue_lock():
-                store = load_dev_queue()
-                for stored_task in store.tasks:
-                    if (
-                        stored_task.ticket_id == task.ticket_id
-                        and stored_task.client == client.name
-                        and stored_task.status == QueueItemStatus.RUNNING
-                    ):
-                        stored_task.session_id = session_id
-                        break
-                save_dev_queue(store)
+                # Stamp session_id on the queued task so the completion
+                # consumer can match SESSION_COMPLETED events to the
+                # correct (current) session and reject stale events from
+                # prior crashed sessions for the same ticket. See GitHub
+                # issue #97.
+                with dev_queue_lock():
+                    store = load_dev_queue()
+                    for stored_task in store.tasks:
+                        if (
+                            stored_task.ticket_id == task.ticket_id
+                            and stored_task.client == client.name
+                            and stored_task.status == QueueItemStatus.RUNNING
+                        ):
+                            stored_task.session_id = session_id
+                            break
+                    save_dev_queue(store)
 
-            record_event(
-                OrchestratorEventType.SESSION_SPAWNED,
-                {
-                    "ticket_id": task.ticket_id,
-                    "client": client.name,
-                    "session_id": session_id,
-                },
-            )
+                record_event(
+                    OrchestratorEventType.SESSION_SPAWNED,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": client.name,
+                        "session_id": session_id,
+                    },
+                )
 
-            running_count += 1
-            spawned += 1
+                running_count += 1
+                spawned += 1
+            except Exception:
+                # Catch broad like the reconcile guard above: a backend
+                # outage (tmux pane exhaustion, transient daemon failure,
+                # OSError from the adapter) must NOT kill the loop. The
+                # task was just claimed RUNNING by _claim_next_pending; it
+                # would otherwise be left in a half-state (status=RUNNING,
+                # session_id=None) requiring manual repair. Revert to
+                # PENDING + clear session_id so the next tick (or
+                # reconcile) can retry. Break to skip this client's
+                # remaining slots this tick — re-trying the same failing
+                # backend immediately would just spin. See GitHub issue
+                # #149.
+                _log.exception(
+                    "dispatch_tick: spawn failed for %s/%s; reverting task to PENDING",
+                    client.name,
+                    task.ticket_id,
+                )
+                with dev_queue_lock():
+                    store = load_dev_queue()
+                    for stored_task in store.tasks:
+                        if (
+                            stored_task.ticket_id == task.ticket_id
+                            and stored_task.client == client.name
+                            and stored_task.status == QueueItemStatus.RUNNING
+                        ):
+                            stored_task.status = QueueItemStatus.PENDING
+                            stored_task.session_id = None
+                            break
+                    save_dev_queue(store)
+                break
 
     return spawned
 
