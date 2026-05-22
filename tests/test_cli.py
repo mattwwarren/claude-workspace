@@ -239,6 +239,11 @@ class TestUpgradeWorkers:
 class TestSignalStop:
     """Tests for the `cw signal-stop` Stop-hook handler (issue #147)."""
 
+    SEED_TICKET_ID = "137"
+    """Default ticket_id stamped into the seeded cw-context.json. Tests that
+    assert event payload propagation reference this constant rather than the
+    bare string."""
+
     def _seed_session(self, tmp_path: Path, sess_id: str = "sess-147") -> Session:
         workspace = tmp_path / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
@@ -264,7 +269,7 @@ class TestSignalStop:
         worktree: Path,
         *,
         session_id: str,
-        ticket_id: str | None = "137",
+        ticket_id: str | None = SEED_TICKET_ID,
     ) -> None:
         claude_dir = worktree / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
@@ -311,7 +316,7 @@ class TestSignalStop:
         )
         assert any(
             e.payload.get("session_id") == session.id
-            and e.payload.get("ticket_id") == "137"
+            and e.payload.get("ticket_id") == self.SEED_TICKET_ID
             for e in events
         )
 
@@ -545,6 +550,13 @@ class TestSignalStop:
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
 
+        # Snapshot session state pre-call. The deferral path must leave it
+        # byte-for-byte unchanged; asserting individual fields would mask
+        # a regression that mutates some other field.
+        pre_state = load_state()
+        pre_target = next(s for s in pre_state.sessions if s.id == session.id)
+        pre_snapshot = pre_target.model_dump()
+
         hook_stdin = json.dumps(
             {
                 "session_id": "claude-uuid-bg",
@@ -559,11 +571,11 @@ class TestSignalStop:
         result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
         assert result.exit_code == 0, result.output
 
-        # Session must remain ACTIVE — no completion side effects.
-        state = load_state()
-        updated = next(s for s in state.sessions if s.id == session.id)
-        assert updated.status == SessionStatus.ACTIVE
-        assert updated.claude_session_id is None
+        # Deferral must not mutate session state. Whole-object snapshot
+        # compare catches any field drift, not just status / claude_session_id.
+        post_state = load_state()
+        post_target = next(s for s in post_state.sessions if s.id == session.id)
+        assert post_target.model_dump() == pre_snapshot
 
         # No SESSION_COMPLETED event must have been emitted.
         events = read_events(
@@ -607,7 +619,7 @@ class TestSignalStop:
         )
         assert any(
             e.payload.get("session_id") == session.id
-            and e.payload.get("ticket_id") == "137"
+            and e.payload.get("ticket_id") == self.SEED_TICKET_ID
             for e in events
         )
 
@@ -646,7 +658,7 @@ class TestSignalStop:
         )
         assert any(
             e.payload.get("session_id") == session.id
-            and e.payload.get("ticket_id") == "137"
+            and e.payload.get("ticket_id") == self.SEED_TICKET_ID
             for e in events
         )
 
