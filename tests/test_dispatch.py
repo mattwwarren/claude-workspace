@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +18,7 @@ from cw.dispatch import (
     persist_last_result,
 )
 from cw.events import record_event
+from cw.exceptions import WorktreeError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -992,3 +995,108 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     completed = consume_completed_sessions()
     assert completed == 1
     assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchTickSpawnErrors
+# ---------------------------------------------------------------------------
+
+
+class _RaisingAdapter(FakeCmuxAdapter):
+    """Adapter whose ``spawn`` always raises the configured exception.
+
+    Used to exercise the spawn-failure containment added for issue #149:
+    a single failure must not crash dispatch_tick.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
+        # Record the attempt for parity with FakeCmuxAdapter call-tracking.
+        self.calls["spawn"].append((workspace, command, surface))
+        raise self._exc
+
+
+class TestDispatchTickSpawnErrors:
+    """Spawn failure inside dispatch_tick is contained, not propagated.
+
+    The dispatch loop is the substrate the dev queue runs on; a single
+    spawn failure (subprocess error, worktree error, adapter exception)
+    used to kill the entire loop and leave a half-claimed task at
+    ``status=RUNNING, session_id=None``.  These tests pin the new
+    behaviour: log + revert task to PENDING + don't propagate.
+    """
+
+    def test_subprocess_error_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-149A", client="test-client"))
+
+        adapter = _RaisingAdapter(
+            subprocess.CalledProcessError(
+                returncode=1,
+                cmd=["tmux", "split-window"],
+                output=b"no space for new pane",
+            ),
+        )
+
+        caplog.set_level(logging.ERROR, logger="cw.dispatch")
+        spawned = dispatch_tick(simple_config, adapter=adapter)
+
+        assert spawned == 0
+
+        queue = load_dev_queue()
+        assert len(queue.tasks) == 1
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+        assert any(
+            "spawn failed" in record.getMessage().lower()
+            for record in caplog.records
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
+        ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
+
+    def test_worktree_error_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-149B", client="test-client"))
+
+        def _boom(*_args: object, **_kwargs: object) -> Path:
+            msg = "git worktree add failed"
+            raise WorktreeError(msg)
+
+        # Patch the name as imported into cw.dispatch, not the source module.
+        monkeypatch.setattr("cw.dispatch.create_worktree", _boom)
+
+        adapter = FakeCmuxAdapter()
+
+        caplog.set_level(logging.ERROR, logger="cw.dispatch")
+        spawned = dispatch_tick(simple_config, adapter=adapter)
+
+        assert spawned == 0
+        assert adapter.calls["spawn"] == []
+
+        queue = load_dev_queue()
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+        assert any(
+            "spawn failed" in record.getMessage().lower()
+            for record in caplog.records
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
+        ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
