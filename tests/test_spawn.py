@@ -148,6 +148,13 @@ class TestSpawnCreate:
         # spawn command must cd into the worktree instead of passing it via -w.
         assert " -w " not in command_arg
         assert command_arg.startswith("cd ")
+        # Daemon spawns go through `cw run-claude` so the wrapper can emit a
+        # SESSION_COMPLETED on clean exit (issue #99). Env vars carry the
+        # session identity through to the wrapper.
+        assert "cw run-claude -- --print" in command_arg
+        assert "CW_CLIENT=acme" in command_arg
+        assert "CW_PURPOSE=impl" in command_arg
+        assert "CW_SESSION_ID=" in command_arg
 
     def test_cmux_workspace_overrides_client_name(
         self, tmp_config_dir: Path, tmp_path: Path

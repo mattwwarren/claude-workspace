@@ -444,6 +444,7 @@ class TestCompletionReason:
         assert CompletionReason.USER.value == "user"
         assert CompletionReason.HANDOFF.value == "handoff"
         assert CompletionReason.CRASHED.value == "crashed"
+        assert CompletionReason.NORMAL.value == "normal"
 
     def test_all_values(self) -> None:
-        assert len(CompletionReason) == 3
+        assert len(CompletionReason) == 4
