@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-05-21
+
+Patch release — closes the wedged-`RUNNING` loop called out as a known
+issue in 0.8.2. Dispatched `/auto-dev` workers that exit cleanly now
+produce a `SESSION_COMPLETED` event with `crashed: false`, so the queue
+task transitions `RUNNING → COMPLETED` instead of sitting on a consumed
+concurrency slot.
+
+### Fixed
+- **Clean-completion signal for dispatched workers** (#99, #101).
+  - `cw.spawn` now routes daemon spawns through
+    `cw run-claude -- --print '<prompt>'` (instead of raw
+    `claude --print`), passing `CW_CLIENT` / `CW_PURPOSE` /
+    `CW_SESSION_ID` env so the wrapper can target the specific session
+    even when concurrent daemon sessions share `(client, purpose=impl)`.
+  - `cw.wrapper` detects headless mode (`--print` in args), tees
+    claude's stdout to fd 1 while capturing the last 1 MiB into a
+    bounded buffer, parses for the `<<<AUTO_DEV_RESULT…>>>` sentinel
+    on clean exit, and emits `SESSION_COMPLETED` via the new
+    `signal_completed()`. Idempotent against reconcile racing ahead.
+    Falls back to `signal_idle` on parse failure or non-zero exit so
+    reconcile's phantom-pane path still catches real crashes.
+  - `CompletionReason.NORMAL` added for the wrapper-signaled terminal
+    path (distinct from `CRASHED` written by reconcile).
+- 0.8.2's consume-side `crashed: true` skip remains intact — no
+  regression on the genuinely-crashed path.
+
+### Known issues
+- Full per-status routing (`shipped` / `no_op` → COMPLETED,
+  `blocked` / `plan_pending_approval` → PAUSED_NEEDS_HUMAN) is still
+  scoped to #58. This release ships the terminal-vs-respawn distinction
+  only; all non-crashed completions currently land as COMPLETED.
+- #59 resume-detection on re-invoke depends on `last_result` being
+  populated, which this release enables — but the dispatch-side
+  resume-injection is separate work.
+
 ## [0.8.2] — 2026-05-06
 
 Patch release — fixes a queue-accounting bug discovered while validating
