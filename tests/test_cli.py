@@ -363,6 +363,73 @@ class TestSignalStop:
         result = runner.invoke(main, ["signal-stop"], input="")
         assert result.exit_code == 0
 
+    def test_cwd_not_string_is_noop(self, tmp_config_dir: Path) -> None:
+        # Hook payload with non-string cwd → silent no-op.
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["signal-stop"],
+            input=json.dumps({"cwd": 42, "session_id": "x"}),
+        )
+        assert result.exit_code == 0
+
+    def test_corrupt_context_file_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "bad-ctx"
+        (worktree / ".claude").mkdir(parents=True)
+        (worktree / ".claude" / "cw-context.json").write_text("{not valid json")
+        hook_stdin = json.dumps({"cwd": str(worktree), "session_id": "c-uuid"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+    def test_context_not_dict_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "list-ctx"
+        (worktree / ".claude").mkdir(parents=True)
+        # Valid JSON, but a list rather than a dict.
+        (worktree / ".claude" / "cw-context.json").write_text("[1, 2, 3]")
+        hook_stdin = json.dumps({"cwd": str(worktree), "session_id": "c-uuid"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+    def test_context_missing_session_id_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "no-sid"
+        (worktree / ".claude").mkdir(parents=True)
+        (worktree / ".claude" / "cw-context.json").write_text(
+            json.dumps({"client": "c", "ticket_id": "1"})  # no session_id
+        )
+        hook_stdin = json.dumps({"cwd": str(worktree), "session_id": "c-uuid"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+    def test_stdin_read_oserror_is_noop(self, tmp_config_dir: Path) -> None:
+        """Direct-call the underlying callback with stdin raising OSError.
+
+        CliRunner.invoke installs its own sys.stdin wrapper that out-races a
+        patch on ``cw.cli.sys.stdin``, so this case is exercised by calling
+        the command's callback directly with a fake stdin instead.
+        """
+
+        class _RaisingStdin:
+            def read(self) -> str:
+                error_msg = "broken pipe"
+                raise OSError(error_msg)
+
+        callback = main.commands["signal-stop"].callback
+        assert callable(callback)
+        with patch("cw.cli.sys.stdin", _RaisingStdin()):
+            callback()
+
 
 class TestCompletion:
     def test_completion_command_bash(self) -> None:
