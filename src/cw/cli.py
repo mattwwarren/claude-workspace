@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -252,6 +253,38 @@ def doctor(reap: bool) -> None:
     click.echo(format_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)
+
+
+@main.command(name="upgrade-workers")
+@handle_errors
+def upgrade_workers() -> None:
+    """Restart all daemon-managed background sessions via ``claude respawn --all``.
+
+    Run after upgrading cw or the Claude CLI so background workers pick up
+    the current Claude binary. Wraps ``claude respawn --all`` (RFC 0001 Row 7);
+    closes the gap previously filled by hand-rolled daemon-restart logic.
+
+    Propagates the subprocess exit code. Surfaces stdout to the user; on
+    non-zero exit also surfaces stderr.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "respawn", "--all"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        raise click.ClickException(
+            "claude binary not found on PATH. Install Claude Code, "
+            "then re-run 'cw upgrade-workers'."
+        ) from e
+    if result.stdout:
+        click.echo(result.stdout, nl=False)
+    if result.returncode != 0:
+        if result.stderr:
+            click.echo(result.stderr, nl=False, err=True)
+        raise click.exceptions.Exit(result.returncode)
 
 
 @main.command(name="init")
