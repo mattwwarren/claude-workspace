@@ -127,7 +127,9 @@ def dispatch_tick(
             and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
         )
 
-        cap = config.per_client_max_parallel.get(client.name, 1)
+        cap = config.per_client_max_parallel.get(
+            client.name, config.default_max_parallel
+        )
 
         priority_ids = plan_order_by_client.get(client.name)
         while running_count < cap:

@@ -290,6 +290,37 @@ class TestPerClientCapRespected:
         assert len(store.running()) == 2
         assert len(store.pending()) == 1
 
+    def test_unlisted_client_uses_default_max_parallel(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Client missing from per_client_max_parallel uses default_max_parallel.
+
+        Regression test for GitHub issue #145 — the cap fallback used to
+        be hardcoded to 1, so a top-level ``default_max_parallel: 3`` had
+        no effect on unlisted clients.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={},  # test-client deliberately unlisted
+            default_max_parallel=3,
+        )
+
+        for i in range(4):
+            add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(config, adapter=adapter, native_daemon=daemon)
+
+        # default_max_parallel=3 → spawn 3, leave 1 pending.
+        assert spawned == 3
+        store = load_dev_queue()
+        assert len(store.running()) == 3
+        assert len(store.pending()) == 1
+
 
 # ---------------------------------------------------------------------------
 # TestNoDoubleDispatch

@@ -13,6 +13,7 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
+    OrchestratorConfig,
     Session,
     SessionPurpose,
     SessionStatus,
@@ -448,3 +449,35 @@ class TestCompletionReason:
 
     def test_all_values(self) -> None:
         assert len(CompletionReason) == 4
+
+
+class TestOrchestratorConfigLegacyDefault:
+    """Migration of legacy ``per_client_max_parallel.default`` (issue #145)."""
+
+    def test_lifts_legacy_default_into_top_level_field(self) -> None:
+        """A stray ``default`` key under per_client_max_parallel is promoted
+        to ``default_max_parallel`` and removed from the per-client dict.
+        """
+        config = OrchestratorConfig.model_validate(
+            {
+                "per_client_max_parallel": {"default": 5, "real-client": 2},
+            }
+        )
+        assert config.default_max_parallel == 5
+        assert config.per_client_max_parallel == {"real-client": 2}
+        assert "default" not in config.per_client_max_parallel
+
+    def test_explicit_default_max_parallel_wins_over_legacy(self) -> None:
+        """If both new and legacy keys are present, the explicit field wins."""
+        config = OrchestratorConfig.model_validate(
+            {
+                "default_max_parallel": 7,
+                "per_client_max_parallel": {"default": 5},
+            }
+        )
+        assert config.default_max_parallel == 7
+
+    def test_no_legacy_key_leaves_default_at_one(self) -> None:
+        """Default fallback is 1 when neither field is set."""
+        config = OrchestratorConfig()
+        assert config.default_max_parallel == 1
