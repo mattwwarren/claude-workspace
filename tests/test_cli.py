@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -18,12 +19,15 @@ from cw.cli import (
     main,
 )
 from cw.config import load_clients, load_state, save_state
+from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
     CwState,
+    OrchestratorEventType,
     QueueItem,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TaskSpec,
@@ -228,6 +232,203 @@ class TestUpgradeWorkers:
         result = runner.invoke(main, ["upgrade-workers", "--help"])
         assert result.exit_code == 0
         assert "respawn" in result.output
+
+
+class TestSignalStop:
+    """Tests for the `cw signal-stop` Stop-hook handler (issue #147)."""
+
+    def _seed_session(self, tmp_path: Path, sess_id: str = "sess-147") -> Session:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True, exist_ok=True)
+        session = Session(
+            id=sess_id,
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.IDLE,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        return session
+
+    def _write_context(
+        self,
+        worktree: Path,
+        *,
+        session_id: str,
+        ticket_id: str | None = "137",
+    ) -> None:
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "session_name": "test-client/auto-dev/137",
+                    "client": "test-client",
+                    "purpose": "impl",
+                    "ticket_id": ticket_id,
+                }
+            )
+        )
+
+    def test_happy_path_emits_event_and_completes_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        session = self._seed_session(tmp_path)
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-abc",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+                "last_assistant_message": "all done",
+            }
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.claude_session_id == "claude-uuid-abc"
+
+        events = read_events(
+            consumer="test-signal-stop",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(
+            e.payload.get("session_id") == session.id
+            and e.payload.get("ticket_id") == "137"
+            for e in events
+        )
+
+    def test_idempotent_when_already_completed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        session = self._seed_session(tmp_path)
+        session.status = SessionStatus.COMPLETED
+        state = load_state()
+        state.sessions = [session]
+        save_state(state)
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+        hook_stdin = json.dumps({"session_id": "c-uuid", "cwd": str(worktree)})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+        events = read_events(
+            consumer="test-idem",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(e.payload.get("session_id") == session.id for e in events)
+
+    def test_missing_context_file_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "no-context"
+        worktree.mkdir()
+        hook_stdin = json.dumps({"cwd": str(worktree), "session_id": "c-uuid"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+        events = read_events(
+            consumer="test-missing-ctx",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert events == []
+
+    def test_malformed_stdin_is_noop(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input="not json at all")
+        assert result.exit_code == 0
+
+    def test_empty_stdin_is_noop(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input="")
+        assert result.exit_code == 0
+
+    def test_cwd_not_string_is_noop(self, tmp_config_dir: Path) -> None:
+        # Hook payload with non-string cwd → silent no-op.
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["signal-stop"],
+            input=json.dumps({"cwd": 42, "session_id": "x"}),
+        )
+        assert result.exit_code == 0
+
+    def test_corrupt_context_file_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "bad-ctx"
+        (worktree / ".claude").mkdir(parents=True)
+        (worktree / ".claude" / "cw-context.json").write_text("{not valid json")
+        hook_stdin = json.dumps({"cwd": str(worktree), "session_id": "c-uuid"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+    def test_context_not_dict_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "list-ctx"
+        (worktree / ".claude").mkdir(parents=True)
+        # Valid JSON, but a list rather than a dict.
+        (worktree / ".claude" / "cw-context.json").write_text("[1, 2, 3]")
+        hook_stdin = json.dumps({"cwd": str(worktree), "session_id": "c-uuid"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+    def test_context_missing_session_id_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "no-sid"
+        (worktree / ".claude").mkdir(parents=True)
+        (worktree / ".claude" / "cw-context.json").write_text(
+            json.dumps({"client": "c", "ticket_id": "1"})  # no session_id
+        )
+        hook_stdin = json.dumps({"cwd": str(worktree), "session_id": "c-uuid"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+    def test_stdin_read_oserror_is_noop(self, tmp_config_dir: Path) -> None:
+        """Direct-call the underlying callback with stdin raising OSError.
+
+        CliRunner.invoke installs its own sys.stdin wrapper that out-races a
+        patch on ``cw.cli.sys.stdin``, so this case is exercised by calling
+        the command's callback directly with a fake stdin instead.
+        """
+
+        class _RaisingStdin:
+            def read(self) -> str:
+                error_msg = "broken pipe"
+                raise OSError(error_msg)
+
+        callback = main.commands["signal-stop"].callback
+        assert callable(callback)
+        with patch("cw.cli.sys.stdin", _RaisingStdin()):
+            callback()
 
 
 class TestCompletion:

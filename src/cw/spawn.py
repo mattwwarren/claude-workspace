@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,53 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
 
 
+_HOOK_SETTINGS_TEMPLATE = {
+    "hooks": {
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": "cw signal-stop"}],
+            }
+        ]
+    }
+}
+
+
+def _write_hook_context(
+    worktree: Path,
+    *,
+    session_id: str,
+    session_name: str,
+    client: str,
+    purpose: str,
+    ticket_id: str | None,
+) -> None:
+    """Write hook config + correlation context into the worktree pre-spawn.
+
+    Two files land under ``<worktree>/.claude/``:
+
+    - ``settings.local.json`` — configures a Stop hook that invokes
+      ``cw signal-stop`` after each agent turn.
+    - ``cw-context.json`` — correlation metadata the hook reads to emit a
+      ``SESSION_COMPLETED`` event keyed back to the cw session + dev_queue
+      task. Bypasses the env-var injection limitation on ``claude --bg``
+      (see GitHub issue #133).
+    """
+    claude_dir = worktree / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps(_HOOK_SETTINGS_TEMPLATE, indent=2) + "\n",
+    )
+    context = {
+        "session_id": session_id,
+        "session_name": session_name,
+        "client": client,
+        "purpose": purpose,
+        "ticket_id": ticket_id,
+    }
+    (claude_dir / "cw-context.json").write_text(json.dumps(context, indent=2) + "\n")
+
+
 def spawn_create_impl(
     *,
     client: ClientConfig,
@@ -25,6 +73,7 @@ def spawn_create_impl(
     label: str | None,
     adapter: CmuxAdapter,
     parent: str | None = None,
+    ticket_id: str | None = None,
 ) -> str:
     """Create a daemon-spawned session.
 
@@ -66,6 +115,19 @@ def spawn_create_impl(
         origin=SessionOrigin.DAEMON,
         workspace_path=client.workspace_path,
         worktree_path=worktree,
+    )
+
+    # Inject Stop-hook config + correlation context into the worktree so
+    # the spawned session emits a SESSION_COMPLETED event when its agent
+    # turn finishes — works even under ``claude --bg`` where env vars are
+    # not propagated. See GitHub issue #147.
+    _write_hook_context(
+        worktree,
+        session_id=sess.id,
+        session_name=sess.name,
+        client=client.name,
+        purpose=SessionPurpose.IMPL.value,
+        ticket_id=ticket_id,
     )
 
     env_prefix = (
