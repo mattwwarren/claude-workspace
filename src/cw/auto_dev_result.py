@@ -28,9 +28,11 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 _log = logging.getLogger(__name__)
 
-# v1 is the legacy shape; v2 adds the `no_op` status. Both are accepted during
-# the rollout window — see docs/headless-contract.md §8.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
+# v1 is the legacy shape; v2 adds the `no_op` status; v3 adds the
+# `stage1_pre_flight` stage_reached value and `none` plan_source (used
+# together for pre-flight no_op exits). All are accepted during the rollout
+# window — see docs/headless-contract.md §8.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
 _CLOSE_SENTINEL = "AUTO_DEV_RESULT>>>"
@@ -63,7 +65,14 @@ Status = Literal[
 # producer bug — it would silently degrade for downstream tools that key off
 # the version field.
 _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
+# NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
+# gated by schema_version. Spec §8 says enum additions require a version
+# bump (v3), and v3 IS the official home for these values, BUT the producer
+# skill emits them under v2 today (see #103). One-time rollout exception:
+# accept under v2 AND v3 until the skill bumps. When skill emits v3, this
+# exception can be removed and a `_V3_STAGES`/`_V3_PLAN_SOURCES` gate added.
 StageReached = Literal[
+    "stage1_pre_flight",
     "stage1_plan",
     "stage2_impl",
     "stage3_review",
@@ -72,7 +81,7 @@ StageReached = Literal[
     "stage5_post_create",
 ]
 ScopeTier = Literal["small", "large"]
-PlanSource = Literal["linear_existing", "generated", "free_text"]
+PlanSource = Literal["linear_existing", "generated", "free_text", "none"]
 
 
 class Scope(BaseModel):
@@ -129,7 +138,7 @@ _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
 class AutoDevResult(BaseModel):
     """Parsed sentinel block. All cross-field invariants from §3-§5 enforced."""
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     ticket_id: str
     status: Status
     stage_reached: StageReached
@@ -207,15 +216,28 @@ class AutoDevResult(BaseModel):
             msg = f"branch must be null when status is {self.status!r}"
             raise ValueError(msg)
 
-        # §3.3 lines_actual is None iff exited before impl (stage1_plan)
-        exited_pre_impl = self.stage_reached == "stage1_plan"
+        # §3.3 lines_actual is None iff exited before impl (stage1_plan or
+        # stage1_pre_flight — both exit before any implementation work).
+        exited_pre_impl = self.stage_reached in ("stage1_plan", "stage1_pre_flight")
         if exited_pre_impl and self.scope.lines_actual is not None:
-            msg = "scope.lines_actual must be null when stage_reached='stage1_plan'"
+            msg = (
+                "scope.lines_actual must be null when stage_reached is "
+                "'stage1_plan' or 'stage1_pre_flight'"
+            )
             raise ValueError(msg)
         if not exited_pre_impl and self.scope.lines_actual is None:
             msg = (
                 "scope.lines_actual must be non-null when "
                 f"stage_reached={self.stage_reached!r}"
+            )
+            raise ValueError(msg)
+
+        # stage1_pre_flight can only exit as no_op (pre-flight exits before any
+        # plan is produced — other statuses are not possible here).
+        if self.stage_reached == "stage1_pre_flight" and self.status != "no_op":
+            msg = (
+                f"stage_reached='stage1_pre_flight' requires status='no_op', "
+                f"got status={self.status!r}"
             )
             raise ValueError(msg)
 

@@ -130,13 +130,13 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `schema_version` | int | Currently `2` (legacy `1` still accepted during the rollout window). Bump rules in §8. |
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
 | `status` | string enum | See §4. |
-| `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
+| `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_pre_flight`, `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Pre-flight exits (e.g. already-satisfied tickets) use `stage1_pre_flight`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
 | `scope.tier` | `"small"` \| `"large"` | Per the Guard Matrix in `commands/auto-dev.md`. |
 | `scope.files` | int | File count touched (or planned, if exited pre-impl). |
 | `scope.lines_estimate` | int | Plan-time line estimate. |
 | `scope.lines_actual` | int \| null | Actual lines touched; `null` if exited before impl. |
 | `scope.forbidden_touched` | bool | Whether any `--forbidden` area was touched. |
-| `plan_source` | `"linear_existing"` \| `"generated"` \| `"free_text"` | How the plan was sourced. |
+| `plan_source` | `"linear_existing"` \| `"generated"` \| `"free_text"` \| `"none"` | How the plan was sourced. `"none"` is used for pre-flight exits where no plan was produced. |
 | `branch` | string \| null | Branch name; `null` if exited before branch creation (e.g. `plan_pending_approval`). |
 | `worktree_path` | string \| null | Absolute path; `null` if no worktree was created. |
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
@@ -167,7 +167,7 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `scope_exceeded` | `--scope-limit small` rejected a Large ticket before impl started. |
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started. |
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details. |
-| `no_op` | Pre-flight detected the ticket already satisfied (or otherwise not work-bearing); no plan, no branch, no PR. Introduced at `schema_version=2`. Rationale: terse, neutral wording — does not presume the cause (already-merged dupe, invalid ticket, code already covers it). The actor (skill / cw) decides what to do via `next_actions` (typically `close_issue_as_completed`). |
+| `no_op` | Pre-flight detected the ticket already satisfied (or otherwise not work-bearing); no plan, no branch, no PR. Introduced at `schema_version=2`. Rationale: terse, neutral wording — does not presume the cause (already-merged dupe, invalid ticket, code already covers it). The actor (skill / cw) decides what to do via `next_actions` (typically `close_issue_as_completed`). Emitted at `schema_version=3` with `stage_reached='stage1_pre_flight'` and `plan_source='none'`. (During the rollout window, parsers also accept this shape under `schema_version=2`.) |
 
 ### 4.2 `blocker.reason` (when `status = "blocked"`)
 
@@ -267,7 +267,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 
 ## 8. Versioning
 
-`schema_version: 2` is the current contract. Parsers also accept `schema_version: 1` during the rollout window (the skill upgrades after this; old worker emissions still in flight must keep parsing).
+`schema_version: 3` is the current contract. Parsers also accept `schema_version: 1` and `schema_version: 2` during the rollout window.
 
 **Version history:**
 
@@ -275,6 +275,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 |---|---|
 | 1 | Initial contract. |
 | 2 | Added `no_op` status (§4.1) and `close_issue_as_completed` advisory action (§4.3). v1-tagged payloads with `status=no_op` are rejected as `validation_failed`. |
+| 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). |
 
 **Bump required when:**
 - Any field is removed or renamed.
@@ -287,7 +288,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 - A new `next_actions` entry is added (parsers already treat unknown actions as advisory).
 - A new `blocker.reason` value is added (open enum — see §4.2).
 
-**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`).
+**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'` and `plan_source='none'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness.
 
 When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. **Order matters:** the parser must accept the new version BEFORE the skill emits it, otherwise in-flight emissions land in deployed parsers that don't recognize them. Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
 
