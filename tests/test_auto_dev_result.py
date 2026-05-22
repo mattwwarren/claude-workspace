@@ -208,10 +208,10 @@ def _forbidden_area_payload() -> dict[str, Any]:
 
 def _no_op_payload() -> dict[str, Any]:
     return {
-        "schema_version": 2,
-        "ticket_id": "GEN-8",
+        "schema_version": 3,
+        "ticket_id": "GEN-no-op",
         "status": "no_op",
-        "stage_reached": "stage1_plan",
+        "stage_reached": "stage1_pre_flight",
         "scope": {
             "tier": "small",
             "files": 0,
@@ -219,7 +219,7 @@ def _no_op_payload() -> dict[str, Any]:
             "lines_actual": None,
             "forbidden_touched": False,
         },
-        "plan_source": "linear_existing",
+        "plan_source": "none",
         "branch": None,
         "worktree_path": None,
         "fork_point_sha": None,
@@ -558,3 +558,58 @@ class TestInvariants:
         result = AutoDevResult.model_validate(p)
         assert result.blocker is not None
         assert result.blocker.reason == "future_unknown_reason"
+
+
+# ---------------------------------------------------------------------------
+# stage1_pre_flight + plan_source=none (v3, with v2 backward-compat exception)
+# ---------------------------------------------------------------------------
+
+
+class TestPreFlightNoOp:
+    def test_no_op_payload_round_trips(self) -> None:
+        """v3 pre-flight no-op payload serializes and parses correctly."""
+        result = parse_stdout(_wrap_sentinel(_no_op_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.stage_reached == "stage1_pre_flight"
+        assert result.plan_source == "none"
+
+    def test_no_op_payload_v2_backward_compat(self) -> None:
+        """Pre-flight shape accepted under schema_version=2 (rollout exception)."""
+        p = _no_op_payload()
+        p["schema_version"] = 2
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.stage_reached == "stage1_pre_flight"
+        assert result.plan_source == "none"
+        assert result.schema_version == 2
+
+    def test_stage1_pre_flight_requires_no_op_status(self) -> None:
+        # stage_reached=stage1_pre_flight with any non-no_op status is rejected.
+        p = _no_op_payload()
+        p["status"] = "shipped"
+        p["pr"] = {
+            "number": 1,
+            "url": "https://github.com/x/y/pull/1",
+            "auto_merge": True,
+            "base": "main",
+        }
+        p["next_actions"] = ["wait_for_ci"]
+        p["scope"]["lines_actual"] = None  # still pre-impl stage
+        with pytest.raises(ValidationError, match="stage1_pre_flight"):
+            AutoDevResult.model_validate(p)
+
+    def test_lines_actual_allowed_none_at_stage1_pre_flight(self) -> None:
+        """lines_actual=None is valid at stage1_pre_flight (pre-impl exit)."""
+        p = _no_op_payload()
+        assert p["scope"]["lines_actual"] is None
+        result = AutoDevResult.model_validate(p)
+        assert result.scope.lines_actual is None
+
+    def test_lines_actual_non_null_rejected_at_stage1_pre_flight(self) -> None:
+        """lines_actual non-null at stage1_pre_flight violates pre-impl invariant."""
+        p = _no_op_payload()
+        p["scope"]["lines_actual"] = 10
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
