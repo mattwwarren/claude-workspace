@@ -872,6 +872,16 @@ def signal_stop() -> None:
         # subagent causes the parent to be marked COMPLETED and, for
         # DAEMON-origin sessions, killed via `claude stop`, orphaning the
         # in-flight subagent. See issue #151.
+        #
+        # Fast path: no state I/O. The idempotency guard below is
+        # unreachable on this path by design — deferral leaves state
+        # untouched regardless of current session status.
+        #
+        # Backstop: if the second Stop hook ever fails to fire (daemon
+        # bug, subagent hard crash with no clean Stop), reconcile.py
+        # eventually detects the phantom and marks the session CRASHED,
+        # reverting any matching dev_queue task to PENDING for retry.
+        # Recovery, not silent wedge.
         return
 
     state = load_state()
