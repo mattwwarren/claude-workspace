@@ -514,6 +514,177 @@ class TestSignalStop:
 
         assert daemon.stop_calls == []
 
+    def test_signal_stop_defers_when_background_tasks_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Stop hook with pending background_tasks must NOT complete.
+
+        Dispatching a ``run_in_background: true`` subagent ends the parent's
+        turn while the subagent is still running. The Stop hook fires with
+        a populated ``background_tasks`` list; we must leave the session
+        in its current status so the parent isn't killed mid-flight.
+        See issue #151.
+        """
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        session = self._seed_session(tmp_path, sess_id="sess-bg")
+        # Override default IDLE status: this session is actively running
+        # a background subagent when the Stop hook fires.
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.status = SessionStatus.ACTIVE
+        target.surface_ref = "claude-short-id"
+        save_state(state)
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-bg",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+                "background_tasks": [
+                    {"id": "task-1", "description": "Plan subagent running"},
+                ],
+            }
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        # Session must remain ACTIVE — no completion side effects.
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        assert updated.claude_session_id is None
+
+        # No SESSION_COMPLETED event must have been emitted.
+        events = read_events(
+            consumer="test-bg-defer",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(e.payload.get("session_id") == session.id for e in events)
+
+        # native_daemon.stop must NOT have been called.
+        assert daemon.stop_calls == []
+
+    def test_signal_stop_proceeds_when_background_tasks_empty_list(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An empty background_tasks list is treated as no pending work."""
+        session = self._seed_session(tmp_path, sess_id="sess-bg-empty")
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-empty",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+                "background_tasks": [],
+            }
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.claude_session_id == "claude-uuid-empty"
+
+        events = read_events(
+            consumer="test-bg-empty",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(
+            e.payload.get("session_id") == session.id
+            and e.payload.get("ticket_id") == "137"
+            for e in events
+        )
+
+    def test_signal_stop_proceeds_when_background_tasks_absent(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Payload without a background_tasks key behaves like no pending work.
+
+        Explicit coverage so a future payload-normalization step can't
+        silently regress the contract.
+        """
+        session = self._seed_session(tmp_path, sess_id="sess-bg-absent")
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-absent",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.claude_session_id == "claude-uuid-absent"
+
+        events = read_events(
+            consumer="test-bg-absent",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(
+            e.payload.get("session_id") == session.id
+            and e.payload.get("ticket_id") == "137"
+            for e in events
+        )
+
+    def test_signal_stop_ignores_non_list_background_tasks(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A malformed background_tasks (non-list) is treated as no pending work.
+
+        Mirrors the defensive-payload pattern used by test_cwd_not_string_is_noop
+        and test_context_not_dict_is_noop.
+        """
+        session = self._seed_session(tmp_path, sess_id="sess-bg-bad")
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-bad",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+                "background_tasks": "not-a-list",
+            }
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-bg-bad",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(e.payload.get("session_id") == session.id for e in events)
+
 
 class TestCompletion:
     def test_completion_command_bash(self) -> None:
