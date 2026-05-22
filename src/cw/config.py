@@ -64,8 +64,8 @@ DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30
-per_client_max_parallel:
-  default: 2
+default_max_parallel: 2
+per_client_max_parallel: {}
 linear_prefix_map: {}
 """
 

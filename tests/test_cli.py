@@ -430,6 +430,88 @@ class TestSignalStop:
         with patch("cw.cli.sys.stdin", _RaisingStdin()):
             callback()
 
+    def test_stops_native_bg_session_on_daemon_origin(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal-stop calls claude stop on a DAEMON session's short id.
+
+        Without this cleanup the native bg session lingers in the daemon
+        roster after its agent turn ends (Claude treats it as idle), and
+        roster.json grows unbounded across dispatches — the exact failure
+        mode GitHub issue #150 set out to retire. The Stop hook fires
+        once per turn so the cleanup must live in signal-stop itself,
+        not in a separate sweeper.
+        """
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        session = self._seed_session(tmp_path, sess_id="sess-stop")
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        # Register a short id with the fake daemon and stamp it on the
+        # session — this mirrors what spawn_create_impl does in production.
+        daemon = FakeNativeDaemonClient()
+        short_id = daemon.spawn_bg(cwd=worktree, prompt="seed")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.surface_ref = short_id
+        save_state(state)
+        self._write_context(worktree, session_id=session.id)
+
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-stop",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        assert daemon.stop_calls == [short_id]
+        assert daemon.list_live_session_short_ids() == set()
+
+    def test_does_not_stop_user_origin_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin sessions are not bg workers — leave them alone.
+
+        signal-stop fires for any session whose worktree carries the
+        injected hook context, but cleanup via ``claude stop`` only makes
+        sense for daemon-origin bg workers. An interactive session that
+        happened to land at the same cwd would not have a roster entry.
+        """
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        session = self._seed_session(tmp_path, sess_id="sess-user")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.origin = SessionOrigin.USER
+        target.surface_ref = "tmux-pane-3"
+        save_state(state)
+        assert session.worktree_path is not None
+        self._write_context(session.worktree_path, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {"session_id": "claude-uuid", "cwd": str(session.worktree_path)}
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0
+
+        assert daemon.stop_calls == []
+
 
 class TestCompletion:
     def test_completion_command_bash(self) -> None:

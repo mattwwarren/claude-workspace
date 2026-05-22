@@ -183,12 +183,42 @@ class BackendName(StrEnum):
 
 
 class OrchestratorConfig(BaseModel):
-    """Parsed contents of orchestrator.yaml."""
+    """Parsed contents of orchestrator.yaml.
+
+    ``default_max_parallel`` is the cap applied to any client missing from
+    ``per_client_max_parallel``. The legacy yaml layout placed this value
+    under ``per_client_max_parallel.default``, but that key was treated as
+    a literal client name and silently ignored (see GitHub issue #145).
+    A model validator migrates any stray ``default`` key into the new
+    top-level field so old configs keep working with a one-time warning.
+    """
 
     tick_interval_seconds: int = 30
     per_client_max_parallel: dict[str, int] = Field(default_factory=dict)
+    default_max_parallel: int = 1
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)
     backend: BackendName | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_default_key(cls, data: object) -> object:
+        """Lift a stray ``per_client_max_parallel.default`` into the top field.
+
+        Only fires when the caller has not already set ``default_max_parallel``
+        explicitly — explicit configuration wins. The legacy key is removed
+        from the per-client dict so it doesn't shadow real client names.
+        """
+        if not isinstance(data, dict):
+            return data
+        per_client = data.get("per_client_max_parallel")
+        if not isinstance(per_client, dict):
+            return data
+        legacy = per_client.pop("default", None)
+        if legacy is None:
+            return data
+        if "default_max_parallel" not in data:
+            data["default_max_parallel"] = legacy
+        return data
 
 
 class HookRule(BaseModel):
