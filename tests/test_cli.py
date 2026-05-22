@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -184,6 +185,49 @@ class TestCli:
             result = runner.invoke(main, ["start", "bad-client"])
             assert result.exit_code != 0
             assert "Test error message" in result.output
+
+
+class TestUpgradeWorkers:
+    def test_happy_path(self) -> None:
+        runner = CliRunner()
+        completed = SimpleNamespace(
+            returncode=0, stdout="Respawned 3 workers\n", stderr=""
+        )
+        with patch("cw.cli.subprocess.run", return_value=completed) as mock_run:
+            result = runner.invoke(main, ["upgrade-workers"])
+            mock_run.assert_called_once_with(
+                ["claude", "respawn", "--all"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert result.exit_code == 0
+            assert "Respawned 3 workers" in result.output
+
+    def test_subprocess_nonzero_propagates_exit_code(self) -> None:
+        runner = CliRunner()
+        completed = SimpleNamespace(returncode=2, stdout="", stderr="boom\n")
+        with patch("cw.cli.subprocess.run", return_value=completed):
+            result = runner.invoke(main, ["upgrade-workers"])
+            assert result.exit_code == 2
+            assert "boom" in result.output
+
+    def test_claude_not_on_path(self) -> None:
+        runner = CliRunner()
+        with patch(
+            "cw.cli.subprocess.run",
+            side_effect=FileNotFoundError(2, "No such file or directory", "claude"),
+        ):
+            result = runner.invoke(main, ["upgrade-workers"])
+            assert result.exit_code != 0
+            assert "claude" in result.output
+            assert "not found" in result.output
+
+    def test_help_mentions_respawn(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["upgrade-workers", "--help"])
+        assert result.exit_code == 0
+        assert "respawn" in result.output
 
 
 class TestCompletion:
