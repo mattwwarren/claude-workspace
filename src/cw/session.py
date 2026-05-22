@@ -498,6 +498,12 @@ def done_session(
         msg = f"Session {session.name} is already completed."
         raise CwError(msg)
 
+    if cleanup and session.worktree_path and session.branch:
+        client = get_client(session.client)
+        click.echo(f"Removing worktree for branch '{session.branch}'...")
+        remove_worktree(client, session.branch, force=force)
+        click.echo("Worktree removed.")
+
     session.status = SessionStatus.COMPLETED
     session.completed_reason = CompletionReason.USER
     session.completed_at = datetime.now(UTC)
@@ -513,9 +519,3 @@ def done_session(
         ),
     )
     click.echo(f"Session {session.name} marked as completed.")
-
-    if cleanup and session.worktree_path and session.branch:
-        client = get_client(session.client)
-        click.echo(f"Removing worktree for branch '{session.branch}'...")
-        remove_worktree(client, session.branch, force=force)
-        click.echo("Worktree removed.")

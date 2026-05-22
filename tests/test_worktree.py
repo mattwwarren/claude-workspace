@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+import pytest
+
 from cw.models import ClientConfig
 from cw.worktree import (
     _git_dir,
@@ -17,7 +19,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    import pytest
+    pass
 
 
 class TestSlugifyBranch:
@@ -437,3 +439,42 @@ class TestRemoveWorktree:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         remove_worktree(client, "feat/dirty", force=True)
         assert any("--force" in call for call in git_calls)
+
+    def test_raises_on_dirty_without_force(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from subprocess import CalledProcessError
+
+        from cw.exceptions import WorktreeError
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "feat-dirty"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            if "--force" not in args:
+                msg = (
+                    "fatal: 'feat-dirty' contains modified or untracked files, "
+                    "use --force to delete it"
+                )
+                err = CalledProcessError(
+                    128,
+                    " ".join(args),
+                    stderr=msg,
+                )
+                raise WorktreeError("Git command failed") from err
+            return MagicMock(returncode=0, stderr="")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(WorktreeError):
+            remove_worktree(client, "feat/dirty", force=False)
