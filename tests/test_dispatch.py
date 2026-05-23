@@ -61,12 +61,18 @@ def workspace_dir(make_git_repo: Callable[[str], Path]) -> Path:
 
 
 @pytest.fixture
-def sample_client_config(workspace_dir: Path) -> ClientConfig:
-    """A ClientConfig for use with dispatch tests."""
+def sample_client_config(workspace_dir: Path, tmp_path: Path) -> ClientConfig:
+    """A ClientConfig for use with dispatch tests.
+
+    Sets worktree_base to a tmp_path subdirectory so create_worktree
+    writes test worktrees under tmp_path (not ~/.cw/wt/), preventing
+    stale-directory accumulation across test runs.
+    """
     return ClientConfig(
         name="test-client",
         workspace_path=workspace_dir,
         default_branch="main",
+        worktree_base=tmp_path / "worktrees",
     )
 
 
@@ -93,12 +99,15 @@ def _make_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
     config_dir = tmp_path / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
     clients_file = config_dir / "clients.yaml"
-    clients_file.write_text(
-        f"clients:\n"
-        f"  {client.name}:\n"
-        f"    workspace_path: {client.workspace_path}\n"
-        f"    default_branch: {client.default_branch}\n"
-    )
+    lines = [
+        "clients:\n",
+        f"  {client.name}:\n",
+        f"    workspace_path: {client.workspace_path}\n",
+        f"    default_branch: {client.default_branch}\n",
+    ]
+    if client.worktree_base is not None:
+        lines.append(f"    worktree_base: {client.worktree_base}\n")
+    clients_file.write_text("".join(lines))
 
 
 # ---------------------------------------------------------------------------
