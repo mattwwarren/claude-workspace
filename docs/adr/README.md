@@ -44,6 +44,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 |---|---|---|
 | [0000](0000-native-supervisor-migration.md) | Migrate session lifecycle to `claude --bg` + supervisor | Accepted |
 | [0001](0001-parked-tasks-pin-their-session.md) | Parked tasks pin their Session | Accepted |
+| [0002](0002-blocker-retry-policy-pair.md) | Blocker carries an explicit retry policy | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR. Future ADRs start
