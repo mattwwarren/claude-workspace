@@ -358,3 +358,61 @@ When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lock
   - cw#59 — https://github.com/mattwwarren/claude-workspace/issues/59
 - **Substrate** (cw 0.8.0 milestone, prerequisite for #56–#59): cw#52–#55.
 - **Skill-side resume implementation:** https://github.com/mattwwarren/global-claude/issues/2.
+
+---
+
+## 10. Stage Event Taxonomy (Producer Contract)
+
+### 10.1 Event Types
+
+`stage.entered` and `stage.errored` are **orchestrator events** — recorded on cw's event bus, not part of the `<<<AUTO_DEV_RESULT` sentinel block in §3. The skill records them via `cw event record …` at each stage boundary while running in headless mode. Consumers (cw status output, TUI dashboard, automation hooks) read them back through `cw event tail` and `read_events`.
+
+### 10.2 Stage Identifiers (closed enum)
+
+Every `stage` and `prev_stage` payload value MUST match one of:
+
+- `s0_intake`
+- `s1_plan_generated`
+- `s1_ambiguity_scan_complete`
+- `s1_plan_reviewed`
+- `s2_impl_started`
+- `s2_impl_complete`
+- `s3_review_started`
+- `s3_review_complete`
+- `s4_pr_created`
+- `s5_ci_waiting`
+- `done`
+
+### 10.3 Payload Schema
+
+**Required for both `stage.entered` and `stage.errored`:**
+
+- `session_id` (str) — the cw session that owns the run.
+- `ticket_id` (str) — the ticket being worked.
+- `stage` (str) — the stage being entered or that errored; MUST match the closed enum in §10.2.
+- `started_at` (str) — ISO8601 UTC timestamp, e.g. `2026-05-23T13:01:42Z`.
+
+**Optional:**
+
+- `prev_stage` (str) — the stage being departed; MUST also match the closed enum in §10.2.
+
+**`stage.errored`-only:**
+
+- `error_kind` (str) — free-form classifier such as `agent_block`, `impl_failed`, `review_blocked`. Open enum — consumers MUST tolerate unknown values.
+
+### 10.4 Producer Invocation
+
+The skill emits stage transitions via `cw event record` from inside the headless session:
+
+```bash
+cw event record stage.entered \
+  --payload '{"session_id":"$CW_SESSION_ID","ticket_id":"173","stage":"s2_impl_started","prev_stage":"s1_plan_reviewed","started_at":"2026-05-23T13:01:42Z"}'
+```
+
+### 10.5 Consumer Behavior
+
+cw surfaces `last_stage` per running session in `cw orchestrate status` (text output) and the TUI sessions table (rendered by `cw orchestrate watch`). The value is derived at render time by filtering recorded events to `STAGE_ENTERED` and mapping `payload.session_id → payload.stage` (latest event wins). `STAGE_ERRORED` events are visible in `cw event tail` and `recent_events` but do NOT redefine `last_stage`. Sessions with no stage events render as `—` in the TUI and omit the `last_stage=…` token in the text output.
+
+### 10.6 Cross-Repo Status
+
+The producer side ships in `mattwwarren/global-claude` `commands/auto-dev.md` as a coordinated PR; the consumer side (event taxonomy + `last_stage` plumbing) ships in cw#173.
