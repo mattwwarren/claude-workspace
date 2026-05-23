@@ -561,6 +561,107 @@ class TestInvariants:
 
 
 # ---------------------------------------------------------------------------
+# Phase B + E — Blocker context and retry semantics (#174)
+# ---------------------------------------------------------------------------
+
+
+class TestBlockerPhaseBE:
+    def test_v2_block_without_new_fields_still_parses(self) -> None:
+        """Back-compat: producers on v1/v2 emit no new fields; parser accepts."""
+        p = _blocked_payload()
+        result = AutoDevResult.model_validate(p)
+        assert isinstance(result.blocker, type(result.blocker))
+        assert result.blocker is not None
+        assert result.blocker.exception_type is None
+        assert result.blocker.message is None
+        assert result.blocker.recovery_hint is None
+        assert result.blocker.retry_eligible is None
+        assert result.blocker.retry_delay_seconds is None
+
+    def test_phase_b_fields_round_trip(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {
+                "exception_type": "PlanValidationError",
+                "message": (
+                    "Plan contains MUST_FIX findings that persist after revision"
+                ),
+                "recovery_hint": "Manual review required; update plan and retry",
+            },
+        )
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.exception_type == "PlanValidationError"
+        assert "MUST_FIX" in (result.blocker.message or "")
+        assert "Manual review" in (result.blocker.recovery_hint or "")
+
+    def test_phase_e_retry_eligible_with_delay(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {
+                "reason": "ci_timeout",
+                "retry_eligible": True,
+                "retry_delay_seconds": 120,
+            },
+        )
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds == 120
+
+    def test_phase_e_retry_ineligible_no_delay(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {
+                "reason": "plan_unreviewable",
+                "retry_eligible": False,
+                "retry_delay_seconds": None,
+            },
+        )
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is False
+        assert result.blocker.retry_delay_seconds is None
+
+    def test_retry_delay_without_eligible_rejected(self) -> None:
+        # A delay only makes sense when the orchestrator is allowed to retry.
+        p = _blocked_payload()
+        p["blocker"].update(
+            {"retry_eligible": False, "retry_delay_seconds": 30},
+        )
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_retry_delay_negative_rejected(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {"retry_eligible": True, "retry_delay_seconds": -5},
+        )
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_phase_b_and_e_together_on_v3_block(self) -> None:
+        p = _blocked_payload()
+        p["schema_version"] = 3
+        p["blocker"].update(
+            {
+                "reason": "ci_timeout",
+                "exception_type": "CITimeoutError",
+                "message": "CI did not complete within 30 minutes",
+                "recovery_hint": "Re-dispatch with a 2-minute delay",
+                "retry_eligible": True,
+                "retry_delay_seconds": 120,
+            },
+        )
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.exception_type == "CITimeoutError"
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds == 120
+
+
+# ---------------------------------------------------------------------------
 # stage1_pre_flight + plan_source=none (v3, with v2 backward-compat exception)
 # ---------------------------------------------------------------------------
 
