@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
-from cw.exceptions import CwError
+from cw.exceptions import CwError, HookContextConflictError
 from cw.models import Session, SessionOrigin, SessionPurpose
 from cw.native_daemon import get_native_daemon_client
 
@@ -37,6 +37,7 @@ def _write_hook_context(
     client: str,
     purpose: str,
     ticket_id: str | None,
+    origin: SessionOrigin,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -48,10 +49,33 @@ def _write_hook_context(
       ``SESSION_COMPLETED`` event keyed back to the cw session + dev_queue
       task. Bypasses the env-var injection limitation on ``claude --bg``
       (see GitHub issue #133).
+
+    Origin-aware ``settings.local.json`` strategy (Option A from issue #165
+    Phase B):
+
+    - ``SessionOrigin.DAEMON``: the worktree was freshly created by cw;
+      any prior ``settings.local.json`` is from a defunct cw spawn, so we
+      blind-overwrite with the current hook template.
+    - ``SessionOrigin.USER``: the worktree may carry a user-owned
+      ``settings.local.json``. If one already exists, raise
+      :class:`HookContextConflictError` rather than clobbering. If none
+      exists, write the hook template (same content as the DAEMON path).
+
+    Phase C wires the typed error into a clean failure path so interactive
+    ``claude --bg`` sessions surface the conflict instead of trampling the
+    user's settings.
     """
     claude_dir = worktree / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
-    (claude_dir / "settings.local.json").write_text(
+    settings_path = claude_dir / "settings.local.json"
+    if origin is SessionOrigin.USER and settings_path.exists():
+        msg = (
+            "Cannot inject Stop hook: "
+            f"{settings_path} already exists in a USER-origin worktree. "
+            "Refusing to overwrite user-managed settings."
+        )
+        raise HookContextConflictError(msg)
+    settings_path.write_text(
         json.dumps(_HOOK_SETTINGS_TEMPLATE, indent=2) + "\n",
     )
     context = {
@@ -122,6 +146,7 @@ def spawn_create_impl(
         client=client.name,
         purpose=SessionPurpose.IMPL.value,
         ticket_id=ticket_id,
+        origin=SessionOrigin.DAEMON,
     )
 
     daemon = native_daemon or get_native_daemon_client()

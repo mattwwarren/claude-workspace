@@ -305,6 +305,104 @@ class TestHookContextInjection:
         assert context["ticket_id"] is None
 
 
+class TestWriteHookContext:
+    """Tests for _write_hook_context's origin-aware settings.local.json behavior.
+
+    Phase B of multiplexer-removal (issue #165): the function must keep its
+    existing blind-overwrite behavior for DAEMON-origin (fresh cw-owned
+    worktree) but refuse to clobber an existing settings.local.json in a
+    USER-origin worktree (the user owns that file).
+    """
+
+    def _call(
+        self,
+        worktree: Path,
+        *,
+        origin: SessionOrigin,
+        session_id: str = "sess-write-hook",
+        session_name: str = "test-client/auto-dev/137",
+        client: str = "test-client",
+        purpose: str = "impl",
+        ticket_id: str | None = "137",
+    ) -> None:
+        from cw.spawn import _write_hook_context
+
+        _write_hook_context(
+            worktree,
+            session_id=session_id,
+            session_name=session_name,
+            client=client,
+            purpose=purpose,
+            ticket_id=ticket_id,
+            origin=origin,
+        )
+
+    def test_write_hook_context_daemon_origin_clobbers(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON-origin: pre-existing settings.local.json gets overwritten.
+
+        The worktree was freshly created by cw, so any content there is from
+        a prior (now defunct) cw spawn — safe to clobber with the current
+        hook template.
+        """
+        worktree = tmp_path / "worktree"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        settings_path = claude_dir / "settings.local.json"
+        prior = {"hooks": {"Stop": [{"matcher": "", "hooks": [{"x": "y"}]}]}}
+        settings_path.write_text(json.dumps(prior))
+
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        rewritten = json.loads(settings_path.read_text())
+        stop_hooks = rewritten["hooks"]["Stop"]
+        assert any(
+            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+        )
+        # Prior unrelated content is gone — confirms blind overwrite.
+        assert rewritten != prior
+
+    def test_write_hook_context_user_origin_raises_on_existing_settings(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """USER-origin: existing settings.local.json → HookContextConflictError."""
+        from cw.exceptions import HookContextConflictError
+
+        worktree = tmp_path / "worktree"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        settings_path = claude_dir / "settings.local.json"
+        prior_text = json.dumps({"permissions": {"allow": ["Bash(ls)"]}})
+        settings_path.write_text(prior_text)
+
+        with pytest.raises(HookContextConflictError):
+            self._call(worktree, origin=SessionOrigin.USER)
+
+        # File untouched.
+        assert settings_path.read_text() == prior_text
+
+    def test_write_hook_context_user_origin_writes_when_no_settings(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """USER-origin + no existing file → writes hook template successfully."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        self._call(worktree, origin=SessionOrigin.USER)
+
+        settings_path = worktree / ".claude" / "settings.local.json"
+        assert settings_path.exists()
+        settings = json.loads(settings_path.read_text())
+        stop_hooks = settings["hooks"]["Stop"]
+        assert any(
+            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_hooks
+        )
+        # Correlation file should still be written.
+        context_path = worktree / ".claude" / "cw-context.json"
+        assert context_path.exists()
+
+
 class TestSpawnClose:
     """Tests for the spawn close business logic."""
 

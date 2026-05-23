@@ -245,6 +245,10 @@ class TestSignalStop:
     bare string."""
 
     def _seed_session(self, tmp_path: Path, sess_id: str = "sess-147") -> Session:
+        # Seed ACTIVE: a freshly-spawned DAEMON session is ACTIVE until the
+        # Stop hook fires. After issue #165 Phase B the idempotency guard
+        # covers IDLE too, so seeding IDLE would short-circuit every Stop
+        # hook test that exercises the active → completed flow.
         workspace = tmp_path / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
         worktree = tmp_path / "worktree"
@@ -257,7 +261,7 @@ class TestSignalStop:
             origin=SessionOrigin.DAEMON,
             workspace_path=workspace,
             worktree_path=worktree,
-            status=SessionStatus.IDLE,
+            status=SessionStatus.ACTIVE,
         )
         state = load_state()
         state.sessions.append(session)
@@ -696,6 +700,212 @@ class TestSignalStop:
             event_types=[OrchestratorEventType.SESSION_COMPLETED],
         )
         assert any(e.payload.get("session_id") == session.id for e in events)
+
+    # ------------------------------------------------------------------
+    # Origin-aware Stop hook (issue #165, Phase B of multiplexer-removal).
+    #
+    # USER-origin sessions are interactive: the Stop hook fires at every
+    # agent turn, but the human is still driving. Mark IDLE so daemon
+    # triggers / wait loops can react, but DO NOT emit SESSION_COMPLETED
+    # and DO NOT call native_daemon.stop (the session has no roster entry).
+    # DAEMON-origin behavior must stay intact — that path completes the
+    # session, emits the event, and stops the bg worker as before.
+    # ------------------------------------------------------------------
+
+    def test_signal_stop_user_origin_active_transitions_to_idle(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin + ACTIVE → IDLE, claude_session_id persisted, no event."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        session = self._seed_session(tmp_path, sess_id="sess-user-active")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.origin = SessionOrigin.USER
+        target.status = SessionStatus.ACTIVE
+        target.surface_ref = "tmux-pane-9"
+        save_state(state)
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-user",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.IDLE
+        assert updated.claude_session_id == "claude-uuid-user"
+        assert updated.completed_at is None
+        assert updated.completed_reason is None
+
+        events = read_events(
+            consumer="test-user-active",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(e.payload.get("session_id") == session.id for e in events)
+
+        assert daemon.stop_calls == []
+
+    def test_signal_stop_user_origin_idle_is_noop(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin + IDLE: widened idempotency guard catches re-fires."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        session = self._seed_session(tmp_path, sess_id="sess-user-idle")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.origin = SessionOrigin.USER
+        target.status = SessionStatus.IDLE
+        save_state(state)
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        pre_state = load_state()
+        pre_target = next(s for s in pre_state.sessions if s.id == session.id)
+        pre_snapshot = pre_target.model_dump()
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-idle-refire",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        post_target = next(s for s in load_state().sessions if s.id == session.id)
+        assert post_target.model_dump() == pre_snapshot
+
+        events = read_events(
+            consumer="test-user-idle-refire",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(e.payload.get("session_id") == session.id for e in events)
+
+        assert daemon.stop_calls == []
+
+    def test_signal_stop_user_origin_backgrounded_is_noop(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin + BACKGROUNDED: silent no-op via inside-branch ACTIVE check."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        session = self._seed_session(tmp_path, sess_id="sess-user-bgrd")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.origin = SessionOrigin.USER
+        target.status = SessionStatus.BACKGROUNDED
+        save_state(state)
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+        self._write_context(worktree, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        pre_state = load_state()
+        pre_target = next(s for s in pre_state.sessions if s.id == session.id)
+        pre_snapshot = pre_target.model_dump()
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-bgrd",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        post_target = next(s for s in load_state().sessions if s.id == session.id)
+        assert post_target.model_dump() == pre_snapshot
+
+        events = read_events(
+            consumer="test-user-bgrd",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(e.payload.get("session_id") == session.id for e in events)
+
+        assert daemon.stop_calls == []
+
+    def test_signal_stop_daemon_origin_unchanged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: DAEMON-origin still completes + emits + stops."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        session = self._seed_session(tmp_path, sess_id="sess-daemon-regress")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.origin = SessionOrigin.DAEMON
+        target.status = SessionStatus.ACTIVE
+        save_state(state)
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+
+        daemon = FakeNativeDaemonClient()
+        short_id = daemon.spawn_bg(cwd=worktree, prompt="seed")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.surface_ref = short_id
+        save_state(state)
+        self._write_context(worktree, session_id=session.id)
+
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-daemon",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.claude_session_id == "claude-uuid-daemon"
+
+        events = read_events(
+            consumer="test-daemon-regress",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(e.payload.get("session_id") == session.id for e in events)
+
+        assert daemon.stop_calls == [short_id]
 
 
 class TestCompletion:
