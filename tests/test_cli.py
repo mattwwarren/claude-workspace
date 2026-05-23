@@ -540,11 +540,10 @@ class TestSignalStop:
         from cw.native_daemon import FakeNativeDaemonClient
 
         session = self._seed_session(tmp_path, sess_id="sess-bg")
-        # Override default IDLE status: this session is actively running
-        # a background subagent when the Stop hook fires.
+        # The defers path needs a surface_ref so the regression assertion
+        # below can prove daemon.stop wasn't called against any roster id.
         state = load_state()
         target = next(s for s in state.sessions if s.id == session.id)
-        target.status = SessionStatus.ACTIVE
         target.surface_ref = "claude-short-id"
         save_state(state)
         assert session.worktree_path is not None
