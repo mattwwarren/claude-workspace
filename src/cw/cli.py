@@ -694,8 +694,9 @@ def event_record(
     """Record an event to the inbox.
 
     EVENT_TYPE must be one of: ticket.enqueued, session.spawned,
-    session.completed, pr.registered, pr.ci_failed,
-    pr.review_received, pr.mergeable, pr.merged.
+    session.completed, session.timed_out, stage.entered, stage.errored,
+    pr.registered, pr.ci_failed, pr.review_received, pr.mergeable,
+    pr.merged.
     """
     if event_type not in _VALID_EVENT_TYPES:
         valid = ", ".join(sorted(_VALID_EVENT_TYPES))
@@ -1349,9 +1350,11 @@ def _format_status_human(status: OrchestratorStatus) -> str:
     )
 
     lines.extend(("", f"Running sessions:  {len(status.running_sessions)}"))
-    lines.extend(
-        f"  - {s.id}  {s.name}  status={s.status}" for s in status.running_sessions
-    )
+    for s in status.running_sessions:
+        line = f"  - {s.id}  {s.name}  status={s.status}"
+        if s.last_stage:
+            line += f"  last_stage={s.last_stage}"
+        lines.append(line)
 
     lines.extend(("", f"Monitored PRs:     {len(status.monitored_prs)}"))
     lines.extend(
