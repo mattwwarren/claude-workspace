@@ -236,6 +236,21 @@ Advisory only. cw acts on these without parsing prose.
 
 Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`. `next_actions` is otherwise an open vocabulary — parsers MUST pass unknown actions through unchanged (do not act on them, do not reject the payload).
 
+### 4.4 Recognized intermediate statuses (not in closed enum)
+
+The producer emits two additional `status` values that fall outside the §4.1 closed enum. They represent **pre-dispatch human-attention** outcomes — the run halted before producing a branch because the planning agents surfaced something a human must disposition (a premise to verify, an ambiguity to resolve). They are observed in dogfood today; they are NOT in the closed enum because the routing semantics (treat as advisory pre-dispatch context, not a terminal pipeline outcome) differ from the canonical statuses.
+
+| Status | Meaning | Payload signal |
+|---|---|---|
+| `premises_pending_verification` | The Plan Soundness Reviewer flagged premises the orchestrator could not auto-verify; the run halted with the premises listed for human disposition. | `premises` array is non-empty. Each entry carries at minimum a description of the premise (key may be `premise` or `claim`) and producer-supplied verification context (any of `verify_by` / `plan_depends_on_it_for` / `evidence_in_ticket` / `how_to_verify` / `verified` / `resolution`). Consumers MUST tolerate missing keys — the shape is producer-driven and not yet stabilized. |
+| `ambiguities_pending_resolution` | Ambiguity scan returned items that exceeded the auto-resolve threshold; the run halted with the ambiguities listed for human disposition. | `ambiguities` array is non-empty. Each entry typically carries `question`, `plan_assumption`, `alternatives`, `why_it_matters`, `ticket_evidence`; treat all keys as best-effort. |
+
+**Parser behavior:** §6 (5) applies — unknown `status` values route through synthetic `BlockedResult` with `reason=status_unknown`. The producer's literal status string is preserved in `blocker.details` (`got status='<value>'; surface verbatim, do not auto-route`). Consumers that need the full payload re-extract the sentinel block via `extract_block` and read it as raw JSON.
+
+**Consumer guidance:** Skills that want to handle these (e.g. `/cw-followup`, `/cw-validate-result`) MUST NOT key off the typed `result.status` — they should re-parse the raw sentinel block, recognize the two values, and route via the `premises` / `ambiguities` arrays directly. Treat the arrays as the first-class signal; the `status` string is the producer's label for the same condition.
+
+**Promotion to v4 (future):** Promoting either to a canonical status is a `schema_version` bump per §8 (closed-enum addition rule). When that happens, the cross-field invariants are obvious from the table above (e.g. `status='ambiguities_pending_resolution'` requires `ambiguities` non-empty). Tracked in #191.
+
 ---
 
 ## 5. Health Aggregation
@@ -289,7 +304,7 @@ The skill can fail to emit a complete sentinel block. cw must handle:
 2. **Opening sentinel present, closing sentinel missing** — skill crashed mid-emit. Same handling as (1).
 3. **Block present but JSON does not parse** — skill bug. Same handling as (1); include the raw block in `details`.
 4. **`schema_version` higher than parser supports** — skill upgraded ahead of cw. Surface verbatim and refuse to act on `next_actions`; do not auto-merge or auto-route.
-5. **Unknown `status` value** — same as (4).
+5. **Unknown `status` value** — same as (4). Two producer-emitted values (`premises_pending_verification`, `ambiguities_pending_resolution`) are recognized as pre-dispatch human-attention states; see §4.4 for consumer-side handling.
 6. **Multiple complete sentinel blocks in one invocation's stdout** — skill bug (the contract is exactly one per invocation; see §3.1). Same handling as (1), with `reason: "multiple_result_blocks"` and `details` containing the count and the LAST block's raw payload.
 
 Parser must NEVER act on a partial parse — if any of the above fire, treat the run as blocked and require human attention.
