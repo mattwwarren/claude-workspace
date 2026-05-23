@@ -80,6 +80,10 @@ _LIVE_STATUSES: frozenset[SessionStatus] = frozenset(
 # at the prompt. A session whose ``pane_current_command`` is in this
 # set is treated as a zombie phantom even though the pane itself still
 # exists. See GitHub issue #144.
+# Known limitation: a user who manually attaches to a cw pane and drops
+# to a subshell will also match this predicate and be reaped on the
+# next reconcile tick. cw auto-spawn does not produce this pattern in
+# normal use.
 _IDLE_SHELL_COMMANDS: frozenset[str] = frozenset(
     {"bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh"}
 )

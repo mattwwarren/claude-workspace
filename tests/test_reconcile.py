@@ -295,8 +295,8 @@ def test_compute_drift_command_check_empty_does_not_falsely_reap() -> None:
     that are in list_surfaces — fail-open, no false-positive reaping."""
     adapter = FakeCmuxAdapter()
     ref = adapter.spawn("ws", "claude", "right")
-    # Simulate a backend failure by monkey-patching the adapter method.
-    adapter.list_live_surface_commands = dict  # type: ignore[method-assign]
+    # Simulate a backend failure via the FakeCmuxAdapter fail-mode flag.
+    adapter._commands_fail = True
 
     daemon = FakeNativeDaemonClient()
     state = CwState(sessions=[_mk_session("maybe-alive", ref)])

@@ -245,6 +245,7 @@ class FakeCmuxAdapter:
         }
         self._live: set[str] = set()
         self._live_commands: dict[str, str] = {}
+        self._commands_fail: bool = False
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Record call and return a deterministic fake surface ref."""
@@ -277,8 +278,15 @@ class FakeCmuxAdapter:
         return set(self._live)
 
     def list_live_surface_commands(self) -> dict[str, str]:
-        """Return a copy of the current foreground-command map."""
+        """Return a copy of the current foreground-command map.
+
+        If ``_commands_fail`` is True, returns an empty dict to simulate a
+        backend enumeration failure (exercises the fail-open path in
+        :func:`cw.reconcile.compute_drift`).
+        """
         self.calls["list_live_surface_commands"].append(())
+        if self._commands_fail:
+            return {}
         return dict(self._live_commands)
 
     def set_pane_command(self, surface_ref: str, command: str) -> None:
