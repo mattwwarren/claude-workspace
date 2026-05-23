@@ -1544,6 +1544,7 @@ def _spawn_create_impl(
     worktree: Path,
     prompt_file: Path,
     label: str | None,
+    headless: bool = False,
     native_daemon: NativeDaemonClient | None = None,
 ) -> str:
     """Create a daemon-spawned session.
@@ -1560,6 +1561,7 @@ def _spawn_create_impl(
         worktree=worktree,
         prompt=prompt_file.read_text(encoding="utf-8"),
         label=label,
+        headless=headless,
         native_daemon=native_daemon,
     )
 
@@ -1605,6 +1607,19 @@ def _spawn_close_impl(
 @click.option("--worktree", "-w", default=None, help="Worktree path.")
 @click.option("--prompt-file", "-f", default=None, help="Path to prompt file.")
 @click.option("--label", "-l", default=None, help="Session label (default: daemon).")
+@click.option(
+    "--headless",
+    is_flag=True,
+    default=False,
+    help=(
+        "Mark the session as headless in cw-context.json so the signal_stop "
+        "Layer 1 backstop (issue #176) activates: a session that exits without "
+        "an AUTO_DEV_RESULT sentinel within the 30-min budget transitions to "
+        "TIMED_OUT (retry-eligible) instead of silently COMPLETED. Use when the "
+        "prompt invokes /auto-dev --headless or any other skill that emits the "
+        "sentinel contract."
+    ),
+)
 @click.pass_context
 @handle_errors
 def spawn(
@@ -1613,6 +1628,7 @@ def spawn(
     worktree: str | None,
     prompt_file: str | None,
     label: str | None,
+    headless: bool,
 ) -> None:
     """Spawn a daemon-managed Claude session or manage spawned sessions.
 
@@ -1648,6 +1664,7 @@ def spawn(
         worktree=Path(cast("str", worktree)),
         prompt_file=Path(cast("str", prompt_file)),
         label=label,
+        headless=headless,
     )
     click.echo(session_id)
 
