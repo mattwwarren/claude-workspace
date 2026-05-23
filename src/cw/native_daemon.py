@@ -45,6 +45,11 @@ _ROSTER_PATH = Path.home() / ".claude" / "daemon" / "roster.json"
 # ``claude --bg`` invocation: ``backgrounded · <8 hex chars>``.
 _BG_STDOUT_PATTERN = re.compile(r"backgrounded\s*·\s*([0-9a-f]{8})")
 
+# Claude Code 2.1.150 wraps the short id in ANSI color escapes
+# (``backgrounded · \x1b[36m<id>\x1b[39m``). Strip CSI SGR sequences before
+# matching so the parser tolerates terminal-formatted output.
+_ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
 
 @runtime_checkable
 class NativeDaemonClient(Protocol):
@@ -108,7 +113,8 @@ class RealNativeDaemonClient:
             )
             raise CwError(msg) from exc
 
-        match = _BG_STDOUT_PATTERN.search(proc.stdout or "")
+        stdout_clean = _ANSI_CSI_PATTERN.sub("", proc.stdout or "")
+        match = _BG_STDOUT_PATTERN.search(stdout_clean)
         if match is None:
             msg = (
                 "claude --bg succeeded but stdout did not contain a "

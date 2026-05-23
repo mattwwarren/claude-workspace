@@ -63,6 +63,36 @@ class TestRealNativeDaemonClientSpawn:
         ]
         assert captured["cwd"] == worktree
 
+    def test_parses_short_id_from_ansi_coded_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression #203: Claude Code 2.1.150 wraps the short id in CSI SGR.
+
+        Real captured output from claude --bg on 2026-05-23::
+
+            'backgrounded \xc2\xb7 \\x1b[36m7719118f\\x1b[39m\\n'
+            '\\x1b[2m  claude agents    list sessions\\x1b[22m\\n'
+            ...
+
+        The parser must strip ANSI escapes before searching, otherwise the
+        ``\\x1b[36m`` between ``\xc2\xb7`` and the hex id breaks the match.
+        """
+        ansi_stdout = (
+            "backgrounded · \x1b[36m7719118f\x1b[39m\n"
+            "\x1b[2m  claude agents             list sessions\x1b[22m\n"
+            "\x1b[2m  claude attach 7719118f    open in this terminal\x1b[22m\n"
+            "\x1b[2m  claude logs 7719118f      show recent output\x1b[22m\n"
+            "\x1b[2m  claude stop 7719118f      stop this session\x1b[22m\n"
+        )
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_, **__: _FakeCompleted(stdout=ansi_stdout),
+        )
+        client = RealNativeDaemonClient()
+
+        assert client.spawn_bg(cwd=tmp_path, prompt="x") == "7719118f"
+
     def test_missing_short_id_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
