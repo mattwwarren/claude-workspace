@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
-from cw.exceptions import CwError, HookContextConflictError
+from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose
 from cw.native_daemon import get_native_daemon_client
 
@@ -15,6 +17,39 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig
     from cw.native_daemon import NativeDaemonClient
+
+
+def _validate_worktree(path: Path) -> None:
+    """Ensure *path* is a real git worktree, not an empty dir.
+
+    Catches the #186 symptom: a prior ``git worktree add -b <branch>``
+    failed (e.g. branch already taken) but the directory was mkdir'd
+    by the shell anyway, leaving cw spawn to run on an empty dir.
+    """
+    if not path.exists():
+        msg = f"Worktree path does not exist: {path}"
+        raise WorktreeError(msg)
+    if not (path / ".git").exists():
+        msg = (
+            f"Worktree path is not a git checkout: {path} (missing .git/). "
+            f"A prior 'git worktree add' likely failed; check that the "
+            f"branch name was not already taken."
+        )
+        raise WorktreeError(msg)
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-dir"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=clean_env,
+    )
+    if result.returncode != 0:
+        msg = (
+            f"Worktree path failed 'git rev-parse --git-dir': {path}\n"
+            f"stderr: {result.stderr.strip()}"
+        )
+        raise WorktreeError(msg)
 
 
 _HOOK_SETTINGS_TEMPLATE = {
@@ -119,6 +154,7 @@ def spawn_create_impl(
     ``sess.id`` to ``parent.worker_session_ids``. Raises :class:`CwError`
     if the parent session is not in state.
     """
+    _validate_worktree(worktree)
     state = load_state()
 
     parent_session: Session | None = None
