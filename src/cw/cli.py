@@ -830,14 +830,17 @@ def _sentinel_present_in_transcript(
     Claude stores session transcripts at:
       ``~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl``
 
-    where the encoded path replaces both ``/`` and ``.`` with ``-``.
-    Scans each assistant message in the JSONL for the sentinel open tag.
-    Returns False on any I/O or parse error (fail-open: defer rather than
-    falsely report sentinel present). See GitHub issue #176 Layer 1.
+    where the encoded path replaces both ``/`` and ``.`` with ``-``. The JSONL
+    contains one event per line; ``assistant`` events carry ``message.content``
+    blocks whose ``text`` fields hold the model output, JSON-escaped (real
+    newlines become the two-character sequence ``\\n``). Running ``extract_block``
+    against the raw file therefore misses sentinels that are valid in their
+    decoded form, so this scans each assistant text block individually after
+    JSON decoding. Returns False on any I/O or parse error (fail-open: defer
+    rather than falsely report sentinel present). See GitHub issue #176 Layer 1.
     """
     if not claude_session_id:
         return False
-    # Encode path the same way Claude does: replace '/' and '.' with '-'.
     encoded = cwd.replace("/", "-").replace(".", "-")
     transcript_path = (
         Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
@@ -845,11 +848,29 @@ def _sentinel_present_in_transcript(
     if not transcript_path.is_file():
         return False
     try:
-        raw = transcript_path.read_text(encoding="utf-8", errors="replace")
+        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "text":
+                        continue
+                    text = block.get("text")
+                    if isinstance(text, str) and extract_block(text) is not None:
+                        return True
     except OSError:
         return False
-    # extract_block returns non-None when a complete sentinel pair is found.
-    return extract_block(raw) is not None
+    return False
 
 
 @main.command(name="signal-stop")

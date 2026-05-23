@@ -1219,6 +1219,194 @@ class TestSignalStop:
         assert daemon.stop_calls == []
 
 
+class TestSentinelPresentInTranscript:
+    """Direct tests for the real _sentinel_present_in_transcript helper.
+
+    Earlier tests mocked this helper to keep TestSignalStop tightly scoped,
+    which let the original implementation ship with a bug: it ran
+    ``extract_block`` against the raw JSONL file text, but Claude transcripts
+    JSON-encode each ``message.content[].text`` field — so the sentinel's
+    newlines appear as the literal two-character sequence ``\\n``, and
+    ``extract_block`` (which expects real newlines) misses every real run.
+
+    These tests exercise the helper end-to-end against transcripts shaped
+    the way Claude actually writes them, so the regression cannot recur.
+    See GitHub issue #176 Layer 1.
+    """
+
+    def _write_transcript(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        assistant_text: str,
+        home: Path,
+    ) -> None:
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+
+    def test_returns_true_when_sentinel_embedded_in_jsonl_assistant_text(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Real failure mode: sentinel JSON-escaped inside an assistant text block.
+
+        Regression for issue #176 — the original helper read the file as
+        raw text and missed sentinels whose newlines had been encoded as
+        ``\\n``. Decoding each assistant text block before scanning fixes it.
+        """
+        from cw.cli import _sentinel_present_in_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-170"
+        worktree.mkdir(parents=True)
+        sentinel_text = (
+            "Comment posted. Emitting result.\n\n"
+            "```\n"
+            "<<<AUTO_DEV_RESULT\n"
+            '{"schema_version": 2, "ticket_id": "170", "status": "shipped"}\n'
+            "AUTO_DEV_RESULT>>>\n"
+            "```\n"
+        )
+        self._write_transcript(worktree, "uuid-with-sentinel", sentinel_text, fake_home)
+
+        assert _sentinel_present_in_transcript(str(worktree), "uuid-with-sentinel")
+
+    def test_returns_false_when_no_sentinel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.cli import _sentinel_present_in_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-200"
+        worktree.mkdir(parents=True)
+        self._write_transcript(
+            worktree, "uuid-empty", "Plain status update, no sentinel here.", fake_home
+        )
+
+        assert not _sentinel_present_in_transcript(str(worktree), "uuid-empty")
+
+    def test_returns_false_when_transcript_missing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.cli import _sentinel_present_in_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-201"
+        worktree.mkdir(parents=True)
+
+        assert not _sentinel_present_in_transcript(str(worktree), "missing-uuid")
+
+    def test_returns_false_when_session_id_is_none(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from cw.cli import _sentinel_present_in_transcript
+
+        assert not _sentinel_present_in_transcript(str(tmp_path), None)
+
+    def test_skips_non_assistant_records(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A sentinel string buried in a user/system event must not count.
+
+        Only the assistant's own output counts as a real sentinel emission.
+        """
+        from cw.cli import _sentinel_present_in_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-202"
+        worktree.mkdir(parents=True)
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True)
+        # Sentinel lives inside a user-typed text block — must not count.
+        user_record = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "<<<AUTO_DEV_RESULT\n"
+                            '{"schema_version": 2, "status": "shipped"}\n'
+                            "AUTO_DEV_RESULT>>>"
+                        ),
+                    }
+                ],
+            },
+        }
+        path = project_dir / "uuid-user-only.jsonl"
+        path.write_text(json.dumps(user_record) + "\n")
+
+        assert not _sentinel_present_in_transcript(str(worktree), "uuid-user-only")
+
+    def test_tolerates_malformed_lines(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bad JSON lines are skipped; subsequent valid lines still scanned."""
+        from cw.cli import _sentinel_present_in_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-203"
+        worktree.mkdir(parents=True)
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True)
+        valid_record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "<<<AUTO_DEV_RESULT\n"
+                            '{"schema_version": 2, "status": "shipped"}\n'
+                            "AUTO_DEV_RESULT>>>"
+                        ),
+                    }
+                ],
+            },
+        }
+        (project_dir / "uuid-mixed.jsonl").write_text(
+            "not json at all\n"
+            + json.dumps({"type": "system"})
+            + "\n"
+            + json.dumps(valid_record)
+            + "\n"
+        )
+
+        assert _sentinel_present_in_transcript(str(worktree), "uuid-mixed")
+
+
 class TestCompletion:
     def test_completion_command_bash(self) -> None:
         runner = CliRunner()
