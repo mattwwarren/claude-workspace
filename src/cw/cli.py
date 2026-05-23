@@ -886,13 +886,35 @@ def signal_stop() -> None:
 
     state = load_state()
     session = next((s for s in state.sessions if s.id == cw_session_id), None)
-    if session is None or session.status == SessionStatus.COMPLETED:
+    if session is None or session.status in (
+        SessionStatus.COMPLETED,
+        SessionStatus.IDLE,
+    ):
+        return
+
+    claude_session_id = hook_payload.get("session_id")
+
+    # Issue #165 Phase B: USER-origin sessions are interactive — the Stop
+    # hook fires at every agent turn but the human is still driving. Mark
+    # IDLE so wait loops / daemon triggers can react, but do NOT emit
+    # SESSION_COMPLETED (no dev_queue task to retire) and do NOT call
+    # native_daemon.stop (no roster entry to clean up). DAEMON-origin
+    # falls through to the existing COMPLETED transition below.
+    if session.origin is SessionOrigin.USER:
+        if session.status != SessionStatus.ACTIVE:
+            # BACKGROUNDED (or any non-ACTIVE state) — silent no-op so a
+            # Stop hook firing on a session the user has explicitly
+            # parked doesn't flip its status.
+            return
+        session.status = SessionStatus.IDLE
+        if isinstance(claude_session_id, str):
+            session.claude_session_id = claude_session_id
+        save_state(state)
         return
 
     session.status = SessionStatus.COMPLETED
     session.completed_at = datetime.now(UTC)
     session.completed_reason = CompletionReason.NORMAL
-    claude_session_id = hook_payload.get("session_id")
     if isinstance(claude_session_id, str):
         session.claude_session_id = claude_session_id
     save_state(state)
