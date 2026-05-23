@@ -120,11 +120,45 @@ class Blocker(BaseModel):
     ``reason`` is intentionally typed as ``str`` (open enum per §4.2). The
     producer may add new reasons without a schema bump; consumers surface
     unknown reasons verbatim.
+
+    Phase B and Phase E of the queue-orchestrator observability expansion
+    (issue #174) added five optional fields. All default to None so v1/v2
+    blocks without them parse unchanged; producers emitting v3 should
+    populate them per the headless-contract spec.
     """
 
     stage: str
     reason: str
     details: str = ""
+    # Phase B — blocker context for orchestrator routing.
+    exception_type: str | None = None
+    message: str | None = None
+    recovery_hint: str | None = None
+    # Phase E — queue-aware retry semantics. ``retry_eligible=True`` paired
+    # with a non-null ``retry_delay_seconds`` means the orchestrator can
+    # safely re-dispatch after the given backoff. ``retry_eligible=False``
+    # means human intervention is required.
+    retry_eligible: bool | None = None
+    retry_delay_seconds: int | None = None
+
+    @model_validator(mode="after")
+    def _check_retry_invariants(self) -> Blocker:
+        # If retry_delay_seconds is set, retry_eligible must be True. The
+        # reverse is allowed — a producer can mark retry_eligible without
+        # committing to a specific backoff.
+        if self.retry_delay_seconds is not None and self.retry_eligible is not True:
+            msg = (
+                "retry_delay_seconds set without retry_eligible=True "
+                f"(got retry_eligible={self.retry_eligible!r})"
+            )
+            raise ValueError(msg)
+        if self.retry_delay_seconds is not None and self.retry_delay_seconds < 0:
+            msg = (
+                f"retry_delay_seconds must be non-negative, "
+                f"got {self.retry_delay_seconds}"
+            )
+            raise ValueError(msg)
+        return self
 
 
 _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(

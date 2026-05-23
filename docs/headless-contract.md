@@ -171,8 +171,25 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 
 ### 4.2 `blocker.reason` (when `status = "blocked"`)
 
+Minimum shape (v1+):
+
 ```json
 {"stage": "stage2_impl", "reason": "agent_block", "details": "<verbatim blocker text>"}
+```
+
+Full v3 shape with Phase B and Phase E fields (issue #174):
+
+```json
+{
+  "stage": "stage4a_merge_gate",
+  "reason": "ci_timeout",
+  "details": "<verbatim blocker text>",
+  "exception_type": "CITimeoutError",
+  "message": "CI did not complete within 30 minutes",
+  "recovery_hint": "Re-dispatch after CI watchers settle",
+  "retry_eligible": true,
+  "retry_delay_seconds": 120
+}
 ```
 
 | Reason | Meaning |
@@ -182,6 +199,28 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
 
 `blocker.reason` is an **open enum** — the producer may add new reasons without a `schema_version` bump. Consumers MUST treat unknown reasons as opaque strings and surface verbatim. (Unlike `status`, which is closed: see §4 and §8.)
+
+#### Phase B fields (orchestrator routing context)
+
+| Field | Type | Notes |
+|---|---|---|
+| `exception_type` | string \| null | Producer-side exception class name when the blocker originated from a raised exception. Free-form; consumers surface verbatim. |
+| `message` | string \| null | Single-line summary of the blocker suitable for notification text. Distinct from `details` (which is verbatim multi-line context). |
+| `recovery_hint` | string \| null | Producer's suggestion for the recovery action — typically what the human or orchestrator should try next. Free-form text. |
+
+All three are optional. Producers SHOULD populate them when the underlying failure has a structured exception; they MAY remain null for blocker reasons that don't map to an exception (e.g. soft-blocks like `review_blocked`).
+
+#### Phase E fields (queue-aware retry semantics)
+
+| Field | Type | Notes |
+|---|---|---|
+| `retry_eligible` | bool \| null | `true` when the orchestrator MAY re-dispatch this ticket without human intervention. `false` when human review is required (MUST_FIX persistence, scope ambiguity, etc.). `null` means the producer didn't commit either way — consumer defaults to human escalation. |
+| `retry_delay_seconds` | int \| null | Suggested backoff before re-dispatch when `retry_eligible=true`. Non-negative. Set to `null` to mean "no specific delay required". Invariant: a non-null `retry_delay_seconds` REQUIRES `retry_eligible=true`. |
+
+The pair encodes three policies:
+- **Retry now**: `retry_eligible=true`, `retry_delay_seconds=null` — transient or no-backoff failures.
+- **Retry after delay**: `retry_eligible=true`, `retry_delay_seconds=N` — CI timeouts, classifier non-determinism (issue #183), rate-limit hits.
+- **Human required**: `retry_eligible=false`, `retry_delay_seconds=null` — semantic blockers where another try with the same input won't help.
 
 ### 4.3 `next_actions` Vocabulary
 
