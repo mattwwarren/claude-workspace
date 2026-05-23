@@ -75,6 +75,15 @@ _LIVE_STATUSES: frozenset[SessionStatus] = frozenset(
     }
 )
 
+# Shell process names indicating a pane's foreground process is an idle
+# shell — claude (or ``cw run-claude``) has exited and the pane is back
+# at the prompt. A session whose ``pane_current_command`` is in this
+# set is treated as a zombie phantom even though the pane itself still
+# exists. See GitHub issue #144.
+_IDLE_SHELL_COMMANDS: frozenset[str] = frozenset(
+    {"bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh"}
+)
+
 
 @dataclass(frozen=True)
 class ReconcileReport:
@@ -118,13 +127,24 @@ def compute_drift(
     daemon = native_daemon or get_native_daemon_client()
     tmux_live = adapter.list_surfaces()
     native_live = daemon.list_live_session_short_ids()
+    # Second-pass zombie filter: panes that exist but whose foreground
+    # process is a bare shell are not actually live cw sessions. An empty
+    # command map means the backend can't enumerate — skip the filter
+    # (fail-open) rather than risk false-positive reaping.
+    surface_commands = adapter.list_live_surface_commands()
+    zombie_refs: set[str] = set()
+    if surface_commands:
+        zombie_refs = {
+            ref for ref, cmd in surface_commands.items() if cmd in _IDLE_SHELL_COMMANDS
+        }
+
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
             continue
         if session.surface_ref is None:
             continue
-        if session.surface_ref in tmux_live:
+        if session.surface_ref in tmux_live and session.surface_ref not in zombie_refs:
             continue
         if session.surface_ref in native_live:
             continue

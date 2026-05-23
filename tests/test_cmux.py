@@ -549,6 +549,78 @@ class TestGetBackendAdapter:
         assert isinstance(adapter, TmuxAdapter)
 
 
+def test_fake_adapter_list_live_surface_commands_tracks_spawn() -> None:
+    """FakeCmuxAdapter.list_live_surface_commands returns spawned refs as 'claude'."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    assert adapter.list_live_surface_commands() == {ref: "claude"}
+
+
+def test_fake_adapter_list_live_surface_commands_empty_after_close() -> None:
+    """Closing a surface removes it from the command map."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    adapter.close(ref)
+    assert ref not in adapter.list_live_surface_commands()
+
+
+def test_fake_adapter_set_pane_command_override() -> None:
+    """set_pane_command changes the command shown in the live command map."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    adapter.set_pane_command(ref, "bash")
+    assert adapter.list_live_surface_commands() == {ref: "bash"}
+
+
+def test_fake_adapter_records_list_live_surface_commands_call() -> None:
+    """list_live_surface_commands call is recorded in adapter.calls."""
+    adapter = FakeCmuxAdapter()
+    adapter.spawn("ws", "claude", "right")
+    adapter.list_live_surface_commands()
+    assert len(adapter.calls["list_live_surface_commands"]) == 1
+
+
+def test_real_cmux_list_live_surface_commands_uses_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RealCmuxAdapter.list_live_surface_commands returns non-shell sentinel values.
+
+    The cmux surface.list response does not expose a current-command field,
+    so the adapter maps every live surface to a sentinel ('cmux-surface')
+    so the zombie filter is a transparent no-op for the cmux backend.
+    """
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        if method == "workspace.list":
+            return {
+                "workspaces": [
+                    {"id": "ws-a", "title": "client-a"},
+                ]
+            }
+        if method == "surface.list":
+            return {"surfaces": [{"id": "surf-1"}, {"id": "surf-2"}]}
+        raise AssertionError(f"unexpected call: {method}")
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    result = adapter.list_live_surface_commands()
+    assert set(result.keys()) == {"surf-1", "surf-2"}
+    # All values must be the non-shell sentinel — never a shell name.
+    shell_names = {"bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh"}
+    for cmd in result.values():
+        assert cmd not in shell_names, (
+            f"Sentinel should not be a shell name, got {cmd!r}"
+        )
+
+
 def test_fake_adapter_list_surfaces_tracks_spawn_and_close() -> None:
     """FakeCmuxAdapter tracks live surfaces via spawn/close."""
     adapter = FakeCmuxAdapter()

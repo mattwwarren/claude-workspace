@@ -266,6 +266,96 @@ def test_reconcile_refuses_to_mass_reap_on_empty_live_set(
         assert s.completed_reason is None
 
 
+def test_compute_drift_flags_idle_session_when_pane_runs_bash() -> None:
+    """Key zombie test: IDLE session whose pane command is 'bash' is flagged phantom."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    adapter.set_pane_command(ref, "bash")
+
+    daemon = FakeNativeDaemonClient()
+    state = CwState(sessions=[_mk_session("zombie", ref, status=SessionStatus.IDLE)])
+    report = compute_drift(state, adapter, daemon)
+    assert "zombie" in report.phantom_session_ids
+
+
+def test_compute_drift_keeps_session_alive_when_pane_runs_cw() -> None:
+    """Session whose pane foreground process is 'cw' (or 'claude') is alive."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    # Default command from spawn is "claude" — leave it unchanged.
+
+    daemon = FakeNativeDaemonClient()
+    state = CwState(sessions=[_mk_session("alive", ref, status=SessionStatus.IDLE)])
+    report = compute_drift(state, adapter, daemon)
+    assert "alive" not in report.phantom_session_ids
+
+
+def test_compute_drift_command_check_empty_does_not_falsely_reap() -> None:
+    """When list_live_surface_commands returns {} (failure), do not reap sessions
+    that are in list_surfaces — fail-open, no false-positive reaping."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    # Simulate a backend failure by monkey-patching the adapter method.
+    adapter.list_live_surface_commands = dict  # type: ignore[method-assign]
+
+    daemon = FakeNativeDaemonClient()
+    state = CwState(sessions=[_mk_session("maybe-alive", ref)])
+    report = compute_drift(state, adapter, daemon)
+    # list_surfaces has ref, list_live_surface_commands returned {} → fail-open
+    assert "maybe-alive" not in report.phantom_session_ids
+
+
+def test_reconcile_reaps_bash_pane_zombie_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Full reconcile end-to-end: IDLE session with bash pane is COMPLETED+CRASHED."""
+    adapter = FakeCmuxAdapter()
+    bash_ref = adapter.spawn("ws", "claude", "right")
+    adapter.set_pane_command(bash_ref, "bash")
+    # Add a decoy live surface so outage guard doesn't fire.
+    _decoy_ref = adapter.spawn("ws", "claude", "right")
+
+    sess = _mk_session("zombie-full", bash_ref, status=SessionStatus.IDLE)
+    save_state(CwState(sessions=[sess]))
+
+    daemon = FakeNativeDaemonClient()
+    report = reconcile(adapter, daemon)
+
+    assert "zombie-full" in report.phantom_session_ids
+    reloaded = load_state()
+    s = reloaded.find_by_name_or_id("zombie-full")
+    assert s is not None
+    assert s.status == SessionStatus.COMPLETED
+    assert s.completed_reason == CompletionReason.CRASHED
+
+
+def test_reconcile_outage_guard_still_fires_on_empty_list_surfaces(
+    tmp_config_dir: Path,
+) -> None:
+    """Outage guard: when list_surfaces returns empty and state has live sessions,
+    reconcile returns empty report regardless of list_live_surface_commands content."""
+    state = CwState(
+        sessions=[
+            _mk_session("s1", "r1"),
+            _mk_session("s2", "r2", status=SessionStatus.IDLE),
+        ]
+    )
+    save_state(state)
+
+    adapter = FakeCmuxAdapter()  # empty live set → outage guard fires
+    daemon = FakeNativeDaemonClient()
+    report = reconcile(adapter, daemon)
+
+    assert report.phantom_session_ids == []
+    assert report.phantom_session_names == []
+
+    reloaded = load_state()
+    for sid in ("s1", "s2"):
+        s = reloaded.find_by_name_or_id(sid)
+        assert s is not None
+        assert s.status in {SessionStatus.ACTIVE, SessionStatus.IDLE}
+
+
 def test_reconcile_with_only_native_live_proceeds(
     tmp_config_dir: Path,
 ) -> None:
