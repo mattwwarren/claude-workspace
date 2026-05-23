@@ -906,6 +906,318 @@ class TestSignalStop:
 
         assert daemon.stop_calls == [short_id]
 
+    # ------------------------------------------------------------------
+    # Issue #176 Layer 1: headless-session backstop tests
+    # ------------------------------------------------------------------
+
+    def _write_headless_context(
+        self,
+        worktree: Path,
+        *,
+        session_id: str,
+        ticket_id: str | None = SEED_TICKET_ID,
+    ) -> None:
+        """Write a cw-context.json with ``headless: true`` (dispatch-spawned)."""
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "session_name": "test-client/auto-dev/137",
+                    "client": "test-client",
+                    "purpose": "impl",
+                    "ticket_id": ticket_id,
+                    "headless": True,
+                }
+            )
+        )
+
+    def test_signal_stop_timed_out_when_no_sentinel_after_budget(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Headless session past budget with no sentinel → TIMED_OUT + event.
+
+        This is the primary regression test for GitHub issue #176 Layer 1:
+        a session that orphaned (Stop fires, no sentinel, bg_tasks empty)
+        must NOT silently transition to COMPLETED.
+        """
+        # Seed session started 31 minutes ago (past the 30-min budget).
+        import datetime as dt
+
+        from cw.cli import HEADLESS_TIMEOUT_SECONDS
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+        assert (hook_time - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree-timed-out"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="sess-timed-out",
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+
+        # Seed a RUNNING TicketTask so we can verify it reverts to PENDING.
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+
+        self._write_headless_context(worktree, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        short_id = daemon.spawn_bg(cwd=worktree, prompt="seed")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.surface_ref = short_id
+        save_state(state)
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-timed-out",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+                "last_assistant_message": "Waiting for review agents to complete...",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.TIMED_OUT
+        assert updated.claude_session_id == "claude-uuid-timed-out"
+
+        # SESSION_TIMED_OUT event emitted with expected payload fields.
+        events = read_events(
+            consumer="test-timed-out",
+            event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["session_id"] == session.id
+        assert payload["ticket_id"] == self.SEED_TICKET_ID
+        assert payload["elapsed_seconds"] >= HEADLESS_TIMEOUT_SECONDS
+        assert "Waiting for review agents" in str(
+            payload.get("last_assistant_message_excerpt", "")
+        )
+
+        # SESSION_COMPLETED must NOT have been emitted.
+        completed_events = read_events(
+            consumer="test-timed-out-no-completed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(
+            e.payload.get("session_id") == session.id for e in completed_events
+        )
+
+        # TicketTask must have been reverted to PENDING.
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+        # native_daemon.stop called to clean up the daemon worker.
+        assert daemon.stop_calls == [short_id]
+
+    def test_signal_stop_completes_normally_with_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Headless session with sentinel present → COMPLETED as normal.
+
+        Verifies that the backstop does not interfere with successful runs:
+        when the sentinel block is present in the transcript, the session
+        should complete normally even if the budget has elapsed.
+        See GitHub issue #176 Layer 1.
+        """
+        import datetime as dt
+
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree-sentinel"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="sess-sentinel",
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        # Write a fake transcript with a valid sentinel block so the
+        # sentinel-detection helper finds it.
+        claude_session_id = "abc12345"
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        transcript_dir = tmp_path / "fake-claude-home" / "projects" / encoded
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        sentinel_content = (
+            "<<<AUTO_DEV_RESULT\n"
+            '{"schema_version": 1, "status": "shipped"}\n'
+            "AUTO_DEV_RESULT>>>"
+        )
+        (transcript_dir / f"{claude_session_id}.jsonl").write_text(sentinel_content)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        # Patch Path.home() to return our fake home so the transcript path resolves.
+        fake_home = tmp_path / "fake-claude-home"
+
+        def _fake_sentinel(cwd: str, sid: str | None) -> bool:
+            from cw.auto_dev_result import extract_block
+
+            if not sid:
+                return False
+            enc = cwd.replace("/", "-").replace(".", "-")
+            tp = fake_home / "projects" / enc / f"{sid}.jsonl"
+            if not tp.is_file():
+                return False
+            return extract_block(tp.read_text()) is not None
+
+        monkeypatch.setattr("cw.cli._sentinel_present_in_transcript", _fake_sentinel)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        timed_out_events = read_events(
+            consumer="test-sentinel-no-timeout",
+            event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+        )
+        assert not any(
+            e.payload.get("session_id") == session.id for e in timed_out_events
+        )
+
+    def test_signal_stop_defers_under_budget_no_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Headless session under budget with no sentinel → defer (no transition).
+
+        The session remains ACTIVE; no event is emitted. Another Stop hook
+        will fire later, or reconcile will catch it.
+        See GitHub issue #176 Layer 1.
+        """
+        import datetime as dt
+
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        # Session is 5 minutes old — well under the 30-minute budget.
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree-under-budget"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="sess-under-budget",
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-under-budget",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        # Session must not have changed status.
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+
+        # No events of either kind.
+        for event_type in (
+            OrchestratorEventType.SESSION_COMPLETED,
+            OrchestratorEventType.SESSION_TIMED_OUT,
+        ):
+            events = read_events(
+                consumer=f"test-under-budget-{event_type}",
+                event_types=[event_type],
+            )
+            assert not any(e.payload.get("session_id") == session.id for e in events)
+
+        # daemon.stop must NOT have been called.
+        assert daemon.stop_calls == []
+
 
 class TestCompletion:
     def test_completion_command_bash(self) -> None:

@@ -22,6 +22,11 @@ class SessionStatus(StrEnum):
     IDLE = "idle"
     BACKGROUNDED = "backgrounded"
     COMPLETED = "completed"
+    # Headless daemon session exceeded wall-clock budget without emitting a
+    # sentinel. Terminal-ish but retry-eligible: reconciler reverts the
+    # owning TicketTask to PENDING so the dispatch loop can retry.
+    # See GitHub issue #176 Layer 1.
+    TIMED_OUT = "timed_out"
 
 
 class CompletionReason(StrEnum):
@@ -29,6 +34,7 @@ class CompletionReason(StrEnum):
     HANDOFF = "handoff"
     CRASHED = "crashed"
     NORMAL = "normal"
+    TIMED_OUT = "timed_out"
 
 
 class SessionOrigin(StrEnum):
@@ -110,6 +116,7 @@ class OrchestratorEventType(StrEnum):
     TICKET_ENQUEUED = "ticket.enqueued"
     SESSION_SPAWNED = "session.spawned"
     SESSION_COMPLETED = "session.completed"
+    SESSION_TIMED_OUT = "session.timed_out"
     PR_REGISTERED = "pr.registered"
     PR_CI_FAILED = "pr.ci_failed"
     PR_REVIEW_RECEIVED = "pr.review_received"

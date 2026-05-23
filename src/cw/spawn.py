@@ -38,6 +38,7 @@ def _write_hook_context(
     purpose: str,
     ticket_id: str | None,
     origin: SessionOrigin,
+    headless: bool = False,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -84,6 +85,7 @@ def _write_hook_context(
         "client": client,
         "purpose": purpose,
         "ticket_id": ticket_id,
+        "headless": headless,
     }
     (claude_dir / "cw-context.json").write_text(json.dumps(context, indent=2) + "\n")
 
@@ -97,6 +99,7 @@ def spawn_create_impl(
     native_daemon: NativeDaemonClient | None = None,
     parent: str | None = None,
     ticket_id: str | None = None,
+    headless: bool = False,
 ) -> str:
     """Create a daemon-spawned session via the native Claude background daemon.
 
@@ -147,6 +150,7 @@ def spawn_create_impl(
         purpose=SessionPurpose.IMPL.value,
         ticket_id=ticket_id,
         origin=SessionOrigin.DAEMON,
+        headless=headless,
     )
 
     daemon = native_daemon or get_native_daemon_client()

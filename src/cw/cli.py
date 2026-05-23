@@ -15,6 +15,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
+from cw.auto_dev_result import extract_block
 from cw.cmux import CmuxAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
@@ -26,7 +27,14 @@ from cw.config import (
     show_config,
 )
 from cw.daemon import run_watcher_tick
-from cw.dev_queue import add_ticket, list_tickets, resolve_client
+from cw.dev_queue import (
+    add_ticket,
+    dev_queue_lock,
+    list_tickets,
+    load_dev_queue,
+    resolve_client,
+    save_dev_queue,
+)
 from cw.dispatch import run_dispatch_loop
 from cw.doctor import format_report, run_doctor
 from cw.events import advance_cursor, read_events, record_event
@@ -77,6 +85,12 @@ from cw.spawn import spawn_create_impl
 from cw.tui import DetailLevel
 from cw.tui import watch as tui_watch
 from cw.wrapper import run_claude_wrapper, signal_idle
+
+# Wall-clock budget for headless daemon sessions before signal_stop transitions
+# them to TIMED_OUT instead of deferring. After this many seconds without a
+# sentinel the session is considered stalled; dev-queue retries via reconcile.
+# See GitHub issue #176 Layer 1.
+HEADLESS_TIMEOUT_SECONDS = 1800  # 30 minutes
 
 
 def handle_errors[F: Callable[..., object]](fn: F) -> F:
@@ -807,6 +821,37 @@ def run_claude(extra_args: tuple[str, ...]) -> None:
     run_claude_wrapper(extra_args)
 
 
+def _sentinel_present_in_transcript(
+    cwd: str,
+    claude_session_id: str | None,
+) -> bool:
+    """Return True if the AUTO_DEV_RESULT sentinel block appears in the transcript.
+
+    Claude stores session transcripts at:
+      ``~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl``
+
+    where the encoded path replaces both ``/`` and ``.`` with ``-``.
+    Scans each assistant message in the JSONL for the sentinel open tag.
+    Returns False on any I/O or parse error (fail-open: defer rather than
+    falsely report sentinel present). See GitHub issue #176 Layer 1.
+    """
+    if not claude_session_id:
+        return False
+    # Encode path the same way Claude does: replace '/' and '.' with '-'.
+    encoded = cwd.replace("/", "-").replace(".", "-")
+    transcript_path = (
+        Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
+    )
+    if not transcript_path.is_file():
+        return False
+    try:
+        raw = transcript_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    # extract_block returns non-None when a complete sentinel pair is found.
+    return extract_block(raw) is not None
+
+
 @main.command(name="signal-stop")
 @handle_errors
 def signal_stop() -> None:
@@ -889,6 +934,7 @@ def signal_stop() -> None:
     if session is None or session.status in (
         SessionStatus.COMPLETED,
         SessionStatus.IDLE,
+        SessionStatus.TIMED_OUT,
     ):
         return
 
@@ -912,8 +958,79 @@ def signal_stop() -> None:
         save_state(state)
         return
 
+    # Issue #176 Layer 1: headless backstop.
+    #
+    # A headless DAEMON session (ticket_id present in context) must NOT be
+    # silently marked COMPLETED unless it emitted an AUTO_DEV_RESULT sentinel.
+    # The bg_tasks guard above correctly defers when a subagent is in flight,
+    # but the parent's *next* turn may end (with background_tasks=[]) before
+    # it has finished its post-wait pipeline work — a silent orphan.
+    #
+    # Detection: DAEMON-origin + non-None ticket_id in context ≡ headless.
+    # Sentinel check: look for the sentinel open tag in the Claude transcript.
+    # Budget: if no sentinel AND wall-clock since session.started_at exceeds
+    # HEADLESS_TIMEOUT_SECONDS, transition to TIMED_OUT (retry-eligible) so
+    # the failure is loud and dev-queue can retry. Under budget: defer (return)
+    # so another Stop hook (or reconcile) can catch it later.
+    #
+    # The guard does NOT replace the bg_tasks deferral — both fire independently.
+    ticket_id_value = context.get("ticket_id")
+    # ``headless: true`` in cw-context.json is written by spawn_create_impl
+    # when dispatch launches a /auto-dev session. Absent (or False) for legacy
+    # sessions and non-headless daemon sessions — those fall through to the
+    # normal COMPLETED path unchanged.
+    is_headless = session.origin is SessionOrigin.DAEMON and bool(
+        context.get("headless")
+    )
+    now = datetime.now(UTC)
+    if is_headless:
+        has_sentinel = _sentinel_present_in_transcript(
+            cwd_value, claude_session_id if isinstance(claude_session_id, str) else None
+        )
+        if not has_sentinel:
+            elapsed = (now - session.started_at).total_seconds()
+            if elapsed < HEADLESS_TIMEOUT_SECONDS:
+                # Under budget — defer. Another Stop hook turn will fire, or
+                # reconcile will eventually catch a phantom and CRASH it.
+                return
+            # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
+            last_msg = hook_payload.get("last_assistant_message", "")
+            excerpt = str(last_msg)[:500] if last_msg else ""
+            session.status = SessionStatus.TIMED_OUT
+            session.completed_at = now
+            session.completed_reason = CompletionReason.TIMED_OUT
+            if isinstance(claude_session_id, str):
+                session.claude_session_id = claude_session_id
+            save_state(state)
+            timed_out_payload: dict[str, object] = {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": context.get("client"),
+                "ticket_id": ticket_id_value,
+                "claude_session_id": claude_session_id,
+                "elapsed_seconds": elapsed,
+                "last_assistant_message_excerpt": excerpt,
+            }
+            record_event(OrchestratorEventType.SESSION_TIMED_OUT, timed_out_payload)
+            # Revert the owning TicketTask from RUNNING → PENDING so the
+            # dispatch loop can retry this ticket on the next tick.
+            with dev_queue_lock():
+                store = load_dev_queue()
+                for task in store.tasks:
+                    if (
+                        task.ticket_id == ticket_id_value
+                        and task.status == QueueItemStatus.RUNNING
+                    ):
+                        task.status = QueueItemStatus.PENDING
+                        task.session_id = None
+                        break
+                save_dev_queue(store)
+            if session.surface_ref is not None:
+                get_native_daemon_client().stop(session.surface_ref)
+            return
+
     session.status = SessionStatus.COMPLETED
-    session.completed_at = datetime.now(UTC)
+    session.completed_at = now
     session.completed_reason = CompletionReason.NORMAL
     if isinstance(claude_session_id, str):
         session.claude_session_id = claude_session_id

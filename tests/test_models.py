@@ -36,9 +36,10 @@ class TestSessionStatus:
         assert SessionStatus.IDLE.value == "idle"
         assert SessionStatus.BACKGROUNDED.value == "backgrounded"
         assert SessionStatus.COMPLETED.value == "completed"
+        assert SessionStatus.TIMED_OUT.value == "timed_out"
 
     def test_all_values(self) -> None:
-        assert len(SessionStatus) == 4
+        assert len(SessionStatus) == 5
 
 
 class TestSession:
@@ -446,9 +447,10 @@ class TestCompletionReason:
         assert CompletionReason.HANDOFF.value == "handoff"
         assert CompletionReason.CRASHED.value == "crashed"
         assert CompletionReason.NORMAL.value == "normal"
+        assert CompletionReason.TIMED_OUT.value == "timed_out"
 
     def test_all_values(self) -> None:
-        assert len(CompletionReason) == 4
+        assert len(CompletionReason) == 5
 
 
 class TestOrchestratorConfigLegacyDefault:
