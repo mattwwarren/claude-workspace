@@ -136,7 +136,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `scope.lines_estimate` | int | Plan-time line estimate. |
 | `scope.lines_actual` | int \| null | Actual lines touched; `null` if exited before impl. |
 | `scope.forbidden_touched` | bool | Whether any `--forbidden` area was touched. |
-| `plan_source` | `"linear_existing"` \| `"generated"` \| `"free_text"` \| `"none"` | How the plan was sourced. `"none"` is used for pre-flight exits where no plan was produced. |
+| `plan_source` | `"linear_existing"` \| `"github_issue_existing"` \| `"generated"` \| `"free_text"` \| `"none"` | How the plan was sourced. `"linear_existing"` and `"github_issue_existing"` are equivalent (the latter is the post-Linear, GitHub-Issues-era label — producers should emit whichever matches their tracker). `"none"` is used for pre-flight exits where no plan was produced. |
 | `branch` | string \| null | Branch name; `null` if exited before branch creation (e.g. `plan_pending_approval`). |
 | `worktree_path` | string \| null | Absolute path; `null` if no worktree was created. |
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
@@ -314,7 +314,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 |---|---|
 | 1 | Initial contract. |
 | 2 | Added `no_op` status (§4.1) and `close_issue_as_completed` advisory action (§4.3). v1-tagged payloads with `status=no_op` are rejected as `validation_failed`. |
-| 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). |
+| 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). Also added `github_issue_existing` to `plan_source` (the post-Linear analog of `linear_existing`; treated identically). Accepted under v2 and v3 — same rollout-exception treatment, since the producer emits this value at v2 today (see #190). |
 
 **Bump required when:**
 - Any field is removed or renamed.
@@ -327,7 +327,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 - A new `next_actions` entry is added (parsers already treat unknown actions as advisory).
 - A new `blocker.reason` value is added (open enum — see §4.2).
 
-**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'` and `plan_source='none'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness.
+**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'`, `plan_source='none'`, and `plan_source='github_issue_existing'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness.
 
 When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. **Order matters:** the parser must accept the new version BEFORE the skill emits it, otherwise in-flight emissions land in deployed parsers that don't recognize them. Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
 

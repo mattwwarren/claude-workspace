@@ -714,3 +714,32 @@ class TestPreFlightNoOp:
         p["scope"]["lines_actual"] = 10
         with pytest.raises(ValidationError, match="lines_actual"):
             AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# plan_source="github_issue_existing" (added per #190 — producer-side rename
+# of "linear_existing" for GitHub-sourced runs; treated identically).
+# ---------------------------------------------------------------------------
+
+
+class TestPlanSourceGitHubIssueExisting:
+    def test_shipped_run_with_github_issue_existing_parses(self) -> None:
+        """A real shipped payload (#149 captured) emitted under v2."""
+        p = _shipped_payload()
+        p["schema_version"] = 2
+        p["plan_source"] = "github_issue_existing"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_source == "github_issue_existing"
+        assert result.status == "shipped"
+        assert result.schema_version == 2
+
+    def test_no_op_run_with_github_issue_existing_parses(self) -> None:
+        """A pre-flight no_op payload (#136 captured) with the GitHub plan_source."""
+        p = _no_op_payload()
+        p["schema_version"] = 2
+        p["plan_source"] = "github_issue_existing"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_source == "github_issue_existing"
+        assert result.status == "no_op"
