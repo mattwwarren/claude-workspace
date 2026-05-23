@@ -173,6 +173,68 @@ job) becomes redundant once #112 + #113 land, and the body of
   surfaces. The migration is phased so that *during* the transition
   both exist, but the end-state is single-path.
 
+## Update 2026-05-22 — Phase A spike result (multiplexer-removal)
+
+A scoping spike (plan file: `~/.claude/plans/cw-multiplexer-removal-spike/main.md`,
+retained outside the repo) re-evaluated whether the migration could **skip the
+intermediate `NativeBackend` adapter phase (#108)** and cut straight to deletion
+of the multiplexer substrate. Triggered by #144 (phantom-bash pane detection),
+which only existed because `MultiplexerAdapter` treats pane existence as proof
+the agent is alive.
+
+**Phase A verdict: GREEN.** Four prerequisites verified:
+
+1. **`claude attach <short-id>` PTY behavior** — clean same-terminal attach,
+   Ctrl+Z detach works from primary AND secondary, cross-terminal reattach
+   works, no PTY artifacts. (Ctrl+D in any attached terminal terminates the
+   session in all terminals — expected EOF semantics; Phase C UX docs must
+   mention "detach with Ctrl+Z, not Ctrl+D".)
+2. **Stop hook origin discrimination** — `signal-stop` already conditions on
+   `Session.origin` for `daemon.stop` cleanup (`src/cw/cli.py:917`). Extending
+   it to gate the COMPLETED transition by origin is a small diff. Phase B
+   handles this; sketch in the Phase B ticket body.
+3. **Daemon roster crash-cleanup** — verified by SIGKILL of a `claude --bg`
+   worker (`/tmp/cw-spike-check3/ac9d923a`). Roster reflects death within
+   ~10-15 s; daemon auto-respawns with `attempt += 1`, same short id, via
+   `--resume <sessionId>`. `claude stop <short-id>` is the explicit-cleanup
+   primitive. **Caveat:** auto-respawn is correct for headless dispatch,
+   wrong for interactive — per-origin respawn-policy config needed in Phase C
+   (the `dispatch.respawnFlags` field in roster.json is the knob).
+4. **`cw bg` independence** — confirmed by code reading. `background_session`
+   has no `send-keys` / no `/session-done` injection; the docstring claim is
+   aspirational. Only multiplexer dep is the optional `--notify` path
+   (`_notify_sibling`), trivially removable.
+
+**Bonus finding:** `claude agents --json` enumerates ALL live agents
+(interactive + background) with `kind`, `status`, `cwd`, `sessionId`,
+`startedAt`. Broader liveness oracle than `roster.json` (which is
+background-only). Phase D should adopt it for `cw status` / `cw list`.
+
+### Refined conversion path
+
+Supersedes the #105 → #108 → #111 → #119 sequence in "Conversion path" above
+where it overlaps:
+
+| Phase | Scope | Ticket |
+|---|---|---|
+| **B** | Origin-aware Stop hook + safe `settings.local.json` write for interactive sessions | new |
+| **C** | `cw start` / `cw resume` → daemon-only via `claude --bg` + `claude attach`. Per-origin respawn-policy config. | new |
+| **D** | Remove `MultiplexerAdapter` from `reconcile.py`, `dispatch.py`, `doctor.py`, `orchestrate.py`. Replace liveness checks with `claude agents --json` + roster reads. | new |
+| **F** | Delete `src/cw/cmux.py`, `src/cw/tmux.py`, `MultiplexerAdapter` protocol, associated tests. One-time `sessions.json` migration clearing non-hex `surface_ref` values. | #119 (narrowed) |
+
+Phase E (compatibility gate behind `CW_BACKEND=multiplexer`) is **skipped**:
+cw already requires Claude with the daemon, so single-path deletion is direct.
+
+**#108 closed as obsoleted by this spike.** The intermediate `NativeBackend`
+adapter was a hedge against the daemon not covering enough of cw's surface;
+the spike confirms it does. The broader `wrapper.py` / `events.py` /
+`pr_responder.py` deletion vision originally bundled into #119 remains
+under its respective per-phase tickets (#111, #112, #115) — #119 narrows to
+multiplexer/adapter deletion only.
+
+PR #164 shipped a targeted fix for #144 and stays viable as the substrate
+during Phases B–D. The fix becomes obsolete once Phase F lands.
+
 ## Referenced by
 
 - ADR-0001 (parked tasks pin their Session)
