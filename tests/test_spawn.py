@@ -304,6 +304,64 @@ class TestHookContextInjection:
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         assert context["ticket_id"] is None
 
+    def test_cli_headless_flag_writes_headless_true_to_context(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`cw spawn --headless` plumbs `headless: true` into cw-context.json.
+
+        Without this, the signal_stop Layer 1 backstop (issue #176) won't
+        activate for sessions spawned directly via the CLI — only dev-queue
+        dispatch sets the flag today. Manual meta-test fan-out (parallel
+        /auto-dev runs on the same ticket via cw spawn) needs the same
+        backstop coverage that dev-queue dispatch gets.
+        """
+        from cw.cli import _spawn_create_impl
+
+        client = _make_client(tmp_path)
+        prompt_file = _make_prompt_file(tmp_path, "/auto-dev 171 --headless")
+        daemon = FakeNativeDaemonClient()
+        worktree = tmp_path / "worktree" / "manual-headless"
+        worktree.mkdir(parents=True)
+
+        _spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt_file=prompt_file,
+            label="meta-171-a",
+            headless=True,
+            native_daemon=daemon,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["headless"] is True
+
+    def test_cli_headless_flag_defaults_to_false(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`cw spawn` (no --headless) leaves `headless: false` in context.
+
+        Back-compat: existing callers (not /auto-dev dispatch) don't get the
+        backstop applied to them.
+        """
+        from cw.cli import _spawn_create_impl
+
+        client = _make_client(tmp_path)
+        prompt_file = _make_prompt_file(tmp_path, "some prompt")
+        daemon = FakeNativeDaemonClient()
+        worktree = tmp_path / "worktree" / "manual-default"
+        worktree.mkdir(parents=True)
+
+        _spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt_file=prompt_file,
+            label=None,
+            native_daemon=daemon,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["headless"] is False
+
 
 class TestWriteHookContext:
     """Tests for _write_hook_context's origin-aware settings.local.json behavior.
