@@ -6,7 +6,6 @@ import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
@@ -37,10 +36,6 @@ from cw.orchestrate import (
     retire_merged_prs,
 )
 from cw.pr_responder import PRDispatchRecord, save_dispatch_record
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -90,7 +85,7 @@ def captured_runner() -> tuple[
 
 
 @pytest.fixture
-def fake_runner() -> Iterator[tuple[list[list[str]], object]]:
+def fake_runner() -> tuple[list[list[str]], object]:
     """Yield (recorded_calls, runner_callable)."""
     calls: list[list[str]] = []
 

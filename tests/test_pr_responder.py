@@ -145,6 +145,7 @@ class TestCIFailedSpawnsFixCI:
         assert spawned == 1
         assert len(adapter.calls["spawn"]) == 1
         _workspace, command, _surface = adapter.calls["spawn"][0]
+        assert isinstance(command, str)
         assert "/fix-ci 42" in command
         assert configured_client.name == "myproject"
 
@@ -163,6 +164,7 @@ class TestReviewReceivedSpawnsAddressReview:
         assert spawned == 1
         assert len(adapter.calls["spawn"]) == 1
         _workspace, command, _surface = adapter.calls["spawn"][0]
+        assert isinstance(command, str)
         assert "/address-review 17" in command
         assert configured_client.name == "myproject"
 

@@ -48,19 +48,19 @@ class TestProtocolConformance:
         adapter = _instantiate(adapter_cls, monkeypatch)
         assert isinstance(adapter, MultiplexerAdapter)
 
-    def test_spawn_signature(self, adapter_cls: type) -> None:
+    def test_spawn_signature(self, adapter_cls: type[MultiplexerAdapter]) -> None:
         sig = inspect.signature(adapter_cls.spawn)
         params = list(sig.parameters.keys())
         # self, workspace, command, surface
         assert params[1:] == ["workspace", "command", "surface"]
         assert sig.parameters["surface"].default == "right"
 
-    def test_close_signature(self, adapter_cls: type) -> None:
+    def test_close_signature(self, adapter_cls: type[MultiplexerAdapter]) -> None:
         sig = inspect.signature(adapter_cls.close)
         params = list(sig.parameters.keys())
         assert params[1:] == ["surface_ref"]
 
-    def test_identify_signature(self, adapter_cls: type) -> None:
+    def test_identify_signature(self, adapter_cls: type[MultiplexerAdapter]) -> None:
         sig = inspect.signature(adapter_cls.identify)
         params = list(sig.parameters.keys())
         # self only

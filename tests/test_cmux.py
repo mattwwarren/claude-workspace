@@ -72,10 +72,9 @@ class TestFakeCmuxAdapterClose:
         assert adapter.calls["close"][0] == ("ref-a",)
         assert adapter.calls["close"][1] == ("ref-b",)
 
-    def test_close_returns_none(self) -> None:
+    def test_close_does_not_raise(self) -> None:
         adapter = FakeCmuxAdapter()
-        result = adapter.close("any-ref")
-        assert result is None
+        adapter.close("any-ref")
 
 
 class TestFakeCmuxAdapterIdentify:
@@ -790,9 +789,7 @@ def test_real_cmux_call_translates_json_decode_error_to_cwerror(
 
     monkeypatch.setattr(
         "socket.socket",
-        # FakeSock mimics the socket.socket protocol structurally; mypy
-        # cannot see that and flags the return type as incompatible.
-        lambda *_args: FakeSock(),  # type: ignore[misc]
+        lambda *_args: FakeSock(),
     )
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
 

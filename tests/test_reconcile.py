@@ -38,7 +38,7 @@ def _mk_session(
         purpose=SessionPurpose.IMPL,
         status=status,
         workspace_path=ClientConfig(
-            name="client-a", workspace_path="/tmp/ws"
+            name="client-a", workspace_path=Path("/tmp/ws")
         ).workspace_path,
         surface_ref=surface_ref,
         started_at=datetime(2026, 4, 19, tzinfo=UTC),
@@ -397,7 +397,7 @@ def test_reconcile_timed_out_session_reverts_dev_queue_task_to_pending(
         origin=SessionOrigin.DAEMON,
         status=SessionStatus.TIMED_OUT,
         workspace_path=ClientConfig(
-            name="client-a", workspace_path="/tmp/ws"
+            name="client-a", workspace_path=Path("/tmp/ws")
         ).workspace_path,
         surface_ref=None,
         started_at=datetime(2026, 4, 19, tzinfo=UTC),
@@ -442,7 +442,7 @@ def test_reconcile_timed_out_task_revert_called_during_reconcile(
         origin=SessionOrigin.DAEMON,
         status=SessionStatus.TIMED_OUT,
         workspace_path=ClientConfig(
-            name="client-a", workspace_path="/tmp/ws"
+            name="client-a", workspace_path=Path("/tmp/ws")
         ).workspace_path,
         surface_ref=None,
         started_at=datetime(2026, 4, 19, tzinfo=UTC),
