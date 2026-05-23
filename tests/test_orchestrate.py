@@ -866,3 +866,235 @@ class TestOrchestratorParent:
         entry = orchestrator_parent("wrk81")
         assert entry is not None
         assert entry.surface_ref is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: last_stage derivation from stage events (issue #173)
+# ---------------------------------------------------------------------------
+
+
+class TestRunningSessionLastStage:
+    def test_running_session_last_stage_picks_most_recent(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Last STAGE_ENTERED event wins per session_id."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                    _make_session("s2", workspace, status=SessionStatus.ACTIVE),
+                ]
+            )
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s1",
+                "ticket_id": "173",
+                "stage": "s1_plan_reviewed",
+                "started_at": "2026-05-23T13:00:00Z",
+            },
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s1",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:01:00Z",
+            },
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s2",
+                "ticket_id": "174",
+                "stage": "s1_plan_generated",
+                "started_at": "2026-05-23T13:02:00Z",
+            },
+        )
+
+        snapshot = orchestrator_status()
+        by_id = {s.id: s for s in snapshot.running_sessions}
+        assert by_id["s1"].last_stage == "s2_impl_started"
+        assert by_id["s2"].last_stage == "s1_plan_generated"
+
+    def test_running_session_last_stage_none_when_no_events(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """A running session with no stage events has last_stage=None."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                ]
+            )
+        )
+        snapshot = orchestrator_status()
+        assert len(snapshot.running_sessions) == 1
+        assert snapshot.running_sessions[0].last_stage is None
+
+    def test_running_session_last_stage_ignores_completed_session_events(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """COMPLETED sessions don't appear in running_sessions even with events."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                    _make_session("c1", workspace, status=SessionStatus.COMPLETED),
+                ]
+            )
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s1",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:00:00Z",
+            },
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "c1",
+                "ticket_id": "172",
+                "stage": "done",
+                "started_at": "2026-05-23T13:01:00Z",
+            },
+        )
+
+        snapshot = orchestrator_status()
+        ids = [s.id for s in snapshot.running_sessions]
+        assert "c1" not in ids
+        by_id = {s.id: s for s in snapshot.running_sessions}
+        assert by_id["s1"].last_stage == "s2_impl_started"
+
+    def test_running_session_last_stage_ignores_non_stage_events(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """PR_MERGED and other non-stage events don't redefine last_stage."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                ]
+            )
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s1",
+                "ticket_id": "173",
+                "stage": "s1_plan_reviewed",
+                "started_at": "2026-05-23T13:00:00Z",
+            },
+        )
+        record_event(
+            OrchestratorEventType.PR_MERGED,
+            {"session_id": "s1", "pr_number": 42},
+        )
+
+        snapshot = orchestrator_status()
+        by_id = {s.id: s for s in snapshot.running_sessions}
+        assert by_id["s1"].last_stage == "s1_plan_reviewed"
+
+    def test_running_session_last_stage_handles_errored_event(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """STAGE_ERRORED is deliberately ignored when deriving last_stage."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                ]
+            )
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s1",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:00:00Z",
+            },
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ERRORED,
+            {
+                "session_id": "s1",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:01:00Z",
+                "error_kind": "agent_block",
+            },
+        )
+
+        snapshot = orchestrator_status()
+        by_id = {s.id: s for s in snapshot.running_sessions}
+        assert by_id["s1"].last_stage == "s2_impl_started"
+
+
+# ---------------------------------------------------------------------------
+# Tests: CLI orchestrate status surfaces last_stage (issue #173)
+# ---------------------------------------------------------------------------
+
+
+class TestCliOrchestrateStatusLastStage:
+    def test_cli_orchestrate_status_includes_last_stage(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Running-sessions section includes last_stage=<value> when set."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                ]
+            )
+        )
+        record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "s1",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:00:00Z",
+            },
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "status"])
+        assert result.exit_code == 0, result.output
+        assert "last_stage=s2_impl_started" in result.output
+
+    def test_cli_orchestrate_status_omits_last_stage_when_none(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """No last_stage token when the session has no stage events."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session("s1", workspace, status=SessionStatus.ACTIVE),
+                ]
+            )
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "status"])
+        assert result.exit_code == 0, result.output
+        assert "last_stage=" not in result.output

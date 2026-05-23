@@ -14,6 +14,8 @@ from cw.models import (
     CompletionReason,
     CwState,
     OrchestratorConfig,
+    OrchestratorEvent,
+    OrchestratorEventType,
     Session,
     SessionPurpose,
     SessionStatus,
@@ -483,3 +485,39 @@ class TestOrchestratorConfigLegacyDefault:
         """Default fallback is 1 when neither field is set."""
         config = OrchestratorConfig()
         assert config.default_max_parallel == 1
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "abc12345",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "prev_stage": "s1_plan_reviewed",
+                "started_at": "2026-05-23T13:01:42Z",
+            },
+        ),
+        (
+            OrchestratorEventType.STAGE_ERRORED,
+            {
+                "session_id": "abc12345",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:01:42Z",
+                "error_kind": "agent_block",
+            },
+        ),
+    ],
+)
+def test_stage_event_types_round_trip(
+    event_type: OrchestratorEventType,
+    payload: dict[str, str],
+) -> None:
+    """STAGE_ENTERED / STAGE_ERRORED survive a Pydantic model round-trip."""
+    event = OrchestratorEvent(type=event_type, payload=payload)
+    restored = OrchestratorEvent.model_validate_json(event.model_dump_json())
+    assert restored.type is event_type
+    assert restored.payload == payload

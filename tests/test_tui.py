@@ -242,3 +242,71 @@ class TestWatch:
             status_fn=lambda: sample_status,
         )
         assert buffer.getvalue() == ""
+
+
+# ---------------------------------------------------------------------------
+# STAGE column tests (issue #173)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stage_status(frozen_now: datetime) -> OrchestratorStatus:
+    """A status with one session having last_stage and one without."""
+    return OrchestratorStatus(
+        generated_at=frozen_now,
+        running_sessions=[
+            SessionSummary(
+                id="withst01",
+                name="personal/impl",
+                client="personal",
+                status="active",
+                purpose="impl",
+                started_at=datetime(2026, 4, 18, 11, 55, 0, tzinfo=UTC),
+                worktree_path=Path("/home/matthew/workspace/personal/wt/abc"),
+                last_stage="s2_impl_started",
+            ),
+            SessionSummary(
+                id="nostage1",
+                name="personal/idea",
+                client="personal",
+                status="active",
+                purpose="idea",
+                started_at=datetime(2026, 4, 18, 10, 0, 0, tzinfo=UTC),
+                worktree_path=None,
+                last_stage=None,
+            ),
+        ],
+    )
+
+
+class TestSessionsTableStageColumn:
+    def test_default_level_shows_last_stage_when_present(
+        self,
+        stage_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        """The session with last_stage set surfaces the stage value at DEFAULT."""
+        output = _render(stage_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        assert "s2_impl_started" in output
+
+    def test_default_level_renders_dash_when_last_stage_absent(
+        self,
+        stage_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        """A session with last_stage=None renders an em-dash in the STAGE column."""
+        output = _render(stage_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        # The STAGE column header is present in DEFAULT.
+        assert "STAGE" in output
+        # The em-dash sentinel for missing values is present.
+        assert "—" in output
+
+    def test_compact_level_omits_last_stage(
+        self,
+        stage_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        """COMPACT mode renders only counts -- no STAGE column or stage value."""
+        output = _render(stage_status, DetailLevel.COMPACT, frozen_now=frozen_now)
+        assert "STAGE" not in output
+        assert "s2_impl_started" not in output
