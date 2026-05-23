@@ -220,7 +220,10 @@ def reconcile(
 
     drift = compute_drift(state, adapter, daemon)
     if not drift.phantom_session_ids:
-        return drift
+        # No phantom sessions to reap, but still run the TIMED_OUT sweep so
+        # any task whose session was timed out by signal_stop gets reverted.
+        timed_out_ticket_ids = revert_timed_out_tasks()
+        return ReconcileReport(reverted_ticket_ids=timed_out_ticket_ids)
 
     phantom_set = set(drift.phantom_session_ids)
     now = datetime.now(UTC)
@@ -271,8 +274,47 @@ def reconcile(
             if reverted:
                 save_dev_queue(store)
 
+    # Sweep for TIMED_OUT sessions whose owning TicketTask was not yet reverted
+    # (e.g. signal_stop crashed after setting status but before touching the
+    # queue). This mirrors the CRASHED-revert path above. TIMED_OUT sessions
+    # are already terminal so no state mutation is needed — queue revert only.
+    timed_out_ticket_ids = revert_timed_out_tasks()
+    all_reverted = list(dict.fromkeys(reverted + timed_out_ticket_ids))
+
     return ReconcileReport(
         phantom_session_ids=drift.phantom_session_ids,
         phantom_session_names=phantom_names,
-        reverted_ticket_ids=reverted,
+        reverted_ticket_ids=all_reverted,
     )
+
+
+def revert_timed_out_tasks() -> list[str]:
+    """Revert RUNNING TicketTasks whose owning session is TIMED_OUT.
+
+    Called during :func:`reconcile` as a backstop for the case where
+    ``signal_stop`` crashed after writing TIMED_OUT status but before
+    reverting the dev-queue task. Returns the list of ticket IDs reverted.
+    """
+    state = load_state()
+    timed_out_session_ids = {
+        s.id
+        for s in state.sessions
+        if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
+    }
+    if not timed_out_session_ids:
+        return []
+
+    reverted: list[str] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for task in store.tasks:
+            if task.status != QueueItemStatus.RUNNING:
+                continue
+            if task.session_id not in timed_out_session_ids:
+                continue
+            task.status = QueueItemStatus.PENDING
+            task.session_id = None
+            reverted.append(task.ticket_id)
+        if reverted:
+            save_dev_queue(store)
+    return reverted

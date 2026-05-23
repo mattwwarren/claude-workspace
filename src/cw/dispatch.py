@@ -158,6 +158,7 @@ def dispatch_tick(
                     native_daemon=resolved_native_daemon,
                     parent=parent,
                     ticket_id=task.ticket_id,
+                    headless=True,
                 )
 
                 # Stamp session_id on the queued task so the completion

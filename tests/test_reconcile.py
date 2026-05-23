@@ -23,7 +23,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile import compute_drift, reconcile
+from cw.reconcile import compute_drift, reconcile, revert_timed_out_tasks
 
 
 def _mk_session(
@@ -375,3 +375,101 @@ def test_reconcile_with_only_native_live_proceeds(
     report = reconcile(adapter, daemon)
 
     assert report.phantom_session_ids == ["dead-native"]
+
+
+def test_reconcile_timed_out_session_reverts_dev_queue_task_to_pending(
+    tmp_config_dir: Path,
+) -> None:
+    """TIMED_OUT session with a RUNNING TicketTask → task reverted to PENDING.
+
+    This is the backstop for the case where signal_stop crashed after
+    writing TIMED_OUT but before reverting the dev-queue task.
+    See GitHub issue #176 Layer 1.
+    """
+    # Seed a TIMED_OUT DAEMON session. Its surface_ref is gone (daemon
+    # already stopped it), so the backends report nothing live. reconcile
+    # only mutates ACTIVE/IDLE sessions, so this session stays TIMED_OUT.
+    timed_out_session = Session(
+        id="timed-out-sess",
+        name="client-a/auto-dev/42",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path="/tmp/ws"
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[timed_out_session]))
+
+    # RUNNING task stamped with the timed-out session.
+    dev_store = DevQueueStore(
+        tasks=[
+            TicketTask(
+                ticket_id="42",
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id="timed-out-sess",
+            )
+        ]
+    )
+    save_dev_queue(dev_store)
+
+    reverted = revert_timed_out_tasks()
+    assert reverted == ["42"]
+
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == "42")
+    assert task.status == QueueItemStatus.PENDING
+    assert task.session_id is None
+
+
+def test_reconcile_timed_out_task_revert_called_during_reconcile(
+    tmp_config_dir: Path,
+) -> None:
+    """reconcile() picks up TIMED_OUT session queue revert automatically.
+
+    Ensures the revert_timed_out_tasks call is wired into the main
+    reconcile() function and its result surfaces in ReconcileReport.
+    """
+    timed_out_session = Session(
+        id="timed-out-sess-2",
+        name="client-a/auto-dev/43",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path="/tmp/ws"
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[timed_out_session]))
+
+    dev_store = DevQueueStore(
+        tasks=[
+            TicketTask(
+                ticket_id="43",
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id="timed-out-sess-2",
+            )
+        ]
+    )
+    save_dev_queue(dev_store)
+
+    # Both backends empty but only TIMED_OUT sessions in state (not ACTIVE/IDLE)
+    # so the backend-outage guard doesn't trip.
+    adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
+    report = reconcile(adapter, daemon)
+
+    assert "43" in report.reverted_ticket_ids
+
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == "43")
+    assert task.status == QueueItemStatus.PENDING
+    assert task.session_id is None
