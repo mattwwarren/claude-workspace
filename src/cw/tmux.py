@@ -18,6 +18,13 @@ from cw.exceptions import CwError
 # Pane reference format returned by ``tmux split-window -P -F ...``.
 _PANE_FORMAT = "#{session_name}:#{window_index}.#{pane_index}"
 
+# Pane reference format that also captures the foreground command name.
+# Used by :meth:`TmuxAdapter.list_live_surface_commands` to detect zombie
+# panes whose claude process has exited (pane is back at the shell prompt).
+_PANE_FORMAT_WITH_COMMAND = (
+    "#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}"
+)
+
 # Mapping from the cw-level "surface" hint to tmux's split-window flag.
 # "right" produces a horizontal split (new pane to the right); "bottom"
 # produces a vertical split. Anything else falls back to horizontal.
@@ -123,3 +130,28 @@ class TmuxAdapter:
         if result.returncode != 0 or not result.stdout:
             return set()
         return {line for line in result.stdout.strip().splitlines() if line}
+
+    def list_live_surface_commands(self) -> dict[str, str]:
+        """Return mapping of pane ref to foreground command name.
+
+        Single ``tmux list-panes`` call with a format string capturing
+        both the pane ref and ``pane_current_command``. Returns an empty
+        dict when the tmux server is not running or the call fails —
+        same all-or-nothing semantics as :meth:`list_surfaces`. The
+        reconciler treats an empty return as "command info unavailable,
+        skip the zombie filter" — fail-open, no false-positive reaping.
+        """
+        result = self._run(
+            ["list-panes", "-a", "-F", _PANE_FORMAT_WITH_COMMAND],
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return {}
+        commands: dict[str, str] = {}
+        for line in result.stdout.strip().splitlines():
+            if not line:
+                continue
+            parts = line.split(" ", 1)
+            if len(parts) == 2:
+                commands[parts[0]] = parts[1].strip()
+        return commands
