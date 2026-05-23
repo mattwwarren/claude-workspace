@@ -71,6 +71,13 @@ _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
 # skill emits them under v2 today (see #103). One-time rollout exception:
 # accept under v2 AND v3 until the skill bumps. When skill emits v3, this
 # exception can be removed and a `_V3_STAGES`/`_V3_PLAN_SOURCES` gate added.
+#
+# Also accepted ungated: "github_issue_existing" (PlanSource). The producer
+# emits this for GitHub-sourced runs (the post-Linear analog of
+# "linear_existing"); the parser previously rejected every such run as
+# validation_failed (see #190). Treated identically to "linear_existing" —
+# pure producer-side relabeling, no consumer behavior change. Accepted under
+# v2 and v3 (the producer emits at v2 today per captured payloads).
 StageReached = Literal[
     "stage1_pre_flight",
     "stage1_plan",
@@ -81,7 +88,13 @@ StageReached = Literal[
     "stage5_post_create",
 ]
 ScopeTier = Literal["small", "large"]
-PlanSource = Literal["linear_existing", "generated", "free_text", "none"]
+PlanSource = Literal[
+    "linear_existing",
+    "github_issue_existing",
+    "generated",
+    "free_text",
+    "none",
+]
 
 
 class Scope(BaseModel):
