@@ -306,6 +306,7 @@ class SessionSummary(BaseModel):
     started_at: datetime
     surface_ref: str | None = None
     worktree_path: Path | None = None
+    last_stage: str | None = None
 
 
 class TicketSummary(BaseModel):
@@ -354,7 +355,11 @@ def _summarise_ticket(task: TicketTask) -> TicketSummary:
     )
 
 
-def _summarise_session(sess: Session) -> SessionSummary:
+def _summarise_session(
+    sess: Session,
+    *,
+    last_stage: str | None = None,
+) -> SessionSummary:
     return SessionSummary(
         id=sess.id,
         name=sess.name,
@@ -364,7 +369,29 @@ def _summarise_session(sess: Session) -> SessionSummary:
         started_at=sess.started_at,
         surface_ref=sess.surface_ref,
         worktree_path=sess.worktree_path,
+        last_stage=last_stage,
     )
+
+
+def _derive_last_stage_by_session(
+    events: list[OrchestratorEvent],
+) -> dict[str, str]:
+    """Map session_id -> most recent STAGE_ENTERED.stage.
+
+    Iterates events in chronological order; later events overwrite
+    earlier ones. STAGE_ERRORED events are deliberately ignored — they
+    remain visible in recent_events but do not redefine the "current
+    stage" of a session.
+    """
+    result: dict[str, str] = {}
+    for ev in events:
+        if ev.type is not OrchestratorEventType.STAGE_ENTERED:
+            continue
+        session_id = ev.payload.get("session_id")
+        stage = ev.payload.get("stage")
+        if isinstance(session_id, str) and isinstance(stage, str):
+            result[session_id] = stage
+    return result
 
 
 def _summarise_event(event: OrchestratorEvent) -> EventSummary:
@@ -428,17 +455,20 @@ def orchestrator_status() -> OrchestratorStatus:
         _summarise_ticket(t) for t in queue.tasks if t.status == QueueItemStatus.PENDING
     ]
 
+    # Read all events first so we can derive last_stage per session before
+    # summarising the running list.
+    all_events = read_events()
+    last_stage_by_session = _derive_last_stage_by_session(all_events)
+
     state = load_state()
     running = [
-        _summarise_session(s)
+        _summarise_session(s, last_stage=last_stage_by_session.get(s.id))
         for s in state.sessions
         if s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
     ]
 
     monitored = _load_monitored_prs()
 
-    # Read all events, then take the last N (chronological order from the inbox).
-    all_events = read_events()
     tail = all_events[-_RECENT_EVENTS_LIMIT:]
     recent = [_summarise_event(e) for e in tail]
 
