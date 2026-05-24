@@ -153,6 +153,30 @@ class TestRealNativeDaemonClientSpawn:
         with pytest.raises(DisclaimerNotAcceptedError, match="disclaimer"):
             client.spawn_bg(cwd=tmp_path, prompt="x")
 
+    def test_disclaimer_error_message_contains_verbatim_ac_substring(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: error message must contain verbatim AC2 lowercase-r substring."""
+        from cw.exceptions import DisclaimerNotAcceptedError
+
+        full_stderr = (
+            "--bg with bypassPermissions requires accepting the disclaimer first. "
+            "Run `claude --dangerously-skip-permissions` once interactively."
+        )
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(
+                1, ["claude"], output="", stderr=full_stderr
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        exc_info: pytest.ExceptionInfo[DisclaimerNotAcceptedError]
+        with pytest.raises(DisclaimerNotAcceptedError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+        # Verbatim AC2 substring (lowercase 'r') must appear in the message.
+        assert "run `claude --dangerously-skip-permissions` once" in str(exc_info.value)
+
 
 class TestRealNativeDaemonClientRoster:
     """list_live_session_short_ids reads roster.json."""

@@ -115,8 +115,9 @@ class RealNativeDaemonClient:
             stderr_text = (exc.stderr or exc.stdout or "").strip()
             if _DISCLAIMER_REJECTION_PATTERN in stderr_text:
                 msg = (
-                    "claude --bg requires accepting the disclaimer first. "
-                    "Run `claude --dangerously-skip-permissions` once interactively."
+                    "claude --bg failed: bypassPermissions disclaimer not accepted."
+                    " To fix, run `claude --dangerously-skip-permissions`"
+                    " once interactively."
                 )
                 raise DisclaimerNotAcceptedError(msg) from exc
             msg = (

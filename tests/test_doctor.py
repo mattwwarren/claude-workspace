@@ -1022,3 +1022,177 @@ def test_report_ok_unaffected_by_warn_checks() -> None:
         checks=[warn_check],
     )
     assert report.ok is True
+
+
+# ---------------------------------------------------------------------------
+# format_report footer tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatReportFooter:
+    """format_report footer reflects ok/warn/fail state without contradicting."""
+
+    def test_all_ok_no_warn_shows_healthy(self) -> None:
+        """Only OK checks (no WARN, no FAIL) → 'status: healthy'."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("check-a", ok=True, warn=False, detail=""),
+                CheckResult("check-b", ok=True, warn=False, detail=""),
+            ],
+        )
+        rendered = format_report(report)
+        assert rendered.endswith("status: healthy")
+
+    def test_warn_checks_present_shows_advisory(self) -> None:
+        """Any WARN check (ok=True, warn=True) → advisory footer, not plain healthy."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("bypass-disclaimer", ok=True, warn=True, detail="not set"),
+                CheckResult("check-ok", ok=True, warn=False, detail=""),
+            ],
+        )
+        rendered = format_report(report)
+        # Must contain advisory wording — not plain 'healthy' by itself.
+        assert "status: healthy — advisory warnings" in rendered
+        # Exit-code contract: ok is still True, so this is NOT "problems detected".
+        assert "problems detected" not in rendered
+
+    def test_fail_check_shows_problems_detected(self) -> None:
+        """Any FAIL check → 'status: problems detected'."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("check-fail", ok=False, warn=False, detail="broken"),
+            ],
+        )
+        rendered = format_report(report)
+        assert "status: problems detected" in rendered
+        assert "healthy" not in rendered
+
+    def test_clean_property_true_when_all_ok_no_warn(self) -> None:
+        """DoctorReport.clean is True only when every check is ok and not warned."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[CheckResult("x", ok=True, warn=False, detail="")],
+        )
+        assert report.clean is True
+
+    def test_clean_property_false_when_any_warn(self) -> None:
+        """DoctorReport.clean is False when any check has warn=True."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("x", ok=True, warn=True, detail=""),
+                CheckResult("y", ok=True, warn=False, detail=""),
+            ],
+        )
+        assert report.clean is False
+
+    def test_clean_property_false_when_any_fail(self) -> None:
+        """DoctorReport.clean is False when any check has ok=False."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[CheckResult("x", ok=False, warn=False, detail="")],
+        )
+        assert report.clean is False
+
+
+# ---------------------------------------------------------------------------
+# _check_claude_version: version-floor and returncode tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClaudeVersion:
+    """Direct tests for _check_claude_version via monkeypatched subprocess.run."""
+
+    def _mk_proc(self, stdout: str = "", returncode: int = 0) -> object:
+        class _Proc:
+            pass
+
+        p = _Proc()
+        p.stdout = stdout  # type: ignore[attr-defined]
+        p.stderr = ""  # type: ignore[attr-defined]
+        p.returncode = returncode  # type: ignore[attr-defined]
+        return p
+
+    def test_version_above_floor_ok_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Version >= 2.1.139 → ok=True, warn=False."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("2.1.150 (Claude Code)\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is False
+        assert "2.1.150" in result.detail
+
+    def test_version_equal_floor_ok_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Version == 2.1.139 → ok=True, warn=False (floor is inclusive)."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("2.1.139 (Claude Code)\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_version_below_floor_ok_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Version < 2.1.139 → ok=True, warn=True, detail contains upgrade hint."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("2.0.0 (Claude Code)\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "2.1.139" in result.detail
+
+    def test_unparseable_version_ok_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-numeric version → ok=True, warn=True, detail mentions parse failure."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("not-a-version\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "could not parse" in result.detail
+
+    def test_nonzero_returncode_ok_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Binary exits non-zero → ok=True, warn=True, detail includes returncode."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("some output\n", returncode=1),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "1" in result.detail  # returncode appears in detail
