@@ -11,7 +11,9 @@ assert on specific checks.
 
 from __future__ import annotations
 
+import json
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +40,7 @@ class CheckResult:
     name: str
     ok: bool
     detail: str
+    warn: bool = False
 
 
 @dataclass
@@ -56,6 +59,16 @@ class DoctorReport:
 _CMUX_SOCKET_PATH = (
     Path.home() / "Library" / "Application Support" / "cmux" / "cmux.sock"
 )
+
+# Path to Claude Code user settings — read for the disclaimer-acceptance flag.
+_CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+
+# Re-export _ROSTER_PATH for an independent module-level binding (so tests can
+# patch cw.doctor._ROSTER_PATH separately from cw.native_daemon._ROSTER_PATH —
+# the autouse conftest fixture patches only the native_daemon binding).
+from cw.native_daemon import _ROSTER_PATH as _NATIVE_ROSTER_PATH  # noqa: E402
+
+_ROSTER_PATH = _NATIVE_ROSTER_PATH
 
 
 def _check_backend_binary(backend: BackendName) -> CheckResult:
@@ -295,16 +308,129 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     if link_state is not None:
         report.checks.extend(_check_linkage(link_state))
 
+    report.checks.append(_check_bypass_disclaimer())
+    report.checks.append(_check_claude_version())
+    report.checks.append(_check_daemon_reachable())
+
     if reap:
         report.checks.append(_check_reconcile())
     return report
+
+
+def _check_bypass_disclaimer() -> CheckResult:
+    """Check whether the user has accepted the bypass-permissions disclaimer."""
+    try:
+        raw = _CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CheckResult(
+            "bypass-disclaimer",
+            ok=True,
+            warn=True,
+            detail=f"settings.json not found at {_CLAUDE_SETTINGS_PATH}",
+        )
+    except Exception as exc:
+        return CheckResult(
+            "bypass-disclaimer",
+            ok=True,
+            warn=True,
+            detail=f"could not read settings.json: {exc}",
+        )
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "bypass-disclaimer",
+            ok=True,
+            warn=True,
+            detail=f"could not read settings.json: {exc}",
+        )
+    if data.get("skipDangerousModePermissionPrompt"):
+        return CheckResult("bypass-disclaimer", ok=True, warn=False, detail="accepted")
+    return CheckResult(
+        "bypass-disclaimer",
+        ok=True,
+        warn=True,
+        detail=(
+            "skipDangerousModePermissionPrompt not set"
+            " — run `claude --dangerously-skip-permissions` once interactively"
+        ),
+    )
+
+
+def _check_claude_version() -> CheckResult:
+    """Check that the claude binary is reachable and return its version."""
+    try:
+        proc = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return CheckResult("claude-version", ok=False, detail="claude binary not found")
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "claude-version", ok=False, detail="claude --version timed out (10s)"
+        )
+    version_line = (
+        (proc.stdout or proc.stderr or "").splitlines()[0]
+        if (proc.stdout or proc.stderr)
+        else ""
+    )
+    return CheckResult("claude-version", ok=True, detail=version_line)
+
+
+def _check_daemon_reachable() -> CheckResult:
+    """Check whether the Claude native daemon's roster reports a running supervisor."""
+    try:
+        raw = _ROSTER_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CheckResult(
+            "daemon-reachable",
+            ok=True,
+            warn=True,
+            detail=f"roster.json not found at {_ROSTER_PATH} — daemon not started?",
+        )
+    except Exception as exc:
+        return CheckResult(
+            "daemon-reachable",
+            ok=True,
+            warn=True,
+            detail=f"could not read roster.json: {exc}",
+        )
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "daemon-reachable",
+            ok=True,
+            warn=True,
+            detail=f"could not read roster.json: {exc}",
+        )
+    pid = data.get("supervisorPid", 0)
+    if isinstance(pid, int) and pid > 0:
+        return CheckResult(
+            "daemon-reachable", ok=True, warn=False, detail=f"supervisorPid={pid}"
+        )
+    return CheckResult(
+        "daemon-reachable",
+        ok=True,
+        warn=True,
+        detail="supervisorPid absent or zero — daemon may not be running",
+    )
 
 
 def format_report(report: DoctorReport) -> str:
     """Render a :class:`DoctorReport` as a human-readable block."""
     lines = [f"cw {report.version}"]
     for check in report.checks:
-        mark = "OK" if check.ok else "FAIL"
+        if check.warn:
+            mark = "WARN"
+        elif check.ok:
+            mark = "OK"
+        else:
+            mark = "FAIL"
         line = f"  [{mark}] {check.name}"
         if check.detail:
             line += f" — {check.detail}"
