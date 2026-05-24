@@ -753,3 +753,76 @@ class TestCheckLinkageDirect:
         assert "ghost-b" in dp.detail
         assert "worker-a" in dp.detail
         assert "worker-b" in dp.detail
+
+
+# ---------------------------------------------------------------------------
+# doctor --reap reverts completed-silent dev-queue tasks
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_reap_reverts_completed_silent_dev_queue_task(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cw doctor --reap reverts a RUNNING task whose DAEMON COMPLETED session exists."""
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from click.testing import CliRunner
+
+    from cw.cli import main
+    from cw.cmux import FakeCmuxAdapter
+    from cw.config import save_state
+    from cw.dev_queue import load_dev_queue, save_dev_queue
+    from cw.models import (
+        ClientConfig,
+        CwState,
+        DevQueueStore,
+        QueueItemStatus,
+        Session,
+        SessionOrigin,
+        SessionPurpose,
+        SessionStatus,
+        TicketTask,
+    )
+
+    monkeypatch.setenv("CW_BACKEND", "fake")
+
+    comp_session = Session(
+        id="comp-doctor-1",
+        name="client-a/auto-dev/TKT-DR1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.COMPLETED,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[comp_session]))
+
+    task = TicketTask(
+        ticket_id="TKT-DR1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="comp-doctor-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def _fake_adapter() -> FakeCmuxAdapter:
+        return FakeCmuxAdapter()
+
+    monkeypatch.setattr("cw.doctor.get_cmux_adapter", _fake_adapter)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor", "--reap"])
+    assert result.exit_code == 0, result.output
+    assert "reconciliation" in result.output
+    assert "reverted 1 ticket(s)" in result.output
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "TKT-DR1")
+    assert t.status == QueueItemStatus.PENDING
+    assert t.session_id is None

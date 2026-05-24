@@ -29,9 +29,11 @@ from cw.config import (
 from cw.daemon import run_watcher_tick
 from cw.dev_queue import (
     add_ticket,
+    clear_tickets,
     dev_queue_lock,
     list_tickets,
     load_dev_queue,
+    remove_ticket,
     resolve_client,
     save_dev_queue,
 )
@@ -1169,12 +1171,56 @@ def dev_queue_add(tickets: tuple[str, ...], client: str | None, priority: int) -
     for ticket_id in tickets:
         resolved = resolve_client(ticket_id, config, client)
         task = TicketTask(ticket_id=ticket_id, client=resolved, priority=priority)
-        add_ticket(task)
+        inserted = add_ticket(task)
+        if not inserted:
+            click.echo(
+                f"Skipped {ticket_id} -> {resolved}: already queued"
+                " (pending or running).",
+                err=True,
+            )
+            continue
         record_event(
             OrchestratorEventType.TICKET_ENQUEUED,
             {"ticket_id": ticket_id, "client": resolved, "priority": priority},
         )
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
+
+
+@dev_queue.command(name="remove")
+@click.argument("tickets", nargs=-1, required=True)
+@click.option("--client", "-c", "client", required=True, help="Client name")
+@click.option(
+    "--all",
+    "-a",
+    "remove_all",
+    is_flag=True,
+    default=False,
+    help="Remove all matching entries when multiple match",
+)
+@handle_errors
+def dev_queue_remove(tickets: tuple[str, ...], client: str, remove_all: bool) -> None:
+    """Remove dev-queue task(s) for the given ticket(s) and client."""
+    for ticket in tickets:
+        remove_ticket(ticket, client, remove_all=remove_all)
+        click.echo(f"Removed {ticket} from {client} dev-queue.")
+
+
+@dev_queue.command(name="clear")
+@click.option("--client", "-c", "client", required=True, help="Client name")
+@click.option(
+    "--status",
+    "-s",
+    "status_filter",
+    type=click.Choice([e.value for e in QueueItemStatus]),
+    default=None,
+    help="Optional status filter",
+)
+@handle_errors
+def dev_queue_clear(client: str, status_filter: str | None) -> None:
+    """Clear dev-queue tasks for the given client, optionally filtered by status."""
+    status_enum = QueueItemStatus(status_filter) if status_filter else None
+    count = clear_tickets(client, status=status_enum)
+    click.echo(f"Cleared {count} dev-queue task(s) for {client}.")
 
 
 @dev_queue.command(name="status")
