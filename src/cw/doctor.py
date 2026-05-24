@@ -11,7 +11,9 @@ assert on specific checks.
 
 from __future__ import annotations
 
+import json
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +30,7 @@ from cw.config import (
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
 from cw.models import BackendName, CwState, Session
+from cw.native_daemon import _ROSTER_PATH
 from cw.reconcile import reconcile
 
 
@@ -38,6 +41,7 @@ class CheckResult:
     name: str
     ok: bool
     detail: str
+    warn: bool = False
 
 
 @dataclass
@@ -52,10 +56,24 @@ class DoctorReport:
     def ok(self) -> bool:
         return all(c.ok for c in self.checks)
 
+    @property
+    def clean(self) -> bool:
+        """True only when every check is both ok and not warned."""
+        return all(c.ok and not c.warn for c in self.checks)
+
 
 _CMUX_SOCKET_PATH = (
     Path.home() / "Library" / "Application Support" / "cmux" / "cmux.sock"
 )
+
+# Path to Claude Code user settings — read for the disclaimer-acceptance flag.
+_CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+
+# Minimum supported Claude Code version for native-daemon dispatch.
+_MIN_CLAUDE_VERSION = (2, 1, 139)
+
+# Number of components (major.minor.patch) required in a version string.
+_VERSION_PARTS = 3
 
 
 def _check_backend_binary(backend: BackendName) -> CheckResult:
@@ -295,20 +313,163 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     if link_state is not None:
         report.checks.extend(_check_linkage(link_state))
 
+    report.checks.append(_check_bypass_disclaimer())
+    report.checks.append(_check_claude_version())
+    report.checks.append(_check_daemon_reachable())
+
     if reap:
         report.checks.append(_check_reconcile())
     return report
+
+
+def _check_bypass_disclaimer() -> CheckResult:
+    """Check whether the user has accepted the bypass-permissions disclaimer."""
+    try:
+        raw = _CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CheckResult(
+            "bypass-disclaimer",
+            ok=True,
+            warn=True,
+            detail=f"settings.json not found at {_CLAUDE_SETTINGS_PATH}",
+        )
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "bypass-disclaimer",
+            ok=True,
+            warn=True,
+            detail=f"could not parse settings.json: {exc}",
+        )
+    if data.get("skipDangerousModePermissionPrompt"):
+        return CheckResult("bypass-disclaimer", ok=True, warn=False, detail="accepted")
+    return CheckResult(
+        "bypass-disclaimer",
+        ok=True,
+        warn=True,
+        detail=(
+            "skipDangerousModePermissionPrompt not set"
+            " — run `claude --dangerously-skip-permissions` once interactively"
+        ),
+    )
+
+
+def _check_claude_version() -> CheckResult:
+    """Check that the claude binary is reachable and return its version.
+
+    Returns ok=True, warn=True when the binary ran but exited non-zero, or when
+    the version string cannot be parsed, or when the version is below the floor
+    required for native-daemon dispatch.
+    """
+    try:
+        proc = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return CheckResult("claude-version", ok=False, detail="claude binary not found")
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "claude-version", ok=False, detail="claude --version timed out (10s)"
+        )
+
+    output = proc.stdout or proc.stderr or ""
+    version_line = output.splitlines()[0] if output else ""
+
+    if proc.returncode != 0:
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=f"claude --version exited {proc.returncode}: {version_line}",
+        )
+
+    # Parse the leading X.Y.Z token from the version line.
+    first_token = version_line.split()[0] if version_line else ""
+    parts = first_token.split(".")
+    try:
+        if len(parts) < _VERSION_PARTS:
+            raise ValueError("fewer than three version components")
+        parsed = tuple(int(p) for p in parts[:3])
+    except (ValueError, AttributeError):
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=f"could not parse version: {version_line}",
+        )
+
+    if parsed < _MIN_CLAUDE_VERSION:
+        min_str = ".".join(str(x) for x in _MIN_CLAUDE_VERSION)
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=(
+                f"{version_line} — upgrade to >= {min_str} for native-daemon dispatch"
+            ),
+        )
+
+    return CheckResult("claude-version", ok=True, detail=version_line)
+
+
+def _check_daemon_reachable() -> CheckResult:
+    """Check whether the Claude native daemon's roster reports a running supervisor."""
+    try:
+        raw = _ROSTER_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CheckResult(
+            "daemon-reachable",
+            ok=True,
+            warn=True,
+            detail=f"roster.json not found at {_ROSTER_PATH} — daemon not started?",
+        )
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "daemon-reachable",
+            ok=True,
+            warn=True,
+            detail=f"could not parse roster.json: {exc}",
+        )
+    pid = data.get("supervisorPid", 0)
+    if isinstance(pid, int) and pid > 0:
+        return CheckResult(
+            "daemon-reachable", ok=True, warn=False, detail=f"supervisorPid={pid}"
+        )
+    return CheckResult(
+        "daemon-reachable",
+        ok=True,
+        warn=True,
+        detail="supervisorPid absent or zero — daemon may not be running",
+    )
 
 
 def format_report(report: DoctorReport) -> str:
     """Render a :class:`DoctorReport` as a human-readable block."""
     lines = [f"cw {report.version}"]
     for check in report.checks:
-        mark = "OK" if check.ok else "FAIL"
+        if check.warn:
+            mark = "WARN"
+        elif check.ok:
+            mark = "OK"
+        else:
+            mark = "FAIL"
         line = f"  [{mark}] {check.name}"
         if check.detail:
             line += f" — {check.detail}"
         lines.append(line)
     lines.append("")
-    lines.append("status: healthy" if report.ok else "status: problems detected")
+    if not report.ok:
+        footer = "status: problems detected"
+    elif report.clean:
+        footer = "status: healthy"
+    else:
+        footer = "status: healthy — advisory warnings"
+    lines.append(footer)
     return "\n".join(lines)
