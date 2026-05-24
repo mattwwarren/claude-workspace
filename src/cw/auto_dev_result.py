@@ -180,6 +180,13 @@ _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
 _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
     {"plan_pending_approval", "scope_exceeded", "forbidden_area", "no_op"},
 )
+# Pre-flight + blocked is a retry/escalation shape, not a terminal reject —
+# next_actions must signal the recovery verb. The Origin Sync block (#226)
+# emits `sync_local_main`; `manual_intervention` covers escalation cases
+# (e.g. local main has unmerged commits the orchestrator can't auto-resolve).
+_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
+    {"sync_local_main", "manual_intervention"},
+)
 
 
 class AutoDevResult(BaseModel):
@@ -279,17 +286,53 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
-        # stage1_pre_flight can only exit as no_op (pre-flight exits before any
-        # plan is produced — other statuses are not possible here).
-        if self.stage_reached == "stage1_pre_flight" and self.status != "no_op":
+        # stage1_pre_flight can exit as no_op (work not needed) or blocked
+        # (work needed but a pre-flight gate failed, e.g. Origin Sync — see
+        # issue #226). Other statuses still violate the pre-impl contract.
+        pre_flight_blocked = (
+            self.stage_reached == "stage1_pre_flight" and self.status == "blocked"
+        )
+        if self.stage_reached == "stage1_pre_flight" and self.status not in (
+            "no_op",
+            "blocked",
+        ):
             msg = (
-                f"stage_reached='stage1_pre_flight' requires status='no_op', "
-                f"got status={self.status!r}"
+                f"stage_reached='stage1_pre_flight' requires status in "
+                f"('no_op', 'blocked'), got status={self.status!r}"
             )
             raise ValueError(msg)
 
-        # §4.3 terminal-reject statuses have empty next_actions
-        if self.status in _TERMINAL_REJECT_STATUSES and self.next_actions:
+        # Pre-flight + blocked is a retry/escalation shape: next_actions must
+        # be non-empty and drawn from the allowed verb set. The generic
+        # terminal-reject rule below (empty next_actions) does NOT apply here.
+        if pre_flight_blocked:
+            if not self.next_actions:
+                msg = (
+                    "next_actions must be non-empty when status='blocked' at "
+                    "stage1_pre_flight (got empty list); expected one of "
+                    f"{sorted(_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS)}"
+                )
+                raise ValueError(msg)
+            invalid = [
+                a
+                for a in self.next_actions
+                if a not in _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS
+            ]
+            if invalid:
+                msg = (
+                    f"next_actions {invalid!r} not allowed for blocked at "
+                    f"stage1_pre_flight; expected subset of "
+                    f"{sorted(_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS)}"
+                )
+                raise ValueError(msg)
+
+        # §4.3 terminal-reject statuses have empty next_actions, EXCEPT for
+        # the pre-flight + blocked retry shape covered above.
+        if (
+            self.status in _TERMINAL_REJECT_STATUSES
+            and self.next_actions
+            and not pre_flight_blocked
+        ):
             msg = (
                 f"next_actions must be empty for terminal-reject status "
                 f"{self.status!r}, got {self.next_actions!r}"

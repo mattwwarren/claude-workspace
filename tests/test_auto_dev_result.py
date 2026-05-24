@@ -686,8 +686,13 @@ class TestPreFlightNoOp:
         assert result.plan_source == "none"
         assert result.schema_version == 2
 
-    def test_stage1_pre_flight_requires_no_op_status(self) -> None:
-        # stage_reached=stage1_pre_flight with any non-no_op status is rejected.
+    def test_stage1_pre_flight_rejects_incompatible_status(self) -> None:
+        """Pre-flight exit only allows {no_op, blocked} — shipped et al are rejected.
+
+        The `blocked` admission was added for #226 (Origin Sync block); see
+        TestStage1PreFlightBlocked for the positive cases. Any other status
+        at pre-flight is still a contract violation.
+        """
         p = _no_op_payload()
         p["status"] = "shipped"
         p["pr"] = {
@@ -713,6 +718,139 @@ class TestPreFlightNoOp:
         p = _no_op_payload()
         p["scope"]["lines_actual"] = 10
         with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# stage1_pre_flight + blocked (added per #226 — Origin Sync block emits this
+# combo legitimately; the consumer previously rejected it as a §4.3 violation,
+# so every Origin-Sync-blocked sentinel became validation_failed). When status
+# is blocked at pre-flight, next_actions is constrained to retry/escalation
+# verbs rather than empty (which is required for the generic terminal-reject
+# `blocked` shape at later stages).
+# ---------------------------------------------------------------------------
+
+
+def _pre_flight_blocked_payload() -> dict[str, Any]:
+    """Origin-Sync-shaped sentinel: stage1_pre_flight + blocked + sync_local_main.
+
+    Matches the producer's emit shape from commit 97c92b3 (cf #178). The
+    blocker.reason is open-enum (§4.2) — `origin_sync_required` is the
+    canonical value but any string is allowed.
+    """
+    return {
+        "schema_version": 3,
+        "ticket_id": "GEN-pre-flight-blocked",
+        "status": "blocked",
+        "stage_reached": "stage1_pre_flight",
+        "scope": {
+            "tier": "small",
+            "files": 0,
+            "lines_estimate": 0,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "none",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage1_pre_flight",
+            "reason": "origin_sync_required",
+            "details": "local main behind origin/main; sync before dispatch",
+        },
+        "next_actions": ["sync_local_main"],
+    }
+
+
+class TestStage1PreFlightBlocked:
+    def test_origin_sync_shaped_sentinel_parses_cleanly(self) -> None:
+        """The exact shape the producer emits for Origin Sync block (#226)."""
+        p = _pre_flight_blocked_payload()
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "blocked"
+        assert result.stage_reached == "stage1_pre_flight"
+        assert result.next_actions == ["sync_local_main"]
+        assert result.blocker is not None
+        assert result.blocker.reason == "origin_sync_required"
+
+    def test_manual_intervention_next_action_allowed(self) -> None:
+        """Escalation path: blocker that needs human action, not retry."""
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["manual_intervention"]
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["manual_intervention"]
+
+    def test_empty_next_actions_rejected_when_blocked_at_pre_flight(self) -> None:
+        """Pre-flight blocked must signal a recovery path — empty list is a bug.
+
+        A producer emitting `blocked` with no next_actions at pre-flight
+        gives the orchestrator nothing to route on. Force the producer to
+        emit at least one of the allowed verbs.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_invalid_next_action_rejected_at_pre_flight_blocked(self) -> None:
+        """next_actions for pre-flight blocked is a closed set, not free-form.
+
+        ``wait_for_ci`` would short-circuit on the earlier §4.3 ``wait_for_ci
+        iff shipped`` rule, so use a verb that only the pre-flight closed-set
+        check can reject. Asserts the rejection message points at the
+        closed-set so we know the right branch fired.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["close_issue_as_completed"]  # valid for no_op, not blocked
+        with pytest.raises(ValidationError, match="expected subset of"):
+            AutoDevResult.model_validate(p)
+
+    def test_mixed_valid_and_invalid_next_actions_rejected(self) -> None:
+        """If any entry is outside the allowed set, the whole list is invalid.
+
+        Producer must emit a pure list of allowed verbs — partial validity
+        doesn't pass.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["sync_local_main", "free_text_recovery"]
+        with pytest.raises(ValidationError, match="free_text_recovery"):
+            AutoDevResult.model_validate(p)
+
+    def test_pre_flight_blocked_through_parse_stdout(self) -> None:
+        """End-to-end: a captured sentinel block round-trips via parse_stdout.
+
+        The wrapper path (`_parse_sentinel_from_transcript` in signal_stop)
+        uses parse_stdout, so the round-trip must succeed without falling
+        into the BlockedResult fail-open path.
+        """
+        p = _pre_flight_blocked_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.stage_reached == "stage1_pre_flight"
+
+    def test_blocked_at_later_stage_still_requires_empty_next_actions(self) -> None:
+        """Regression guard: widening for pre-flight must NOT widen mid-pipeline.
+
+        A `blocked` exit at stage2_impl is the generic terminal-reject shape
+        — §4.3 still requires empty next_actions there.
+        """
+        p = _blocked_payload()  # blocked at stage2_impl
+        p["next_actions"] = ["sync_local_main"]
+        with pytest.raises(ValidationError, match="next_actions"):
             AutoDevResult.model_validate(p)
 
 
