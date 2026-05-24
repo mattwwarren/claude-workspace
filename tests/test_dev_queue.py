@@ -745,3 +745,128 @@ class TestClearTickets:
         save_dev_queue(DevQueueStore(tasks=tasks))
         count = clear_tickets("genhealth")
         assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueueRemove
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueueRemove:
+    def test_remove_happy_path(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(ticket_id="CLI-R1", client="genhealth")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "remove", "CLI-R1", "--client", "genhealth"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Removed CLI-R1" in result.output
+        store = load_dev_queue()
+        assert len(store.tasks) == 0
+
+    def test_remove_zero_match_errors(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "remove", "CLI-MISS", "--client", "genhealth"]
+        )
+        assert result.exit_code != 0
+        assert "No dev-queue task found" in result.output
+
+    def test_remove_multi_match_without_all_errors(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(ticket_id="CLI-DUP", client="genhealth"),
+            TicketTask(ticket_id="CLI-DUP", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "remove", "CLI-DUP", "--client", "genhealth"]
+        )
+        assert result.exit_code != 0
+        assert "Multiple dev-queue tasks" in result.output
+
+    def test_remove_with_all_flag(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(ticket_id="CLI-DUP", client="genhealth"),
+            TicketTask(ticket_id="CLI-DUP", client="genhealth"),
+            TicketTask(ticket_id="CLI-KEEP", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "remove", "CLI-DUP", "--client", "genhealth", "--all"]
+        )
+        assert result.exit_code == 0, result.output
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].ticket_id == "CLI-KEEP"
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueueClear
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueueClear:
+    def test_clear_all_for_client(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(ticket_id="CLI-A", client="genhealth"),
+            TicketTask(ticket_id="CLI-B", client="genhealth"),
+            TicketTask(ticket_id="CLI-C", client="other"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "clear", "--client", "genhealth"])
+        assert result.exit_code == 0, result.output
+        assert "Cleared 2" in result.output
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].client == "other"
+
+    def test_clear_with_status_filter(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(
+                ticket_id="CLI-P", client="genhealth", status=QueueItemStatus.PENDING
+            ),
+            TicketTask(
+                ticket_id="CLI-R", client="genhealth", status=QueueItemStatus.RUNNING
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "clear",
+                "--client",
+                "genhealth",
+                "--status",
+                "pending",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Cleared 1" in result.output
+        store = load_dev_queue()
+        ticket_ids = [t.ticket_id for t in store.tasks]
+        assert "CLI-P" not in ticket_ids
+        assert "CLI-R" in ticket_ids
+
+    def test_clear_invalid_status_choice_errors(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "clear",
+                "--client",
+                "genhealth",
+                "--status",
+                "bogus",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Invalid value" in result.output or "invalid choice" in result.output

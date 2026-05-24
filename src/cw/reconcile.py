@@ -298,20 +298,14 @@ def reconcile(
     )
 
 
-def revert_timed_out_tasks() -> list[str]:
-    """Revert RUNNING TicketTasks whose owning session is TIMED_OUT.
+def _revert_running_tasks_for_sessions(session_ids: set[str]) -> list[str]:
+    """Revert RUNNING TicketTasks whose ``session_id`` is in *session_ids*.
 
-    Called during :func:`reconcile` as a backstop for the case where
-    ``signal_stop`` crashed after writing TIMED_OUT status but before
-    reverting the dev-queue task. Returns the list of ticket IDs reverted.
+    Shared helper for the per-status revert wrappers. Acquires
+    ``dev_queue_lock`` for the read+write window; writes only when at least
+    one task was reverted. Returns the list of reverted ticket IDs.
     """
-    state = load_state()
-    timed_out_session_ids = {
-        s.id
-        for s in state.sessions
-        if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
-    }
-    if not timed_out_session_ids:
+    if not session_ids:
         return []
 
     reverted: list[str] = []
@@ -320,7 +314,7 @@ def revert_timed_out_tasks() -> list[str]:
         for task in store.tasks:
             if task.status != QueueItemStatus.RUNNING:
                 continue
-            if task.session_id not in timed_out_session_ids:
+            if task.session_id not in session_ids:
                 continue
             task.status = QueueItemStatus.PENDING
             task.session_id = None
@@ -328,6 +322,22 @@ def revert_timed_out_tasks() -> list[str]:
         if reverted:
             save_dev_queue(store)
     return reverted
+
+
+def revert_timed_out_tasks() -> list[str]:
+    """Revert RUNNING TicketTasks whose owning session is TIMED_OUT.
+
+    Called during :func:`reconcile` as a backstop for the case where
+    ``signal_stop`` crashed after writing TIMED_OUT status but before
+    reverting the dev-queue task. Returns the list of ticket IDs reverted.
+    """
+    state = load_state()
+    session_ids = {
+        s.id
+        for s in state.sessions
+        if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
+    }
+    return _revert_running_tasks_for_sessions(session_ids)
 
 
 def revert_completed_silent_tasks() -> list[str]:
@@ -339,25 +349,9 @@ def revert_completed_silent_tasks() -> list[str]:
     list of ticket IDs reverted.
     """
     state = load_state()
-    silent_completed_session_ids = {
+    session_ids = {
         s.id
         for s in state.sessions
         if s.status == SessionStatus.COMPLETED and s.origin is SessionOrigin.DAEMON
     }
-    if not silent_completed_session_ids:
-        return []
-
-    reverted: list[str] = []
-    with dev_queue_lock():
-        store = load_dev_queue()
-        for task in store.tasks:
-            if task.status != QueueItemStatus.RUNNING:
-                continue
-            if task.session_id not in silent_completed_session_ids:
-                continue
-            task.status = QueueItemStatus.PENDING
-            task.session_id = None
-            reverted.append(task.ticket_id)
-        if reverted:
-            save_dev_queue(store)
-    return reverted
+    return _revert_running_tasks_for_sessions(session_ids)
