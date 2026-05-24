@@ -15,7 +15,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw.auto_dev_result import extract_block
+from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
 from cw.cmux import CmuxAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
@@ -824,11 +824,11 @@ def run_claude(extra_args: tuple[str, ...]) -> None:
     run_claude_wrapper(extra_args)
 
 
-def _sentinel_present_in_transcript(
+def _parse_sentinel_from_transcript(
     cwd: str,
     claude_session_id: str | None,
-) -> bool:
-    """Return True if the AUTO_DEV_RESULT sentinel block appears in the transcript.
+) -> AutoDevResult | BlockedResult | None:
+    """Return the parsed sentinel from the transcript, or None if absent.
 
     Claude stores session transcripts at:
       ``~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl``
@@ -839,17 +839,22 @@ def _sentinel_present_in_transcript(
     newlines become the two-character sequence ``\\n``). Running ``extract_block``
     against the raw file therefore misses sentinels that are valid in their
     decoded form, so this scans each assistant text block individually after
-    JSON decoding. Returns False on any I/O or parse error (fail-open: defer
-    rather than falsely report sentinel present). See GitHub issue #176 Layer 1.
+    JSON decoding. Returns None on any I/O error or when no complete sentinel
+    pair is found — distinct from a BlockedResult, which means the sentinel
+    framing was present but the inner payload was unusable (§6 failure modes).
+
+    Used by ``signal_stop`` for headless DAEMON sessions, whose result must
+    be captured here because they bypass the cw wrapper entirely. See GitHub
+    issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
     """
     if not claude_session_id:
-        return False
+        return None
     encoded = cwd.replace("/", "-").replace(".", "-")
     transcript_path = (
         Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
     )
     if not transcript_path.is_file():
-        return False
+        return None
     try:
         with transcript_path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -870,10 +875,25 @@ def _sentinel_present_in_transcript(
                         continue
                     text = block.get("text")
                     if isinstance(text, str) and extract_block(text) is not None:
-                        return True
+                        return parse_stdout(text)
     except OSError:
-        return False
-    return False
+        return None
+    return None
+
+
+def _sentinel_present_in_transcript(
+    cwd: str,
+    claude_session_id: str | None,
+) -> bool:
+    """Return True if the AUTO_DEV_RESULT sentinel block appears in the transcript.
+
+    Thin wrapper around :func:`_parse_sentinel_from_transcript` preserved for
+    callers that only need the boolean (Layer 1 budget gate in signal_stop).
+    A non-None return — including a BlockedResult for malformed payloads —
+    means the agent emitted *something*; the result-capture path uses the
+    full parsed value, but the budget path only cares "did it emit?"
+    """
+    return _parse_sentinel_from_transcript(cwd, claude_session_id) is not None
 
 
 @main.command(name="signal-stop")
@@ -1007,11 +1027,12 @@ def signal_stop() -> None:
         context.get("headless")
     )
     now = datetime.now(UTC)
+    parsed_sentinel: AutoDevResult | BlockedResult | None = None
     if is_headless:
-        has_sentinel = _sentinel_present_in_transcript(
+        parsed_sentinel = _parse_sentinel_from_transcript(
             cwd_value, claude_session_id if isinstance(claude_session_id, str) else None
         )
-        if not has_sentinel:
+        if parsed_sentinel is None:
             elapsed = (now - session.started_at).total_seconds()
             if elapsed < HEADLESS_TIMEOUT_SECONDS:
                 # Under budget — defer. Another Stop hook turn will fire, or
@@ -1058,6 +1079,14 @@ def signal_stop() -> None:
     session.completed_reason = CompletionReason.NORMAL
     if isinstance(claude_session_id, str):
         session.claude_session_id = claude_session_id
+    # Issue #225: headless DAEMON sessions bypass the cw wrapper, so
+    # signal_completed (wrapper.py) never runs and last_result stayed None.
+    # Capture the parsed sentinel here before save_state so downstream
+    # consumers (consume_completed_sessions, /cw-followup) can route by
+    # status. parse_stdout returns BlockedResult on malformed payloads — we
+    # persist either shape; both serialize to a dict with a "status" field.
+    if parsed_sentinel is not None:
+        session.last_result = parsed_sentinel.model_dump(mode="json")
     save_state(state)
 
     payload: dict[str, object] = {
