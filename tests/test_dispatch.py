@@ -1167,3 +1167,46 @@ class TestDispatchTickSpawnErrors:
             for record in caplog.records
             if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
+
+
+class TestDispatchTickReconcileErrors:
+    """Reconcile failure inside dispatch_tick is contained, not propagated.
+
+    Paired test for the sanctioned BLE001 broad-catch at
+    src/cw/dispatch.py:105. Reconcile is best-effort housekeeping; if it
+    fails (transient adapter outage, corrupted roster, OSError on stale
+    socket), dispatch_tick must log + continue, not propagate.
+    """
+
+    def test_reconcile_failure_does_not_crash_dispatch_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        def _boom_reconcile(*_args: object, **_kwargs: object) -> None:
+            msg = "simulated reconcile failure"
+            raise RuntimeError(msg)
+
+        # Patch the name as imported into cw.dispatch (not cw.reconcile).
+        monkeypatch.setattr("cw.dispatch.reconcile", _boom_reconcile)
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+
+        caplog.set_level(logging.ERROR, logger="cw.dispatch")
+
+        # Must not raise; reconcile guard catches and logs, dispatch_tick
+        # continues to the dev-queue scan and returns normally.
+        spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        assert spawned == 0
+        assert any(
+            "reconcile failed" in record.getMessage().lower()
+            for record in caplog.records
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
+        ), "expected ERROR log from cw.dispatch mentioning 'reconcile failed'"
