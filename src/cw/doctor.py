@@ -333,13 +333,6 @@ def _check_bypass_disclaimer() -> CheckResult:
             warn=True,
             detail=f"settings.json not found at {_CLAUDE_SETTINGS_PATH}",
         )
-    except Exception as exc:
-        return CheckResult(
-            "bypass-disclaimer",
-            ok=True,
-            warn=True,
-            detail=f"could not read settings.json: {exc}",
-        )
     try:
         data: dict[str, object] = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -434,13 +427,6 @@ def _check_daemon_reachable() -> CheckResult:
             ok=True,
             warn=True,
             detail=f"roster.json not found at {_ROSTER_PATH} — daemon not started?",
-        )
-    except Exception as exc:
-        return CheckResult(
-            "daemon-reachable",
-            ok=True,
-            warn=True,
-            detail=f"could not read roster.json: {exc}",
         )
     try:
         data: dict[str, object] = json.loads(raw)
