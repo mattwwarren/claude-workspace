@@ -220,10 +220,16 @@ def reconcile(
 
     drift = compute_drift(state, adapter, daemon)
     if not drift.phantom_session_ids:
-        # No phantom sessions to reap, but still run the TIMED_OUT sweep so
-        # any task whose session was timed out by signal_stop gets reverted.
+        # No phantom sessions to reap, but still run the TIMED_OUT and
+        # COMPLETED-silent sweeps so any tasks whose sessions completed or
+        # timed out without reverting their queue task are recovered.
         timed_out_ticket_ids = revert_timed_out_tasks()
-        return ReconcileReport(reverted_ticket_ids=timed_out_ticket_ids)
+        completed_silent_ticket_ids = revert_completed_silent_tasks()
+        return ReconcileReport(
+            reverted_ticket_ids=list(
+                dict.fromkeys(timed_out_ticket_ids + completed_silent_ticket_ids)
+            )
+        )
 
     phantom_set = set(drift.phantom_session_ids)
     now = datetime.now(UTC)
@@ -274,18 +280,48 @@ def reconcile(
             if reverted:
                 save_dev_queue(store)
 
-    # Sweep for TIMED_OUT sessions whose owning TicketTask was not yet reverted
-    # (e.g. signal_stop crashed after setting status but before touching the
-    # queue). This mirrors the CRASHED-revert path above. TIMED_OUT sessions
-    # are already terminal so no state mutation is needed — queue revert only.
+    # Sweep for TIMED_OUT and DAEMON-COMPLETED sessions whose owning TicketTask
+    # was not yet reverted (e.g. signal_stop crashed after setting status but
+    # before touching the queue, or a headless session completed without
+    # the dispatch consumer processing it). TIMED_OUT/COMPLETED sessions are
+    # already terminal so no state mutation is needed — queue revert only.
     timed_out_ticket_ids = revert_timed_out_tasks()
-    all_reverted = list(dict.fromkeys(reverted + timed_out_ticket_ids))
+    completed_silent_ticket_ids = revert_completed_silent_tasks()
+    all_reverted = list(
+        dict.fromkeys(reverted + timed_out_ticket_ids + completed_silent_ticket_ids)
+    )
 
     return ReconcileReport(
         phantom_session_ids=drift.phantom_session_ids,
         phantom_session_names=phantom_names,
         reverted_ticket_ids=all_reverted,
     )
+
+
+def _revert_running_tasks_for_sessions(session_ids: set[str]) -> list[str]:
+    """Revert RUNNING TicketTasks whose ``session_id`` is in *session_ids*.
+
+    Shared helper for the per-status revert wrappers. Acquires
+    ``dev_queue_lock`` for the read+write window; writes only when at least
+    one task was reverted. Returns the list of reverted ticket IDs.
+    """
+    if not session_ids:
+        return []
+
+    reverted: list[str] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for task in store.tasks:
+            if task.status != QueueItemStatus.RUNNING:
+                continue
+            if task.session_id not in session_ids:
+                continue
+            task.status = QueueItemStatus.PENDING
+            task.session_id = None
+            reverted.append(task.ticket_id)
+        if reverted:
+            save_dev_queue(store)
+    return reverted
 
 
 def revert_timed_out_tasks() -> list[str]:
@@ -296,25 +332,26 @@ def revert_timed_out_tasks() -> list[str]:
     reverting the dev-queue task. Returns the list of ticket IDs reverted.
     """
     state = load_state()
-    timed_out_session_ids = {
+    session_ids = {
         s.id
         for s in state.sessions
         if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
     }
-    if not timed_out_session_ids:
-        return []
+    return _revert_running_tasks_for_sessions(session_ids)
 
-    reverted: list[str] = []
-    with dev_queue_lock():
-        store = load_dev_queue()
-        for task in store.tasks:
-            if task.status != QueueItemStatus.RUNNING:
-                continue
-            if task.session_id not in timed_out_session_ids:
-                continue
-            task.status = QueueItemStatus.PENDING
-            task.session_id = None
-            reverted.append(task.ticket_id)
-        if reverted:
-            save_dev_queue(store)
-    return reverted
+
+def revert_completed_silent_tasks() -> list[str]:
+    """Revert RUNNING TicketTasks whose owning session is DAEMON COMPLETED.
+
+    Called during :func:`reconcile` as a backstop for sessions that completed
+    without reverting their dev-queue task (e.g. the session wrote COMPLETED
+    status but the dispatch consumer had not yet processed it). Returns the
+    list of ticket IDs reverted.
+    """
+    state = load_state()
+    session_ids = {
+        s.id
+        for s in state.sessions
+        if s.status == SessionStatus.COMPLETED and s.origin is SessionOrigin.DAEMON
+    }
+    return _revert_running_tasks_for_sessions(session_ids)

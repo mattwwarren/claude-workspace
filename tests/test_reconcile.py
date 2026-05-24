@@ -473,3 +473,254 @@ def test_reconcile_timed_out_task_revert_called_during_reconcile(
     task = next(t for t in store.tasks if t.ticket_id == "43")
     assert task.status == QueueItemStatus.PENDING
     assert task.session_id is None
+
+
+# ---------------------------------------------------------------------------
+# revert_completed_silent_tasks tests
+# ---------------------------------------------------------------------------
+
+
+def _mk_daemon_completed_session(sid: str) -> Session:
+    """Build a DAEMON COMPLETED session for silent-revert testing."""
+    from cw.models import ClientConfig
+
+    sess = _mk_session(sid, surface_ref=None, status=SessionStatus.COMPLETED)
+    sess.origin = SessionOrigin.DAEMON
+    sess.workspace_path = ClientConfig(
+        name="client-a", workspace_path=Path("/tmp/ws")
+    ).workspace_path
+    return sess
+
+
+def test_revert_completed_silent_tasks_happy_path(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON COMPLETED session + RUNNING task with matching session_id → reverted."""
+    sess = _mk_daemon_completed_session("comp-sess-1")
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TKT-CS1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="comp-sess-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    from cw.reconcile import revert_completed_silent_tasks
+
+    reverted = revert_completed_silent_tasks()
+    assert "TKT-CS1" in reverted
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "TKT-CS1")
+    assert t.status == QueueItemStatus.PENDING
+    assert t.session_id is None
+
+
+def test_revert_completed_silent_tasks_skips_user_origin(
+    tmp_config_dir: Path,
+) -> None:
+    """USER origin COMPLETED session + RUNNING task → no revert."""
+    sess = _mk_session("user-comp", surface_ref=None, status=SessionStatus.COMPLETED)
+    sess.origin = SessionOrigin.USER
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TKT-UO",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="user-comp",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    from cw.reconcile import revert_completed_silent_tasks
+
+    reverted = revert_completed_silent_tasks()
+    assert reverted == []
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "TKT-UO")
+    assert t.status == QueueItemStatus.RUNNING
+
+
+def test_revert_completed_silent_tasks_skips_non_completed(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON ACTIVE/RUNNING/TIMED_OUT session → no revert."""
+    for status in (SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.TIMED_OUT):
+        sess = _mk_session(f"non-comp-{status}", surface_ref=None, status=status)
+        sess.origin = SessionOrigin.DAEMON
+        task = TicketTask(
+            ticket_id=f"TKT-{status}",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=f"non-comp-{status}",
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from cw.reconcile import revert_completed_silent_tasks
+
+        reverted = revert_completed_silent_tasks()
+        assert reverted == [], f"Expected no revert for status={status}"
+
+
+def test_revert_completed_silent_tasks_skips_unmatched_session(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON COMPLETED session, but task.session_id != that id → no revert."""
+    sess = _mk_daemon_completed_session("comp-sess-x")
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TKT-NM",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="different-session",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    from cw.reconcile import revert_completed_silent_tasks
+
+    reverted = revert_completed_silent_tasks()
+    assert reverted == []
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "TKT-NM")
+    assert t.status == QueueItemStatus.RUNNING
+
+
+def test_revert_completed_silent_tasks_returns_empty_when_no_match(
+    tmp_config_dir: Path,
+) -> None:
+    """No matching sessions → returns empty list."""
+    save_state(CwState(sessions=[]))
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    from cw.reconcile import revert_completed_silent_tasks
+
+    reverted = revert_completed_silent_tasks()
+    assert reverted == []
+
+
+def test_reconcile_merges_completed_silent_reverts_into_report(
+    tmp_config_dir: Path,
+) -> None:
+    """reconcile() includes both timed-out and completed-silent reverts."""
+    timed_out_session = Session(
+        id="timed-out-merge",
+        name="client-a/auto-dev/TKT-TO",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+    completed_silent_session = Session(
+        id="comp-merge",
+        name="client-a/auto-dev/TKT-CS",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.COMPLETED,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[timed_out_session, completed_silent_session]))
+
+    dev_store = DevQueueStore(
+        tasks=[
+            TicketTask(
+                ticket_id="TKT-TO",
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id="timed-out-merge",
+            ),
+            TicketTask(
+                ticket_id="TKT-CS",
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id="comp-merge",
+            ),
+        ]
+    )
+    save_dev_queue(dev_store)
+
+    adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
+    report = reconcile(adapter, daemon)
+
+    assert "TKT-TO" in report.reverted_ticket_ids
+    assert "TKT-CS" in report.reverted_ticket_ids
+
+
+def test_reconcile_calls_timed_out_then_completed_silent(
+    tmp_config_dir: Path,
+) -> None:
+    """Both revert helpers fire independently and each reverts the right task."""
+    from cw.models import ClientConfig
+
+    timed_out_session = Session(
+        id="to-ind",
+        name="client-a/auto-dev/TKT-IND-TO",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+    comp_silent_session = Session(
+        id="cs-ind",
+        name="client-a/auto-dev/TKT-IND-CS",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.COMPLETED,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[timed_out_session, comp_silent_session]))
+
+    dev_store = DevQueueStore(
+        tasks=[
+            TicketTask(
+                ticket_id="TKT-IND-TO",
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id="to-ind",
+            ),
+            TicketTask(
+                ticket_id="TKT-IND-CS",
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id="cs-ind",
+            ),
+        ]
+    )
+    save_dev_queue(dev_store)
+
+    from cw.reconcile import revert_completed_silent_tasks, revert_timed_out_tasks
+
+    # Call helpers independently to assert each reverts only the right task.
+    to_reverted = revert_timed_out_tasks()
+    assert "TKT-IND-TO" in to_reverted
+    assert "TKT-IND-CS" not in to_reverted
+
+    cs_reverted = revert_completed_silent_tasks()
+    assert "TKT-IND-CS" in cs_reverted
+    assert "TKT-IND-TO" not in cs_reverted
