@@ -1,3 +1,6 @@
+# Install both stages with a single `uv run pre-commit install`.
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.14
@@ -27,6 +30,17 @@ repos:
       - id: pytest
         name: pytest
         entry: uv run pytest tests/ -x -q
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Mirrors the CI patch-coverage gate so failures surface before push,
+      # not after a wasted CI cycle. Same threshold (90%) and same scope
+      # (`not integration`) as .github/workflows/ci.yml.
+      - id: diff-cover
+        name: diff-cover (vs origin/main, 90%)
+        stages: [pre-push]
+        entry: bash -c 'git fetch --quiet origin main && uv run pytest tests/ -q -m "not integration" --cov=cw --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
         language: system
         pass_filenames: false
         always_run: true
