@@ -20,3 +20,21 @@ class HookContextConflictError(CwError):
     (Phase C of multiplexer-removal) route this to a clean failure mode
     rather than overwriting.
     """
+
+
+class DisclaimerNotAcceptedError(CwError):
+    """Raised when ``claude --bg`` fails because the user has not accepted
+    the bypass-permissions disclaimer.
+
+    Detection: the substring ``"requires accepting the disclaimer first"`` is
+    present in ``CalledProcessError.stderr``. Verified against the live
+    ``claude`` binary at version 2.1.150 via ``strings`` — the full stderr line
+    emitted by that binary is::
+
+        --bg with bypassPermissions requires accepting the disclaimer first.
+        Run `claude --dangerously-skip-permissions` once interactively.
+
+    Remediation: run ``claude --dangerously-skip-permissions`` once interactively
+    to accept the disclaimer (persisted to ``~/.claude/settings.json`` as
+    ``skipDangerousModePermissionPrompt: true``).
+    """
