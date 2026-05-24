@@ -1,7 +1,9 @@
 # Migrate session lifecycle from wrapper + multiplexer to `claude --bg` + supervisor
 
 **Status:** Accepted
-**Driven by:** #105, #108, #109, #111, #112, #113, #114, #119
+**Driven by (multiplexer-removal track):** #165 (B), #166 (C), #167 (D), #119 (F)
+**Driven by (parallel workstreams):** #114, #115 (pr-channel); #116, #117 (sdk-orchestrator)
+**Superseded:** #105, #108, #109, #111, #112, #113 (closed — see 2026-05-22 update)
 
 ## Decision
 
@@ -238,4 +240,7 @@ during Phases B–D. The fix becomes obsolete once Phase F lands.
 ## Referenced by
 
 - ADR-0001 (parked tasks pin their Session)
-- #58, #59, #105, #108, #109, #111, #112, #113, #114, #119, #126, #127
+- Multiplexer-removal track: #165 (B ✅), #166 (C ✅), #167 (D), #119 (F)
+- Spin-out deletion tickets (formerly bundled in #119): #242 wrapper, #243 reconcile slim, #244 daemon PR-watcher, #245 pr_responder, #246 handoff, #247 prompts
+- Parallel workstreams: #114, #115 (pr-channel); #116, #117 (sdk-orchestrator)
+- Adjacent: #58, #59, #126, #127

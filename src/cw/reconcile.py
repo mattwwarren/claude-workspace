@@ -110,7 +110,7 @@ class ReconcileReport:
 
 def compute_drift(
     state: CwState,
-    adapter: MultiplexerAdapter,
+    adapter: MultiplexerAdapter | None = None,
     native_daemon: NativeDaemonClient | None = None,
 ) -> ReconcileReport:
     """Return a report naming sessions whose surface is no longer live.
@@ -124,18 +124,25 @@ def compute_drift(
     Claude session id passes liveness via the roster, while an
     interactive session with a tmux pane ref passes via the adapter.
 
+    *adapter* is optional. When ``None``, the multiplexer side of the union
+    is treated as empty; only the native daemon oracle is consulted. Phase D
+    will drop the adapter parameter entirely once the multiplexer is removed
+    from all call sites.
+
     This function does not mutate state. It also does not distinguish
     "backend reports zero live entries" from "backend is unreachable";
     that guard lives in :func:`reconcile`.
     """
     daemon = native_daemon or get_native_daemon_client()
-    tmux_live = adapter.list_surfaces()
+    tmux_live = adapter.list_surfaces() if adapter is not None else set()
     native_live = daemon.list_live_session_short_ids()
     # Second-pass zombie filter: panes that exist but whose foreground
     # process is a bare shell are not actually live cw sessions. An empty
     # command map means the backend can't enumerate — skip the filter
     # (fail-open) rather than risk false-positive reaping.
-    surface_commands = adapter.list_live_surface_commands()
+    surface_commands = (
+        adapter.list_live_surface_commands() if adapter is not None else {}
+    )
     zombie_refs: set[str] = set()
     if surface_commands:
         zombie_refs = {
@@ -188,7 +195,7 @@ def _looks_like_backend_outage(
 
 
 def reconcile(
-    adapter: MultiplexerAdapter,
+    adapter: MultiplexerAdapter | None = None,
     native_daemon: NativeDaemonClient | None = None,
 ) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
@@ -203,6 +210,10 @@ def reconcile(
     :func:`_looks_like_backend_outage` matches — a transient multiplexer
     restart (or a missing native roster) must not trigger mass-reaping.
 
+    *adapter* is optional. When ``None``, the multiplexer side is treated
+    as empty; only the native daemon oracle is consulted. Phase D will drop
+    the adapter parameter entirely.
+
     Partial-failure note: state and the dev queue are separate files. If
     ``save_state`` succeeds but the subsequent dev-queue update raises,
     the session will be COMPLETED while its TicketTask stays RUNNING.
@@ -213,7 +224,7 @@ def reconcile(
     """
     daemon = native_daemon or get_native_daemon_client()
     state = load_state()
-    tmux_live = adapter.list_surfaces()
+    tmux_live = adapter.list_surfaces() if adapter is not None else set()
     native_live = daemon.list_live_session_short_ids()
     if _looks_like_backend_outage(state, tmux_live, native_live):
         return ReconcileReport()
