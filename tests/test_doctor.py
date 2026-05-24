@@ -18,6 +18,20 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, Session
 
 
+def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub _check_claude_version to return ok=True.
+
+    The real check runs ``claude --version``, which is not on the GH Actions
+    runners. Healthy-path tests that assert ``report.ok`` (no failing checks)
+    must neutralise the binary lookup; other tests covering this check
+    directly remain in :class:`TestCheckClaudeVersionDirect`.
+    """
+    monkeypatch.setattr(
+        "cw.doctor._check_claude_version",
+        lambda: CheckResult("claude-version", ok=True, detail="2.1.139 (stubbed)"),
+    )
+
+
 class TestRunDoctorFakeBackend:
     """When CW_BACKEND=fake the backend binary check is a no-op."""
 
@@ -25,6 +39,7 @@ class TestRunDoctorFakeBackend:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         assert report.backend is BackendName.FAKE
         assert report.ok
@@ -53,6 +68,7 @@ class TestRunDoctorTmuxBackend:
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "tmux")
         monkeypatch.setattr("cw.doctor.shutil.which", lambda _name: "/usr/bin/tmux")
+        _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         assert report.ok
 
@@ -84,6 +100,7 @@ class TestFormatReport:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         rendered = format_report(report)
         assert "status: healthy" in rendered
@@ -94,6 +111,7 @@ class TestDoctorCli:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         runner = CliRunner()
         result = runner.invoke(main, ["doctor"])
         assert result.exit_code == 0
@@ -171,6 +189,7 @@ def test_cw_doctor_cli_reap_flag(
     # Force fake backend so the binary/socket check passes on every platform
     # (macOS default is cmux, whose socket does not exist in CI).
     monkeypatch.setenv("CW_BACKEND", "fake")
+    _stub_claude_version_ok(monkeypatch)
     runner = CliRunner()
     result = runner.invoke(main, ["doctor", "--reap"])
     assert result.exit_code == 0
@@ -610,6 +629,7 @@ class TestCheckLinkageIndependence:
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         save_state(
             CwState(
                 sessions=[
