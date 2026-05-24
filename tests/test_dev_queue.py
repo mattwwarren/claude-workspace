@@ -13,10 +13,12 @@ from cw.cli import main
 from cw.config import load_orchestrator_config
 from cw.dev_queue import (
     add_ticket,
+    clear_tickets,
     list_tickets,
     load_dev_queue,
     load_plan,
     plan_path,
+    remove_ticket,
     resolve_client,
     save_dev_queue,
     save_plan,
@@ -602,3 +604,144 @@ class TestConcurrentAccess:
         assert not reader_errors, (
             f"Reader observed {len(reader_errors)} partial writes: {reader_errors[:3]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestAddTicketDedupe
+# ---------------------------------------------------------------------------
+
+
+class TestAddTicketDedupe:
+    def test_returns_true_on_insert(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="genhealth")
+        result = add_ticket(task)
+        assert result is True
+
+    def test_returns_false_on_pending_duplicate(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="genhealth")
+        add_ticket(task)
+        duplicate = TicketTask(ticket_id="GEN-1", client="genhealth")
+        result = add_ticket(duplicate)
+        assert result is False
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+
+    def test_returns_false_on_running_duplicate(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(
+            ticket_id="GEN-2", client="genhealth", status=QueueItemStatus.RUNNING
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        duplicate = TicketTask(ticket_id="GEN-2", client="genhealth")
+        result = add_ticket(duplicate)
+        assert result is False
+        store2 = load_dev_queue()
+        assert len(store2.tasks) == 1
+
+    def test_allows_terminal_duplicate(self, tmp_dev_queue: Path) -> None:
+        """Existing COMPLETED entry does NOT block re-adding."""
+        completed = TicketTask(
+            ticket_id="GEN-3", client="genhealth", status=QueueItemStatus.COMPLETED
+        )
+        save_dev_queue(DevQueueStore(tasks=[completed]))
+        new_task = TicketTask(ticket_id="GEN-3", client="genhealth")
+        result = add_ticket(new_task)
+        assert result is True
+        store2 = load_dev_queue()
+        assert len(store2.tasks) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestRemoveTicket
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveTicket:
+    def test_removes_single_match(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(ticket_id="TKT-10", client="genhealth")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        remove_ticket("TKT-10", "genhealth")
+        store = load_dev_queue()
+        assert len(store.tasks) == 0
+
+    def test_raises_on_zero_match(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        pattern = "No dev-queue task found for ticket 'TKT-99' in client 'genhealth'"
+        with pytest.raises(CwError, match=pattern):
+            remove_ticket("TKT-99", "genhealth")
+
+    def test_raises_on_multi_match_without_remove_all(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        tasks = [
+            TicketTask(ticket_id="TKT-5", client="genhealth"),
+            TicketTask(ticket_id="TKT-5", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        pattern = r"Multiple dev-queue tasks \(2\) match ticket 'TKT-5'"
+        with pytest.raises(CwError, match=pattern):
+            remove_ticket("TKT-5", "genhealth")
+
+    def test_removes_all_with_remove_all_flag(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(ticket_id="TKT-5", client="genhealth"),
+            TicketTask(ticket_id="TKT-5", client="genhealth"),
+            TicketTask(ticket_id="TKT-6", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        remove_ticket("TKT-5", "genhealth", remove_all=True)
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].ticket_id == "TKT-6"
+
+
+# ---------------------------------------------------------------------------
+# TestClearTickets
+# ---------------------------------------------------------------------------
+
+
+class TestClearTickets:
+    def test_clears_all_for_client_without_status(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(ticket_id="TKT-A", client="genhealth"),
+            TicketTask(ticket_id="TKT-B", client="genhealth"),
+            TicketTask(ticket_id="TKT-C", client="other"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        clear_tickets("genhealth")
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].client == "other"
+
+    def test_clears_by_status_filter(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(
+                ticket_id="TKT-P", client="genhealth", status=QueueItemStatus.PENDING
+            ),
+            TicketTask(
+                ticket_id="TKT-R",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+            ),
+            TicketTask(
+                ticket_id="TKT-C",
+                client="genhealth",
+                status=QueueItemStatus.COMPLETED,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        clear_tickets("genhealth", status=QueueItemStatus.PENDING)
+        store = load_dev_queue()
+        ticket_ids = [t.ticket_id for t in store.tasks]
+        assert "TKT-P" not in ticket_ids
+        assert "TKT-R" in ticket_ids
+        assert "TKT-C" in ticket_ids
+
+    def test_returns_count_removed(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(ticket_id="TKT-1", client="genhealth"),
+            TicketTask(ticket_id="TKT-2", client="genhealth"),
+            TicketTask(ticket_id="TKT-3", client="other"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        count = clear_tickets("genhealth")
+        assert count == 2
