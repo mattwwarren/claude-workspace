@@ -807,6 +807,7 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
     )
 
     monkeypatch.setenv("CW_BACKEND", "fake")
+    _stub_claude_version_ok(monkeypatch)
 
     comp_session = Session(
         id="comp-doctor-1",
