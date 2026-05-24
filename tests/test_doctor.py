@@ -1019,7 +1019,8 @@ class TestRunDoctor10Checks:
         monkeypatch.setenv("CW_BACKEND", "fake")
 
         def fake_run_not_found(*_a: object, **_kw: object) -> object:
-            raise FileNotFoundError("no claude")
+            msg = "no claude"
+            raise FileNotFoundError(msg)
 
         self._monkeypatch_paths(
             monkeypatch,

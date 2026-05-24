@@ -109,7 +109,8 @@ class TestRealNativeDaemonClientSpawn:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def fake_run(*_args: object, **_kwargs: object) -> _FakeCompleted:
-            raise FileNotFoundError("no claude")
+            msg = "no claude"
+            raise FileNotFoundError(msg)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         client = RealNativeDaemonClient()

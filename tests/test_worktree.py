@@ -472,7 +472,8 @@ class TestRemoveWorktree:
                     " ".join(args),
                     stderr=msg,
                 )
-                raise WorktreeError("Git command failed") from err
+                wt_msg = "Git command failed"
+                raise WorktreeError(wt_msg) from err
             return MagicMock(returncode=0, stderr="")
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
