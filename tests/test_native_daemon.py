@@ -132,6 +132,27 @@ class TestRealNativeDaemonClientSpawn:
         with pytest.raises(CwError, match="claude --bg exited 2"):
             client.spawn_bg(cwd=tmp_path, prompt="x")
 
+    def test_disclaimer_not_accepted_raises_typed_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uses FULL verified stderr from claude binary 2.1.150."""
+        from cw.exceptions import DisclaimerNotAcceptedError
+
+        full_stderr = (
+            "--bg with bypassPermissions requires accepting the disclaimer first. "
+            "Run `claude --dangerously-skip-permissions` once interactively."
+        )
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(
+                1, ["claude"], output="", stderr=full_stderr
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        with pytest.raises(DisclaimerNotAcceptedError, match="disclaimer"):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
 
 class TestRealNativeDaemonClientRoster:
     """list_live_session_short_ids reads roster.json."""

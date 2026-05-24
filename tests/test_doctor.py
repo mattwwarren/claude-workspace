@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.doctor import format_report, run_doctor
+from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
 from cw.models import BackendName
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
     from cw.models import ClientConfig, Session
@@ -826,3 +826,199 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
     t = next(t for t in store.tasks if t.ticket_id == "TKT-DR1")
     assert t.status == QueueItemStatus.PENDING
     assert t.session_id is None
+
+
+# ---------------------------------------------------------------------------
+# New checks: bypass-disclaimer, claude-version, daemon-reachable
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_run_version(stdout: str = "2.1.150 (Claude Code)\n") -> object:
+    """Return a subprocess.run replacement that succeeds for --version."""
+
+    class _FakeCompleted:
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = 0
+
+    def fake_run(args: list[str], **_kwargs: object) -> _FakeCompleted:
+        return _FakeCompleted()
+
+    return fake_run
+
+
+class TestRunDoctor10Checks:
+    """Tests for bypass-disclaimer, claude-version, and daemon-reachable checks."""
+
+    def _monkeypatch_paths(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        settings_content: str | None = None,
+        roster_content: str | None = None,
+        fake_run: object | None = None,
+    ) -> tuple[Path, Path]:
+        """Set up isolated path monkeypatches for new doctor checks.
+
+        Returns (settings_path, roster_path) for further manipulation.
+        """
+        settings_path = tmp_path / ".claude" / "settings.json"
+        roster_path = tmp_path / ".claude" / "daemon" / "roster.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        roster_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if settings_content is not None:
+            settings_path.write_text(settings_content)
+        if roster_content is not None:
+            roster_path.write_text(roster_content)
+
+        monkeypatch.setattr("cw.doctor._CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        if fake_run is not None:
+            monkeypatch.setattr("cw.doctor.subprocess.run", fake_run)
+        else:
+            monkeypatch.setattr(
+                "cw.doctor.subprocess.run",
+                _make_fake_run_version(),
+            )
+        return settings_path, roster_path
+
+    def test_all_three_checks_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """run_doctor() includes bypass-disclaimer, claude-version, daemon-reachable."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        settings_path = tmp_config_dir / ".claude" / "settings.json"
+        roster_path = tmp_config_dir / ".claude" / "daemon" / "roster.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        roster_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps({"skipDangerousModePermissionPrompt": True})
+        )
+        roster_path.write_text(json.dumps({"supervisorPid": 12345, "workers": {}}))
+
+        monkeypatch.setattr("cw.doctor._CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.subprocess.run", _make_fake_run_version())
+
+        report = run_doctor()
+        names = {c.name for c in report.checks}
+        assert "bypass-disclaimer" in names
+        assert "claude-version" in names
+        assert "daemon-reachable" in names
+
+    def test_bypass_disclaimer_warns_when_not_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """settings.json with {} → bypass-disclaimer is ok=True warn=True."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({}),
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "bypass-disclaimer")
+        assert check.ok is True
+        assert check.warn is True
+
+    def test_bypass_disclaimer_ok_when_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """settings.json with flag set → bypass-disclaimer ok=True warn=False."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "bypass-disclaimer")
+        assert check.ok is True
+        assert check.warn is False
+
+    def test_daemon_reachable_warns_when_roster_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """No roster file → daemon-reachable is ok=True warn=True."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        # Provide settings so bypass-disclaimer doesn't interfere
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            # no roster_content — file won't exist
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "daemon-reachable")
+        assert check.ok is True
+        assert check.warn is True
+
+    def test_daemon_reachable_ok_when_supervisor_running(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """roster with supervisorPid: 12345 → daemon-reachable is ok=True warn=False."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"supervisorPid": 12345, "workers": {}}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "daemon-reachable")
+        assert check.ok is True
+        assert check.warn is False
+
+    def test_daemon_reachable_warns_on_missing_supervisor_pid(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """roster with workers but no supervisorPid → WARN, no KeyError."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"workers": {}}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "daemon-reachable")
+        assert check.ok is True
+        assert check.warn is True
+
+    def test_claude_version_missing_binary_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """FileNotFoundError from claude binary → claude-version is ok=False."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+
+        def fake_run_not_found(*_a: object, **_kw: object) -> object:
+            raise FileNotFoundError("no claude")
+
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"supervisorPid": 12345}),
+            fake_run=fake_run_not_found,
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "claude-version")
+        assert check.ok is False
+
+
+def test_report_ok_unaffected_by_warn_checks() -> None:
+    """WARN checks have ok=True; DoctorReport.ok stays True; cw doctor exits 0."""
+    # Construct a DoctorReport with only WARN checks (ok=True, warn=True)
+    warn_check = CheckResult("bypass-disclaimer", ok=True, warn=True, detail="not set")
+    report = DoctorReport(
+        version="0.0.0",
+        backend=BackendName.FAKE,
+        checks=[warn_check],
+    )
+    assert report.ok is True
