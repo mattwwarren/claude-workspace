@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from cw.exceptions import CwError
+from cw.exceptions import CwError, DisclaimerNotAcceptedError
 
 _log = logging.getLogger(__name__)
 
@@ -49,6 +49,11 @@ _BG_STDOUT_PATTERN = re.compile(r"backgrounded\s*·\s*([0-9a-f]{8})")
 # (``backgrounded · \x1b[36m<id>\x1b[39m``). Strip CSI SGR sequences before
 # matching so the parser tolerates terminal-formatted output.
 _ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+# Substring verified against claude binary 2.1.150 via ``strings``; full stderr is:
+# "--bg with bypassPermissions requires accepting the disclaimer first.
+#  Run `claude --dangerously-skip-permissions` once interactively."
+_DISCLAIMER_REJECTION_PATTERN = "requires accepting the disclaimer first"
 
 
 @runtime_checkable
@@ -107,6 +112,13 @@ class RealNativeDaemonClient:
             msg = "claude binary not on PATH; cannot spawn background session"
             raise CwError(msg) from exc
         except subprocess.CalledProcessError as exc:
+            stderr_text = (exc.stderr or exc.stdout or "").strip()
+            if _DISCLAIMER_REJECTION_PATTERN in stderr_text:
+                msg = (
+                    "claude --bg requires accepting the disclaimer first. "
+                    "Run `claude --dangerously-skip-permissions` once interactively."
+                )
+                raise DisclaimerNotAcceptedError(msg) from exc
             msg = (
                 f"claude --bg exited {exc.returncode}: "
                 f"{(exc.stderr or exc.stdout or '').strip()}"
