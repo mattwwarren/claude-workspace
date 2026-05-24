@@ -90,6 +90,9 @@ select = [
     "TCH",  # flake8-type-checking
     "PERF", # perflint
     "FURB", # refurb
+    "BLE",  # flake8-blind-except
+    "EM",   # flake8-errmsg
+    "TRY",  # tryceratops (exception handling)
 ]
 ignore = [
     "T201",  # print() is our UI output mechanism (via click.echo, but also direct)
@@ -115,6 +118,7 @@ ignore = [
     "TC005",    # empty type-checking blocks during migration are fine
     "S108",     # /tmp socket paths are part of the cmux protocol spec
     "PLC0415",  # inline imports used in test methods that need monkeypatching first
+    "TRY003",   # long messages in test asserts are intentional for debug clarity
 ]
 
 [tool.mypy]
