@@ -93,6 +93,8 @@ select = [
     "BLE",  # flake8-blind-except
     "EM",   # flake8-errmsg
     "TRY",  # tryceratops (exception handling)
+    "LOG",  # flake8-logging (logger.exception vs error+exc_info, extra= misuse)
+    "G",    # flake8-logging-format (no f-strings/format in log calls; use lazy %)
 ]
 ignore = [
     "T201",  # print() is our UI output mechanism (via click.echo, but also direct)
