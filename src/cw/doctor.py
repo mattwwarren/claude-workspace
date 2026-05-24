@@ -391,9 +391,14 @@ def _check_claude_version() -> CheckResult:
     # Parse the leading X.Y.Z token from the version line.
     first_token = version_line.split()[0] if version_line else ""
     parts = first_token.split(".")
+    if len(parts) < _VERSION_PARTS:
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=f"could not parse version: {version_line}",
+        )
     try:
-        if len(parts) < _VERSION_PARTS:
-            raise ValueError("fewer than three version components")
         parsed = tuple(int(p) for p in parts[:3])
     except (ValueError, AttributeError):
         return CheckResult(
