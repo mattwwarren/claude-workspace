@@ -294,10 +294,11 @@ def upgrade_workers() -> None:
             check=False,
         )
     except FileNotFoundError as e:
-        raise click.ClickException(
+        msg = (
             "claude binary not found on PATH. Install Claude Code, "
             "then re-run 'cw upgrade-workers'."
-        ) from e
+        )
+        raise click.ClickException(msg) from e
     if result.stdout:
         click.echo(result.stdout, nl=False)
     if result.returncode != 0:

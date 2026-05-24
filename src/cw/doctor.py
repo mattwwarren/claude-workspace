@@ -18,6 +18,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+from pydantic import ValidationError
+
 from cw import __version__
 from cw.cmux import _resolve_backend_name, get_cmux_adapter
 from cw.config import (
@@ -118,7 +121,7 @@ def _check_config_file() -> CheckResult:
         )
     try:
         load_clients()
-    except Exception as exc:
+    except (OSError, yaml.YAMLError, CwError, ValidationError) as exc:
         return CheckResult("clients.yaml", ok=False, detail=f"parse failed: {exc}")
     return CheckResult("clients.yaml", ok=True, detail=str(path))
 
@@ -146,7 +149,7 @@ def _check_state_file() -> tuple[CheckResult, CwState | None]:
     path = state_file()
     try:
         state = load_state()
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
         return (
             CheckResult("sessions.json", ok=False, detail=f"load failed: {exc}"),
             None,
@@ -157,7 +160,7 @@ def _check_state_file() -> tuple[CheckResult, CwState | None]:
 def _check_dev_queue() -> CheckResult:
     try:
         load_dev_queue()
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
         return CheckResult("dev_queue.json", ok=False, detail=f"load failed: {exc}")
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
 
@@ -391,9 +394,14 @@ def _check_claude_version() -> CheckResult:
     # Parse the leading X.Y.Z token from the version line.
     first_token = version_line.split()[0] if version_line else ""
     parts = first_token.split(".")
+    if len(parts) < _VERSION_PARTS:
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=f"could not parse version: {version_line}",
+        )
     try:
-        if len(parts) < _VERSION_PARTS:
-            raise ValueError("fewer than three version components")
         parsed = tuple(int(p) for p in parts[:3])
     except (ValueError, AttributeError):
         return CheckResult(

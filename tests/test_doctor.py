@@ -1019,7 +1019,8 @@ class TestRunDoctor10Checks:
         monkeypatch.setenv("CW_BACKEND", "fake")
 
         def fake_run_not_found(*_a: object, **_kw: object) -> object:
-            raise FileNotFoundError("no claude")
+            msg = "no claude"
+            raise FileNotFoundError(msg)
 
         self._monkeypatch_paths(
             monkeypatch,
@@ -1217,3 +1218,58 @@ class TestCheckClaudeVersion:
         assert result.ok is True
         assert result.warn is True
         assert "1" in result.detail  # returncode appears in detail
+
+
+# ---------------------------------------------------------------------------
+# Direct tests for loader failure paths covered by narrowed BLE excepts
+# (src/cw/doctor.py:124 _check_config_file, :163 _check_dev_queue)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckConfigFileLoaderFailure:
+    """_check_config_file returns ok=False when load_clients raises a narrowed type."""
+
+    def test_yaml_error_from_load_clients_is_reported_as_fail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """yaml.YAMLError from load_clients → ok=False, parse-failure detail."""
+        import yaml
+
+        from cw.config import clients_file
+        from cw.doctor import _check_config_file
+
+        # File must exist so the try/except path runs (existence-true branch
+        # short-circuits to ok=True before reaching the loader).
+        clients_file().write_text("not: valid: yaml: here")
+
+        yaml_msg = "malformed clients.yaml"
+
+        def fake_load_clients() -> object:
+            raise yaml.YAMLError(yaml_msg)
+
+        monkeypatch.setattr("cw.doctor.load_clients", fake_load_clients)
+        result = _check_config_file()
+        assert result.ok is False
+        assert "parse failed" in result.detail
+        assert yaml_msg in result.detail
+
+
+class TestCheckDevQueueLoaderFailure:
+    """_check_dev_queue returns ok=False when load_dev_queue raises a narrowed type."""
+
+    def test_json_decode_error_from_load_dev_queue_is_reported_as_fail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """JSONDecodeError from load_dev_queue → ok=False, load-failure detail."""
+        from cw.doctor import _check_dev_queue
+
+        json_msg = "corrupt dev_queue.json"
+
+        def fake_load_dev_queue() -> object:
+            raise json.JSONDecodeError(json_msg, "", 0)
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", fake_load_dev_queue)
+        result = _check_dev_queue()
+        assert result.ok is False
+        assert "load failed" in result.detail
+        assert json_msg in result.detail

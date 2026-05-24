@@ -343,9 +343,10 @@ def _is_git_repo(path: Path) -> bool:
             check=False,
             env=clean_env,
         )
-        return result.returncode == 0
     except OSError:
         return False
+    else:
+        return result.returncode == 0
 
 
 _VALID_PURPOSES = frozenset(p.value for p in SessionPurpose)

@@ -1071,7 +1071,8 @@ class TestDoneSession:
         def mock_remove_worktree(
             client: object, branch: str, force: bool = False
         ) -> None:
-            raise WorktreeError("worktree has uncommitted changes")
+            msg = "worktree has uncommitted changes"
+            raise WorktreeError(msg)
 
         monkeypatch.setattr("cw.session.remove_worktree", mock_remove_worktree)
 

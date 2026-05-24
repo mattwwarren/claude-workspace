@@ -102,7 +102,16 @@ def dispatch_tick(
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     try:
         reconcile(resolved_adapter, resolved_native_daemon)
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331 (4-part justification):
+        # 1. Adapter surface: reconcile() calls adapter.list_surfaces() and
+        #    native-daemon roster I/O — backend-specific failure modes
+        #    (tmux server crash, JSON roster corruption, OSError on stale socket).
+        # 2. Logging: _log.exception captures the full traceback with exc_info.
+        # 3. Non-critical: reconcile is best-effort housekeeping. Skipping a tick
+        #    just means phantoms get reaped on the next dispatch_tick.
+        # 4. Paired test: tests/test_dispatch.py
+        #    test_reconcile_failure_does_not_crash_dispatch_tick.
         _log.exception("reconcile failed during dispatch_tick; continuing")
     clients = load_clients()
     state = load_state()
@@ -189,7 +198,12 @@ def dispatch_tick(
 
                 running_count += 1
                 spawned += 1
-            except Exception:
+            except Exception:  # noqa: BLE001
+                # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
+                # Paired tests: TestDispatchTickSpawnErrors in
+                # tests/test_dispatch.py:1097+ (asserts the loop survives
+                # spawn failures and the task is reverted to PENDING).
+                #
                 # Catch broad like the reconcile guard above: a backend
                 # outage (tmux pane exhaustion, transient daemon failure,
                 # OSError from the adapter) must NOT kill the loop. The
