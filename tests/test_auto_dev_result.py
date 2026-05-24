@@ -806,10 +806,27 @@ class TestStage1PreFlightBlocked:
             AutoDevResult.model_validate(p)
 
     def test_invalid_next_action_rejected_at_pre_flight_blocked(self) -> None:
-        """next_actions for pre-flight blocked is a closed set, not free-form."""
+        """next_actions for pre-flight blocked is a closed set, not free-form.
+
+        ``wait_for_ci`` would short-circuit on the earlier §4.3 ``wait_for_ci
+        iff shipped`` rule, so use a verb that only the pre-flight closed-set
+        check can reject. Asserts the rejection message points at the
+        closed-set so we know the right branch fired.
+        """
         p = _pre_flight_blocked_payload()
-        p["next_actions"] = ["wait_for_ci"]  # shipped-only verb
-        with pytest.raises(ValidationError, match="next_actions"):
+        p["next_actions"] = ["close_issue_as_completed"]  # valid for no_op, not blocked
+        with pytest.raises(ValidationError, match="expected subset of"):
+            AutoDevResult.model_validate(p)
+
+    def test_mixed_valid_and_invalid_next_actions_rejected(self) -> None:
+        """If any entry is outside the allowed set, the whole list is invalid.
+
+        Producer must emit a pure list of allowed verbs — partial validity
+        doesn't pass.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["sync_local_main", "free_text_recovery"]
+        with pytest.raises(ValidationError, match="free_text_recovery"):
             AutoDevResult.model_validate(p)
 
     def test_pre_flight_blocked_through_parse_stdout(self) -> None:
