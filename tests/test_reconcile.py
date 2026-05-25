@@ -768,7 +768,7 @@ def test_revert_stalled_headless_sessions_transitions_past_budget(
     """Session past budget → TIMED_OUT, task reverted, event emitted."""
     worktree = tmp_path / "wt-stalled"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
 
     sess = _mk_headless_daemon_session("stalled-1", worktree, started_at)

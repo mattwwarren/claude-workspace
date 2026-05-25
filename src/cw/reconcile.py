@@ -68,7 +68,11 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 # Wall-clock budget for headless daemon sessions. Mirrors the constant in
 # cli.py signal_stop; cli.py imports this value so there is a single source
 # of truth. See GitHub issue #185.
-HEADLESS_TIMEOUT_SECONDS = 1800  # 30 minutes
+#
+# Bumped 30 → 60 min on 2026-05-25 after ticket #215 (tier=large, 11 files,
+# 626 lines) hit the 30-min cap mid-implementation. Per-ticket / per-tier
+# override mechanism tracked in #265.
+HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 
 
 # Only these two statuses imply "the multiplexer should have a surface".
