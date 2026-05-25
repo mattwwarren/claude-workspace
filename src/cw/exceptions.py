@@ -6,9 +6,13 @@ from __future__ import annotations
 class CwError(Exception):
     """Base exception for all cw errors."""
 
+    __slots__ = ()
+
 
 class WorktreeError(CwError):
     """Error from git worktree operations."""
+
+    __slots__ = ()
 
 
 class HookContextConflictError(CwError):
@@ -20,6 +24,8 @@ class HookContextConflictError(CwError):
     (Phase C of multiplexer-removal) route this to a clean failure mode
     rather than overwriting.
     """
+
+    __slots__ = ()
 
 
 class DisclaimerNotAcceptedError(CwError):
@@ -38,3 +44,5 @@ class DisclaimerNotAcceptedError(CwError):
     to accept the disclaimer (persisted to ``~/.claude/settings.json`` as
     ``skipDangerousModePermissionPrompt: true``).
     """
+
+    __slots__ = ()

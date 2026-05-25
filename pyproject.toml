@@ -97,6 +97,12 @@ select = [
     "TRY",  # tryceratops (exception handling)
     "LOG",  # flake8-logging (logger.exception vs error+exc_info, extra= misuse)
     "G",    # flake8-logging-format (no f-strings/format in log calls; use lazy %)
+    "ICN",  # flake8-import-conventions (canonical aliases, e.g. import pandas as pd)
+    "ISC",  # flake8-implicit-str-concat (accidental adjacent-string concat in lists)
+    "INP",  # flake8-no-pep420 (require __init__.py; no implicit namespace packages)
+    "SLOT", # flake8-slots (require __slots__ on str/tuple/namedtuple subclasses)
+    "YTT",  # flake8-2020 (sys.version_info index gotchas)
+    "PYI",  # flake8-pyi (stub-file hygiene; no .pyi files in tree today)
 ]
 ignore = [
     "T201",  # print() is our UI output mechanism (via click.echo, but also direct)
