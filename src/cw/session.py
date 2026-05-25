@@ -388,7 +388,7 @@ def resume_session(
         # spawn_create_impl chokepoint. USER-origin sessions inherit the
         # operator's default model (issue #248).
         if session.origin == SessionOrigin.DAEMON and client.worker_model:
-            extra_args = (extra_args or []) + ["--model", client.worker_model]
+            extra_args = [*extra_args, "--model", client.worker_model]
 
         click.echo(
             f"Session {session.name} not live in daemon;"
