@@ -253,6 +253,101 @@ class TestSpawnCreate:
         assert daemon.spawn_calls == []
 
 
+class TestSpawnCreateImplWorkerModel:
+    """Tests for ClientConfig.worker_model forwarding through spawn_create_impl
+    to ``claude --bg`` via ``extra_args`` (issue #248).
+    """
+
+    def test_spawn_create_impl_with_worker_model_pins_model(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """When worker_model is set, spawn_bg gets --model <id> as extra_args."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "acme"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="acme",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-worker-model")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--model",
+            "claude-sonnet-4-6-20251015",
+        ]
+
+    def test_spawn_create_impl_no_worker_model_omits_model_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """When worker_model is unset, extra_args is None (no --model flag)."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-no-worker-model")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] is None
+
+    def test_spawn_create_impl_worker_model_haiku_passes_through_opaque(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """worker_model is opaque — any string is threaded verbatim."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "thrifty"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="thrifty",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-haiku-pinned")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--model",
+            "claude-haiku-4-5-20251001",
+        ]
+
+
 class TestValidateWorktree:
     """Tests for the _validate_worktree pre-flight gate (issue #186).
 

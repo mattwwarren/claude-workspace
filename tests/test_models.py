@@ -232,6 +232,28 @@ class TestClientConfig:
         # Explicit workspace_path is preserved
         assert c.workspace_path == Path("/explicit/path")
 
+    def test_worker_model_defaults_to_none(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.worker_model is None
+
+    def test_worker_model_accepts_opaque_string(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        assert c.worker_model == "claude-sonnet-4-6-20251015"
+
+    def test_worker_model_round_trip(self) -> None:
+        original = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored.worker_model == "claude-haiku-4-5-20251001"
+
 
 class TestCwState:
     def test_empty_state(self) -> None:

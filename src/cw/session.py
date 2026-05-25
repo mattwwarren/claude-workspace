@@ -384,6 +384,12 @@ def resume_session(
         if session.claude_session_id:
             extra_args = ["--resume", session.claude_session_id]
 
+        # Forward client.worker_model for DAEMON-origin resume, mirroring the
+        # spawn_create_impl chokepoint. USER-origin sessions inherit the
+        # operator's default model (issue #248).
+        if session.origin == SessionOrigin.DAEMON and client.worker_model:
+            extra_args = [*extra_args, "--model", client.worker_model]
+
         click.echo(
             f"Session {session.name} not live in daemon;"
             " spawning new background session..."
