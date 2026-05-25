@@ -1327,6 +1327,12 @@ class TestDispatchTickFreshnessGate:
 
         assert spawned == 1
 
+        events = read_events(
+            consumer="test-freshness-no-event",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 0, "Fresh main should not emit ticket.needs_sync"
+
     def test_freshness_check_called_once_per_client_per_tick(
         self,
         tmp_dispatch_dirs: Path,

@@ -3015,7 +3015,7 @@ class TestDevQueueRefreshAll:
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
-        assert result.exit_code != 0
+        assert result.exit_code == 1
         assert "client-b" in called_clients
         assert "client-a" in called_clients
 

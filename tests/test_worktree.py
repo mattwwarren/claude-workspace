@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -15,6 +16,7 @@ from cw.models import ClientConfig
 from cw.worktree import (
     _git_dir,
     create_worktree,
+    fast_forward_main,
     is_main_behind_origin,
     remove_worktree,
     resolve_worktree_base,
@@ -492,36 +494,37 @@ class TestIsMainBehindOrigin:
     # Option A: real bare-repo tests
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
+        """Run a git command stripped of GIT_* env vars; return stdout."""
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(cwd) if cwd else None,
+            env=clean_env,
+        )
+        return result.stdout.strip()
+
     def _make_bare_origin_and_clone(
         self, tmp_path: Path
     ) -> tuple[Path, Path, ClientConfig]:
         """Create a bare origin repo, clone it, return (bare, clone, client)."""
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-
-        def _git(*args: str, cwd: Path | None = None) -> str:
-            result = subprocess.run(
-                ["git", *args],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=str(cwd) if cwd else None,
-                env=clean_env,
-            )
-            return result.stdout.strip()
-
         bare = tmp_path / "bare.git"
         bare.mkdir()
-        _git("init", "--bare", "-b", "main", str(bare))
+        self._run_bare_git("init", "--bare", "-b", "main", str(bare))
 
         clone = tmp_path / "clone"
-        _git("clone", str(bare), str(clone))
-        _git("config", "user.email", "test@example.com", cwd=clone)
-        _git("config", "user.name", "cw test", cwd=clone)
+        self._run_bare_git("clone", str(bare), str(clone))
+        self._run_bare_git("config", "user.email", "test@example.com", cwd=clone)
+        self._run_bare_git("config", "user.name", "cw test", cwd=clone)
         # Create an initial commit so main exists
         (clone / "README.md").write_text("init\n")
-        _git("add", "README.md", cwd=clone)
-        _git("commit", "-m", "initial", cwd=clone)
-        _git("push", "origin", "main", cwd=clone)
+        self._run_bare_git("add", "README.md", cwd=clone)
+        self._run_bare_git("commit", "-m", "initial", cwd=clone)
+        self._run_bare_git("push", "origin", "main", cwd=clone)
 
         client = ClientConfig(
             name="test-client",
@@ -541,30 +544,17 @@ class TestIsMainBehindOrigin:
 
     def test_stale_main_returns_true_with_counts(self, tmp_path: Path) -> None:
         """When origin has a new commit local doesn't have, returns (True, ...)."""
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-
-        def _git(*args: str, cwd: Path | None = None) -> str:
-            result = subprocess.run(
-                ["git", *args],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=str(cwd) if cwd else None,
-                env=clean_env,
-            )
-            return result.stdout.strip()
-
         bare, _clone, client = self._make_bare_origin_and_clone(tmp_path)
 
         # Create a second clone to push a new commit to the bare origin
         clone2 = tmp_path / "clone2"
-        _git("clone", str(bare), str(clone2))
-        _git("config", "user.email", "test@example.com", cwd=clone2)
-        _git("config", "user.name", "cw test", cwd=clone2)
+        self._run_bare_git("clone", str(bare), str(clone2))
+        self._run_bare_git("config", "user.email", "test@example.com", cwd=clone2)
+        self._run_bare_git("config", "user.name", "cw test", cwd=clone2)
         (clone2 / "extra.txt").write_text("extra\n")
-        _git("add", "extra.txt", cwd=clone2)
-        _git("commit", "-m", "second commit", cwd=clone2)
-        _git("push", "origin", "main", cwd=clone2)
+        self._run_bare_git("add", "extra.txt", cwd=clone2)
+        self._run_bare_git("commit", "-m", "second commit", cwd=clone2)
+        self._run_bare_git("push", "origin", "main", cwd=clone2)
 
         # Now the original clone's local main is behind origin/main
         stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
@@ -601,7 +591,6 @@ class TestIsMainBehindOrigin:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        import logging
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
             stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
@@ -643,11 +632,11 @@ class TestIsMainBehindOrigin:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        import logging
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
             stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
 
+        assert call_count == 1  # fetch raised immediately; no further git calls
         assert stale is False
         assert local_sha == ""
         assert origin_sha == ""
@@ -688,7 +677,6 @@ class TestIsMainBehindOrigin:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        import logging
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
             stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
@@ -743,3 +731,92 @@ class TestIsMainBehindOrigin:
         expected_cwd = _git_dir(client)
         for cwd in captured_cwds:
             assert cwd == expected_cwd
+
+
+class TestFastForwardMain:
+    """Tests for fast_forward_main."""
+
+    def test_already_up_to_date_returns_same_sha(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When already current, before_sha == after_sha."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "ws",
+            default_branch="main",
+        )
+        sha = "abc123def456abc123def456abc123def456abc1"
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.stdout = sha + "\n"
+            result.stderr = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        before, after = fast_forward_main(client)
+        assert before == sha
+        assert after == sha
+
+    def test_updated_returns_different_shas(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a fast-forward, before_sha != after_sha."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "ws",
+            default_branch="main",
+        )
+        old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        new_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        call_count = 0
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock()
+            result.stderr = ""
+            if "rev-parse" in args and call_count == 1:
+                result.stdout = old_sha + "\n"
+            elif "pull" in args:
+                result.stdout = ""
+            else:
+                result.stdout = new_sha + "\n"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        before, after = fast_forward_main(client)
+        assert before == old_sha
+        assert after == new_sha
+
+    def test_pull_failure_raises_worktreeerror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WorktreeError raised on pull failure (non-FF or network error)."""
+        from cw.exceptions import WorktreeError as _WorktreeError
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "ws",
+            default_branch="main",
+        )
+        old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        call_count = 0
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                result = MagicMock()
+                result.stdout = old_sha + "\n"
+                result.stderr = ""
+                return result
+            msg = "would clobber existing tag"
+            raise _WorktreeError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with pytest.raises(WorktreeError, match="would clobber"):
+            fast_forward_main(client)
