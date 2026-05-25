@@ -198,7 +198,21 @@ class TestConcurrentAdd:
         def _add(i: int) -> None:
             try:
                 add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="genhealth"))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
+                # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331
+                # (3-part justification — paired-test part is N/A because
+                # the catch IS the test scaffold collecting per-thread
+                # failures for the assertion on line 210):
+                # 1. Test-scaffold surface: the assertion under test
+                #    (errors == []) needs to surface ANY thread-local
+                #    exception, including unexpected ones — narrowing
+                #    here would mask real bugs.
+                # 2. Logging: caught exception is appended to the
+                #    'errors' list and surfaced in the assertion message
+                #    on failure.
+                # 3. Non-critical: this is a test thread; the main
+                #    test orchestrates failure surfacing via the errors
+                #    list and asserts on it after join().
                 errors.append(e)
 
         threads = [threading.Thread(target=_add, args=(i,)) for i in range(n)]

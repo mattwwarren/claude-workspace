@@ -2,20 +2,34 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.doctor import format_report, run_doctor
+from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
 from cw.models import BackendName
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
     from cw.models import ClientConfig, Session
+
+
+def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub _check_claude_version to return ok=True.
+
+    The real check runs ``claude --version``, which is not on the GH Actions
+    runners. Healthy-path tests that assert ``report.ok`` (no failing checks)
+    must neutralise the binary lookup; other tests covering this check
+    directly remain in :class:`TestCheckClaudeVersionDirect`.
+    """
+    monkeypatch.setattr(
+        "cw.doctor._check_claude_version",
+        lambda: CheckResult("claude-version", ok=True, detail="2.1.139 (stubbed)"),
+    )
 
 
 class TestRunDoctorFakeBackend:
@@ -25,6 +39,7 @@ class TestRunDoctorFakeBackend:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         assert report.backend is BackendName.FAKE
         assert report.ok
@@ -53,6 +68,7 @@ class TestRunDoctorTmuxBackend:
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "tmux")
         monkeypatch.setattr("cw.doctor.shutil.which", lambda _name: "/usr/bin/tmux")
+        _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         assert report.ok
 
@@ -84,6 +100,7 @@ class TestFormatReport:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         rendered = format_report(report)
         assert "status: healthy" in rendered
@@ -94,6 +111,7 @@ class TestDoctorCli:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         runner = CliRunner()
         result = runner.invoke(main, ["doctor"])
         assert result.exit_code == 0
@@ -171,6 +189,7 @@ def test_cw_doctor_cli_reap_flag(
     # Force fake backend so the binary/socket check passes on every platform
     # (macOS default is cmux, whose socket does not exist in CI).
     monkeypatch.setenv("CW_BACKEND", "fake")
+    _stub_claude_version_ok(monkeypatch)
     runner = CliRunner()
     result = runner.invoke(main, ["doctor", "--reap"])
     assert result.exit_code == 0
@@ -610,6 +629,7 @@ class TestCheckLinkageIndependence:
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
         monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         save_state(
             CwState(
                 sessions=[
@@ -787,6 +807,7 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
     )
 
     monkeypatch.setenv("CW_BACKEND", "fake")
+    _stub_claude_version_ok(monkeypatch)
 
     comp_session = Session(
         id="comp-doctor-1",
@@ -826,3 +847,429 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
     t = next(t for t in store.tasks if t.ticket_id == "TKT-DR1")
     assert t.status == QueueItemStatus.PENDING
     assert t.session_id is None
+
+
+# ---------------------------------------------------------------------------
+# New checks: bypass-disclaimer, claude-version, daemon-reachable
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_run_version(stdout: str = "2.1.150 (Claude Code)\n") -> object:
+    """Return a subprocess.run replacement that succeeds for --version."""
+
+    class _FakeCompleted:
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = 0
+
+    def fake_run(args: list[str], **_kwargs: object) -> _FakeCompleted:
+        return _FakeCompleted()
+
+    return fake_run
+
+
+class TestRunDoctor10Checks:
+    """Tests for bypass-disclaimer, claude-version, and daemon-reachable checks."""
+
+    def _monkeypatch_paths(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        settings_content: str | None = None,
+        roster_content: str | None = None,
+        fake_run: object | None = None,
+    ) -> tuple[Path, Path]:
+        """Set up isolated path monkeypatches for new doctor checks.
+
+        Returns (settings_path, roster_path) for further manipulation.
+        """
+        settings_path = tmp_path / ".claude" / "settings.json"
+        roster_path = tmp_path / ".claude" / "daemon" / "roster.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        roster_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if settings_content is not None:
+            settings_path.write_text(settings_content)
+        if roster_content is not None:
+            roster_path.write_text(roster_content)
+
+        monkeypatch.setattr("cw.doctor._CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        if fake_run is not None:
+            monkeypatch.setattr("cw.doctor.subprocess.run", fake_run)
+        else:
+            monkeypatch.setattr(
+                "cw.doctor.subprocess.run",
+                _make_fake_run_version(),
+            )
+        return settings_path, roster_path
+
+    def test_all_three_checks_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """run_doctor() includes bypass-disclaimer, claude-version, daemon-reachable."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        settings_path = tmp_config_dir / ".claude" / "settings.json"
+        roster_path = tmp_config_dir / ".claude" / "daemon" / "roster.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        roster_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps({"skipDangerousModePermissionPrompt": True})
+        )
+        roster_path.write_text(json.dumps({"supervisorPid": 12345, "workers": {}}))
+
+        monkeypatch.setattr("cw.doctor._CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.subprocess.run", _make_fake_run_version())
+
+        report = run_doctor()
+        names = {c.name for c in report.checks}
+        assert "bypass-disclaimer" in names
+        assert "claude-version" in names
+        assert "daemon-reachable" in names
+
+    def test_bypass_disclaimer_warns_when_not_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """settings.json with {} → bypass-disclaimer is ok=True warn=True."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({}),
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "bypass-disclaimer")
+        assert check.ok is True
+        assert check.warn is True
+
+    def test_bypass_disclaimer_ok_when_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """settings.json with flag set → bypass-disclaimer ok=True warn=False."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"supervisorPid": 12345}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "bypass-disclaimer")
+        assert check.ok is True
+        assert check.warn is False
+
+    def test_daemon_reachable_warns_when_roster_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """No roster file → daemon-reachable is ok=True warn=True."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        # Provide settings so bypass-disclaimer doesn't interfere
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            # no roster_content — file won't exist
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "daemon-reachable")
+        assert check.ok is True
+        assert check.warn is True
+
+    def test_daemon_reachable_ok_when_supervisor_running(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """roster with supervisorPid: 12345 → daemon-reachable is ok=True warn=False."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"supervisorPid": 12345, "workers": {}}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "daemon-reachable")
+        assert check.ok is True
+        assert check.warn is False
+
+    def test_daemon_reachable_warns_on_missing_supervisor_pid(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """roster with workers but no supervisorPid → WARN, no KeyError."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"workers": {}}),
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "daemon-reachable")
+        assert check.ok is True
+        assert check.warn is True
+
+    def test_claude_version_missing_binary_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """FileNotFoundError from claude binary → claude-version is ok=False."""
+        monkeypatch.setenv("CW_BACKEND", "fake")
+
+        def fake_run_not_found(*_a: object, **_kw: object) -> object:
+            msg = "no claude"
+            raise FileNotFoundError(msg)
+
+        self._monkeypatch_paths(
+            monkeypatch,
+            tmp_config_dir,
+            settings_content=json.dumps({"skipDangerousModePermissionPrompt": True}),
+            roster_content=json.dumps({"supervisorPid": 12345}),
+            fake_run=fake_run_not_found,
+        )
+        report = run_doctor()
+        check = next(c for c in report.checks if c.name == "claude-version")
+        assert check.ok is False
+
+
+def test_report_ok_unaffected_by_warn_checks() -> None:
+    """WARN checks have ok=True; DoctorReport.ok stays True; cw doctor exits 0."""
+    # Construct a DoctorReport with only WARN checks (ok=True, warn=True)
+    warn_check = CheckResult("bypass-disclaimer", ok=True, warn=True, detail="not set")
+    report = DoctorReport(
+        version="0.0.0",
+        backend=BackendName.FAKE,
+        checks=[warn_check],
+    )
+    assert report.ok is True
+
+
+# ---------------------------------------------------------------------------
+# format_report footer tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatReportFooter:
+    """format_report footer reflects ok/warn/fail state without contradicting."""
+
+    def test_all_ok_no_warn_shows_healthy(self) -> None:
+        """Only OK checks (no WARN, no FAIL) → 'status: healthy'."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("check-a", ok=True, warn=False, detail=""),
+                CheckResult("check-b", ok=True, warn=False, detail=""),
+            ],
+        )
+        rendered = format_report(report)
+        assert rendered.endswith("status: healthy")
+
+    def test_warn_checks_present_shows_advisory(self) -> None:
+        """Any WARN check (ok=True, warn=True) → advisory footer, not plain healthy."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("bypass-disclaimer", ok=True, warn=True, detail="not set"),
+                CheckResult("check-ok", ok=True, warn=False, detail=""),
+            ],
+        )
+        rendered = format_report(report)
+        # Must contain advisory wording — not plain 'healthy' by itself.
+        assert "status: healthy — advisory warnings" in rendered
+        # Exit-code contract: ok is still True, so this is NOT "problems detected".
+        assert "problems detected" not in rendered
+
+    def test_fail_check_shows_problems_detected(self) -> None:
+        """Any FAIL check → 'status: problems detected'."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("check-fail", ok=False, warn=False, detail="broken"),
+            ],
+        )
+        rendered = format_report(report)
+        assert "status: problems detected" in rendered
+        assert "healthy" not in rendered
+
+    def test_clean_property_true_when_all_ok_no_warn(self) -> None:
+        """DoctorReport.clean is True only when every check is ok and not warned."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[CheckResult("x", ok=True, warn=False, detail="")],
+        )
+        assert report.clean is True
+
+    def test_clean_property_false_when_any_warn(self) -> None:
+        """DoctorReport.clean is False when any check has warn=True."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[
+                CheckResult("x", ok=True, warn=True, detail=""),
+                CheckResult("y", ok=True, warn=False, detail=""),
+            ],
+        )
+        assert report.clean is False
+
+    def test_clean_property_false_when_any_fail(self) -> None:
+        """DoctorReport.clean is False when any check has ok=False."""
+        report = DoctorReport(
+            version="0.0.0",
+            backend=BackendName.FAKE,
+            checks=[CheckResult("x", ok=False, warn=False, detail="")],
+        )
+        assert report.clean is False
+
+
+# ---------------------------------------------------------------------------
+# _check_claude_version: version-floor and returncode tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClaudeVersion:
+    """Direct tests for _check_claude_version via monkeypatched subprocess.run."""
+
+    def _mk_proc(self, stdout: str = "", returncode: int = 0) -> object:
+        class _Proc:
+            pass
+
+        p = _Proc()
+        p.stdout = stdout  # type: ignore[attr-defined]
+        p.stderr = ""  # type: ignore[attr-defined]
+        p.returncode = returncode  # type: ignore[attr-defined]
+        return p
+
+    def test_version_above_floor_ok_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Version >= 2.1.139 → ok=True, warn=False."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("2.1.150 (Claude Code)\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is False
+        assert "2.1.150" in result.detail
+
+    def test_version_equal_floor_ok_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Version == 2.1.139 → ok=True, warn=False (floor is inclusive)."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("2.1.139 (Claude Code)\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_version_below_floor_ok_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Version < 2.1.139 → ok=True, warn=True, detail contains upgrade hint."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("2.0.0 (Claude Code)\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "2.1.139" in result.detail
+
+    def test_unparseable_version_ok_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-numeric version → ok=True, warn=True, detail mentions parse failure."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("not-a-version\n"),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "could not parse" in result.detail
+
+    def test_nonzero_returncode_ok_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Binary exits non-zero → ok=True, warn=True, detail includes returncode."""
+        from cw.doctor import _check_claude_version
+
+        monkeypatch.setattr(
+            "cw.doctor.subprocess.run",
+            lambda *_a, **_kw: self._mk_proc("some output\n", returncode=1),
+        )
+        result = _check_claude_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "1" in result.detail  # returncode appears in detail
+
+
+# ---------------------------------------------------------------------------
+# Direct tests for loader failure paths covered by narrowed BLE excepts
+# (src/cw/doctor.py:124 _check_config_file, :163 _check_dev_queue)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckConfigFileLoaderFailure:
+    """_check_config_file returns ok=False when load_clients raises a narrowed type."""
+
+    def test_yaml_error_from_load_clients_is_reported_as_fail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """yaml.YAMLError from load_clients → ok=False, parse-failure detail."""
+        import yaml
+
+        from cw.config import clients_file
+        from cw.doctor import _check_config_file
+
+        # File must exist so the try/except path runs (existence-true branch
+        # short-circuits to ok=True before reaching the loader).
+        clients_file().write_text("not: valid: yaml: here")
+
+        yaml_msg = "malformed clients.yaml"
+
+        def fake_load_clients() -> object:
+            raise yaml.YAMLError(yaml_msg)
+
+        monkeypatch.setattr("cw.doctor.load_clients", fake_load_clients)
+        result = _check_config_file()
+        assert result.ok is False
+        assert "parse failed" in result.detail
+        assert yaml_msg in result.detail
+
+
+class TestCheckDevQueueLoaderFailure:
+    """_check_dev_queue returns ok=False when load_dev_queue raises a narrowed type."""
+
+    def test_json_decode_error_from_load_dev_queue_is_reported_as_fail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """JSONDecodeError from load_dev_queue → ok=False, load-failure detail."""
+        from cw.doctor import _check_dev_queue
+
+        json_msg = "corrupt dev_queue.json"
+
+        def fake_load_dev_queue() -> object:
+            raise json.JSONDecodeError(json_msg, "", 0)
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", fake_load_dev_queue)
+        result = _check_dev_queue()
+        assert result.ok is False
+        assert "load failed" in result.detail
+        assert json_msg in result.detail

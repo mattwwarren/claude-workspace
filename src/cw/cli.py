@@ -15,7 +15,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw.auto_dev_result import extract_block
+from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
 from cw.cmux import CmuxAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
@@ -40,7 +40,7 @@ from cw.dev_queue import (
 from cw.dispatch import run_dispatch_loop
 from cw.doctor import format_report, run_doctor
 from cw.events import advance_cursor, read_events, record_event
-from cw.exceptions import CwError
+from cw.exceptions import CwError, WorktreeError
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -75,7 +75,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
-from cw.reconcile import reconcile
+from cw.reconcile import HEADLESS_TIMEOUT_SECONDS, reconcile
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -88,12 +88,6 @@ from cw.tui import DetailLevel
 from cw.tui import watch as tui_watch
 from cw.worktree import fast_forward_main
 from cw.wrapper import run_claude_wrapper, signal_idle
-
-# Wall-clock budget for headless daemon sessions before signal_stop transitions
-# them to TIMED_OUT instead of deferring. After this many seconds without a
-# sentinel the session is considered stalled; dev-queue retries via reconcile.
-# See GitHub issue #176 Layer 1.
-HEADLESS_TIMEOUT_SECONDS = 1800  # 30 minutes
 
 
 def handle_errors[F: Callable[..., object]](fn: F) -> F:
@@ -295,10 +289,11 @@ def upgrade_workers() -> None:
             check=False,
         )
     except FileNotFoundError as e:
-        raise click.ClickException(
+        msg = (
             "claude binary not found on PATH. Install Claude Code, "
             "then re-run 'cw upgrade-workers'."
-        ) from e
+        )
+        raise click.ClickException(msg) from e
     if result.stdout:
         click.echo(result.stdout, nl=False)
     if result.returncode != 0:
@@ -825,11 +820,98 @@ def run_claude(extra_args: tuple[str, ...]) -> None:
     run_claude_wrapper(extra_args)
 
 
-def _sentinel_present_in_transcript(
+# Max dispatch attempts before a validation_failed sentinel caps the task as
+# FAILED rather than reverting to PENDING. See issue #251 Bug B.
+_VALIDATION_FAILED_MAX_ATTEMPTS = 3
+
+# AutoDevResult statuses that represent terminal outcomes the dev-queue should
+# never auto-retry. Marking these COMPLETED prevents the race described in
+# issue #251 Bug A where revert_completed_silent_tasks reverts a task to
+# PENDING before consume_completed_sessions can process the SESSION_COMPLETED
+# event — causing no_op and similar outcomes to trigger infinite re-dispatch.
+_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = frozenset(
+    {
+        "shipped",
+        "no_op",
+        "plan_pending_approval",
+        "review_pending_approval",
+        "merge_gate_blocked",
+        "scope_exceeded",
+        "forbidden_area",
+    }
+)
+
+
+def _apply_sentinel_to_task(
+    ticket_id: str,
+    cw_session_id: str,
+    sentinel: AutoDevResult | BlockedResult,
+) -> None:
+    """Directly update the matching dev-queue task based on the sentinel result.
+
+    Called from signal_stop *before* the session is marked COMPLETED so the
+    task is already in its terminal state when revert_completed_silent_tasks
+    runs. This closes the race window where:
+
+      1. signal_stop marks session COMPLETED (save_state)
+      2. dispatch loop reconcile fires: sees COMPLETED session + RUNNING task
+         → reverts task to PENDING
+      3. consume_completed_sessions reads the SESSION_COMPLETED event but
+         finds task is PENDING (not RUNNING) → skips it
+      4. next tick re-dispatches the ticket (infinite loop for no_op)
+
+    See GitHub issue #251.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        target: TicketTask | None = None
+        for task in store.tasks:
+            if (
+                task.ticket_id == ticket_id
+                and task.session_id == cw_session_id
+                and task.status == QueueItemStatus.RUNNING
+            ):
+                target = task
+                break
+        if target is None:
+            return
+
+        if isinstance(sentinel, AutoDevResult):
+            if sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
+                target.status = QueueItemStatus.COMPLETED
+            elif sentinel.status == "blocked":
+                retry = (
+                    sentinel.blocker is not None
+                    and sentinel.blocker.retry_eligible is True
+                )
+                if retry:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+                else:
+                    target.status = QueueItemStatus.COMPLETED
+            else:
+                target.status = QueueItemStatus.COMPLETED
+        else:
+            # BlockedResult: sentinel failed to parse or was malformed.
+            if sentinel.blocker.reason == "validation_failed":
+                if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
+                    target.status = QueueItemStatus.FAILED
+                else:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+            else:
+                # Other parse failures (no_result_emitted, etc.) → retry.
+                target.status = QueueItemStatus.PENDING
+                target.session_id = None
+
+        save_dev_queue(store)
+
+
+def _parse_sentinel_from_transcript(
     cwd: str,
     claude_session_id: str | None,
-) -> bool:
-    """Return True if the AUTO_DEV_RESULT sentinel block appears in the transcript.
+) -> AutoDevResult | BlockedResult | None:
+    """Return the parsed sentinel from the transcript, or None if absent.
 
     Claude stores session transcripts at:
       ``~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl``
@@ -840,17 +922,22 @@ def _sentinel_present_in_transcript(
     newlines become the two-character sequence ``\\n``). Running ``extract_block``
     against the raw file therefore misses sentinels that are valid in their
     decoded form, so this scans each assistant text block individually after
-    JSON decoding. Returns False on any I/O or parse error (fail-open: defer
-    rather than falsely report sentinel present). See GitHub issue #176 Layer 1.
+    JSON decoding. Returns None on any I/O error or when no complete sentinel
+    pair is found — distinct from a BlockedResult, which means the sentinel
+    framing was present but the inner payload was unusable (§6 failure modes).
+
+    Used by ``signal_stop`` for headless DAEMON sessions, whose result must
+    be captured here because they bypass the cw wrapper entirely. See GitHub
+    issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
     """
     if not claude_session_id:
-        return False
+        return None
     encoded = cwd.replace("/", "-").replace(".", "-")
     transcript_path = (
         Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
     )
     if not transcript_path.is_file():
-        return False
+        return None
     try:
         with transcript_path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -871,10 +958,25 @@ def _sentinel_present_in_transcript(
                         continue
                     text = block.get("text")
                     if isinstance(text, str) and extract_block(text) is not None:
-                        return True
+                        return parse_stdout(text)
     except OSError:
-        return False
-    return False
+        return None
+    return None
+
+
+def _sentinel_present_in_transcript(
+    cwd: str,
+    claude_session_id: str | None,
+) -> bool:
+    """Return True if the AUTO_DEV_RESULT sentinel block appears in the transcript.
+
+    Thin wrapper around :func:`_parse_sentinel_from_transcript` preserved for
+    callers that only need the boolean (Layer 1 budget gate in signal_stop).
+    A non-None return — including a BlockedResult for malformed payloads —
+    means the agent emitted *something*; the result-capture path uses the
+    full parsed value, but the budget path only cares "did it emit?"
+    """
+    return _parse_sentinel_from_transcript(cwd, claude_session_id) is not None
 
 
 @main.command(name="signal-stop")
@@ -1008,11 +1110,12 @@ def signal_stop() -> None:
         context.get("headless")
     )
     now = datetime.now(UTC)
+    parsed_sentinel: AutoDevResult | BlockedResult | None = None
     if is_headless:
-        has_sentinel = _sentinel_present_in_transcript(
+        parsed_sentinel = _parse_sentinel_from_transcript(
             cwd_value, claude_session_id if isinstance(claude_session_id, str) else None
         )
-        if not has_sentinel:
+        if parsed_sentinel is None:
             elapsed = (now - session.started_at).total_seconds()
             if elapsed < HEADLESS_TIMEOUT_SECONDS:
                 # Under budget — defer. Another Stop hook turn will fire, or
@@ -1054,11 +1157,27 @@ def signal_stop() -> None:
                 get_native_daemon_client().stop(session.surface_ref)
             return
 
+    # Issue #251: directly update the dev-queue task *before* marking the
+    # session COMPLETED. This closes the race where revert_completed_silent_tasks
+    # sees a COMPLETED session with a still-RUNNING task and reverts it to
+    # PENDING before consume_completed_sessions can process the event — causing
+    # no_op and similar terminal outcomes to trigger infinite re-dispatch.
+    if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
+        _apply_sentinel_to_task(ticket_id_value, session.id, parsed_sentinel)
+
     session.status = SessionStatus.COMPLETED
     session.completed_at = now
     session.completed_reason = CompletionReason.NORMAL
     if isinstance(claude_session_id, str):
         session.claude_session_id = claude_session_id
+    # Issue #225: headless DAEMON sessions bypass the cw wrapper, so
+    # signal_completed (wrapper.py) never runs and last_result stayed None.
+    # Capture the parsed sentinel here before save_state so downstream
+    # consumers (consume_completed_sessions, /cw-followup) can route by
+    # status. parse_stdout returns BlockedResult on malformed payloads — we
+    # persist either shape; both serialize to a dict with a "status" field.
+    if parsed_sentinel is not None:
+        session.last_result = parsed_sentinel.model_dump(mode="json")
     save_state(state)
 
     payload: dict[str, object] = {
@@ -1395,11 +1514,11 @@ def dev_queue_refresh_all() -> None:
                 click.echo(f"{client.name}: already up to date ({before[:8]})")
             else:
                 click.echo(f"{client.name}: updated {before[:8]}..{after[:8]}")
-        except Exception as exc:
+        except WorktreeError as exc:
             click.echo(f"{client.name}: ERROR — {exc}", err=True)
             had_error = True
     if had_error:
-        raise SystemExit(1)
+        raise click.exceptions.Exit(1)
 
 
 # --- Orchestrate command group ---

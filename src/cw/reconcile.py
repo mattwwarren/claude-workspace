@@ -35,6 +35,7 @@ targets.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -53,7 +54,7 @@ from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
     from cw.cmux import MultiplexerAdapter
-    from cw.models import CwState
+    from cw.models import CwState, Session
     from cw.native_daemon import NativeDaemonClient
 
 
@@ -63,6 +64,15 @@ if TYPE_CHECKING:
 # here (not in ``cw.dispatch``) to avoid a circular import — ``cw.dispatch``
 # imports :func:`reconcile` from this module.
 AUTO_DEV_LABEL_PREFIX = "auto-dev/"
+
+# Wall-clock budget for headless daemon sessions. Mirrors the constant in
+# cli.py signal_stop; cli.py imports this value so there is a single source
+# of truth. See GitHub issue #185.
+#
+# Bumped 30 → 60 min on 2026-05-25 after ticket #215 (tier=large, 11 files,
+# 626 lines) hit the 30-min cap mid-implementation. Per-ticket / per-tier
+# override mechanism tracked in #265.
+HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 
 
 # Only these two statuses imply "the multiplexer should have a surface".
@@ -110,7 +120,7 @@ class ReconcileReport:
 
 def compute_drift(
     state: CwState,
-    adapter: MultiplexerAdapter,
+    adapter: MultiplexerAdapter | None = None,
     native_daemon: NativeDaemonClient | None = None,
 ) -> ReconcileReport:
     """Return a report naming sessions whose surface is no longer live.
@@ -124,18 +134,25 @@ def compute_drift(
     Claude session id passes liveness via the roster, while an
     interactive session with a tmux pane ref passes via the adapter.
 
+    *adapter* is optional. When ``None``, the multiplexer side of the union
+    is treated as empty; only the native daemon oracle is consulted. Phase D
+    will drop the adapter parameter entirely once the multiplexer is removed
+    from all call sites.
+
     This function does not mutate state. It also does not distinguish
     "backend reports zero live entries" from "backend is unreachable";
     that guard lives in :func:`reconcile`.
     """
     daemon = native_daemon or get_native_daemon_client()
-    tmux_live = adapter.list_surfaces()
+    tmux_live = adapter.list_surfaces() if adapter is not None else set()
     native_live = daemon.list_live_session_short_ids()
     # Second-pass zombie filter: panes that exist but whose foreground
     # process is a bare shell are not actually live cw sessions. An empty
     # command map means the backend can't enumerate — skip the filter
     # (fail-open) rather than risk false-positive reaping.
-    surface_commands = adapter.list_live_surface_commands()
+    surface_commands = (
+        adapter.list_live_surface_commands() if adapter is not None else {}
+    )
     zombie_refs: set[str] = set()
     if surface_commands:
         zombie_refs = {
@@ -187,8 +204,103 @@ def _looks_like_backend_outage(
     )
 
 
+def _is_headless(session: Session) -> bool:
+    """Return True if session's worktree has a headless cw-context.json.
+
+    Fail-open: returns False when worktree_path is None, or when the context
+    file is missing or unreadable — a deleted worktree must not be falsely
+    flagged as headless. Mirrors cli.py signal_stop at line 1003-1005.
+    """
+    if session.worktree_path is None:
+        return False
+    context_path = session.worktree_path / ".claude" / "cw-context.json"
+    try:
+        context = json.loads(context_path.read_text())
+        return bool(context.get("headless")) if isinstance(context, dict) else False
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def revert_stalled_headless_sessions(
+    state: CwState, *, now: datetime, budget_seconds: int
+) -> list[str]:
+    """Transition stalled headless DAEMON sessions past budget to TIMED_OUT.
+
+    Passive backstop complementing signal_stop's Stop-hook-driven check.
+    signal_stop can only fire at Claude turn boundaries; a session whose agent
+    stalled mid-turn (classifier denial, OOM, long subagent chain) produces no
+    further Stop firings and would sit ACTIVE forever without this sweep.
+
+    Runs unconditionally before the outage guard so a transient backend hiccup
+    does not delay enforcement of the wall-clock budget. The sweep is purely
+    time-based; surface liveness is irrelevant.
+
+    Calls save_state(state) when any sessions are transitioned — callers must
+    not assume state is unchanged on return. On the phantom-handling path in
+    reconcile(), save_state is called again at line 381; this double-save is
+    benign because save_state is idempotent over identical content.
+
+    Returns the list of ticket IDs whose TicketTask was reverted to PENDING.
+    See GitHub issue #185.
+    """
+    pending: list[tuple[Session, str | None]] = []
+    for session in state.sessions:
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if not _is_headless(session):
+            continue
+        elapsed = (now - session.started_at).total_seconds()
+        if elapsed < budget_seconds:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        pending.append((session, ticket_id))
+
+    if not pending:
+        return []
+
+    save_state(state)
+
+    ticket_ids_to_revert = [tid for _, tid in pending if tid]
+    reverted: list[str] = []
+    if ticket_ids_to_revert:
+        ticket_id_set = set(ticket_ids_to_revert)
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id in ticket_id_set
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    reverted.append(task.ticket_id)
+            if reverted:
+                save_dev_queue(store)
+
+    for session, ticket_id in pending:
+        payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "elapsed_seconds": (now - session.started_at).total_seconds(),
+            "last_assistant_message_excerpt": "",
+        }
+        record_event(OrchestratorEventType.SESSION_TIMED_OUT, payload)
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+
+    return reverted
+
+
 def reconcile(
-    adapter: MultiplexerAdapter,
+    adapter: MultiplexerAdapter | None = None,
     native_daemon: NativeDaemonClient | None = None,
 ) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
@@ -203,6 +315,10 @@ def reconcile(
     :func:`_looks_like_backend_outage` matches — a transient multiplexer
     restart (or a missing native roster) must not trigger mass-reaping.
 
+    *adapter* is optional. When ``None``, the multiplexer side is treated
+    as empty; only the native daemon oracle is consulted. Phase D will drop
+    the adapter parameter entirely.
+
     Partial-failure note: state and the dev queue are separate files. If
     ``save_state`` succeeds but the subsequent dev-queue update raises,
     the session will be COMPLETED while its TicketTask stays RUNNING.
@@ -213,10 +329,20 @@ def reconcile(
     """
     daemon = native_daemon or get_native_daemon_client()
     state = load_state()
-    tmux_live = adapter.list_surfaces()
+    now = datetime.now(UTC)
+
+    # Passive budget sweep: catches headless DAEMON sessions whose agent
+    # stalled mid-turn and produced no further Stop hook firings. Runs before
+    # the outage guard so a backend hiccup does not delay budget enforcement.
+    # See GitHub issue #185.
+    stalled_reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    tmux_live = adapter.list_surfaces() if adapter is not None else set()
     native_live = daemon.list_live_session_short_ids()
     if _looks_like_backend_outage(state, tmux_live, native_live):
-        return ReconcileReport()
+        return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
     drift = compute_drift(state, adapter, daemon)
     if not drift.phantom_session_ids:
@@ -225,15 +351,14 @@ def reconcile(
         # timed out without reverting their queue task are recovered.
         timed_out_ticket_ids = revert_timed_out_tasks()
         completed_silent_ticket_ids = revert_completed_silent_tasks()
-        return ReconcileReport(
-            reverted_ticket_ids=list(
-                dict.fromkeys(timed_out_ticket_ids + completed_silent_ticket_ids)
+        all_reverted = list(
+            dict.fromkeys(
+                stalled_reverted + timed_out_ticket_ids + completed_silent_ticket_ids
             )
         )
+        return ReconcileReport(reverted_ticket_ids=all_reverted)
 
     phantom_set = set(drift.phantom_session_ids)
-    now = datetime.now(UTC)
-
     ticket_ids_to_revert: list[str] = []
     pending_events: list[dict[str, object]] = []
     phantom_names: list[str] = []
@@ -288,7 +413,12 @@ def reconcile(
     timed_out_ticket_ids = revert_timed_out_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     all_reverted = list(
-        dict.fromkeys(reverted + timed_out_ticket_ids + completed_silent_ticket_ids)
+        dict.fromkeys(
+            stalled_reverted
+            + reverted
+            + timed_out_ticket_ids
+            + completed_silent_ticket_ids
+        )
     )
 
     return ReconcileReport(

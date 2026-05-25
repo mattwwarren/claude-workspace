@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
+import yaml
+from pydantic import ValidationError
+
 from cw.config import load_orchestrator_config
 from cw.exceptions import CwError
 from cw.models import BackendName
@@ -317,7 +320,11 @@ def _resolve_backend_name() -> BackendName:
 
     try:
         config = load_orchestrator_config()
-    except Exception:  # pragma: no cover - config load shouldn't hard-fail selector
+    except (
+        OSError,
+        yaml.YAMLError,
+        ValidationError,
+    ):  # pragma: no cover - config load shouldn't hard-fail selector
         config = None
     if config is not None and config.backend is not None:
         return config.backend

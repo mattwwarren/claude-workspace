@@ -605,7 +605,8 @@ def test_real_cmux_list_live_surface_commands_uses_sentinel(
             }
         if method == "surface.list":
             return {"surfaces": [{"id": "surf-1"}, {"id": "surf-2"}]}
-        raise AssertionError(f"unexpected call: {method}")
+        msg = f"unexpected call: {method}"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
@@ -669,7 +670,8 @@ def test_real_cmux_list_surfaces_aggregates_across_workspaces(
             if ws_id == "ws-a":
                 return {"surfaces": [{"id": "surf-a1"}, {"id": "surf-a2"}]}
             return {"surfaces": [{"id": "surf-b1"}]}
-        raise AssertionError(f"unexpected call: {method}")
+        msg = f"unexpected call: {method}"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
@@ -696,7 +698,8 @@ def test_real_cmux_list_surfaces_returns_empty_on_socket_error(
     def fake_call(
         self: object, method: str, params: dict[str, object]
     ) -> dict[str, object]:
-        raise CwError("connection refused")
+        msg = "connection refused"
+        raise CwError(msg)
 
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
@@ -731,9 +734,11 @@ def test_real_cmux_list_surfaces_aborts_on_surface_list_error(
             }
         if method == "surface.list":
             if params["workspace_id"] == "ws-broken":
-                raise CwError("permission denied")
+                msg = "permission denied"
+                raise CwError(msg)
             return {"surfaces": [{"id": "surf-ok"}]}
-        raise AssertionError(f"unexpected call: {method}")
+        msg = f"unexpected call: {method}"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
@@ -754,7 +759,8 @@ def test_real_cmux_call_translates_os_error_to_cwerror(
     from cw.exceptions import CwError
 
     def fake_connect(self: socket_module.socket, address: object) -> None:
-        raise ConnectionRefusedError("no such file")
+        msg = "no such file"
+        raise ConnectionRefusedError(msg)
 
     monkeypatch.setattr(socket_module.socket, "connect", fake_connect)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/nonexistent.sock"))

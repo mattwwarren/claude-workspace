@@ -476,7 +476,8 @@ class TestRemoveWorktree:
                     " ".join(args),
                     stderr=msg,
                 )
-                raise WorktreeError("Git command failed") from err
+                wt_msg = "Git command failed"
+                raise WorktreeError(wt_msg) from err
             return MagicMock(returncode=0, stderr="")
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
@@ -633,7 +634,8 @@ class TestIsMainBehindOrigin:
             nonlocal call_count
             call_count += 1
             if "fetch" in args:
-                raise WorktreeError("fetch failed")
+                msg = "fetch failed"
+                raise WorktreeError(msg)
             result = MagicMock()
             result.returncode = 0
             result.stdout = "abc123\n"
@@ -677,7 +679,8 @@ class TestIsMainBehindOrigin:
                 result.stderr = ""
                 return result
             if "rev-parse" in args:
-                raise WorktreeError("rev-parse failed")
+                msg = "rev-parse failed"
+                raise WorktreeError(msg)
             result = MagicMock()
             result.returncode = 0
             result.stdout = "0\n"

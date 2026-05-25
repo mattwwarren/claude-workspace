@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "0.9.0"
+version = "0.10.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -33,8 +33,8 @@ dev = [
     "pytest-asyncio>=0.24",
     "freezegun>=1.2",
     "pre-commit>=3.6",
-    "ruff>=0.8",
-    "mypy>=1.13",
+    "ruff>=0.15.14",
+    "mypy>=2.0",
     "types-PyYAML>=6.0",
     "pytest-cov>=6.0",
     "diff-cover>=9.0",
@@ -77,6 +77,7 @@ select = [
     "DTZ",  # flake8-datetimez
     "T20",  # flake8-print
     "PT",   # flake8-pytest-style
+    "PTH",  # flake8-use-pathlib
     "Q",    # flake8-quotes
     "RSE",  # flake8-raise
     "RET",  # flake8-return
@@ -90,6 +91,18 @@ select = [
     "TCH",  # flake8-type-checking
     "PERF", # perflint
     "FURB", # refurb
+    "ASYNC", # flake8-async (blocking calls in async def, time.sleep vs asyncio.sleep)
+    "BLE",  # flake8-blind-except
+    "EM",   # flake8-errmsg
+    "TRY",  # tryceratops (exception handling)
+    "LOG",  # flake8-logging (logger.exception vs error+exc_info, extra= misuse)
+    "G",    # flake8-logging-format (no f-strings/format in log calls; use lazy %)
+    "ICN",  # flake8-import-conventions (canonical aliases, e.g. import pandas as pd)
+    "ISC",  # flake8-implicit-str-concat (accidental adjacent-string concat in lists)
+    "INP",  # flake8-no-pep420 (require __init__.py; no implicit namespace packages)
+    "SLOT", # flake8-slots (require __slots__ on str/tuple/namedtuple subclasses)
+    "YTT",  # flake8-2020 (sys.version_info index gotchas)
+    "PYI",  # flake8-pyi (stub-file hygiene; no .pyi files in tree today)
 ]
 ignore = [
     "T201",  # print() is our UI output mechanism (via click.echo, but also direct)
@@ -115,6 +128,7 @@ ignore = [
     "TC005",    # empty type-checking blocks during migration are fine
     "S108",     # /tmp socket paths are part of the cmux protocol spec
     "PLC0415",  # inline imports used in test methods that need monkeypatching first
+    "TRY003",   # long messages in test asserts are intentional for debug clarity
 ]
 
 [tool.mypy]

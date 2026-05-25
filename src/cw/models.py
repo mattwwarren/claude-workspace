@@ -156,6 +156,9 @@ class TicketTask(BaseModel):
     # persisted before this field existed — consumer falls back to
     # ticket_id-only matching in that case.
     session_id: str | None = None
+    # Incremented each time the task is claimed by _claim_next_pending. Used to
+    # apply a hard cap on validation_failed retries (see issue #251).
+    attempts: int = 0
 
 
 class DispatchPlan(BaseModel):
@@ -307,6 +310,13 @@ class ClientConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_AUTO_PURPOSES),
     )
     purpose_prompts: dict[str, str] = Field(default_factory=dict)
+    # When set, ``cw`` passes ``--model <worker_model>`` to ``claude --bg``
+    # for DAEMON-origin spawns (auto-dev workers, including resume re-spawns
+    # in :func:`cw.session.resume_session`). Opaque string — no validation;
+    # user is responsible for matching Anthropic's published model ids.
+    # Default ``None`` inherits the user's logged-in default model.
+    # See issue #248.
+    worker_model: str | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
     cmux_workspace: str | None = None

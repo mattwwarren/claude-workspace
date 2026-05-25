@@ -945,7 +945,7 @@ class TestSignalStop:
         a session that orphaned (Stop fires, no sentinel, bg_tasks empty)
         must NOT silently transition to COMPLETED.
         """
-        # Seed session started 31 minutes ago (past the 30-min budget).
+        # Seed session started 61 minutes ago (past the 60-min budget).
         import datetime as dt
 
         from cw.cli import HEADLESS_TIMEOUT_SECONDS
@@ -954,7 +954,7 @@ class TestSignalStop:
         from cw.native_daemon import FakeNativeDaemonClient
 
         started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
         assert (hook_time - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
 
         workspace = tmp_path / "workspace"
@@ -1090,36 +1090,31 @@ class TestSignalStop:
         save_state(state)
         self._write_headless_context(worktree, session_id=session.id)
 
-        # Write a fake transcript with a valid sentinel block so the
-        # sentinel-detection helper finds it.
+        # Write a real Claude-shaped transcript JSONL with an assistant
+        # record carrying a parseable sentinel block. The parser walks the
+        # same shape signal_stop sees in production (issue #176 Layer 1).
         claude_session_id = "abc12345"
+        fake_home = tmp_path / "fake-home"
         encoded = str(worktree).replace("/", "-").replace(".", "-")
-        transcript_dir = tmp_path / "fake-claude-home" / "projects" / encoded
+        transcript_dir = fake_home / ".claude" / "projects" / encoded
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        sentinel_content = (
-            "<<<AUTO_DEV_RESULT\n"
-            '{"schema_version": 1, "status": "shipped"}\n'
-            "AUTO_DEV_RESULT>>>"
+        # Use the preserved #215 fixture — it parses to a valid AutoDevResult
+        # with status=plan_pending_approval and exercises every cross-field
+        # invariant in auto_dev_result.py.
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": _SENTINEL_215_PLAN_PENDING}],
+            },
+        }
+        (transcript_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
         )
-        (transcript_dir / f"{claude_session_id}.jsonl").write_text(sentinel_content)
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
-        # Patch Path.home() to return our fake home so the transcript path resolves.
-        fake_home = tmp_path / "fake-claude-home"
-
-        def _fake_sentinel(cwd: str, sid: str | None) -> bool:
-            from cw.auto_dev_result import extract_block
-
-            if not sid:
-                return False
-            enc = cwd.replace("/", "-").replace(".", "-")
-            tp = fake_home / "projects" / enc / f"{sid}.jsonl"
-            if not tp.is_file():
-                return False
-            return extract_block(tp.read_text()) is not None
-
-        monkeypatch.setattr("cw.cli._sentinel_present_in_transcript", _fake_sentinel)
 
         hook_stdin = json.dumps(
             {
@@ -1143,6 +1138,89 @@ class TestSignalStop:
         assert not any(
             e.payload.get("session_id") == session.id for e in timed_out_events
         )
+
+    def test_signal_stop_populates_last_result_on_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Headless session with a parseable sentinel → session.last_result set.
+
+        Regression for GitHub issue #225: signal_stop previously called
+        the bool sentinel-check helper and threw the parse away. Headless
+        DAEMON sessions completed with last_result=None even when the
+        agent emitted a valid AUTO_DEV_RESULT block. The orchestrator's
+        consume_completed_sessions then had nothing to route on.
+        """
+        import datetime as dt
+
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree-225"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="sess-225",
+            name="test-client/auto-dev/214",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        # Write a real transcript with the preserved #214 sentinel — the
+        # exact failure mode that motivated #225.
+        claude_session_id = "uuid-225"
+        fake_home = tmp_path / "fake-home"
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": _SENTINEL_214_BLOCKED}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.last_result is not None
+        assert updated.last_result["status"] == "blocked"
+        assert updated.last_result["ticket_id"] == "214"
+        assert updated.last_result["stage_reached"] == "stage1_plan"
 
     def test_signal_stop_defers_under_budget_no_sentinel(
         self,
@@ -1217,6 +1295,373 @@ class TestSignalStop:
 
         # daemon.stop must NOT have been called.
         assert daemon.stop_calls == []
+
+    def _write_transcript(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        assistant_text: str,
+        home: Path,
+    ) -> None:
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+
+    def _setup_headless_session(
+        self,
+        tmp_path: Path,
+        session_id: str,
+        worktree_name: str,
+    ) -> tuple[Path, Session]:
+        """Seed state with a DAEMON ACTIVE session and return (worktree, session)."""
+        import datetime as dt
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / worktree_name
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id=session_id,
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        return worktree, session
+
+    def test_signal_stop_no_op_marks_task_completed_directly(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """no_op sentinel → task COMPLETED before session COMPLETED.
+
+        Regression for GitHub issue #251 Bug A: _apply_sentinel_to_task
+        must set the task to COMPLETED *before* save_state marks the
+        session COMPLETED, closing the race with revert_completed_silent_tasks.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-no-op", "worktree-251-no-op"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-no-op"
+        fake_home = tmp_path / "fake-home-no-op"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_signal_stop_validation_failed_reverts_to_pending_under_cap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """validation_failed sentinel with attempts < cap → task PENDING.
+
+        Regression for GitHub issue #251 Bug B: malformed sentinel with
+        reason='validation_failed' should revert to PENDING (retry) when
+        the task has not yet exceeded the hard cap.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-vf-under", "worktree-251-vf-under"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-vf-under"
+        fake_home = tmp_path / "fake-home-vf-under"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_signal_stop_validation_failed_marks_failed_at_cap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """validation_failed sentinel with attempts >= cap → task FAILED.
+
+        Regression for GitHub issue #251 Bug B: once a task hits the hard
+        cap (_VALIDATION_FAILED_MAX_ATTEMPTS=3) on validation_failed retries,
+        it must be marked FAILED to stop infinite re-dispatch.
+        """
+        import datetime as dt
+
+        from cw.cli import _VALIDATION_FAILED_MAX_ATTEMPTS
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-vf-cap", "worktree-251-vf-cap"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-vf-cap"
+        fake_home = tmp_path / "fake-home-vf-cap"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.FAILED
+
+    def test_signal_stop_blocked_retry_eligible_reverts_to_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked + retry_eligible=True → task PENDING + session_id cleared.
+
+        The orchestrator should re-dispatch the ticket on the next tick.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-blocked-retry", "worktree-251-blocked-retry"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-blocked-retry"
+        fake_home = tmp_path / "fake-home-blocked-retry"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_signal_stop_blocked_not_retry_eligible_marks_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked sentinel with retry_eligible=False → task COMPLETED (needs human).
+
+        A non-retryable blocker signals that human intervention is required;
+        the task must not re-enter the dispatch queue automatically.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-blocked-no-retry", "worktree-251-blocked-no-retry"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-blocked-no-retry"
+        fake_home = tmp_path / "fake-home-blocked-no-retry"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_BLOCKED_NO_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
 
 
 class TestSentinelPresentInTranscript:
@@ -1405,6 +1850,374 @@ class TestSentinelPresentInTranscript:
         )
 
         assert _sentinel_present_in_transcript(str(worktree), "uuid-mixed")
+
+
+# Real sentinel payloads preserved from the 2026-05-24 dogfood wave (see #225).
+# Embedded inline so the regression tests survive worktree cleanup. Both blocks
+# parse cleanly under the current invariants; their presence as fixtures locks
+# in the round-trip through _parse_sentinel_from_transcript.
+_SENTINEL_214_BLOCKED = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 1,\n'
+    '  "ticket_id": "214",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "EXIT_FOR_HUMAN_REVIEW", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "stage1_plan", "reason": "agent_block", '
+    '"details": "cross-repo scope"},\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_215_PLAN_PENDING = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "215",\n'
+    '  "status": "plan_pending_approval",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "large", "files": 11, "lines_estimate": 626, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "generated",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": ["user_approve_plan"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# Sentinel fixtures for GitHub issue #251 tests.  Same structural shape as
+# the #214/#215 pairs above; ticket_id "137" matches TestSignalStop.SEED_TICKET_ID.
+_SENTINEL_251_NO_OP = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "no_op",\n'
+    '  "stage_reached": "stage1_pre_flight",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": ["close_issue_as_completed"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_251_VALIDATION_FAILED = (
+    # Valid JSON that fails Pydantic cross-field validation: status=shipped
+    # requires next_actions=["wait_for_ci"] but the list is empty.  Produces
+    # BlockedResult(reason="validation_failed") from parse_stdout §6 (5).
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "shipped",\n'
+    '  "stage_reached": "stage5_post_create",\n'
+    '  "scope": {"tier": "small", "files": 1, "lines_estimate": 10, '
+    '"lines_actual": 5, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": "auto-dev/137",\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": "abc123",\n'
+    '  "commits": ["def456"],\n'
+    '  "pr": {"number": 1, '
+    '"url": "https://github.com/foo/bar/pull/1", '
+    '"auto_merge": true, "base": "main"},\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_251_BLOCKED_RETRY = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage1_pre_flight",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "pre_flight", '
+    '"reason": "local_main_diverged_from_origin", '
+    '"details": "local_main=abc, origin_main=def, ahead=1, behind=0", '
+    '"retry_eligible": true, "retry_delay_seconds": null},\n'
+    '  "next_actions": ["sync_local_main"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_251_BLOCKED_NO_RETRY = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "EXIT_FOR_HUMAN_REVIEW", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "stage1_plan", "reason": "plan_unreviewable", '
+    '"details": "MUST_FIX persists after revision", '
+    '"retry_eligible": false, "retry_delay_seconds": null},\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+
+class TestParseSentinelFromTranscript:
+    """Tests for _parse_sentinel_from_transcript (GitHub issue #225).
+
+    Headless DAEMON sessions complete via signal_stop, not the cw wrapper.
+    The wrapper's signal_completed is the only path that assigns
+    session.last_result today, so headless sessions emit valid sentinels
+    that the orchestrator never sees. This helper walks the same Claude
+    transcript JSONL the bool checker uses, but on a sentinel hit it
+    returns the parsed AutoDevResult (or BlockedResult for malformed
+    blocks) instead of throwing the parse away.
+    """
+
+    def _write_transcript(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        assistant_text: str,
+        home: Path,
+    ) -> None:
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+
+    def test_returns_auto_dev_result_on_clean_sentinel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Clean sentinel block → AutoDevResult instance, not bool or BlockedResult."""
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-215"
+        worktree.mkdir(parents=True)
+        self._write_transcript(
+            worktree, "uuid-215", _SENTINEL_215_PLAN_PENDING, fake_home
+        )
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-215")
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.status == "plan_pending_approval"
+        assert parsed.ticket_id == "215"
+
+    def test_returns_auto_dev_result_for_blocked_sentinel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression fixture: real #214 transcript shape parses cleanly."""
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-214"
+        worktree.mkdir(parents=True)
+        self._write_transcript(worktree, "uuid-214", _SENTINEL_214_BLOCKED, fake_home)
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-214")
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.status == "blocked"
+        assert parsed.ticket_id == "214"
+        assert parsed.blocker is not None
+        assert parsed.blocker.reason == "agent_block"
+
+    def test_returns_blocked_result_when_sentinel_json_invalid(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel framing present but inner JSON malformed → BlockedResult.
+
+        Mirrors parse_stdout's §6 (3) handling: the parser does not raise.
+        """
+        from cw.auto_dev_result import BlockedResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-bad"
+        worktree.mkdir(parents=True)
+        bad_sentinel = "<<<AUTO_DEV_RESULT\n{this is not valid JSON\nAUTO_DEV_RESULT>>>"
+        self._write_transcript(worktree, "uuid-bad", bad_sentinel, fake_home)
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-bad")
+        assert isinstance(parsed, BlockedResult)
+        assert parsed.status == "blocked"
+
+    def test_returns_none_when_no_sentinel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No sentinel in transcript → None (distinct from BlockedResult).
+
+        Callers (signal_stop) use None to mean "no result yet, defer or
+        time out per budget"; a non-None return means the agent emitted
+        something — even an invalid block — and we should capture it.
+        """
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-empty"
+        worktree.mkdir(parents=True)
+        self._write_transcript(
+            worktree, "uuid-empty", "Status update with no sentinel.", fake_home
+        )
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-empty") is None
+
+    def test_returns_none_when_transcript_missing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing transcript file → None (fail-open like the bool helper)."""
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-missing"
+        worktree.mkdir(parents=True)
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-missing") is None
+
+    def test_returns_none_when_session_id_is_none(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """No claude_session_id → None without touching the filesystem."""
+        from cw.cli import _parse_sentinel_from_transcript
+
+        assert _parse_sentinel_from_transcript(str(tmp_path), None) is None
+
+    def test_skips_non_assistant_records(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel inside a user message must not be captured.
+
+        Mirrors the bool helper's same-block scoping — only assistant text
+        emissions count as a real sentinel.
+        """
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-userblock"
+        worktree.mkdir(parents=True)
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True)
+        user_record = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _SENTINEL_215_PLAN_PENDING},
+                ],
+            },
+        }
+        (project_dir / "uuid-userblock.jsonl").write_text(
+            json.dumps(user_record) + "\n"
+        )
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-userblock") is None
 
 
 class TestCompletion:
