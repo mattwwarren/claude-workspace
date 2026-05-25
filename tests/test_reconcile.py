@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+import freezegun
 
 from cw.cmux import FakeCmuxAdapter
+
+if TYPE_CHECKING:
+    import pytest
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -23,7 +29,14 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile import compute_drift, reconcile, revert_timed_out_tasks
+from cw.reconcile import (
+    HEADLESS_TIMEOUT_SECONDS,
+    compute_drift,
+    reconcile,
+    revert_completed_silent_tasks,
+    revert_stalled_headless_sessions,
+    revert_timed_out_tasks,
+)
 
 
 def _mk_session(
@@ -507,8 +520,6 @@ def test_revert_completed_silent_tasks_happy_path(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    from cw.reconcile import revert_completed_silent_tasks
-
     reverted = revert_completed_silent_tasks()
     assert "TKT-CS1" in reverted
 
@@ -534,8 +545,6 @@ def test_revert_completed_silent_tasks_skips_user_origin(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    from cw.reconcile import revert_completed_silent_tasks
-
     reverted = revert_completed_silent_tasks()
     assert reverted == []
 
@@ -560,8 +569,6 @@ def test_revert_completed_silent_tasks_skips_non_completed(
         save_state(CwState(sessions=[sess]))
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        from cw.reconcile import revert_completed_silent_tasks
-
         reverted = revert_completed_silent_tasks()
         assert reverted == [], f"Expected no revert for status={status}"
 
@@ -581,8 +588,6 @@ def test_revert_completed_silent_tasks_skips_unmatched_session(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    from cw.reconcile import revert_completed_silent_tasks
-
     reverted = revert_completed_silent_tasks()
     assert reverted == []
 
@@ -597,8 +602,6 @@ def test_revert_completed_silent_tasks_returns_empty_when_no_match(
     """No matching sessions → returns empty list."""
     save_state(CwState(sessions=[]))
     save_dev_queue(DevQueueStore(tasks=[]))
-
-    from cw.reconcile import revert_completed_silent_tasks
 
     reverted = revert_completed_silent_tasks()
     assert reverted == []
@@ -714,8 +717,6 @@ def test_reconcile_calls_timed_out_then_completed_silent(
     )
     save_dev_queue(dev_store)
 
-    from cw.reconcile import revert_completed_silent_tasks, revert_timed_out_tasks
-
     # Call helpers independently to assert each reverts only the right task.
     to_reverted = revert_timed_out_tasks()
     assert "TKT-IND-TO" in to_reverted
@@ -724,3 +725,290 @@ def test_reconcile_calls_timed_out_then_completed_silent(
     cs_reverted = revert_completed_silent_tasks()
     assert "TKT-IND-CS" in cs_reverted
     assert "TKT-IND-TO" not in cs_reverted
+
+
+# ---------------------------------------------------------------------------
+# revert_stalled_headless_sessions tests (GitHub issue #185)
+# ---------------------------------------------------------------------------
+
+
+def _mk_headless_daemon_session(
+    sid: str,
+    worktree: Path,
+    started_at: datetime,
+    surface_ref: str | None = "fake-short-id",
+) -> Session:
+    """Build a headless DAEMON ACTIVE session with a cw-context.json."""
+    sess = Session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        surface_ref=surface_ref,
+        started_at=started_at,
+    )
+    context_dir = worktree / ".claude"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "cw-context.json").write_text(
+        '{"headless": true, "session_id": "' + sid + '"}'
+    )
+    return sess
+
+
+def test_revert_stalled_headless_sessions_transitions_past_budget(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session past budget → TIMED_OUT, task reverted, event emitted."""
+    worktree = tmp_path / "wt-stalled"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("stalled-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="stalled-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="stalled-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert "stalled-1" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+    assert sess.completed_reason == CompletionReason.TIMED_OUT
+    assert sess.completed_at == now
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "stalled-1")
+    assert s.status == SessionStatus.TIMED_OUT
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "stalled-1")
+    assert t.status == QueueItemStatus.PENDING
+    assert t.session_id is None
+
+    events = read_events(
+        consumer="test-stalled-1",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["session_id"] == "stalled-1"
+    assert payload["elapsed_seconds"] >= HEADLESS_TIMEOUT_SECONDS
+
+
+def test_revert_stalled_headless_sessions_leaves_under_budget_alone(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session under budget → unchanged."""
+    worktree = tmp_path / "wt-under"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() < HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("under-budget", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert reverted == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_revert_stalled_headless_sessions_catches_idle_sessions(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """IDLE headless DAEMON session past budget → TIMED_OUT (not ACTIVE-only)."""
+    worktree = tmp_path / "wt-idle"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("idle-stalled", worktree, started_at)
+    sess.status = SessionStatus.IDLE
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert reverted == []  # no matching ticket task
+    assert sess.status == SessionStatus.TIMED_OUT
+
+
+def test_revert_stalled_headless_sessions_skips_non_daemon(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """USER-origin session past budget → unchanged."""
+    worktree = tmp_path / "wt-user"
+    worktree.mkdir(parents=True, exist_ok=True)
+    context_dir = worktree / ".claude"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "cw-context.json").write_text('{"headless": true}')
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="user-sess",
+        name="client-a/user-sess",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert reverted == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_revert_stalled_headless_sessions_fail_open_missing_context(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session with no cw-context.json → fail-open, not transitioned."""
+    worktree = tmp_path / "wt-nocontext"
+    worktree.mkdir(parents=True, exist_ok=True)
+    # Deliberately do NOT write cw-context.json
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="no-ctx",
+        name="client-a/auto-dev/no-ctx",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert reverted == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_revert_stalled_headless_sessions_skips_none_worktree_path(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON session with worktree_path=None → treated as not headless."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_session("no-wt", surface_ref="some-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.started_at = started_at
+    assert sess.worktree_path is None
+
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert reverted == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_revert_stalled_headless_sessions_stops_daemon_surface(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stalled session has surface_ref → get_native_daemon_client().stop() called."""
+    worktree = tmp_path / "wt-stop"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    daemon = FakeNativeDaemonClient()
+    short_id = daemon.spawn_bg(cwd=tmp_path, prompt="seed")
+    monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+
+    sess = _mk_headless_daemon_session(
+        "stop-me", worktree, started_at, surface_ref=short_id
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert short_id in daemon.stop_calls
+
+
+def test_reconcile_includes_stalled_reverts_in_report(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """reconcile() surfaces stalled-session reverts in ReconcileReport."""
+    worktree = tmp_path / "wt-rec"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    daemon = FakeNativeDaemonClient()
+    short_id = daemon.spawn_bg(cwd=tmp_path, prompt="seed")
+
+    sess = _mk_headless_daemon_session(
+        "rec-stalled", worktree, started_at, surface_ref=short_id
+    )
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="rec-stalled",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="rec-stalled",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    adapter = FakeCmuxAdapter()
+    with freezegun.freeze_time(now):
+        report = reconcile(adapter, daemon)
+
+    assert "rec-stalled" in report.reverted_ticket_ids
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "rec-stalled")
+    assert t.status == QueueItemStatus.PENDING
