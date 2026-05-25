@@ -17,6 +17,7 @@ clients:
   #   auto_purposes: [impl, idea, debt]    # which sessions auto-start (default: [idea, impl, debt])
   #   notifications: true                   # desktop notifications on session events
   #   auto_background_threshold: 50         # auto-background after N conversation turns
+  #   worker_model: claude-sonnet-4-6-20251015  # pin Sonnet for auto-dev workers
   #   purpose_prompts:                      # override default session prompts
   #     impl: "Custom implementation instructions..."
   #     idea: "Custom ideation instructions..."

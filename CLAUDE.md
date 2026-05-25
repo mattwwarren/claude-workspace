@@ -149,6 +149,21 @@ cw list
 | **sonnet** | Default - implementation, reviews, planning, multi-file analysis |
 | **opus** | Only when explicitly requested or Sonnet fails on complex reasoning |
 
+### Per-client worker pinning
+
+Each client can pin the model used by autonomous workers (auto-dev,
+dispatch) via the `worker_model` field in `clients.yaml`. When set, `cw`
+forwards `--model <worker_model>` to `claude --bg` from two chokepoints:
+
+- `src/cw/spawn.py:spawn_create_impl` — initial DAEMON spawn (auto-dev
+  worker creation).
+- `src/cw/session.py:resume_session` — DAEMON-origin resume of a dead
+  surface (re-spawn path).
+
+USER-origin sessions (interactive `cw start` / `cw resume`) always inherit
+the operator's logged-in default model and ignore `worker_model`. See
+`config/CONFIG_REFERENCE.md` for the cost-control example.
+
 ## Agent Spawning Decision Tree
 
 **Default: Work directly unless clear reason to spawn.**
