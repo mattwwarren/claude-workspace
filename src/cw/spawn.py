@@ -189,8 +189,16 @@ def spawn_create_impl(
         headless=headless,
     )
 
+    extra_args: list[str] | None = None
+    if client.worker_model:
+        extra_args = ["--model", client.worker_model]
+
     daemon = native_daemon or get_native_daemon_client()
-    sess.surface_ref = daemon.spawn_bg(cwd=worktree, prompt=prompt)
+    sess.surface_ref = daemon.spawn_bg(
+        cwd=worktree,
+        prompt=prompt,
+        extra_args=extra_args,
+    )
 
     if parent_session is not None:
         sess.parent_session_id = parent_session.id

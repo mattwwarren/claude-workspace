@@ -589,14 +589,20 @@ class TestBackgroundSession:
 
 class TestResumeSession:
     def _write_clients_file(
-        self, tmp_config_dir: Path, sample_client: ClientConfig
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        worker_model: str | None = None,
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
+        body = (
             f"clients:\n"
             f"  test-client:\n"
             f"    workspace_path: {sample_client.workspace_path}\n"
         )
+        if worker_model is not None:
+            body += f"    worker_model: {worker_model}\n"
+        clients_file.write_text(body)
 
     def test_live_session_attaches_directly(
         self,
@@ -705,6 +711,121 @@ class TestResumeSession:
         # Verify --resume <uuid> was passed as extra_args
         extra = mock_native_daemon.spawn_extra_args[0]
         assert extra == ["--resume", "550e8400-e29b-41d4-a716-446655440000"]
+
+    def test_resume_daemon_session_with_worker_model_pins_model(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DAEMON-origin resume of a dead surface forwards --model from client."""
+        self._write_clients_file(
+            tmp_config_dir,
+            sample_client,
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="resumewm1",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_extra_args[0] == [
+            "--resume",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--model",
+            "claude-sonnet-4-6-20251015",
+        ]
+
+    def test_resume_daemon_session_no_worker_model_omits_model_flag(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: DAEMON resume without worker_model only has --resume."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="resumewm2",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_extra_args[0] == [
+            "--resume",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]
+
+    def test_resume_user_session_never_pins_model(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin resume ignores client.worker_model (operator default wins)."""
+        self._write_clients_file(
+            tmp_config_dir,
+            sample_client,
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="resumewm3",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.USER,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_extra_args[0] == [
+            "--resume",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]
 
     def test_no_handoff_warns(
         self,
