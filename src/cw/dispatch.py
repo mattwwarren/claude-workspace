@@ -60,11 +60,13 @@ def _claim_next_pending(
                         and task.status == QueueItemStatus.PENDING
                     ):
                         task.status = QueueItemStatus.RUNNING
+                        task.attempts += 1
                         save_dev_queue(store)
                         return task
         for task in store.tasks:
             if task.client == client_name and task.status == QueueItemStatus.PENDING:
                 task.status = QueueItemStatus.RUNNING
+                task.attempts += 1
                 save_dev_queue(store)
                 return task
     return None
