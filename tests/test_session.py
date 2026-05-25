@@ -324,7 +324,7 @@ class TestStartSession:
         pre_state = load_state()
 
         class FlakyDaemon(FakeNativeDaemonClient):
-            def spawn_bg(  # type: ignore[override]
+            def spawn_bg(
                 self, *, cwd: object, prompt: object, extra_args: object = None
             ) -> str:
                 msg = "simulated daemon failure"
