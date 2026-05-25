@@ -3039,7 +3039,8 @@ class TestDevQueueRefreshAll:
         )
 
         runner = CliRunner()
-        runner.invoke(main, ["dev-queue", "refresh-all"])
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0, result.output
 
         events = _read_events(
             consumer="test-refresh-no-events",

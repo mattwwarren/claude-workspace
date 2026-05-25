@@ -138,27 +138,25 @@ def dispatch_tick(
         try:
             stale, _local_sha, _origin_sha, _behind = is_main_behind_origin(client)
         except Exception:  # noqa: BLE001
+            # Cannot narrow: _run_git only wraps CalledProcessError; FileNotFoundError
+            # and OSError (git not on PATH, network down) escape as raw OS exceptions.
             _log.warning(
                 "dispatch_tick: freshness check failed for %s; proceeding",
                 client.name,
+                exc_info=True,
             )
             stale = False
 
         if stale:
             with dev_queue_lock():
                 queue_store = load_dev_queue()
-                for pending_task in queue_store.tasks:
-                    if (
-                        pending_task.client == client.name
-                        and pending_task.status == QueueItemStatus.PENDING
-                    ):
-                        record_event(
-                            OrchestratorEventType.TICKET_NEEDS_SYNC,
-                            {
-                                "ticket_id": pending_task.ticket_id,
-                                "client": client.name,
-                            },
-                        )
+                stale_tasks = [
+                    {"ticket_id": t.ticket_id, "client": client.name}
+                    for t in queue_store.tasks
+                    if t.client == client.name and t.status == QueueItemStatus.PENDING
+                ]
+            for payload in stale_tasks:
+                record_event(OrchestratorEventType.TICKET_NEEDS_SYNC, payload)
             continue
 
         # Count running daemon sessions for this client
