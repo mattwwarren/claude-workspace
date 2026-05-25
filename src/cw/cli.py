@@ -819,6 +819,93 @@ def run_claude(extra_args: tuple[str, ...]) -> None:
     run_claude_wrapper(extra_args)
 
 
+# Max dispatch attempts before a validation_failed sentinel caps the task as
+# FAILED rather than reverting to PENDING. See issue #251 Bug B.
+_VALIDATION_FAILED_MAX_ATTEMPTS = 3
+
+# AutoDevResult statuses that represent terminal outcomes the dev-queue should
+# never auto-retry. Marking these COMPLETED prevents the race described in
+# issue #251 Bug A where revert_completed_silent_tasks reverts a task to
+# PENDING before consume_completed_sessions can process the SESSION_COMPLETED
+# event — causing no_op and similar outcomes to trigger infinite re-dispatch.
+_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = frozenset(
+    {
+        "shipped",
+        "no_op",
+        "plan_pending_approval",
+        "review_pending_approval",
+        "merge_gate_blocked",
+        "scope_exceeded",
+        "forbidden_area",
+    }
+)
+
+
+def _apply_sentinel_to_task(
+    ticket_id: str,
+    cw_session_id: str,
+    sentinel: AutoDevResult | BlockedResult,
+) -> None:
+    """Directly update the matching dev-queue task based on the sentinel result.
+
+    Called from signal_stop *before* the session is marked COMPLETED so the
+    task is already in its terminal state when revert_completed_silent_tasks
+    runs. This closes the race window where:
+
+      1. signal_stop marks session COMPLETED (save_state)
+      2. dispatch loop reconcile fires: sees COMPLETED session + RUNNING task
+         → reverts task to PENDING
+      3. consume_completed_sessions reads the SESSION_COMPLETED event but
+         finds task is PENDING (not RUNNING) → skips it
+      4. next tick re-dispatches the ticket (infinite loop for no_op)
+
+    See GitHub issue #251.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        target: TicketTask | None = None
+        for task in store.tasks:
+            if (
+                task.ticket_id == ticket_id
+                and task.session_id == cw_session_id
+                and task.status == QueueItemStatus.RUNNING
+            ):
+                target = task
+                break
+        if target is None:
+            return
+
+        if isinstance(sentinel, AutoDevResult):
+            if sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
+                target.status = QueueItemStatus.COMPLETED
+            elif sentinel.status == "blocked":
+                retry = (
+                    sentinel.blocker is not None
+                    and sentinel.blocker.retry_eligible is True
+                )
+                if retry:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+                else:
+                    target.status = QueueItemStatus.COMPLETED
+            else:
+                target.status = QueueItemStatus.COMPLETED
+        else:
+            # BlockedResult: sentinel failed to parse or was malformed.
+            if sentinel.blocker.reason == "validation_failed":
+                if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
+                    target.status = QueueItemStatus.FAILED
+                else:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+            else:
+                # Other parse failures (no_result_emitted, etc.) → retry.
+                target.status = QueueItemStatus.PENDING
+                target.session_id = None
+
+        save_dev_queue(store)
+
+
 def _parse_sentinel_from_transcript(
     cwd: str,
     claude_session_id: str | None,
@@ -1068,6 +1155,14 @@ def signal_stop() -> None:
             if session.surface_ref is not None:
                 get_native_daemon_client().stop(session.surface_ref)
             return
+
+    # Issue #251: directly update the dev-queue task *before* marking the
+    # session COMPLETED. This closes the race where revert_completed_silent_tasks
+    # sees a COMPLETED session with a still-RUNNING task and reverts it to
+    # PENDING before consume_completed_sessions can process the event — causing
+    # no_op and similar terminal outcomes to trigger infinite re-dispatch.
+    if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
+        _apply_sentinel_to_task(ticket_id_value, session.id, parsed_sentinel)
 
     session.status = SessionStatus.COMPLETED
     session.completed_at = now

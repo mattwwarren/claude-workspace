@@ -1212,3 +1212,68 @@ class TestDispatchTickReconcileErrors:
             for record in caplog.records
             if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'reconcile failed'"
+
+
+class TestClaimNextPendingAttempts:
+    """_claim_next_pending increments TicketTask.attempts on each claim.
+
+    Regression for GitHub issue #251: the attempts counter must be
+    persisted at claim time so _apply_sentinel_to_task (called from
+    signal_stop before the session is marked COMPLETED) can enforce the
+    validation_failed hard cap.
+    """
+
+    def test_claim_next_pending_increments_attempts(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-251-attempts",
+            client="test-client",
+            attempts=0,
+        )
+        add_ticket(task)
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+
+        dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-attempts")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 1
+
+    def test_claim_next_pending_increments_attempts_cumulatively(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A task reverted to PENDING and re-claimed accumulates attempts."""
+        from cw.dev_queue import save_dev_queue
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Pre-seed with attempts=2 (simulates two prior claim+revert cycles).
+        task = TicketTask(
+            ticket_id="GEN-251-cumulative",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=2,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+
+        dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-cumulative")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 3

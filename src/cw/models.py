@@ -155,6 +155,9 @@ class TicketTask(BaseModel):
     # persisted before this field existed — consumer falls back to
     # ticket_id-only matching in that case.
     session_id: str | None = None
+    # Incremented each time the task is claimed by _claim_next_pending. Used to
+    # apply a hard cap on validation_failed retries (see issue #251).
+    attempts: int = 0
 
 
 class DispatchPlan(BaseModel):
