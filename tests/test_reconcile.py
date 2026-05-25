@@ -33,6 +33,7 @@ from cw.reconcile import (
     HEADLESS_TIMEOUT_SECONDS,
     compute_drift,
     reconcile,
+    revert_completed_silent_tasks,
     revert_stalled_headless_sessions,
     revert_timed_out_tasks,
 )
@@ -519,8 +520,6 @@ def test_revert_completed_silent_tasks_happy_path(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    from cw.reconcile import revert_completed_silent_tasks
-
     reverted = revert_completed_silent_tasks()
     assert "TKT-CS1" in reverted
 
@@ -546,8 +545,6 @@ def test_revert_completed_silent_tasks_skips_user_origin(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    from cw.reconcile import revert_completed_silent_tasks
-
     reverted = revert_completed_silent_tasks()
     assert reverted == []
 
@@ -572,8 +569,6 @@ def test_revert_completed_silent_tasks_skips_non_completed(
         save_state(CwState(sessions=[sess]))
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        from cw.reconcile import revert_completed_silent_tasks
-
         reverted = revert_completed_silent_tasks()
         assert reverted == [], f"Expected no revert for status={status}"
 
@@ -593,8 +588,6 @@ def test_revert_completed_silent_tasks_skips_unmatched_session(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    from cw.reconcile import revert_completed_silent_tasks
-
     reverted = revert_completed_silent_tasks()
     assert reverted == []
 
@@ -609,8 +602,6 @@ def test_revert_completed_silent_tasks_returns_empty_when_no_match(
     """No matching sessions → returns empty list."""
     save_state(CwState(sessions=[]))
     save_dev_queue(DevQueueStore(tasks=[]))
-
-    from cw.reconcile import revert_completed_silent_tasks
 
     reverted = revert_completed_silent_tasks()
     assert reverted == []
@@ -726,8 +717,6 @@ def test_reconcile_calls_timed_out_then_completed_silent(
     )
     save_dev_queue(dev_store)
 
-    from cw.reconcile import revert_completed_silent_tasks, revert_timed_out_tasks
-
     # Call helpers independently to assert each reverts only the right task.
     to_reverted = revert_timed_out_tasks()
     assert "TKT-IND-TO" in to_reverted
@@ -842,6 +831,28 @@ def test_revert_stalled_headless_sessions_leaves_under_budget_alone(
 
     assert reverted == []
     assert sess.status == SessionStatus.ACTIVE
+
+
+def test_revert_stalled_headless_sessions_catches_idle_sessions(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """IDLE headless DAEMON session past budget → TIMED_OUT (not ACTIVE-only)."""
+    worktree = tmp_path / "wt-idle"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("idle-stalled", worktree, started_at)
+    sess.status = SessionStatus.IDLE
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+    )
+
+    assert reverted == []  # no matching ticket task
+    assert sess.status == SessionStatus.TIMED_OUT
 
 
 def test_revert_stalled_headless_sessions_skips_non_daemon(

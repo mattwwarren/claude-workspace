@@ -233,7 +233,7 @@ def revert_stalled_headless_sessions(
 
     Calls save_state(state) when any sessions are transitioned — callers must
     not assume state is unchanged on return. On the phantom-handling path in
-    reconcile(), save_state is called again at line 271; this double-save is
+    reconcile(), save_state is called again at line 381; this double-save is
     benign because save_state is idempotent over identical content.
 
     Returns the list of ticket IDs whose TicketTask was reverted to PENDING.
@@ -241,7 +241,7 @@ def revert_stalled_headless_sessions(
     """
     pending: list[tuple[Session, str | None]] = []
     for session in state.sessions:
-        if session.status is not SessionStatus.ACTIVE:
+        if session.status not in _LIVE_STATUSES:
             continue
         if session.origin is not SessionOrigin.DAEMON:
             continue
