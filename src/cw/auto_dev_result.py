@@ -30,9 +30,11 @@ _log = logging.getLogger(__name__)
 
 # v1 is the legacy shape; v2 adds the `no_op` status; v3 adds the
 # `stage1_pre_flight` stage_reached value and `none` plan_source (used
-# together for pre-flight no_op exits). All are accepted during the rollout
-# window — see docs/headless-contract.md §8.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
+# together for pre-flight no_op exits); v4 promotes
+# `ambiguities_pending_resolution` and `premises_pending_verification` to
+# canonical closed-enum statuses (issue #191). All are accepted during the
+# rollout window — see docs/headless-contract.md §8.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
 _CLOSE_SENTINEL = "AUTO_DEV_RESULT>>>"
@@ -60,11 +62,18 @@ Status = Literal[
     "forbidden_area",
     "blocked",
     "no_op",
+    "ambiguities_pending_resolution",
+    "premises_pending_verification",
 ]
 # Statuses introduced after v1. Emitting one under schema_version=1 is a
 # producer bug — it would silently degrade for downstream tools that key off
 # the version field.
 _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
+# Statuses introduced in v4 (issue #191). Emitting under schema_version<4 is
+# a producer bug.
+_V4_STATUSES: frozenset[str] = frozenset(
+    {"ambiguities_pending_resolution", "premises_pending_verification"}
+)
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
 # gated by schema_version. Spec §8 says enum additions require a version
 # bump (v3), and v3 IS the official home for these values, BUT the producer
@@ -178,7 +187,14 @@ _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
     {"scope_exceeded", "forbidden_area", "blocked"},
 )
 _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
-    {"plan_pending_approval", "scope_exceeded", "forbidden_area", "no_op"},
+    {
+        "plan_pending_approval",
+        "scope_exceeded",
+        "forbidden_area",
+        "no_op",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    },
 )
 # Pre-flight + blocked is a retry/escalation shape, not a terminal reject —
 # next_actions must signal the recovery verb. The Origin Sync block (#226)
@@ -192,7 +208,7 @@ _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
 class AutoDevResult(BaseModel):
     """Parsed sentinel block. All cross-field invariants from §3-§5 enforced."""
 
-    schema_version: Literal[1, 2, 3]
+    schema_version: Literal[1, 2, 3, 4]
     ticket_id: str
     status: Status
     stage_reached: StageReached
@@ -208,6 +224,11 @@ class AutoDevResult(BaseModel):
     friction_highlights: list[str] = Field(default_factory=list)
     blocker: Blocker | None = None
     next_actions: list[str] = Field(default_factory=list)
+    # v4: populated when status is ambiguities_pending_resolution or
+    # premises_pending_verification. Entry shapes are best-effort per §4.4 —
+    # all keys optional, tolerate producer-side key-name drift.
+    ambiguities: list[dict[str, Any]] = Field(default_factory=list)
+    premises: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_invariants(self) -> AutoDevResult:
@@ -216,6 +237,14 @@ class AutoDevResult(BaseModel):
         if self.schema_version < 2 and self.status in _V2_STATUSES:
             msg = (
                 f"status={self.status!r} requires schema_version>=2, "
+                f"got {self.schema_version}"
+            )
+            raise ValueError(msg)
+
+        # §8 v4-introduced statuses cannot ride on a pre-v4-tagged payload.
+        if self.schema_version < 4 and self.status in _V4_STATUSES:
+            msg = (
+                f"status={self.status!r} requires schema_version>=4, "
                 f"got {self.schema_version}"
             )
             raise ValueError(msg)
@@ -336,6 +365,26 @@ class AutoDevResult(BaseModel):
             msg = (
                 f"next_actions must be empty for terminal-reject status "
                 f"{self.status!r}, got {self.next_actions!r}"
+            )
+            raise ValueError(msg)
+
+        # §4.3 (A2) v4 pending statuses require non-empty next_actions.
+        if self.status in _V4_STATUSES and not self.next_actions:
+            msg = f"next_actions must be non-empty when status is {self.status!r}"
+            raise ValueError(msg)
+
+        # §4.4 (A5) cross-field array invariants: arrays must be non-empty
+        # when their corresponding status is set (empty array is a producer bug
+        # — nothing for the consumer to act on).
+        if self.status == "ambiguities_pending_resolution" and not self.ambiguities:
+            msg = (
+                "ambiguities must be non-empty when "
+                "status='ambiguities_pending_resolution'"
+            )
+            raise ValueError(msg)
+        if self.status == "premises_pending_verification" and not self.premises:
+            msg = (
+                "premises must be non-empty when status='premises_pending_verification'"
             )
             raise ValueError(msg)
 
@@ -464,6 +513,8 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         "forbidden_area",
         "blocked",
         "no_op",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
     }:
         return BlockedResult(
             blocker=Blocker(

@@ -278,6 +278,92 @@ def _blocked_payload() -> dict[str, Any]:
     }
 
 
+def _ambiguities_pending_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-ambig",
+        "status": "ambiguities_pending_resolution",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 80,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "ambiguities": [
+            {
+                "question": "Should the enum be open or closed?",
+                "plan_assumption": "closed",
+                "alternatives": ["open"],
+                "why_it_matters": "affects consumer contract",
+                "ticket_evidence": "option 1 in the ticket",
+            }
+        ],
+        "premises": [],
+        "next_actions": ["user_resolve_ambiguities"],
+    }
+
+
+def _premises_pending_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-premise",
+        "status": "premises_pending_verification",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 2,
+            "lines_estimate": 40,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "ambiguities": [],
+        "premises": [
+            {
+                "claim": "The existing PR #198 codified a deliberate decision",
+                "plan_depends_on_it_for": "deciding whether to override §4.4",
+                "how_to_verify": "read PR #198 body",
+            }
+        ],
+        "next_actions": ["user_verify_premises"],
+    }
+
+
 def _wrap_sentinel(payload: dict[str, Any]) -> str:
     body = json.dumps(payload)
     return f"some narrative\n<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
@@ -299,6 +385,8 @@ def _wrap_sentinel(payload: dict[str, Any]) -> str:
         _forbidden_area_payload,
         _blocked_payload,
         _no_op_payload,
+        _ambiguities_pending_payload,
+        _premises_pending_payload,
     ],
 )
 class TestStatusRoundTrips:
@@ -881,3 +969,144 @@ class TestPlanSourceGitHubIssueExisting:
         assert isinstance(result, AutoDevResult)
         assert result.plan_source == "github_issue_existing"
         assert result.status == "no_op"
+
+
+class TestV4StatusPromotion:
+    def test_ambiguities_pending_parses_at_v4(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_ambiguities_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+        assert result.schema_version == 4
+
+    def test_premises_pending_parses_at_v4(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_premises_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert result.schema_version == 4
+
+    def test_ambiguities_pending_rejected_at_v3(self) -> None:
+        # v4-gated status must not parse under schema_version=3
+        p = _ambiguities_pending_payload()
+        p["schema_version"] = 3
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "validation_failed"
+
+    def test_premises_pending_rejected_at_v3(self) -> None:
+        p = _premises_pending_payload()
+        p["schema_version"] = 3
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "validation_failed"
+
+    def test_v4_schema_accepted(self) -> None:
+        p = _ambiguities_pending_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.schema_version == 4
+
+    def test_v5_schema_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["schema_version"] = 5
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "schema_version_unsupported"
+
+    # A5 — empty arrays rejected via cross-field validator
+    def test_empty_ambiguities_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = []
+        with pytest.raises(ValidationError, match="ambiguities"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_premises_rejected(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = []
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    # A2 — next_actions must be non-empty
+    def test_ambiguities_empty_next_actions_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_empty_next_actions_rejected(self) -> None:
+        p = _premises_pending_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    # A4 — pre-branch status: branch must be null
+    def test_ambiguities_rejects_branch(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["branch"] = "dev/sneak"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_rejects_branch(self) -> None:
+        p = _premises_pending_payload()
+        p["branch"] = "dev/sneak"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    # A4 — lines_actual must be null (pre-impl exit)
+    def test_ambiguities_rejects_lines_actual(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["scope"]["lines_actual"] = 50
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_rejects_lines_actual(self) -> None:
+        p = _premises_pending_payload()
+        p["scope"]["lines_actual"] = 30
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+    # A3 — entry fields are all optional (best-effort)
+    def test_ambiguities_entry_with_minimal_keys_accepted(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [{"question": "only question provided"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.ambiguities) == 1
+
+    def test_premises_entry_with_minimal_keys_accepted(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [{"claim": "minimal premise"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_premises_entry_with_alternate_key_shapes_accepted(self) -> None:
+        # Producer uses various key names; parser must tolerate any shape
+        p = _premises_pending_payload()
+        p["premises"] = [
+            {
+                "premise": "alternate key",
+                "verify_by": "read the doc",
+                "verified": False,
+            }
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_round_trip_preserves_ambiguities(self) -> None:
+        p = _ambiguities_pending_payload()
+        result = AutoDevResult.model_validate(p)
+        dumped = result.model_dump(mode="json")
+        assert dumped["status"] == "ambiguities_pending_resolution"
+        assert len(dumped["ambiguities"]) == 1
+
+    def test_round_trip_preserves_premises(self) -> None:
+        p = _premises_pending_payload()
+        result = AutoDevResult.model_validate(p)
+        dumped = result.model_dump(mode="json")
+        assert dumped["status"] == "premises_pending_verification"
+        assert len(dumped["premises"]) == 1
+
+    def test_existing_statuses_unaffected_by_v4_addition(self) -> None:
+        # Regression guard: shipped (v1 payload) still parses under v4-aware parser
+        p = _shipped_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
