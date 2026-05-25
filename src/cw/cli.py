@@ -75,7 +75,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
-from cw.reconcile import reconcile
+from cw.reconcile import HEADLESS_TIMEOUT_SECONDS, reconcile
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -87,12 +87,6 @@ from cw.spawn import spawn_create_impl
 from cw.tui import DetailLevel
 from cw.tui import watch as tui_watch
 from cw.wrapper import run_claude_wrapper, signal_idle
-
-# Wall-clock budget for headless daemon sessions before signal_stop transitions
-# them to TIMED_OUT instead of deferring. After this many seconds without a
-# sentinel the session is considered stalled; dev-queue retries via reconcile.
-# See GitHub issue #176 Layer 1.
-HEADLESS_TIMEOUT_SECONDS = 1800  # 30 minutes
 
 
 def handle_errors[F: Callable[..., object]](fn: F) -> F:
