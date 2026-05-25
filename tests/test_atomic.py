@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,6 @@ def test_atomic_write_text_cleans_temp_on_rename_failure(
     target = tmp_path / "state.json"
 
     leaked: list[str] = []
-    import tempfile
-
     real_mkstemp = tempfile.mkstemp
 
     def capturing_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
