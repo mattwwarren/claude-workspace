@@ -945,7 +945,7 @@ class TestSignalStop:
         a session that orphaned (Stop fires, no sentinel, bg_tasks empty)
         must NOT silently transition to COMPLETED.
         """
-        # Seed session started 31 minutes ago (past the 30-min budget).
+        # Seed session started 61 minutes ago (past the 60-min budget).
         import datetime as dt
 
         from cw.cli import HEADLESS_TIMEOUT_SECONDS
@@ -954,7 +954,7 @@ class TestSignalStop:
         from cw.native_daemon import FakeNativeDaemonClient
 
         started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
         assert (hook_time - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
 
         workspace = tmp_path / "workspace"
