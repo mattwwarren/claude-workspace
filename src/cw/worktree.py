@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import subprocess
@@ -13,6 +14,8 @@ from cw.exceptions import WorktreeError
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
+
+_log = logging.getLogger(__name__)
 
 
 # cmux rejects worktree names longer than 64 chars with:
@@ -193,3 +196,79 @@ def remove_worktree(
         args.append("--force")
 
     _run_git(*args, cwd=_git_dir(client))
+
+
+def is_main_behind_origin(
+    client: ClientConfig,
+) -> tuple[bool, str, str, int]:
+    """Check whether the client's local default branch is behind origin.
+
+    Fetches ``origin/<default_branch>`` then compares local and remote SHAs.
+
+    Returns:
+        A 4-tuple ``(is_stale, local_sha, origin_sha, behind_count)`` where
+        *is_stale* is ``True`` when the local branch is behind the remote.
+        On any fetch or parse failure returns ``(False, "", "", 0)`` and logs
+        a WARNING — the caller should proceed rather than block dispatch.
+    """
+    git_dir = _git_dir(client)
+    default_branch = client.default_branch or "main"
+
+    try:
+        result = _run_git(
+            "fetch", "origin", default_branch, "--quiet", cwd=git_dir, check=False
+        )
+    except WorktreeError as exc:
+        _log.warning(
+            "is_main_behind_origin: fetch failed for %s: %s",
+            client.name,
+            exc,
+        )
+        return (False, "", "", 0)
+
+    if result.returncode != 0:
+        _log.warning(
+            "is_main_behind_origin: fetch failed for %s (rc=%d): %s",
+            client.name,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return (False, "", "", 0)
+
+    try:
+        local_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
+        origin_sha = _run_git(
+            "rev-parse", f"origin/{default_branch}", cwd=git_dir
+        ).stdout.strip()
+        behind_count = int(
+            _run_git(
+                "rev-list",
+                "--count",
+                f"{default_branch}..origin/{default_branch}",
+                cwd=git_dir,
+            ).stdout.strip()
+        )
+        return (behind_count > 0, local_sha, origin_sha, behind_count)
+    except (WorktreeError, ValueError):
+        _log.warning(
+            "is_main_behind_origin: rev-parse/rev-list failed for %s", client.name
+        )
+        return (False, "", "", 0)
+
+
+def fast_forward_main(client: ClientConfig) -> tuple[str, str]:
+    """Fast-forward the client's local default branch to origin.
+
+    Runs ``git pull --ff-only origin <default_branch>`` in the client's git
+    directory.  Raises :exc:`WorktreeError` if the pull fails (non-zero exit).
+
+    Returns:
+        ``(before_sha, after_sha)`` — the SHA before and after the pull.
+        When already up to date both values are equal.
+    """
+    git_dir = _git_dir(client)
+    default_branch = client.default_branch or "main"
+    before_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
+    _run_git("pull", "--ff-only", "origin", default_branch, cwd=git_dir)
+    after_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
+    return (before_sha, after_sha)

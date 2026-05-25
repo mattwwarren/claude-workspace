@@ -86,6 +86,7 @@ from cw.session import (
 from cw.spawn import spawn_create_impl
 from cw.tui import DetailLevel
 from cw.tui import watch as tui_watch
+from cw.worktree import fast_forward_main
 from cw.wrapper import run_claude_wrapper, signal_idle
 
 # Wall-clock budget for headless daemon sessions before signal_stop transitions
@@ -1374,6 +1375,31 @@ def dev_queue_plan(client: str, timeout: int, filter_client: str | None) -> None
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
+
+
+@dev_queue.command(name="refresh-all")
+@handle_errors
+def dev_queue_refresh_all() -> None:
+    """Fast-forward main on every configured client repo.
+
+    Runs ``git pull --ff-only origin <default_branch>`` for each client.
+    Does NOT emit events — absence of ``ticket.needs_sync`` on the next
+    dispatch tick confirms the refresh succeeded.
+    """
+    clients = load_clients()
+    had_error = False
+    for client in clients.values():
+        try:
+            before, after = fast_forward_main(client)
+            if before == after:
+                click.echo(f"{client.name}: already up to date ({before[:8]})")
+            else:
+                click.echo(f"{client.name}: updated {before[:8]}..{after[:8]}")
+        except Exception as exc:
+            click.echo(f"{client.name}: ERROR — {exc}", err=True)
+            had_error = True
+    if had_error:
+        raise SystemExit(1)
 
 
 # --- Orchestrate command group ---

@@ -2060,3 +2060,176 @@ def test_display_status_reconciles_phantom_active_sessions(
     reaped = reloaded.find_by_name_or_id("phantom1")
     assert reaped is not None
     assert reaped.status == SessionStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueRefreshAll
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueRefreshAll:
+    """Tests for `cw dev-queue refresh-all`."""
+
+    def _write_clients_yaml(
+        self,
+        tmp_config_dir: Path,
+        clients: list[tuple[str, str]],
+    ) -> None:
+        """Write a minimal clients.yaml with the given (name, workspace_path) tuples."""
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        lines = ["clients:\n"]
+        for name, ws in clients:
+            lines.append(f"  {name}:\n")
+            lines.append(f"    workspace_path: {ws}\n")
+        (config_dir / "clients.yaml").write_text("".join(lines))
+
+    def test_refresh_all_runs_fast_forward_for_each_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """fast_forward_main called once per configured client, exit 0."""
+        ws_a = tmp_path / "ws-a"
+        ws_a.mkdir()
+        ws_b = tmp_path / "ws-b"
+        ws_b.mkdir()
+        self._write_clients_yaml(
+            tmp_config_dir,
+            [("client-a", str(ws_a)), ("client-b", str(ws_b))],
+        )
+
+        called_clients: list[str] = []
+
+        def _mock_ff(client: object) -> tuple[str, str]:
+            from cw.models import ClientConfig
+
+            assert isinstance(client, ClientConfig)
+            called_clients.append(client.name)
+            return (
+                "sha1sha1sha1sha1sha1sha1sha1sha1sha1sha1",
+                "sha2sha2sha2sha2sha2sha2sha2sha2sha2sha2",
+            )
+
+        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0, result.output
+        assert set(called_clients) == {"client-a", "client-b"}
+
+    def test_refresh_all_prints_already_up_to_date_when_same_sha(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same before/after SHA → 'already up to date' in output."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+
+        monkeypatch.setattr(
+            "cw.cli.fast_forward_main",
+            lambda _c: (
+                "abc123def456abc123def456abc123def456abc1",
+                "abc123def456abc123def456abc123def456abc1",
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0
+        assert "already up to date" in result.output.lower()
+
+    def test_refresh_all_prints_updated_sha_when_changed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Different before/after SHA → output shows both SHAs."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+
+        monkeypatch.setattr(
+            "cw.cli.fast_forward_main",
+            lambda _c: (
+                "oldsha1oldsha1oldsha1oldsha1oldsha1oldsh",
+                "newsha2newsha2newsha2newsha2newsha2newsh",
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0
+        assert "oldsha1" in result.output
+        assert "newsha2" in result.output
+
+    def test_refresh_all_continues_on_one_client_failure(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """WorktreeError for one client → other client still called, exit non-zero."""
+        from cw.exceptions import WorktreeError
+
+        ws_a = tmp_path / "ws-a"
+        ws_a.mkdir()
+        ws_b = tmp_path / "ws-b"
+        ws_b.mkdir()
+        self._write_clients_yaml(
+            tmp_config_dir,
+            [("client-a", str(ws_a)), ("client-b", str(ws_b))],
+        )
+
+        called_clients: list[str] = []
+
+        def _mock_ff(client: object) -> tuple[str, str]:
+            from cw.models import ClientConfig
+
+            assert isinstance(client, ClientConfig)
+            called_clients.append(client.name)
+            if client.name == "client-a":
+                msg = "ff failed"
+                raise WorktreeError(msg)
+            return ("aaa", "bbb")
+
+        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code != 0
+        assert "client-b" in called_clients
+        assert "client-a" in called_clients
+
+    def test_refresh_all_emits_no_events(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """refresh-all does NOT emit ticket.needs_sync events."""
+        from cw.events import read_events as _read_events
+        from cw.models import OrchestratorEventType
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+
+        monkeypatch.setattr(
+            "cw.cli.fast_forward_main",
+            lambda _c: ("aaa", "bbb"),
+        )
+
+        runner = CliRunner()
+        runner.invoke(main, ["dev-queue", "refresh-all"])
+
+        events = _read_events(
+            consumer="test-refresh-no-events",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 0

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- feat: pre-dispatch worktree freshness check in `dispatch_tick`; stale clients emit `ticket.needs_sync` and skip the tick without burning a dispatch slot
+- feat: new `cw dev-queue refresh-all` CLI subcommand fast-forwards each client's local `main` to `origin/main`
+- feat: new `OrchestratorEventType.TICKET_NEEDS_SYNC = "ticket.needs_sync"` event type
+
 ## [0.8.3] — 2026-05-21
 
 Patch release — closes the wedged-`RUNNING` loop called out as a known

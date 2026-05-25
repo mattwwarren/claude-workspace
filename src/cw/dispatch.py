@@ -20,7 +20,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
 from cw.spawn import spawn_create_impl
-from cw.worktree import create_worktree
+from cw.worktree import create_worktree, is_main_behind_origin
 
 if TYPE_CHECKING:
     from cw.cmux import CmuxAdapter
@@ -118,6 +118,37 @@ def dispatch_tick(
                 )
 
     for client in clients.values():
+        # --- Freshness gate ---
+        # Check whether the client's local default branch is behind origin
+        # before claiming any ticket.  Stale repos cause sessions to exit
+        # immediately with local_main_diverged_from_origin, burning a slot.
+        # On any error, log and proceed so a transient network issue never
+        # blocks the whole loop.
+        try:
+            stale, _local_sha, _origin_sha, _behind = is_main_behind_origin(client)
+        except Exception:
+            _log.warning(
+                "dispatch_tick: freshness check failed for %s; proceeding",
+                client.name,
+            )
+            stale = False
+
+        if stale:
+            queue_store = load_dev_queue()
+            for pending_task in queue_store.tasks:
+                if (
+                    pending_task.client == client.name
+                    and pending_task.status == QueueItemStatus.PENDING
+                ):
+                    record_event(
+                        OrchestratorEventType.TICKET_NEEDS_SYNC,
+                        {
+                            "ticket_id": pending_task.ticket_id,
+                            "client": client.name,
+                        },
+                    )
+            continue
+
         # Count running daemon sessions for this client
         running_count = sum(
             1
