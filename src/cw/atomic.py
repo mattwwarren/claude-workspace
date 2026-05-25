@@ -13,10 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -36,9 +33,9 @@ def atomic_write_text(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        os.replace(tmp_name, path)
+        Path(tmp_name).replace(path)
     except BaseException:
         # Remove the temp file if the rename didn't consume it.
         with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_name)
+            Path(tmp_name).unlink()
         raise

@@ -77,6 +77,7 @@ select = [
     "DTZ",  # flake8-datetimez
     "T20",  # flake8-print
     "PT",   # flake8-pytest-style
+    "PTH",  # flake8-use-pathlib
     "Q",    # flake8-quotes
     "RSE",  # flake8-raise
     "RET",  # flake8-return
