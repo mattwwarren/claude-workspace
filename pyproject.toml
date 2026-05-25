@@ -91,6 +91,7 @@ select = [
     "TCH",  # flake8-type-checking
     "PERF", # perflint
     "FURB", # refurb
+    "ASYNC", # flake8-async (blocking calls in async def, time.sleep vs asyncio.sleep)
     "BLE",  # flake8-blind-except
     "EM",   # flake8-errmsg
     "TRY",  # tryceratops (exception handling)
