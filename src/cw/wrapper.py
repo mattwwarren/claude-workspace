@@ -135,7 +135,7 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
     session_id_env = os.environ.get("CW_SESSION_ID")
 
     claude_args = list(extra_args)
-    workspace_path = os.getcwd()
+    workspace_path = str(Path.cwd())
 
     if _is_headless(extra_args):
         returncode, captured = _run_claude_streaming(claude_args)
