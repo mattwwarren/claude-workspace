@@ -948,10 +948,10 @@ class TestSignalStop:
         # Seed session started 61 minutes ago (past the 60-min budget).
         import datetime as dt
 
-        from cw.cli import HEADLESS_TIMEOUT_SECONDS
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
+        from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
 
         started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         hook_time = dt.datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
@@ -1292,6 +1292,109 @@ class TestSignalStop:
                 event_types=[event_type],
             )
             assert not any(e.payload.get("session_id") == session.id for e in events)
+
+        # daemon.stop must NOT have been called.
+        assert daemon.stop_calls == []
+
+    def test_signal_stop_respects_per_ticket_timeout_override(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Per-ticket headless_timeout_override is honored on the Stop-hook path.
+
+        Session elapsed 4000s — past the 3600s global budget, but within the
+        7200s per-ticket override. The hook must defer (session stays ACTIVE).
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        # 4000s elapsed: past the default 3600s global budget, under 7200s override.
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 1, 6, 40, tzinfo=UTC)  # +4000s
+        assert (hook_time - started_at).total_seconds() == 4000
+
+        workspace = tmp_path / "ws-override"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "wt-override"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="sess-override",
+            name="test-client/auto-dev/GEN-override",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+
+        # Seed a RUNNING TicketTask with headless_timeout_override=7200.
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="GEN-override",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    headless_timeout_override=7200,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+
+        # Write headless context with our custom ticket_id.
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session.id,
+                    "session_name": session.name,
+                    "client": "test-client",
+                    "purpose": "impl",
+                    "ticket_id": "GEN-override",
+                    "headless": True,
+                }
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-override",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        # 4000s elapsed < 7200s override → should NOT time out → still ACTIVE.
+        state_after = load_state()
+        sess_after = next(s for s in state_after.sessions if s.id == "sess-override")
+        assert sess_after.status == SessionStatus.ACTIVE, (
+            f"Expected ACTIVE but got {sess_after.status} — "
+            "per-ticket override not honored on Stop-hook path"
+        )
+
+        # TicketTask must remain RUNNING (not reverted to PENDING).
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-override")
+        assert task.status == QueueItemStatus.RUNNING
 
         # daemon.stop must NOT have been called.
         assert daemon.stop_calls == []
@@ -3044,3 +3147,52 @@ class TestDevQueueRefreshAll:
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
         assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueAddTimeout (GitHub issue #265)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueAddTimeout:
+    """Tests for ``--timeout`` flag on ``cw dev-queue add``."""
+
+    def test_dev_queue_add_timeout_flag(self, tmp_config_dir: Path) -> None:
+        """--timeout sets headless_timeout_override on the created TicketTask."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "add",
+                "GEN-123",
+                "--client",
+                "client-a",
+                "--timeout",
+                "5400",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-123"), None)
+        assert task is not None
+        assert task.headless_timeout_override == 5400
+
+    def test_dev_queue_add_no_timeout(self, tmp_config_dir: Path) -> None:
+        """Without --timeout, headless_timeout_override is None."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "GEN-456", "--client", "client-b"],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-456"), None)
+        assert task is not None
+        assert task.headless_timeout_override is None

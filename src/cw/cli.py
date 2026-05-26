@@ -75,7 +75,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
-from cw.reconcile import HEADLESS_TIMEOUT_SECONDS, reconcile
+from cw.reconcile import reconcile, resolve_headless_budget
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -1113,7 +1113,16 @@ def signal_stop() -> None:
         )
         if parsed_sentinel is None:
             elapsed = (now - session.started_at).total_seconds()
-            if elapsed < HEADLESS_TIMEOUT_SECONDS:
+            _headless_config = load_orchestrator_config()
+            _stop_task: TicketTask | None = None
+            if isinstance(ticket_id_value, str):
+                _stop_store = load_dev_queue()
+                _stop_task = next(
+                    (t for t in _stop_store.tasks if t.ticket_id == ticket_id_value),
+                    None,
+                )
+            _budget = resolve_headless_budget(_stop_task, session, _headless_config)
+            if elapsed < _budget:
                 # Under budget — defer. Another Stop hook turn will fire, or
                 # reconcile will eventually catch a phantom and CRASH it.
                 return
@@ -1280,13 +1289,31 @@ def dev_queue() -> None:
 @click.argument("tickets", nargs=-1, required=True)
 @click.option("--client", "-c", default=None, help="Target client name.")
 @click.option("--priority", "-p", type=int, default=0, help="Priority (higher=sooner).")
+@click.option(
+    "--timeout",
+    "-t",
+    "headless_timeout_override",
+    type=int,
+    default=None,
+    help="Override headless timeout (seconds) for this ticket.",
+)
 @handle_errors
-def dev_queue_add(tickets: tuple[str, ...], client: str | None, priority: int) -> None:
+def dev_queue_add(
+    tickets: tuple[str, ...],
+    client: str | None,
+    priority: int,
+    headless_timeout_override: int | None,
+) -> None:
     """Enqueue one or more tickets for dispatch."""
     config = load_orchestrator_config()
     for ticket_id in tickets:
         resolved = resolve_client(ticket_id, config, client)
-        task = TicketTask(ticket_id=ticket_id, client=resolved, priority=priority)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=resolved,
+            priority=priority,
+            headless_timeout_override=headless_timeout_override,
+        )
         inserted = add_ticket(task)
         if not inserted:
             click.echo(

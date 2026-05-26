@@ -33,15 +33,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from cw.config import load_state, save_state
+from cw.config import load_orchestrator_config, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.models import (
     CompletionReason,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
+    TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
 
@@ -193,6 +195,34 @@ def _looks_like_daemon_outage(
     )
 
 
+def resolve_headless_budget(
+    task: TicketTask | None,
+    session: Session,
+    config: OrchestratorConfig,
+) -> int:
+    """Return the wall-clock budget (seconds) for *session*.
+
+    Precedence (highest first):
+    1. task.headless_timeout_override — explicit per-ticket escape hatch.
+    2. session.last_result scope.tier — look up per-tier default in config.
+    3. HEADLESS_TIMEOUT_SECONDS — global fallback (pre-Stage-1 or unknown tier).
+    """
+    if task is not None and task.headless_timeout_override is not None:
+        return task.headless_timeout_override
+    last_result = session.last_result
+    if last_result is not None:
+        tier: str | None = None
+        try:
+            scope = last_result.get("scope")
+            if isinstance(scope, dict):
+                tier = scope.get("tier")
+        except (AttributeError, TypeError):
+            pass
+        if isinstance(tier, str):
+            return config.headless_timeout_by_tier.get(tier, HEADLESS_TIMEOUT_SECONDS)
+    return HEADLESS_TIMEOUT_SECONDS
+
+
 def _is_headless(session: Session) -> bool:
     """Return True if session's worktree has a headless cw-context.json.
 
@@ -211,7 +241,7 @@ def _is_headless(session: Session) -> bool:
 
 
 def revert_stalled_headless_sessions(
-    state: CwState, *, now: datetime, budget_seconds: int
+    state: CwState, *, now: datetime, config: OrchestratorConfig
 ) -> list[str]:
     """Transition stalled headless DAEMON sessions past budget to TIMED_OUT.
 
@@ -224,14 +254,22 @@ def revert_stalled_headless_sessions(
     does not delay enforcement of the wall-clock budget. The sweep is purely
     time-based; surface liveness is irrelevant.
 
+    Loads the dev queue once (read-only, no lock) for per-ticket budget lookups.
+    The existing dev_queue_lock block for the revert step (below) still guards
+    the read-write window.
+
     Calls save_state(state) when any sessions are transitioned — callers must
     not assume state is unchanged on return. On the phantom-handling path in
-    reconcile(), save_state is called again at line 381; this double-save is
-    benign because save_state is idempotent over identical content.
+    reconcile(), save_state is called again later; this double-save is benign
+    because save_state is idempotent over identical content.
 
     Returns the list of ticket IDs whose TicketTask was reverted to PENDING.
-    See GitHub issue #185.
+    See GitHub issue #185, #265.
     """
+    # Read-only dev-queue load for budget lookups — no lock needed here.
+    store_ro = load_dev_queue()
+    task_by_ticket: dict[str, TicketTask] = {t.ticket_id: t for t in store_ro.tasks}
+
     pending: list[tuple[Session, str | None]] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
@@ -240,10 +278,12 @@ def revert_stalled_headless_sessions(
             continue
         if not _is_headless(session):
             continue
-        elapsed = (now - session.started_at).total_seconds()
-        if elapsed < budget_seconds:
-            continue
         ticket_id = ticket_id_for_session(session.name)
+        task = task_by_ticket.get(ticket_id) if ticket_id else None
+        budget = resolve_headless_budget(task, session, config)
+        elapsed = (now - session.started_at).total_seconds()
+        if elapsed < budget:
+            continue
         session.status = SessionStatus.TIMED_OUT
         session.completed_at = now
         session.completed_reason = CompletionReason.TIMED_OUT
@@ -316,8 +356,9 @@ def reconcile() -> ReconcileReport:
     # stalled mid-turn and produced no further Stop hook firings. Runs before
     # the outage guard so a daemon hiccup does not delay budget enforcement.
     # See GitHub issue #185.
+    orchestrator_config = load_orchestrator_config()
     stalled_reverted = revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+        state, now=now, config=orchestrator_config
     )
 
     try:

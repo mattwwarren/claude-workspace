@@ -19,6 +19,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -34,6 +35,7 @@ from cw.reconcile import (
     _claude_agents_json,
     compute_drift,
     reconcile,
+    resolve_headless_budget,
     revert_completed_silent_tasks,
     revert_stalled_headless_sessions,
     revert_timed_out_tasks,
@@ -838,7 +840,7 @@ def test_revert_stalled_headless_sessions_transitions_past_budget(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     reverted = revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+        state, now=now, config=OrchestratorConfig()
     )
 
     assert "stalled-1" in reverted
@@ -880,7 +882,7 @@ def test_revert_stalled_headless_sessions_leaves_under_budget_alone(
     save_state(state)
 
     reverted = revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+        state, now=now, config=OrchestratorConfig()
     )
 
     assert reverted == []
@@ -902,7 +904,7 @@ def test_revert_stalled_headless_sessions_catches_idle_sessions(
     save_state(state)
 
     reverted = revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+        state, now=now, config=OrchestratorConfig()
     )
 
     assert reverted == []  # no matching ticket task
@@ -940,7 +942,7 @@ def test_revert_stalled_headless_sessions_skips_non_daemon(
     save_state(state)
 
     reverted = revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+        state, now=now, config=OrchestratorConfig()
     )
 
     assert reverted == []
@@ -976,7 +978,7 @@ def test_revert_stalled_headless_sessions_fail_open_missing_context(
     save_state(state)
 
     reverted = revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+        state, now=now, config=OrchestratorConfig()
     )
 
     assert reverted == []
@@ -999,7 +1001,7 @@ def test_revert_stalled_headless_sessions_skips_none_worktree_path(
     save_state(state)
 
     reverted = revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
+        state, now=now, config=OrchestratorConfig()
     )
 
     assert reverted == []
@@ -1026,9 +1028,7 @@ def test_revert_stalled_headless_sessions_stops_daemon_surface(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    revert_stalled_headless_sessions(
-        state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
-    )
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
 
     assert short_id in daemon.stop_calls
 
@@ -1069,3 +1069,152 @@ def test_reconcile_includes_stalled_reverts_in_report(
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "rec-stalled")
     assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# resolve_headless_budget tests (GitHub issue #265)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_headless_budget_small_tier(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Per-tier default: session with scope.tier='small' → 1800s."""
+    worktree = tmp_path / "wt-small"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    sess = Session(
+        id="small-tier-sess",
+        name="client-a/auto-dev/GEN-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result={"scope": {"tier": "small"}},
+    )
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == 1800
+
+
+def test_resolve_headless_budget_large_tier(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Per-tier default: session with scope.tier='large' → 5400s."""
+    worktree = tmp_path / "wt-large"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    sess = Session(
+        id="large-tier-sess",
+        name="client-a/auto-dev/GEN-2",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result={"scope": {"tier": "large"}},
+    )
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == 5400
+
+
+def test_resolve_headless_budget_per_ticket_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Per-ticket override beats tier: headless_timeout_override=7200 > small=1800."""
+    worktree = tmp_path / "wt-override"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    sess = Session(
+        id="override-sess",
+        name="client-a/auto-dev/GEN-3",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result={"scope": {"tier": "small"}},
+    )
+    task = TicketTask(
+        ticket_id="GEN-3",
+        client="client-a",
+        headless_timeout_override=7200,
+    )
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 7200
+
+
+def test_resolve_headless_budget_pre_stage1_fallback(
+    tmp_config_dir: Path,
+) -> None:
+    """Pre-Stage-1 fallback: no task, no last_result → HEADLESS_TIMEOUT_SECONDS."""
+    sess = Session(
+        id="fallback-sess",
+        name="client-a/auto-dev/GEN-4",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result=None,
+    )
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == HEADLESS_TIMEOUT_SECONDS
+
+
+def test_revert_stalled_uses_per_session_budget(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session with tier='small' (budget=1800) elapsed 2000s → timed out (< 3600)."""
+    worktree = tmp_path / "wt-per-sess"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # 2000s elapsed: > 1800 (small tier) but < 3600 (global fallback)
+    now = datetime(2026, 1, 1, 0, 33, 20, tzinfo=UTC)
+    assert (now - started_at).total_seconds() == 2000
+
+    sess = _mk_headless_daemon_session("per-sess-small", worktree, started_at)
+    sess.last_result = {"scope": {"tier": "small"}}
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+
+    # Verify resolve_headless_budget returns 1800 for this session
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == 1800
+
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="per-sess-small",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="per-sess-small",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=config)
+
+    assert "per-sess-small" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
