@@ -272,6 +272,7 @@ class Session(BaseModel):
     worktree_path: Path | None = None
     branch: str | None = None
     surface_ref: str | None = None
+    # legacy: write-dead since #246, kept for state compat
     last_handoff_path: Path | None = None
     claude_session_id: str | None = None
     auto_backgrounded: bool = False
