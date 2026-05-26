@@ -82,7 +82,7 @@ def start_session(
     state = load_state()
 
     # Reap phantom sessions so we don't short-circuit on a dead "active" row.
-    reconcile(native_daemon=daemon)
+    reconcile()
     state = load_state()
 
     # Validate parent session FIRST so a bad ID always errors, even when

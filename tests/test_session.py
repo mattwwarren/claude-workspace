@@ -1289,17 +1289,19 @@ def test_start_session_reaps_phantom_before_existing_check(
         )
     )
 
-    # Inject a daemon with one live session (bypasses outage guard) but
-    # "gone-ref" is not a valid 8-char hex ref, so reconcile treats the
-    # session as phantom (non-hex refs don't appear in native_live set).
-    daemon = FakeNativeDaemonClient()
-    daemon._live.add("00000099")  # keep outage guard from firing
+    # Non-empty live set bypasses outage guard; "gone-ref" is absent so
+    # the phantom session is reaped.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
 
     monkeypatch.setattr("cw.session._write_hook_context", _noop)
 
     attached: list[str] = []
     monkeypatch.setattr("cw.session._attach_session", attached.append)
 
+    daemon = FakeNativeDaemonClient()
     start_session(sample_client.name, "impl", native_daemon=daemon)
 
     reloaded = load_state()

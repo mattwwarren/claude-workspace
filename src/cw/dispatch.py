@@ -7,7 +7,6 @@ import time
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import AutoDevResult, parse_stdout
-from cw.cmux import get_cmux_adapter
 from cw.config import load_clients, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
@@ -23,7 +22,6 @@ from cw.spawn import spawn_create_impl
 from cw.worktree import create_worktree, is_main_behind_origin
 
 if TYPE_CHECKING:
-    from cw.cmux import CmuxAdapter
     from cw.models import OrchestratorConfig, TicketTask
     from cw.native_daemon import NativeDaemonClient
 
@@ -74,7 +72,6 @@ def _claim_next_pending(
 
 def dispatch_tick(
     config: OrchestratorConfig,
-    adapter: CmuxAdapter | None = None,
     *,
     use_plan: bool = False,
     parent: str | None = None,
@@ -89,7 +86,6 @@ def dispatch_tick(
 
     Args:
         config: Orchestrator config (per-client caps, tick interval).
-        adapter: Optional CmuxAdapter for testing.
         use_plan: If True, respect the persisted DispatchPlan ordering.
         parent: Optional parent session ID. When set, every spawned
             worker is linked to it (``parent_session_id`` +
@@ -100,15 +96,13 @@ def dispatch_tick(
     Returns:
         Number of sessions spawned during this tick.
     """
-    resolved_adapter = adapter or get_cmux_adapter()
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     try:
-        reconcile(resolved_adapter, resolved_native_daemon)
+        reconcile()
     except Exception:  # noqa: BLE001
         # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331 (4-part justification):
-        # 1. Adapter surface: reconcile() calls adapter.list_surfaces() and
-        #    native-daemon roster I/O — backend-specific failure modes
-        #    (tmux server crash, JSON roster corruption, OSError on stale socket).
+        # 1. reconcile() calls ``claude agents --json`` and native-daemon roster
+        #    I/O — failure modes include subprocess crash and JSON decode errors.
         # 2. Logging: _log.exception captures the full traceback with exc_info.
         # 3. Non-critical: reconcile is best-effort housekeeping. Skipping a tick
         #    just means phantoms get reaped on the next dispatch_tick.
@@ -387,7 +381,6 @@ def run_dispatch_loop(
     *,
     max_parallel: int | None = None,
     once: bool = False,
-    adapter: CmuxAdapter | None = None,
     use_plan: bool = False,
     parent: str | None = None,
     native_daemon: NativeDaemonClient | None = None,
@@ -397,8 +390,6 @@ def run_dispatch_loop(
     Args:
         max_parallel: If set, override all per-client caps with this value.
         once: If True, run a single tick and return immediately.
-        adapter: Optional CmuxAdapter for testing.  Defaults to
-            ``get_cmux_adapter()`` at call time.
         use_plan: If True, load the persisted DispatchPlan and use its
             ordering to claim tasks.  Falls back to enqueue order when no
             plan is found (load_plan returns None).
@@ -407,8 +398,7 @@ def run_dispatch_loop(
             caller's session.
         native_daemon: Optional NativeDaemonClient for testing. Defaults
             to ``get_native_daemon_client()`` at call time. Used for
-            spawning dispatched workers and the native side of
-            reconcile.
+            spawning dispatched workers.
     """
     config = load_orchestrator_config()
 
@@ -417,14 +407,12 @@ def run_dispatch_loop(
         overridden: dict[str, int] = dict.fromkeys(clients, max_parallel)
         config = config.model_copy(update={"per_client_max_parallel": overridden})
 
-    resolved_adapter = adapter or get_cmux_adapter()
     resolved_native_daemon = native_daemon or get_native_daemon_client()
 
     while True:
         consume_completed_sessions()
         dispatch_tick(
             config,
-            adapter=resolved_adapter,
             use_plan=use_plan,
             parent=parent,
             native_daemon=resolved_native_daemon,

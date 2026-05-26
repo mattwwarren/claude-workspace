@@ -1,28 +1,20 @@
-"""Reconcile cw session state with live worker backends.
+"""Reconcile cw session state with the native Claude daemon.
 
-A cw session is "live" if its ``surface_ref`` is registered with at least
-one backend that supplies a liveness oracle. Today there are two:
-
-- the multiplexer (tmux/cmux/fake) for interactive sessions and legacy
-  daemon-via-tmux paths;
-- the native Claude background daemon for dispatched workers spawned via
-  ``claude --bg`` (see GitHub issue #150).
-
-:func:`compute_drift` unions both backends' live sets and returns a
-:class:`ReconcileReport` naming the sessions whose ``surface_ref``
-appears in neither. :func:`reconcile` applies the report.
+A cw session is "live" if its ``surface_ref`` appears in the roster
+returned by ``claude agents --json``. :func:`compute_drift` checks the
+live set and returns a :class:`ReconcileReport` naming sessions whose
+``surface_ref`` is absent. :func:`reconcile` applies the report.
 
 The split is deliberate: ``compute_drift`` is pure and testable in
 isolation; ``reconcile`` does the side-effecting work (state mutation,
 event emission, dev-queue revert).
 
-Transient-outage safety: ``reconcile`` refuses to mutate state when
-*both* backends report zero live entries but the persisted state still
-contains ACTIVE/IDLE sessions with surface refs. A temporary multiplexer
-hiccup, or a missing/unreadable native roster, would otherwise
-irreversibly mark every session as CRASHED. ``compute_drift`` stays pure
-and does not apply this guard — callers that want drift-without-side-
-effects still get the full phantom list.
+Transient-outage safety: ``reconcile`` refuses to mutate state when the
+daemon cannot be reached (``_claude_agents_json`` raises
+``CalledProcessError``) or returns an empty roster while the persisted
+state still contains ACTIVE/IDLE sessions with surface refs. A transient
+daemon hiccup would otherwise irreversibly mark every session as CRASHED.
+``compute_drift`` stays pure and does not apply this guard.
 
 Race note: ``reconcile`` does ``load_state → mutate → save_state`` without
 a dedicated ``sessions.json`` file lock. This matches every other
@@ -36,6 +28,7 @@ targets.
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -53,9 +46,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
-    from cw.cmux import MultiplexerAdapter
     from cw.models import CwState, Session
-    from cw.native_daemon import NativeDaemonClient
 
 
 # Session-name prefix for DAEMON sessions spawned by the dispatch loop. The
@@ -75,8 +66,8 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 
 
-# Only these two statuses imply "the multiplexer should have a surface".
-# BACKGROUNDED sessions intentionally have no pane (that's the whole point);
+# Only these two statuses imply "the daemon should have a live session".
+# BACKGROUNDED sessions intentionally have no surface (that's the whole point);
 # COMPLETED is terminal. Both are ignored by reconciliation.
 _LIVE_STATUSES: frozenset[SessionStatus] = frozenset(
     {
@@ -85,18 +76,20 @@ _LIVE_STATUSES: frozenset[SessionStatus] = frozenset(
     }
 )
 
-# Shell process names indicating a pane's foreground process is an idle
-# shell — claude (or ``cw run-claude``) has exited and the pane is back
-# at the prompt. A session whose ``pane_current_command`` is in this
-# set is treated as a zombie phantom even though the pane itself still
-# exists. See GitHub issue #144.
-# Known limitation: a user who manually attaches to a cw pane and drops
-# to a subshell will also match this predicate and be reaped on the
-# next reconcile tick. cw auto-spawn does not produce this pattern in
-# normal use.
-_IDLE_SHELL_COMMANDS: frozenset[str] = frozenset(
-    {"bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh"}
-)
+
+def _claude_agents_json() -> list[dict[str, object]]:
+    """Call ``claude agents --json`` and return the parsed list.
+
+    Raises ``subprocess.CalledProcessError`` when the daemon is not running.
+    """
+    proc = subprocess.run(
+        ["claude", "agents", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(proc.stdout)
+    return data if isinstance(data, list) else []
 
 
 @dataclass(frozen=True)
@@ -120,52 +113,26 @@ class ReconcileReport:
 
 def compute_drift(
     state: CwState,
-    adapter: MultiplexerAdapter | None = None,
-    native_daemon: NativeDaemonClient | None = None,
+    native_live: set[str],
 ) -> ReconcileReport:
     """Return a report naming sessions whose surface is no longer live.
 
     An ACTIVE or IDLE session is phantom when:
     - it has a ``surface_ref`` (None means it was never spawned), AND
-    - that ref is not in the multiplexer's live set, AND
-    - that ref is not in the native daemon's live set.
+    - that ref is not in *native_live*.
 
-    The two backends are unioned so a daemon-origin session with a short
-    Claude session id passes liveness via the roster, while an
-    interactive session with a tmux pane ref passes via the adapter.
-
-    *adapter* is optional. When ``None``, the multiplexer side of the union
-    is treated as empty; only the native daemon oracle is consulted. Phase D
-    will drop the adapter parameter entirely once the multiplexer is removed
-    from all call sites.
+    *native_live* is the set of short session IDs reported by
+    ``claude agents --json``; callers obtain it via :func:`_claude_agents_json`.
 
     This function does not mutate state. It also does not distinguish
     "backend reports zero live entries" from "backend is unreachable";
     that guard lives in :func:`reconcile`.
     """
-    daemon = native_daemon or get_native_daemon_client()
-    tmux_live = adapter.list_surfaces() if adapter is not None else set()
-    native_live = daemon.list_live_session_short_ids()
-    # Second-pass zombie filter: panes that exist but whose foreground
-    # process is a bare shell are not actually live cw sessions. An empty
-    # command map means the backend can't enumerate — skip the filter
-    # (fail-open) rather than risk false-positive reaping.
-    surface_commands = (
-        adapter.list_live_surface_commands() if adapter is not None else {}
-    )
-    zombie_refs: set[str] = set()
-    if surface_commands:
-        zombie_refs = {
-            ref for ref, cmd in surface_commands.items() if cmd in _IDLE_SHELL_COMMANDS
-        }
-
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
             continue
         if session.surface_ref is None:
-            continue
-        if session.surface_ref in tmux_live and session.surface_ref not in zombie_refs:
             continue
         if session.surface_ref in native_live:
             continue
@@ -181,23 +148,26 @@ def ticket_id_for_session(session_name: str) -> str | None:
     return None
 
 
-def _looks_like_backend_outage(
-    state: CwState, tmux_live: set[str], native_live: set[str]
+def _looks_like_daemon_outage(
+    state: CwState,
+    daemon_errored: bool,
+    native_live: set[str],
 ) -> bool:
-    """True when both backends are empty and the state still has live refs.
+    """True when the daemon appears unreachable and the state still has live refs.
 
-    If either backend returned a non-empty set, treat its absence on the
-    other as "the other backend has nothing live", not an outage — the
-    common case is dispatch using only the native daemon while the
-    multiplexer is idle (or vice versa).
+    Fires when:
+    - the daemon subprocess raised ``CalledProcessError`` (*daemon_errored*), OR
+    - the daemon returned an empty roster while the persisted state has at
+      least one ACTIVE/IDLE session with a ``surface_ref``.
 
-    If both backends are empty *and* the persisted state has at least one
-    ACTIVE/IDLE session that was once given a surface_ref, assume the
-    backends are unreachable rather than "somehow every session died at
-    once". Aborting here is the difference between a 5-second restart and
-    permanent data loss.
+    In either case, assume the daemon is transiently unreachable rather than
+    "somehow every session died at once". Aborting here is the difference
+    between a 5-second restart and permanent data loss.
+
+    When *native_live* is non-empty the daemon is clearly reachable, so
+    this returns False regardless of *daemon_errored*.
     """
-    if tmux_live or native_live:
+    if not daemon_errored and native_live:
         return False
     return any(
         s.surface_ref is not None and s.status in _LIVE_STATUSES for s in state.sessions
@@ -299,10 +269,7 @@ def revert_stalled_headless_sessions(
     return reverted
 
 
-def reconcile(
-    adapter: MultiplexerAdapter | None = None,
-    native_daemon: NativeDaemonClient | None = None,
-) -> ReconcileReport:
+def reconcile() -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
     Flips phantom ACTIVE/IDLE sessions to COMPLETED with
@@ -312,12 +279,8 @@ def reconcile(
     the dispatch loop will retry.
 
     Returns an empty report without mutating state when
-    :func:`_looks_like_backend_outage` matches — a transient multiplexer
-    restart (or a missing native roster) must not trigger mass-reaping.
-
-    *adapter* is optional. When ``None``, the multiplexer side is treated
-    as empty; only the native daemon oracle is consulted. Phase D will drop
-    the adapter parameter entirely.
+    :func:`_looks_like_daemon_outage` matches — a transient daemon hiccup
+    must not trigger mass-reaping.
 
     Partial-failure note: state and the dev queue are separate files. If
     ``save_state`` succeeds but the subsequent dev-queue update raises,
@@ -327,24 +290,31 @@ def reconcile(
     only be recovered by explicit operator action. This is an acceptable
     tradeoff for a file-based, single-user tool.
     """
-    daemon = native_daemon or get_native_daemon_client()
     state = load_state()
     now = datetime.now(UTC)
 
     # Passive budget sweep: catches headless DAEMON sessions whose agent
     # stalled mid-turn and produced no further Stop hook firings. Runs before
-    # the outage guard so a backend hiccup does not delay budget enforcement.
+    # the outage guard so a daemon hiccup does not delay budget enforcement.
     # See GitHub issue #185.
     stalled_reverted = revert_stalled_headless_sessions(
         state, now=now, budget_seconds=HEADLESS_TIMEOUT_SECONDS
     )
 
-    tmux_live = adapter.list_surfaces() if adapter is not None else set()
-    native_live = daemon.list_live_session_short_ids()
-    if _looks_like_backend_outage(state, tmux_live, native_live):
+    try:
+        native_live = {
+            sid
+            for a in _claude_agents_json()
+            if isinstance(sid := a.get("sessionId"), str)
+        }
+        daemon_errored = False
+    except subprocess.CalledProcessError:
+        native_live = set()
+        daemon_errored = True
+    if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
-    drift = compute_drift(state, adapter, daemon)
+    drift = compute_drift(state, native_live)
     if not drift.phantom_session_ids:
         # No phantom sessions to reap, but still run the TIMED_OUT and
         # COMPLETED-silent sweeps so any tasks whose sessions completed or

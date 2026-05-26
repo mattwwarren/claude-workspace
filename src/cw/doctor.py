@@ -1,9 +1,8 @@
 """cw doctor preflight — report environment health in one place.
 
-When a user's environment doesn't satisfy the chosen backend (no tmux,
-cmux daemon not running, state file corrupted), every cw command fails
-deep in an adapter with a cryptic error. `cw doctor` is the one place
-to find out *what* is wrong before you start a session.
+When the environment is missing required binaries or the state file is
+corrupted, every cw command fails with a cryptic error. `cw doctor` is
+the one place to find out *what* is wrong before starting a session.
 
 Returns structured results so the CLI can format them and tests can
 assert on specific checks.
@@ -12,17 +11,15 @@ assert on specific checks.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
 
 from cw import __version__
-from cw.cmux import _resolve_backend_name, get_cmux_adapter
 from cw.config import (
     clients_file,
     load_clients,
@@ -32,9 +29,11 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
-from cw.models import BackendName, CwState, Session
 from cw.native_daemon import _ROSTER_PATH
 from cw.reconcile import reconcile
+
+if TYPE_CHECKING:
+    from cw.models import CwState, Session
 
 
 @dataclass(frozen=True)
@@ -52,7 +51,6 @@ class DoctorReport:
     """Aggregated output from :func:`run_doctor`."""
 
     version: str
-    backend: BackendName
     checks: list[CheckResult] = field(default_factory=list)
 
     @property
@@ -65,10 +63,6 @@ class DoctorReport:
         return all(c.ok and not c.warn for c in self.checks)
 
 
-_CMUX_SOCKET_PATH = (
-    Path.home() / "Library" / "Application Support" / "cmux" / "cmux.sock"
-)
-
 # Path to Claude Code user settings — read for the disclaimer-acceptance flag.
 _CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
@@ -77,37 +71,6 @@ _MIN_CLAUDE_VERSION = (2, 1, 139)
 
 # Number of components (major.minor.patch) required in a version string.
 _VERSION_PARTS = 3
-
-
-def _check_backend_binary(backend: BackendName) -> CheckResult:
-    """Check whether the chosen backend's binary/daemon is reachable."""
-    if backend is BackendName.TMUX:
-        path = shutil.which("tmux")
-        if path:
-            return CheckResult("tmux on PATH", ok=True, detail=path)
-        return CheckResult(
-            "tmux on PATH",
-            ok=False,
-            detail="tmux not found; install via brew/apt or set CW_BACKEND=cmux",
-        )
-    if backend is BackendName.CMUX:
-        if sys.platform != "darwin":
-            return CheckResult(
-                "cmux daemon",
-                ok=False,
-                detail=f"cmux requires macOS; running on {sys.platform}",
-            )
-        if _CMUX_SOCKET_PATH.exists():
-            return CheckResult(
-                "cmux daemon socket", ok=True, detail=str(_CMUX_SOCKET_PATH)
-            )
-        return CheckResult(
-            "cmux daemon socket",
-            ok=False,
-            detail=f"not found at {_CMUX_SOCKET_PATH}; is cmux running?",
-        )
-    # fake backend needs no binary
-    return CheckResult("fake backend (no binary required)", ok=True, detail="")
 
 
 def _check_config_file() -> CheckResult:
@@ -260,15 +223,7 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
 def _check_reconcile() -> CheckResult:
     """Run reconciliation and describe the outcome as a check result."""
     try:
-        adapter = get_cmux_adapter()
-    except CwError as exc:
-        return CheckResult(
-            "reconciliation",
-            ok=False,
-            detail=f"adapter unavailable: {exc}",
-        )
-    try:
-        reconcile_report = reconcile(adapter)
+        reconcile_report = reconcile()
     except CwError as exc:
         return CheckResult(
             "reconciliation",
@@ -292,17 +247,14 @@ def _check_reconcile() -> CheckResult:
 def run_doctor(*, reap: bool = False) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
-    When *reap* is True, also run multiplexer/state reconciliation and
-    append a ``reconciliation`` check summarising the number of reaped
-    sessions and reverted tickets.
+    When *reap* is True, also run state reconciliation and append a
+    ``reconciliation`` check summarising the number of reaped sessions and
+    reverted tickets.
 
     Linkage drift checks (parent/worker reference integrity) are always run,
     independent of the *reap* flag.
     """
-    backend = _resolve_backend_name()
-    report = DoctorReport(version=__version__, backend=backend)
-    report.checks.append(CheckResult("resolved backend", ok=True, detail=backend.value))
-    report.checks.append(_check_backend_binary(backend))
+    report = DoctorReport(version=__version__)
     report.checks.append(_check_config_file())
     report.checks.append(_check_orchestrator_config())
     state_check, link_state = _check_state_file()

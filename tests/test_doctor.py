@@ -10,7 +10,6 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
-from cw.models import BackendName
 
 if TYPE_CHECKING:
     import pytest
@@ -33,65 +32,29 @@ def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestRunDoctorFakeBackend:
-    """When CW_BACKEND=fake the backend binary check is a no-op."""
-
-    def test_resolved_backend_is_fake(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
-    ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "fake")
-        _stub_claude_version_ok(monkeypatch)
-        report = run_doctor()
-        assert report.backend is BackendName.FAKE
-        assert report.ok
+    """run_doctor returns a healthy report on the fake backend."""
 
     def test_report_includes_version(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "fake")
+        _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         assert report.version
 
-
-class TestRunDoctorTmuxBackend:
-    def test_tmux_missing_is_reported_as_failure(
+    def test_report_ok_on_fake_backend(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "tmux")
-        monkeypatch.setattr("cw.doctor.shutil.which", lambda _name: None)
-        report = run_doctor()
-        assert not report.ok
-        failing = [c for c in report.checks if not c.ok]
-        assert any("tmux" in c.name for c in failing)
-
-    def test_tmux_on_path_passes(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
-    ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "tmux")
-        monkeypatch.setattr("cw.doctor.shutil.which", lambda _name: "/usr/bin/tmux")
         _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         assert report.ok
 
 
-class TestRunDoctorCmuxBackend:
-    def test_cmux_non_darwin_is_reported_as_failure(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
-    ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "cmux")
-        monkeypatch.setattr("cw.doctor.sys.platform", "linux")
-        report = run_doctor()
-        assert not report.ok
-        failing = [c for c in report.checks if not c.ok]
-        assert any("cmux" in c.name for c in failing)
-
-
 class TestFormatReport:
-    def test_render_contains_ok_and_fail_markers(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
-    ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "tmux")
-        monkeypatch.setattr("cw.doctor.shutil.which", lambda _name: None)
-        report = run_doctor()
+    def test_render_contains_ok_and_fail_markers(self) -> None:
+        report = DoctorReport(
+            version="0.0.0",
+            checks=[CheckResult("check-fail", ok=False, detail="broken")],
+        )
         rendered = format_report(report)
         assert "FAIL" in rendered
         assert "status: problems detected" in rendered
@@ -99,7 +62,6 @@ class TestFormatReport:
     def test_healthy_report_ends_with_healthy(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "fake")
         _stub_claude_version_ok(monkeypatch)
         report = run_doctor()
         rendered = format_report(report)
@@ -110,7 +72,6 @@ class TestDoctorCli:
     def test_cli_exit_zero_on_healthy(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "fake")
         _stub_claude_version_ok(monkeypatch)
         runner = CliRunner()
         result = runner.invoke(main, ["doctor"])
@@ -120,8 +81,14 @@ class TestDoctorCli:
     def test_cli_exit_nonzero_on_failure(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
-        monkeypatch.setenv("CW_BACKEND", "tmux")
-        monkeypatch.setattr("cw.doctor.shutil.which", lambda _name: None)
+        # Simulate a failing check by stubbing run_doctor to return a failing report.
+        monkeypatch.setattr(
+            "cw.cli.run_doctor",
+            lambda **_kwargs: DoctorReport(
+                version="0.0.0",
+                checks=[CheckResult("check-fail", ok=False, detail="broken")],
+            ),
+        )
         runner = CliRunner()
         result = runner.invoke(main, ["doctor"])
         assert result.exit_code != 0
@@ -134,7 +101,6 @@ def test_run_doctor_reap_flag_reconciles_and_reports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """run_doctor(reap=True) invokes reconcile and reports reaped sessions."""
-    from cw.cmux import FakeCmuxAdapter
     from cw.config import load_state, save_state
     from cw.doctor import run_doctor
     from cw.models import CwState, Session, SessionPurpose, SessionStatus
@@ -155,14 +121,12 @@ def test_run_doctor_reap_flag_reconciles_and_reports(
         )
     )
 
-    def _adapter_with_decoy() -> FakeCmuxAdapter:
-        # Non-empty live set bypasses reconcile's outage guard; "gone" still
-        # isn't live so phantom is still reaped.
-        a = FakeCmuxAdapter()
-        a.spawn("decoy-ws", "echo")
-        return a
-
-    monkeypatch.setattr("cw.doctor.get_cmux_adapter", _adapter_with_decoy)
+    # Non-empty live set bypasses reconcile's outage guard; "gone" still
+    # isn't live so phantom is still reaped.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
 
     report = run_doctor(reap=True)
     reap_checks = [c for c in report.checks if c.name == "reconciliation"]
@@ -188,7 +152,6 @@ def test_cw_doctor_cli_reap_flag(
 
     # Force fake backend so the binary/socket check passes on every platform
     # (macOS default is cmux, whose socket does not exist in CI).
-    monkeypatch.setenv("CW_BACKEND", "fake")
     _stub_claude_version_ok(monkeypatch)
     runner = CliRunner()
     result = runner.invoke(main, ["doctor", "--reap"])
@@ -213,7 +176,6 @@ class TestCheckLinkageHealthy:
         from cw.config import save_state
         from cw.models import CwState
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(CwState(sessions=[]))
         report = run_doctor()
         linkage_checks = [c for c in report.checks if c.name.startswith("linkage/")]
@@ -230,7 +192,6 @@ class TestCheckLinkageHealthy:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -268,7 +229,6 @@ class TestCheckLinkageHealthy:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -321,7 +281,6 @@ class TestCheckLinkageDanglingWorker:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -355,7 +314,6 @@ class TestCheckLinkageDanglingWorker:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -393,7 +351,6 @@ class TestCheckLinkageDanglingParent:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -428,7 +385,6 @@ class TestCheckLinkageDanglingParent:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -475,7 +431,6 @@ class TestCheckLinkageAsymmetric:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -516,7 +471,6 @@ class TestCheckLinkageAsymmetric:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -565,7 +519,6 @@ class TestCheckLinkageAsymmetric:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         save_state(
             CwState(
                 sessions=[
@@ -608,7 +561,6 @@ class TestCheckLinkageIndependence:
         """If state.json is corrupt, linkage checks are skipped (not crashed)."""
         from cw.config import state_file
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         # Write corrupt JSON to the state file
         state_file().parent.mkdir(parents=True, exist_ok=True)
         state_file().write_text("{not valid json}")
@@ -628,7 +580,6 @@ class TestCheckLinkageIndependence:
         from cw.config import save_state
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
-        monkeypatch.setenv("CW_BACKEND", "fake")
         _stub_claude_version_ok(monkeypatch)
         save_state(
             CwState(
@@ -791,7 +742,6 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
     from click.testing import CliRunner
 
     from cw.cli import main
-    from cw.cmux import FakeCmuxAdapter
     from cw.config import save_state
     from cw.dev_queue import load_dev_queue, save_dev_queue
     from cw.models import (
@@ -806,7 +756,6 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
         TicketTask,
     )
 
-    monkeypatch.setenv("CW_BACKEND", "fake")
     _stub_claude_version_ok(monkeypatch)
 
     comp_session = Session(
@@ -831,11 +780,6 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
         session_id="comp-doctor-1",
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-
-    def _fake_adapter() -> FakeCmuxAdapter:
-        return FakeCmuxAdapter()
-
-    monkeypatch.setattr("cw.doctor.get_cmux_adapter", _fake_adapter)
 
     runner = CliRunner()
     result = runner.invoke(main, ["doctor", "--reap"])
@@ -911,7 +855,6 @@ class TestRunDoctor10Checks:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """run_doctor() includes bypass-disclaimer, claude-version, daemon-reachable."""
-        monkeypatch.setenv("CW_BACKEND", "fake")
         settings_path = tmp_config_dir / ".claude" / "settings.json"
         roster_path = tmp_config_dir / ".claude" / "daemon" / "roster.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -935,7 +878,6 @@ class TestRunDoctor10Checks:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """settings.json with {} → bypass-disclaimer is ok=True warn=True."""
-        monkeypatch.setenv("CW_BACKEND", "fake")
         self._monkeypatch_paths(
             monkeypatch,
             tmp_config_dir,
@@ -951,7 +893,6 @@ class TestRunDoctor10Checks:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """settings.json with flag set → bypass-disclaimer ok=True warn=False."""
-        monkeypatch.setenv("CW_BACKEND", "fake")
         self._monkeypatch_paths(
             monkeypatch,
             tmp_config_dir,
@@ -967,7 +908,6 @@ class TestRunDoctor10Checks:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """No roster file → daemon-reachable is ok=True warn=True."""
-        monkeypatch.setenv("CW_BACKEND", "fake")
         # Provide settings so bypass-disclaimer doesn't interfere
         self._monkeypatch_paths(
             monkeypatch,
@@ -984,7 +924,6 @@ class TestRunDoctor10Checks:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """roster with supervisorPid: 12345 → daemon-reachable is ok=True warn=False."""
-        monkeypatch.setenv("CW_BACKEND", "fake")
         self._monkeypatch_paths(
             monkeypatch,
             tmp_config_dir,
@@ -1000,7 +939,6 @@ class TestRunDoctor10Checks:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """roster with workers but no supervisorPid → WARN, no KeyError."""
-        monkeypatch.setenv("CW_BACKEND", "fake")
         self._monkeypatch_paths(
             monkeypatch,
             tmp_config_dir,
@@ -1016,7 +954,6 @@ class TestRunDoctor10Checks:
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """FileNotFoundError from claude binary → claude-version is ok=False."""
-        monkeypatch.setenv("CW_BACKEND", "fake")
 
         def fake_run_not_found(*_a: object, **_kw: object) -> object:
             msg = "no claude"
@@ -1040,7 +977,6 @@ def test_report_ok_unaffected_by_warn_checks() -> None:
     warn_check = CheckResult("bypass-disclaimer", ok=True, warn=True, detail="not set")
     report = DoctorReport(
         version="0.0.0",
-        backend=BackendName.FAKE,
         checks=[warn_check],
     )
     assert report.ok is True
@@ -1058,7 +994,6 @@ class TestFormatReportFooter:
         """Only OK checks (no WARN, no FAIL) → 'status: healthy'."""
         report = DoctorReport(
             version="0.0.0",
-            backend=BackendName.FAKE,
             checks=[
                 CheckResult("check-a", ok=True, warn=False, detail=""),
                 CheckResult("check-b", ok=True, warn=False, detail=""),
@@ -1071,7 +1006,6 @@ class TestFormatReportFooter:
         """Any WARN check (ok=True, warn=True) → advisory footer, not plain healthy."""
         report = DoctorReport(
             version="0.0.0",
-            backend=BackendName.FAKE,
             checks=[
                 CheckResult("bypass-disclaimer", ok=True, warn=True, detail="not set"),
                 CheckResult("check-ok", ok=True, warn=False, detail=""),
@@ -1087,7 +1021,6 @@ class TestFormatReportFooter:
         """Any FAIL check → 'status: problems detected'."""
         report = DoctorReport(
             version="0.0.0",
-            backend=BackendName.FAKE,
             checks=[
                 CheckResult("check-fail", ok=False, warn=False, detail="broken"),
             ],
@@ -1100,7 +1033,6 @@ class TestFormatReportFooter:
         """DoctorReport.clean is True only when every check is ok and not warned."""
         report = DoctorReport(
             version="0.0.0",
-            backend=BackendName.FAKE,
             checks=[CheckResult("x", ok=True, warn=False, detail="")],
         )
         assert report.clean is True
@@ -1109,7 +1041,6 @@ class TestFormatReportFooter:
         """DoctorReport.clean is False when any check has warn=True."""
         report = DoctorReport(
             version="0.0.0",
-            backend=BackendName.FAKE,
             checks=[
                 CheckResult("x", ok=True, warn=True, detail=""),
                 CheckResult("y", ok=True, warn=False, detail=""),
@@ -1121,7 +1052,6 @@ class TestFormatReportFooter:
         """DoctorReport.clean is False when any check has ok=False."""
         report = DoctorReport(
             version="0.0.0",
-            backend=BackendName.FAKE,
             checks=[CheckResult("x", ok=False, warn=False, detail="")],
         )
         assert report.clean is False
