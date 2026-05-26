@@ -539,3 +539,26 @@ class TestChannelPosting:
             _post_to_channel("merged", "owner/repo", 1, {})
 
         assert captured_netlocs == ["custom-host:9999"]
+
+
+# ---------------------------------------------------------------------------
+# run_watcher_tick regression guard
+# ---------------------------------------------------------------------------
+
+
+def test_run_watcher_tick_does_not_call_respond_to_pr_events() -> None:
+    """respond_to_pr_events must NOT be imported or called in run_watcher_tick.
+
+    The orchestrator skill (cw-orchestrator.md) replaced the in-daemon
+    dispatch role of pr_responder.respond_to_pr_events(). This regression
+    guard ensures the import stays removed.
+    """
+    import importlib
+
+    import cw.daemon
+
+    importlib.reload(cw.daemon)
+    assert not hasattr(cw.daemon, "respond_to_pr_events"), (
+        "respond_to_pr_events must not be imported in cw.daemon — "
+        "the orchestrator skill replaced its dispatch role"
+    )
