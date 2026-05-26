@@ -1901,3 +1901,18 @@ def spawn_close(session_id: str) -> None:
     """
     _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")
+
+
+@main.group(name="pr-channel")
+def pr_channel() -> None:
+    """PR channel server: push MCP notifications to subscribed Claude sessions."""
+
+
+@pr_channel.command(name="serve")
+@click.option("--port", default=8788, type=int, show_default=True)
+@click.option("--host", default="127.0.0.1", show_default=True)
+def pr_channel_serve(port: int, host: str) -> None:
+    """Start the cw-pr-events MCP channel server."""
+    from cw.cw_pr_events_server import serve as _serve  # noqa: PLC0415
+
+    _serve(host=host, port=port)

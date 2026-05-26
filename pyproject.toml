@@ -139,3 +139,12 @@ python_version = "3.13"
 strict = true
 mypy_path = "src"
 packages = ["cw"]
+
+[[tool.mypy.overrides]]
+# starlette, mcp, uvicorn are optional extras; ignore missing stubs when not installed
+module = [
+    "starlette.*",
+    "mcp.*",
+    "uvicorn",
+]
+ignore_missing_imports = true
