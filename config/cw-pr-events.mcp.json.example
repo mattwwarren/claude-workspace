@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cw-pr-events": {
+      "command": "cw",
+      "args": ["pr-channel", "proxy", "--client-id", "your-session-id"],
+      "env": {
+        "CW_PR_EVENTS_BASE_URL": "http://127.0.0.1:8788"
+      }
+    }
+  }
+}
