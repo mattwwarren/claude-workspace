@@ -4,8 +4,7 @@ This module closes the loop on the orchestrator pipeline:
 
 * :func:`retire_merged_prs` consumes ``pr.merged`` events, removes the PR
   from review-monitor's persisted state, marks correlated sessions as
-  ``COMPLETED`` (reason ``HANDOFF``), closes their cmux surfaces, and
-  emits ``session.completed`` events.
+  ``COMPLETED`` (reason ``HANDOFF``), and emits ``session.completed`` events.
 
 * :func:`orchestrator_status` returns a snapshot of the orchestrator's
   current state -- pending dev-queue tickets, running sessions, monitored
@@ -31,7 +30,6 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from cw.cmux import get_cmux_adapter
 from cw.config import load_state, review_monitor_dir, save_state
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
@@ -53,8 +51,6 @@ from cw.pr_responder import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from cw.cmux import CmuxAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -143,21 +139,22 @@ def _sessions_for_pr(
 
 def _close_session(
     sess: Session,
-    adapter: CmuxAdapter,
     *,
     pr_number: int,
     repo: str,
 ) -> None:
-    """Close a session: mark COMPLETED, close surface, emit event."""
+    """Close a session: mark COMPLETED and emit event.
+
+    Multiplexer surface close is intentionally omitted: the native daemon
+    manages session lifetime.  Legacy ``surface_ref`` values on existing
+    records are logged and skipped rather than passed to a now-removed adapter.
+    """
     if sess.surface_ref is not None:
-        try:
-            adapter.close(sess.surface_ref)
-        except Exception:
-            logger.exception(
-                "Failed to close cmux surface %s for session %s",
-                sess.surface_ref,
-                sess.id,
-            )
+        logger.warning(
+            "Session %s has legacy surface_ref %r; skipping surface close",
+            sess.id,
+            sess.surface_ref,
+        )
 
     sess.status = SessionStatus.COMPLETED
     sess.completed_reason = CompletionReason.HANDOFF
@@ -175,7 +172,6 @@ def _close_session(
 
 
 def retire_merged_prs(
-    adapter: CmuxAdapter | None = None,
     *,
     runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
 ) -> list[str]:
@@ -186,8 +182,8 @@ def retire_merged_prs(
     1. Invoke ``review_monitor.py complete`` to remove the PR from
        monitoring state.
     2. Look up sessions correlated to the PR via :class:`PRDispatchRecord`.
-    3. Close each session's cmux surface, mark it ``COMPLETED`` with
-       reason ``HANDOFF``, and emit a ``session.completed`` event.
+    3. Mark each session ``COMPLETED`` with reason ``HANDOFF`` and emit a
+       ``session.completed`` event.
     4. Drop the dispatch record entries so subsequent ticks see no
        lingering correlation.
 
@@ -195,8 +191,6 @@ def retire_merged_prs(
     no new ``pr.merged`` events is a no-op.
 
     Args:
-        adapter: CmuxAdapter for surface close calls.  Defaults to
-            :func:`cw.cmux.get_cmux_adapter`.
         runner: Optional subprocess runner override (for tests).
 
     Returns:
@@ -212,10 +206,6 @@ def retire_merged_prs(
     state = load_state()
     dispatch_record = load_dispatch_record()
     retired: list[str] = []
-    # Resolve the adapter lazily — only when we actually have a session to
-    # close. On Linux, `get_cmux_adapter()` crashes at instantiation, so
-    # `retire_merged_prs` with no matching sessions must not trigger it.
-    resolved_adapter: CmuxAdapter | None = adapter
 
     for event in events:
         payload = event.payload
@@ -261,11 +251,8 @@ def retire_merged_prs(
                 dispatch_record.active.pop(dispatch_key, None)
                 continue
 
-            if resolved_adapter is None:
-                resolved_adapter = get_cmux_adapter()
             _close_session(
                 sess,
-                resolved_adapter,
                 pr_number=pr_number,
                 repo=repo,
             )

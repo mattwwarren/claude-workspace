@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import subprocess
 import sys
 from collections.abc import Callable
@@ -16,7 +17,6 @@ from click.shell_completion import CompletionItem
 
 from cw import __version__
 from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
-from cw.cmux import CmuxAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
     init_client,
@@ -421,20 +421,16 @@ def _display_sessions() -> None:
 
 
 def _check_and_mark_dead_sessions() -> list[str]:
-    """Reconcile state with the live multiplexer and return reaped session names.
+    """Reconcile state with the native daemon and return reaped session names.
 
     Cheap passive reconciliation: called from every read path (``cw status``,
     ``cw list``, ``cw start``). The reconciler is idempotent and returns an
     empty list when nothing changed. :func:`cw.reconcile.reconcile` refuses
-    to mass-reap when both backends report empty live sets while active
-    sessions still have surface refs (backend-outage guard), so this helper
+    to mass-reap when the daemon is unreachable or the roster is empty while
+    active sessions still have surface refs (outage guard), so this helper
     is safe to run on every read path.
     """
-    try:
-        adapter = get_cmux_adapter()
-    except CwError:
-        return []
-    report = reconcile(adapter, get_native_daemon_client())
+    report = reconcile()
     return list(report.phantom_session_names)
 
 
@@ -1583,8 +1579,7 @@ def orchestrate_status(as_json: bool) -> None:
 @handle_errors
 def orchestrate_retire() -> None:
     """Run a single PR-retirement pass and print retired session IDs."""
-    adapter = get_cmux_adapter()
-    retired = retire_merged_prs(adapter=adapter)
+    retired = retire_merged_prs()
     if not retired:
         click.echo("No sessions retired.")
         return
@@ -1763,16 +1758,14 @@ def _spawn_create_impl(
 def _spawn_close_impl(
     *,
     session_id: str,
-    adapter: CmuxAdapter,
     native_daemon: NativeDaemonClient | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
-    Routes the underlying-backend close call based on session origin: a
-    DAEMON-origin session was spawned via ``claude --bg`` and is stopped
-    via the native daemon, while a USER-origin session lives in the
-    multiplexer and is closed via the adapter. Separated from the Click
-    command so tests can inject both clients directly.
+    DAEMON-origin sessions are stopped via the native daemon client.
+    USER-origin sessions with a legacy ``surface_ref`` are logged and
+    skipped — the multiplexer adapter has been removed. Separated from
+    the Click command so tests can inject the daemon client directly.
     """
     state = load_state()
     sess = state.find_by_name_or_id(session_id)
@@ -1788,7 +1781,11 @@ def _spawn_close_impl(
             daemon = native_daemon or get_native_daemon_client()
             daemon.stop(sess.surface_ref)
         else:
-            adapter.close(sess.surface_ref)
+            logging.getLogger(__name__).warning(
+                "Session %s has legacy surface_ref %r; skipping surface close",
+                sess.id,
+                sess.surface_ref,
+            )
 
     sess.status = SessionStatus.COMPLETED
     sess.completed_at = datetime.now(UTC)
@@ -1869,24 +1866,11 @@ def spawn(
 def spawn_close(session_id: str) -> None:
     """Close a spawned session by session ID.
 
-    Calls adapter.close on the associated surface and marks the session
-    as COMPLETED.
+    Stops the session via the native daemon and marks it as COMPLETED.
 
     \b
     Example:
       cw spawn close abc12345
     """
-    # Validate session exists before acquiring the adapter (adapter may fail on
-    # non-macOS when cmux is not installed).
-    state = load_state()
-    sess = state.find_by_name_or_id(session_id)
-    if sess is None:
-        not_found_msg = f"Session '{session_id}' not found."
-        raise CwError(not_found_msg)
-    if sess.status == SessionStatus.COMPLETED:
-        already_done_msg = f"Session '{session_id}' is already completed."
-        raise CwError(already_done_msg)
-
-    adapter = get_cmux_adapter()
-    _spawn_close_impl(session_id=session_id, adapter=adapter)
+    _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")

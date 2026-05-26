@@ -11,7 +11,6 @@ import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket
 from cw.events import read_events, record_event
@@ -59,12 +58,6 @@ def workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "workspace" / "test-project"
     ws.mkdir(parents=True)
     return ws
-
-
-@pytest.fixture
-def adapter() -> FakeCmuxAdapter:
-    """A fresh FakeCmuxAdapter for each test."""
-    return FakeCmuxAdapter()
 
 
 @pytest.fixture
@@ -173,19 +166,16 @@ class TestRetireMergedPRs:
     def test_no_events_returns_empty_list(
         self,
         tmp_orchestrate_dirs: Path,
-        adapter: FakeCmuxAdapter,
         fake_runner: tuple[list[list[str]], object],
     ) -> None:
         """When there are no pr.merged events, retirement is a no-op."""
         _calls, runner = fake_runner
-        retired = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
         assert retired == []
-        assert adapter.calls["close"] == []
 
     def test_retires_correlated_session(
         self,
         tmp_orchestrate_dirs: Path,
-        adapter: FakeCmuxAdapter,
         workspace: Path,
         fake_runner: tuple[list[list[str]], object],
     ) -> None:
@@ -197,7 +187,7 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 42)
 
         calls, runner = fake_runner
-        retired = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
 
         # Returned list contains the session ID.
         assert retired == ["sess0001"]
@@ -216,9 +206,6 @@ class TestRetireMergedPRs:
         assert updated.completed_reason == CompletionReason.HANDOFF
         assert updated.completed_at is not None
 
-        # Cmux surface was closed.
-        assert adapter.calls["close"] == [("pane-7",)]
-
         # session.completed event was emitted.
         events = read_events(event_types=[OrchestratorEventType.SESSION_COMPLETED])
         assert len(events) == 1
@@ -231,7 +218,6 @@ class TestRetireMergedPRs:
     def test_idempotent_second_call_noop(
         self,
         tmp_orchestrate_dirs: Path,
-        adapter: FakeCmuxAdapter,
         workspace: Path,
         fake_runner: tuple[list[list[str]], object],
     ) -> None:
@@ -242,19 +228,18 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 9)
 
         calls, runner = fake_runner
-        first = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        first = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
         assert first == ["sess0010"]
         assert len(calls) == 1
 
         # Second call: cursor advanced, nothing left to do.
-        second = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        second = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
         assert second == []
         assert len(calls) == 1  # no additional review-monitor invocations
 
     def test_dispatch_record_entry_removed(
         self,
         tmp_orchestrate_dirs: Path,
-        adapter: FakeCmuxAdapter,
         workspace: Path,
         fake_runner: tuple[list[list[str]], object],
     ) -> None:
@@ -265,7 +250,7 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 11)
 
         _calls, runner = fake_runner
-        retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        retire_merged_prs(runner=runner)  # type: ignore[arg-type]
 
         from cw.pr_responder import load_dispatch_record
 
@@ -275,8 +260,6 @@ class TestRetireMergedPRs:
     def test_no_dispatch_match_only_calls_review_monitor(
         self,
         tmp_orchestrate_dirs: Path,
-        adapter: FakeCmuxAdapter,
-        workspace: Path,
         fake_runner: tuple[list[list[str]], object],
     ) -> None:
         """A merged PR with no correlated sessions still cleans monitor state."""
@@ -284,16 +267,14 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/other", 5)
 
         calls, runner = fake_runner
-        retired = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
 
         assert retired == []
         assert len(calls) == 1
-        assert adapter.calls["close"] == []
 
     def test_completed_session_skipped_but_record_dropped(
         self,
         tmp_orchestrate_dirs: Path,
-        adapter: FakeCmuxAdapter,
         workspace: Path,
         fake_runner: tuple[list[list[str]], object],
     ) -> None:
@@ -304,10 +285,9 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 14)
 
         _calls, runner = fake_runner
-        retired = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
 
         assert retired == []
-        assert adapter.calls["close"] == []
 
         from cw.pr_responder import load_dispatch_record
 
@@ -316,7 +296,6 @@ class TestRetireMergedPRs:
     def test_invalid_pr_number_advances_cursor(
         self,
         tmp_orchestrate_dirs: Path,
-        adapter: FakeCmuxAdapter,
         fake_runner: tuple[list[list[str]], object],
     ) -> None:
         """A pr.merged event without a usable pr_number is skipped, cursor advances."""
@@ -326,43 +305,15 @@ class TestRetireMergedPRs:
         )
 
         calls, runner = fake_runner
-        retired = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
 
         assert retired == []
         # review_monitor.py was NOT invoked because pr_number was invalid.
         assert calls == []
 
         # Second call is a no-op (cursor advanced).
-        retired_second = retire_merged_prs(adapter=adapter, runner=runner)  # type: ignore[arg-type]
+        retired_second = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
         assert retired_second == []
-
-    def test_no_matches_skips_platform_adapter_resolution(
-        self,
-        tmp_orchestrate_dirs: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        fake_runner: tuple[list[list[str]], object],
-    ) -> None:
-        """Regression: when no session matches, the adapter factory is not called.
-
-        `RealCmuxAdapter.__init__` crashes on non-Darwin. If
-        `retire_merged_prs` eagerly called `get_cmux_adapter()` before
-        checking whether any sessions needed closing, a Linux user with
-        zero matches would crash even though no adapter work is needed.
-        """
-        from cw import orchestrate as orch
-
-        def _boom() -> None:
-            msg = "RealCmuxAdapter requires macOS"
-            raise CwError(msg)
-
-        monkeypatch.setattr(orch, "get_cmux_adapter", _boom)
-
-        save_state(CwState(sessions=[]))
-        _seed_pr_merged("owner/other", 99)
-
-        _calls, runner = fake_runner
-        retired = orch.retire_merged_prs(runner=runner)  # type: ignore[arg-type]
-        assert retired == []
 
 
 # ---------------------------------------------------------------------------

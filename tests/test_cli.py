@@ -2424,9 +2424,6 @@ class TestShowStatus:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from cw.cmux import FakeCmuxAdapter
-
-        monkeypatch.setattr("cw.cli.get_cmux_adapter", FakeCmuxAdapter)
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
@@ -2453,16 +2450,12 @@ class TestShowStatus:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """_check_and_mark_dead_sessions reaps sessions whose surface is gone."""
-        from cw.cmux import FakeCmuxAdapter
-
-        def _adapter_with_decoy() -> FakeCmuxAdapter:
-            # Non-empty live set prevents reconcile's outage guard from
-            # refusing to mutate state (see cw.reconcile._looks_like_backend_outage).
-            a = FakeCmuxAdapter()
-            a.spawn("decoy-ws", "echo")
-            return a
-
-        monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
+        # Non-empty live set prevents reconcile's outage guard from
+        # refusing to mutate state; "impl" ref still isn't live so phantom is reaped.
+        monkeypatch.setattr(
+            "cw.reconcile._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -2834,7 +2827,6 @@ def test_display_status_reconciles_phantom_active_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`cw status` reports and reaps sessions with missing surfaces."""
-    from cw.cmux import FakeCmuxAdapter
     from cw.config import load_state, save_state
     from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
@@ -2856,12 +2848,10 @@ def test_display_status_reconciles_phantom_active_sessions(
 
     # Non-empty live set prevents the outage guard from aborting reconcile;
     # the "gone" surface_ref still isn't in the set so phantom1 is reaped.
-    def _adapter_with_decoy() -> FakeCmuxAdapter:
-        a = FakeCmuxAdapter()
-        a.spawn("decoy-ws", "echo")
-        return a
-
-    monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
 
     runner = CliRunner()
     result = runner.invoke(main, ["status"])

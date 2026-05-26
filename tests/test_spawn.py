@@ -10,7 +10,6 @@ import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
 from cw.models import (
@@ -761,10 +760,9 @@ class TestSpawnClose:
         from cw.cli import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id=sess.id, adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
 
         state = load_state()
         closed = state.find_by_name_or_id(sess.id)
@@ -776,22 +774,20 @@ class TestSpawnClose:
     def test_daemon_close_routes_through_native_daemon(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """DAEMON-origin sessions get stopped via claude stop, not adapter.close."""
+        """DAEMON-origin sessions are stopped via the native daemon client."""
         from cw.cli import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id=sess.id, adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
 
         assert daemon.stop_calls == ["abc12345"]
-        assert adapter.calls["close"] == []
 
-    def test_user_origin_close_routes_through_adapter(
+    def test_user_origin_legacy_surface_ref_skipped(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """USER-origin sessions still close via the multiplexer adapter."""
+        """USER-origin sessions with legacy surface_ref are logged and skipped."""
         from cw.cli import _spawn_close_impl
 
         workspace = tmp_path / "workspace" / "test-client"
@@ -807,13 +803,17 @@ class TestSpawnClose:
             surface_ref="tmux-pane-7",
         )
         save_state(CwState(sessions=[sess]))
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id="user0001", adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id="user0001", native_daemon=daemon)
 
-        assert adapter.calls["close"] == [("tmux-pane-7",)]
+        # No native daemon stop (not a DAEMON session)
         assert daemon.stop_calls == []
+        # Session still marked COMPLETED
+        state = load_state()
+        closed = state.find_by_name_or_id("user0001")
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
 
     def test_missing_session_raises_cw_error(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -821,13 +821,10 @@ class TestSpawnClose:
         """spawn close: raises CwError when session_id not found."""
         from cw.cli import _spawn_close_impl
 
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
         error_msg = ""
         try:
-            _spawn_close_impl(
-                session_id="nonexistent", adapter=adapter, native_daemon=daemon
-            )
+            _spawn_close_impl(session_id="nonexistent", native_daemon=daemon)
         except CwError as exc:
             error_msg = str(exc)
         else:
@@ -853,13 +850,10 @@ class TestSpawnClose:
             workspace_path=workspace,
         )
         save_state(CwState(sessions=[sess]))
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
         with pytest.raises(CwError, match="already completed"):
-            _spawn_close_impl(
-                session_id="done1234", adapter=adapter, native_daemon=daemon
-            )
+            _spawn_close_impl(session_id="done1234", native_daemon=daemon)
 
     def test_no_surface_ref_skips_backend_close(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -880,12 +874,10 @@ class TestSpawnClose:
             surface_ref=None,
         )
         save_state(CwState(sessions=[sess]))
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id="nosurf1", adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id="nosurf1", native_daemon=daemon)
 
-        assert adapter.calls["close"] == []
         assert daemon.stop_calls == []
         state = load_state()
         closed = state.find_by_name_or_id("nosurf1")

@@ -66,6 +66,15 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         tmp_path / ".claude" / "daemon" / "roster.json",
     )
 
+    # Stub _claude_agents_json so tests don't invoke the real ``claude``
+    # binary. Tests that want specific liveness behaviour override this with
+    # their own monkeypatch.setattr call; pytest patches stack and the
+    # test-level patch wins.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        list,
+    )
+
     return tmp_path
 
 
