@@ -1927,6 +1927,15 @@ def pr_channel() -> None:
     """PR channel server: push MCP notifications to subscribed Claude sessions."""
 
 
+@pr_channel.command(name="proxy")
+@click.option("--client-id", default=None, help="Unique client ID for cursor tracking.")
+def pr_channel_proxy(client_id: str | None) -> None:
+    """Start the MCP stdio proxy for cw-pr-events (add to .mcp.json)."""
+    from cw.cw_pr_events_channel import run_proxy  # noqa: PLC0415
+
+    run_proxy(client_id=client_id)
+
+
 @pr_channel.command(name="serve")
 @click.option("--port", default=8788, type=int, show_default=True)
 @click.option("--host", default="127.0.0.1", show_default=True)
