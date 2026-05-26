@@ -135,6 +135,8 @@ def spawn_create_impl(
     parent: str | None = None,
     ticket_id: str | None = None,
     headless: bool = False,
+    extra_args: list[str] | None = None,
+    permission_mode: str | None = None,
 ) -> str:
     """Create a daemon-spawned session via the native Claude background daemon.
 
@@ -189,15 +191,18 @@ def spawn_create_impl(
         headless=headless,
     )
 
-    extra_args: list[str] | None = None
+    final_extra: list[str] = []
     if client.worker_model:
-        extra_args = ["--model", client.worker_model]
+        final_extra.extend(["--model", client.worker_model])
+    if extra_args:
+        final_extra.extend(extra_args)
 
     daemon = native_daemon or get_native_daemon_client()
     sess.surface_ref = daemon.spawn_bg(
         cwd=worktree,
         prompt=prompt,
-        extra_args=extra_args,
+        extra_args=final_extra or None,
+        permission_mode=permission_mode,
     )
 
     if parent_session is not None:
