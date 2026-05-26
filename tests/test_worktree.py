@@ -14,6 +14,7 @@ import pytest
 from cw.exceptions import WorktreeError
 from cw.models import ClientConfig
 from cw.worktree import (
+    _fetch_default_branch,
     _git_dir,
     create_worktree,
     fast_forward_main,
@@ -573,9 +574,11 @@ class TestIsMainBehindOrigin:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Fetch rc=128 (no remote) → (False, "", "", 0) + WARNING."""
+        ws = tmp_path / "ws"
+        ws.mkdir()  # directory must exist so the missing-dir guard doesn't fire first
         client = ClientConfig(
             name="test-client",
-            workspace_path=tmp_path / "ws",
+            workspace_path=ws,
             default_branch="main",
         )
 
@@ -599,7 +602,7 @@ class TestIsMainBehindOrigin:
         assert local_sha == ""
         assert origin_sha == ""
         assert behind == 0
-        assert any("fetch failed" in r.message for r in caplog.records)
+        assert any("freshness_check_skip" in r.message for r in caplog.records)
 
     def test_fetch_failure_raises_worktreeerror_returns_false(
         self,
@@ -608,9 +611,11 @@ class TestIsMainBehindOrigin:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """WorktreeError on fetch → (False, "", "", 0) + WARNING."""
+        ws = tmp_path / "ws"
+        ws.mkdir()  # directory must exist so the missing-dir guard doesn't fire first
         client = ClientConfig(
             name="test-client",
-            workspace_path=tmp_path / "ws",
+            workspace_path=ws,
             default_branch="main",
         )
         call_count = 0
@@ -650,9 +655,11 @@ class TestIsMainBehindOrigin:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """WorktreeError on rev-parse → (False, "", "", 0) + WARNING."""
+        ws = tmp_path / "ws"
+        ws.mkdir()  # directory must exist so the missing-dir guard doesn't fire first
         client = ClientConfig(
             name="test-client",
-            workspace_path=tmp_path / "ws",
+            workspace_path=ws,
             default_branch="main",
         )
 
@@ -820,3 +827,11 @@ class TestFastForwardMain:
 
         with pytest.raises(WorktreeError, match="would clobber"):
             fast_forward_main(client)
+
+
+class TestFetchDefaultBranch:
+    def test_missing_dir_returns_false_no_raise(self, tmp_path: Path) -> None:
+        """_fetch_default_branch with missing git_dir returns False, no exception."""
+        missing = tmp_path / "does-not-exist"
+        result = _fetch_default_branch("test-client", "main", missing)
+        assert result is False
