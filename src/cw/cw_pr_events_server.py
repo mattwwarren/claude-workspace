@@ -16,6 +16,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
+from cw.atomic import atomic_write_text
 from cw.config import state_dir
 
 if TYPE_CHECKING:
@@ -163,7 +164,7 @@ def ack_offset(client_id: str, offset: int) -> None:
         _cursors[client_id] = offset
         path = state_dir() / "channel-cursors.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_cursors))
+        atomic_write_text(path, json.dumps(_cursors))
 
 
 def broadcast(notification: dict[str, Any]) -> None:
