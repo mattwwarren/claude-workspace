@@ -192,6 +192,16 @@ class TestCli:
             assert result.exit_code != 0
             assert "Test error message" in result.output
 
+    def test_daemon_once_emits_deprecation_warning(self) -> None:
+        """cw daemon --once prints deprecation warning (via click.echo err=True)."""
+        runner = CliRunner()
+        with patch("cw.cli.run_watcher_tick"):
+            result = runner.invoke(main, ["daemon", "--once"])
+        assert result.exit_code == 0
+        assert "Note: cw daemon's PR-dispatch role is deprecated as of 0.11." in (
+            result.output
+        )
+
 
 class TestUpgradeWorkers:
     def test_happy_path(self) -> None:

@@ -1262,6 +1262,12 @@ def daemon(once: bool) -> None:
     Single tick (e.g. from cron):
       cw daemon --once
     """
+    click.echo(
+        "Note: cw daemon's PR-dispatch role is deprecated as of 0.11. "
+        "Use `cw orchestrator-start` to run the channel-based orchestrator. "
+        "The PR watcher loop (this command's other role) is still required.",
+        err=True,
+    )
     run_watcher_tick(once=once)
 
 

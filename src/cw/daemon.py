@@ -24,7 +24,7 @@ from cw.config import (
 from cw.events import record_event
 from cw.models import OrchestratorEventType, SessionStatus
 from cw.orchestrate import retire_merged_prs
-from cw.pr_responder import clear_completed_pr_sessions, respond_to_pr_events
+from cw.pr_responder import clear_completed_pr_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -371,10 +371,13 @@ def run_watcher_tick(*, once: bool = False) -> None:
             _events, updated_snapshot = watch_prs_for_client(client, snapshot)
             _save_snapshot(client_name, updated_snapshot)
 
-        # Respond to queued PR events and clean up completed dispatch records
+        # As of 2026-05-26 the orchestrator skill (cw-orchestrator.md) replaces the
+        # in-daemon dispatch role of pr_responder.respond_to_pr_events().
+        # The watcher loop continues to detect PRs and post events into the
+        # cw-pr-events channel; the orchestrator session (spawn with
+        # `cw orchestrator-start`) consumes the channel and routes spawns.
         state = load_state()
         clear_completed_pr_sessions(state)
-        respond_to_pr_events()
 
         # Retire merged PRs: close sessions, drop dispatch entries, emit events.
         try:
