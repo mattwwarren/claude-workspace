@@ -22,8 +22,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8788
 DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = DEFAULT_PORT
-_DEFAULT_HOST = DEFAULT_HOST
 _VALID_EVENT_TYPES = frozenset({"ci_failed", "review_received", "mergeable", "merged"})
 _NOTIFICATION_TYPE = "cw-pr-event"
 
@@ -160,7 +158,7 @@ def make_app() -> Starlette:
     )
 
 
-def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> None:
+def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     """Start the server. Blocks until interrupted."""
     import uvicorn  # noqa: PLC0415
 
@@ -168,5 +166,5 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> None:
 
 
 if __name__ == "__main__":
-    _port = int(os.environ.get("CW_PR_EVENTS_PORT", str(_DEFAULT_PORT)))
+    _port = int(os.environ.get("CW_PR_EVENTS_PORT", str(DEFAULT_PORT)))
     serve(port=_port)

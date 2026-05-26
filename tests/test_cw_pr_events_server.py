@@ -18,6 +18,7 @@ from starlette.testclient import TestClient  # noqa: E402
 
 import cw.cw_pr_events_server as _server_mod  # noqa: E402
 from cw.cw_pr_events_server import (  # noqa: E402
+    _NOTIFICATION_TYPE,
     PREventRequest,
     _build_notification,
     broadcast,
@@ -70,7 +71,7 @@ class TestMCPNotificationShape:
 
     def test_notification_has_correct_type(self):
         notif = _build_notification(self._make_event())
-        assert notif["notification_type"] == "cw-pr-event"
+        assert notif["notification_type"] == _NOTIFICATION_TYPE
 
     def test_notification_message_is_json(self):
         notif = _build_notification(self._make_event())
@@ -158,7 +159,7 @@ class TestHandlePostPrEvent:
                 json={"repo": "org/proj", "pr_number": 7, "event_type": "merged"},
             )
             notif = q.get_nowait()
-            assert notif["notification_type"] == "cw-pr-event"
+            assert notif["notification_type"] == _NOTIFICATION_TYPE
             data = json.loads(notif["message"])
             assert data["pr_number"] == 7
         finally:
@@ -179,6 +180,7 @@ class TestServe:
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs.get("host") == "127.0.0.1"
+        assert call_kwargs.get("port") == 9999
 
 
 class TestCLIPrChannel:
