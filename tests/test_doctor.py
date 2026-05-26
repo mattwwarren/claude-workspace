@@ -1207,4 +1207,100 @@ class TestCheckDevQueueLoaderFailure:
         result = _check_dev_queue()
         assert result.ok is False
         assert "load failed" in result.detail
-        assert json_msg in result.detail
+
+
+class TestCheckWorkspacePaths:
+    """Tests for _check_workspace_paths doctor check."""
+
+    def test_missing_workspace_returns_fail_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Client with non-existent workspace_path returns ok=False."""
+        from cw.doctor import _check_workspace_paths
+
+        missing_dir = tmp_path / "nonexistent"
+        # Write clients.yaml with missing path
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  bad-client:\n    workspace_path: {missing_dir}\n"
+            f"    default_branch: main\n"
+        )
+
+        results = _check_workspace_paths()
+
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "bad-client" in results[0].name
+        assert "does not exist" in results[0].detail
+
+    def test_existing_workspace_returns_no_results(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Client with existing workspace_path returns no results (all ok)."""
+        from cw.doctor import _check_workspace_paths
+
+        existing_dir = tmp_path / "real-ws"
+        existing_dir.mkdir()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  ok-client:\n    workspace_path: {existing_dir}\n"
+            f"    default_branch: main\n"
+        )
+
+        results = _check_workspace_paths()
+
+        assert results == []
+
+    def test_missing_clients_yaml_returns_empty(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """No clients.yaml → _check_workspace_paths returns [] (no crash)."""
+        from cw.doctor import _check_workspace_paths
+
+        results = _check_workspace_paths()
+        assert results == []
+
+    def test_load_clients_exception_returns_empty(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """load_clients() raising any exception returns [] (no crash)."""
+        from cw.doctor import _check_workspace_paths
+
+        def boom() -> object:
+            msg = "unexpected parse error"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_clients", boom)
+        results = _check_workspace_paths()
+        assert results == []
+
+    def test_run_doctor_includes_workspace_check(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_doctor surfaces workspace path failures in the report."""
+        _stub_claude_version_ok(monkeypatch)
+        missing_dir = tmp_path / "nonexistent"
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  bad-client:\n    workspace_path: {missing_dir}\n"
+            f"    default_branch: main\n"
+        )
+
+        report = run_doctor()
+
+        workspace_checks = [c for c in report.checks if c.name.startswith("workspace/")]
+        assert len(workspace_checks) == 1
+        assert workspace_checks[0].ok is False

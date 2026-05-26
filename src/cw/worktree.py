@@ -200,16 +200,28 @@ def remove_worktree(
 
 def _fetch_default_branch(client_name: str, default_branch: str, git_dir: Path) -> bool:
     """Fetch origin/<default_branch>. Returns True on success, False on failure."""
+    if not git_dir.exists():
+        _log.warning(
+            "freshness_check_skip: workspace missing for %s (%s)",
+            client_name,
+            git_dir,
+        )
+        return False
     try:
         result = _run_git(
             "fetch", "origin", default_branch, "--quiet", cwd=git_dir, check=False
         )
-    except WorktreeError as exc:
-        _log.warning("is_main_behind_origin: fetch failed for %s: %s", client_name, exc)
+    except (WorktreeError, FileNotFoundError, PermissionError) as exc:
+        _log.warning(
+            "freshness_check_skip: %s (%s): %s",
+            client_name,
+            git_dir,
+            exc,
+        )
         return False
     if result.returncode != 0:
         _log.warning(
-            "is_main_behind_origin: fetch failed for %s (rc=%d): %s",
+            "freshness_check_skip: fetch failed for %s (rc=%d): %s",
             client_name,
             result.returncode,
             result.stderr.strip(),

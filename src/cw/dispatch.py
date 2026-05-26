@@ -132,12 +132,13 @@ def dispatch_tick(
         try:
             stale, _local_sha, _origin_sha, _behind = is_main_behind_origin(client)
         except Exception:  # noqa: BLE001
-            # Cannot narrow: _run_git only wraps CalledProcessError; FileNotFoundError
-            # and OSError (git not on PATH, network down) escape as raw OS exceptions.
+            # Defense-in-depth: _fetch_default_branch now handles
+            # FileNotFoundError/PermissionError internally; this catches
+            # other unexpected OS errors (e.g., git not on PATH, network
+            # issues raising RuntimeError from the adapter).
             _log.warning(
                 "dispatch_tick: freshness check failed for %s; proceeding",
                 client.name,
-                exc_info=True,
             )
             stale = False
 
