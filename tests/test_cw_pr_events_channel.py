@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import urllib.parse
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from click.testing import CliRunner
@@ -247,7 +247,7 @@ class TestRelayUpstream:
             await send_out.aclose()
 
             try:
-                return await recv_out.receive()
+                return cast("SessionMessage", await recv_out.receive())
             except anyio.EndOfStream:
                 return None
 
@@ -345,11 +345,11 @@ class TestRunProxyEnvVars:
         class _StopEarly(Exception):  # noqa: N818
             pass
 
-        @asynccontextmanager  # type: ignore[arg-type]
-        async def _fake_sse_client(url: str, **_kw: Any) -> Any:  # type: ignore[misc]
+        @asynccontextmanager
+        async def _fake_sse_client(url: str, **_kw: Any) -> Any:
             captured.append(url)
             raise _StopEarly
-            yield  # type: ignore[misc]
+            yield
 
         monkeypatch.setattr(_sse_mod, "sse_client", _fake_sse_client)
 
