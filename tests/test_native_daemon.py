@@ -178,6 +178,33 @@ class TestRealNativeDaemonClientSpawn:
         # Verbatim AC2 substring (lowercase 'r') must appear in the message.
         assert "run `claude --dangerously-skip-permissions` once" in str(exc_info.value)
 
+    def test_spawn_bg_permission_mode_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """permission_mode override replaces _DEFAULT_PERMISSION_MODE in cmd."""
+        captured: dict[str, object] = {}
+
+        def fake_run(args: Sequence[str], **kwargs: object) -> _FakeCompleted:
+            captured["args"] = list(args)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        client.spawn_bg(
+            cwd=tmp_path, prompt="do it", permission_mode="bypassPermissions"
+        )
+
+        args = captured["args"]
+        assert isinstance(args, list)
+        assert args[:5] == [
+            "claude",
+            "--bg",
+            "--permission-mode",
+            "bypassPermissions",
+            "do it",
+        ]
+
 
 class TestRealNativeDaemonClientRoster:
     """list_live_session_short_ids reads roster.json."""

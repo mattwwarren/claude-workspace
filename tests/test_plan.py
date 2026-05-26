@@ -57,9 +57,19 @@ class _ScriptedDaemon(FakeNativeDaemonClient):
         self._payload = output_payload
 
     def spawn_bg(
-        self, *, cwd: Path, prompt: str, extra_args: list[str] | None = None
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        extra_args: list[str] | None = None,
+        permission_mode: str | None = None,
     ) -> str:
-        short_id = super().spawn_bg(cwd=cwd, prompt=prompt, extra_args=extra_args)
+        short_id = super().spawn_bg(
+            cwd=cwd,
+            prompt=prompt,
+            extra_args=extra_args,
+            permission_mode=permission_mode,
+        )
         from cw.config import DEV_PLAN_OUTPUT_DIR
 
         prompts = sorted(DEV_PLAN_OUTPUT_DIR.glob("prompt-*.txt"))
