@@ -2473,6 +2473,10 @@ class TestShowStatus:
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                     surface_ref="impl",
+                    # started_at older than SPAWN_GRACE_SECONDS so reconcile
+                    # treats this session as eligible for phantom-reaping
+                    # (the grace window protects only freshly-spawned sessions).
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 )
             ]
         )
@@ -2841,6 +2845,9 @@ def test_display_status_reconciles_phantom_active_sessions(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                     surface_ref="gone",
+                    # Older than SPAWN_GRACE_SECONDS so the spawn-grace
+                    # window doesn't protect this from phantom-reaping.
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )

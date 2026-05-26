@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
@@ -64,6 +64,16 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 # 626 lines) hit the 30-min cap mid-implementation. Per-ticket / per-tier
 # override mechanism tracked in #265.
 HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
+
+
+# Grace window for a newly-spawned session to register with the daemon
+# (`claude agents --json`). `claude --bg` spawn → daemon roster registration
+# is async; reconciliation that runs in the same dispatch tick as the spawn
+# would otherwise see the session as a phantom and reap it within 1 second.
+# 30 seconds is comfortably above observed registration latency (~0.3-1.5s
+# in dogfooding 2026-05-26) while still bounding how long a genuinely dead
+# session can hide. See GitHub issue #271.
+SPAWN_GRACE_SECONDS = 30
 
 
 # Only these two statuses imply "the daemon should have a live session".
@@ -114,20 +124,27 @@ class ReconcileReport:
 def compute_drift(
     state: CwState,
     native_live: set[str],
+    *,
+    now: datetime | None = None,
 ) -> ReconcileReport:
     """Return a report naming sessions whose surface is no longer live.
 
     An ACTIVE or IDLE session is phantom when:
     - it has a ``surface_ref`` (None means it was never spawned), AND
-    - that ref is not in *native_live*.
+    - that ref is not in *native_live*, AND
+    - its ``started_at`` is older than :data:`SPAWN_GRACE_SECONDS` ago
+      (newly-spawned sessions are still registering with the daemon).
 
     *native_live* is the set of short session IDs reported by
     ``claude agents --json``; callers obtain it via :func:`_claude_agents_json`.
+
+    *now* is injected for testability; defaults to ``datetime.now(UTC)``.
 
     This function does not mutate state. It also does not distinguish
     "backend reports zero live entries" from "backend is unreachable";
     that guard lives in :func:`reconcile`.
     """
+    cutoff = (now or datetime.now(UTC)) - timedelta(seconds=SPAWN_GRACE_SECONDS)
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
@@ -135,6 +152,8 @@ def compute_drift(
         if session.surface_ref is None:
             continue
         if session.surface_ref in native_live:
+            continue
+        if session.started_at > cutoff:
             continue
         phantoms.append(session.id)
     return ReconcileReport(phantom_session_ids=phantoms)
@@ -314,7 +333,7 @@ def reconcile() -> ReconcileReport:
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
-    drift = compute_drift(state, native_live)
+    drift = compute_drift(state, native_live, now=now)
     if not drift.phantom_session_ids:
         # No phantom sessions to reap, but still run the TIMED_OUT and
         # COMPLETED-silent sweeps so any tasks whose sessions completed or
