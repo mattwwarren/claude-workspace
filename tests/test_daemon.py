@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
-from urllib.error import URLError
 
 import pytest
 
@@ -448,12 +447,12 @@ class TestChannelPosting:
     def test_merged_posts_correct_payload(self) -> None:
         """merged event_type sends correct JSON body to channel server."""
         captured: list[dict[str, Any]] = []
+        mock_conn = MagicMock()
+        mock_conn.request.side_effect = lambda _m, _p, body, _h: captured.append(
+            json.loads(body)
+        )
 
-        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
-            captured.append(json.loads(req.data))
-            return MagicMock()
-
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("http.client.HTTPConnection", return_value=mock_conn):
             _post_to_channel(
                 "merged",
                 "owner/my-repo",
@@ -470,12 +469,12 @@ class TestChannelPosting:
     def test_ci_failed_posts_correct_payload(self) -> None:
         """ci_failed event_type sends correct JSON body to channel server."""
         captured: list[dict[str, Any]] = []
+        mock_conn = MagicMock()
+        mock_conn.request.side_effect = lambda _m, _p, body, _h: captured.append(
+            json.loads(body)
+        )
 
-        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
-            captured.append(json.loads(req.data))
-            return MagicMock()
-
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("http.client.HTTPConnection", return_value=mock_conn):
             _post_to_channel(
                 "ci_failed", "owner/repo", 7, {"findings_count": 3, "role": "author"}
             )
@@ -486,12 +485,12 @@ class TestChannelPosting:
     def test_review_received_posts_correct_payload(self) -> None:
         """review_received event_type sends correct JSON body."""
         captured: list[dict[str, Any]] = []
+        mock_conn = MagicMock()
+        mock_conn.request.side_effect = lambda _m, _p, body, _h: captured.append(
+            json.loads(body)
+        )
 
-        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
-            captured.append(json.loads(req.data))
-            return MagicMock()
-
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("http.client.HTTPConnection", return_value=mock_conn):
             _post_to_channel(
                 "review_received",
                 "owner/repo",
@@ -505,25 +504,23 @@ class TestChannelPosting:
     def test_mergeable_posts_correct_payload(self) -> None:
         """mergeable event_type sends correct JSON body."""
         captured: list[dict[str, Any]] = []
+        mock_conn = MagicMock()
+        mock_conn.request.side_effect = lambda _m, _p, body, _h: captured.append(
+            json.loads(body)
+        )
 
-        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
-            captured.append(json.loads(req.data))
-            return MagicMock()
-
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("http.client.HTTPConnection", return_value=mock_conn):
             _post_to_channel("mergeable", "owner/repo", 3, {"role": "author"})
 
         assert captured[0]["event_type"] == "mergeable"
 
     def test_channel_server_down_does_not_raise(self) -> None:
-        """URLError from unreachable server is silently swallowed."""
-        err_msg = "Connection refused"
-
-        def raise_url_error(req: Any, timeout: int = 0) -> None:
-            raise URLError(err_msg)
+        """OSError from unreachable server is silently swallowed."""
+        mock_conn = MagicMock()
+        mock_conn.request.side_effect = OSError("Connection refused")
 
         # Must not raise — best-effort design
-        with patch("urllib.request.urlopen", raise_url_error):
+        with patch("http.client.HTTPConnection", return_value=mock_conn):
             _post_to_channel("merged", "owner/repo", 1, {})
 
     def test_cw_pr_events_url_env_var_overrides_default(
@@ -532,13 +529,13 @@ class TestChannelPosting:
         """CW_PR_EVENTS_URL env var controls the POST destination."""
         custom_url = "http://custom-host:9999/pr-event"
         monkeypatch.setenv("CW_PR_EVENTS_URL", custom_url)
-        captured_urls: list[str] = []
+        captured_netlocs: list[str] = []
 
-        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
-            captured_urls.append(req.full_url)
+        def fake_connection(netloc: str, timeout: int = 0) -> MagicMock:
+            captured_netlocs.append(netloc)
             return MagicMock()
 
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("http.client.HTTPConnection", fake_connection):
             _post_to_channel("merged", "owner/repo", 1, {})
 
-        assert captured_urls == [custom_url]
+        assert captured_netlocs == ["custom-host:9999"]

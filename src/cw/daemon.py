@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
 import time
-import urllib.request
+import urllib.parse
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
@@ -183,11 +184,11 @@ def _post_to_channel(
             "payload": payload,
         }
     ).encode()
-    req = urllib.request.Request(  # noqa: S310
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
-    )
+    parsed = urllib.parse.urlparse(url)
+    conn = http.client.HTTPConnection(parsed.netloc, timeout=2)
     try:
-        urllib.request.urlopen(req, timeout=2)  # noqa: S310
+        conn.request("POST", parsed.path, body, {"Content-Type": "application/json"})
+        conn.getresponse()
     except Exception:  # noqa: BLE001
         # Best-effort: channel server may not be running; never block PR watching.
         # Justification: (1) failure modes are connection refused/timeout/HTTP error,
@@ -200,6 +201,8 @@ def _post_to_channel(
             event_type,
             exc_info=True,
         )
+    finally:
+        conn.close()
 
 
 def watch_prs_for_client(
