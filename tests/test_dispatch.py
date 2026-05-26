@@ -17,7 +17,7 @@ from cw.dispatch import (
     dispatch_tick,
     persist_last_result,
 )
-from cw.events import record_event
+from cw.events import read_events, record_event
 from cw.exceptions import WorktreeError
 from cw.models import (
     ClientConfig,
@@ -1169,6 +1169,225 @@ class TestDispatchTickSpawnErrors:
             for record in caplog.records
             if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchTickFreshnessGate
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchTickFreshnessGate:
+    """Freshness-gate tests: stale main blocks dispatch and emits ticket.needs_sync."""
+
+    def test_stale_main_skips_dispatch_and_keeps_pending(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stale client: dispatch returns 0, task stays PENDING, event emitted."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-1", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 3),
+        )
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        assert spawned == 0
+
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.PENDING
+
+        assert len(daemon.spawn_calls) == 0
+
+        events = read_events(
+            consumer="test-freshness",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "CW-1"
+        assert events[0].payload["client"] == "test-client"
+
+    def test_stale_main_emits_event_once_per_pending_ticket(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two PENDING tasks emit two ticket.needs_sync events (one per task)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-10", client="test-client"))
+        add_ticket(TicketTask(ticket_id="CW-11", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 1),
+        )
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-freshness-multi",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 2
+        ticket_ids = {e.payload["ticket_id"] for e in events}
+        assert ticket_ids == {"CW-10", "CW-11"}
+
+    def test_stale_check_skips_only_stale_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Stale client A skipped; fresh client B dispatches normally."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Create second fresh client
+        fresh_ws = make_git_repo("workspace/fresh-project")
+        fresh_client = ClientConfig(
+            name="fresh-client",
+            workspace_path=fresh_ws,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-fresh",
+        )
+        # Append fresh-client to clients.yaml
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        clients_file = config_dir / "clients.yaml"
+        existing = clients_file.read_text()
+        existing += (
+            f"  {fresh_client.name}:\n"
+            f"    workspace_path: {fresh_client.workspace_path}\n"
+            f"    default_branch: {fresh_client.default_branch}\n"
+            f"    worktree_base: {fresh_client.worktree_base}\n"
+        )
+        clients_file.write_text(existing)
+
+        add_ticket(TicketTask(ticket_id="CW-20", client="test-client"))
+        add_ticket(TicketTask(ticket_id="CW-21", client="fresh-client"))
+
+        def _freshness_check(client: ClientConfig) -> tuple[bool, str, str, int]:
+            if client.name == "test-client":
+                return (True, "aaa", "bbb", 2)
+            return (False, "abc", "abc", 0)
+
+        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _freshness_check)
+
+        # fresh-client also needs cap=1
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1, "fresh-client": 1},
+        )
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(config, adapter=adapter, native_daemon=daemon)
+
+        assert spawned == 1  # only fresh-client
+
+        events = read_events(
+            consumer="test-freshness-split",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+        assert events[0].payload["client"] == "test-client"
+
+    def test_fresh_main_dispatches_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fresh main: existing dispatch behaviour unchanged."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-30", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (False, "abc", "abc", 0),
+        )
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        assert spawned == 1
+
+        events = read_events(
+            consumer="test-freshness-no-event",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 0, "Fresh main should not emit ticket.needs_sync"
+
+    def test_freshness_check_called_once_per_client_per_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """is_main_behind_origin called exactly once per client even with 3 tasks."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        for i in range(3):
+            add_ticket(TicketTask(ticket_id=f"CW-4{i}", client="test-client"))
+
+        call_count = 0
+
+        def _counting(_client: ClientConfig) -> tuple[bool, str, str, int]:
+            nonlocal call_count
+            call_count += 1
+            return (False, "abc", "abc", 0)
+
+        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _counting)
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        assert call_count == 1
+
+    def test_freshness_check_failure_does_not_block_dispatch(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """RuntimeError from freshness check: WARNING logged, dispatch proceeds."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-50", client="test-client"))
+
+        def _boom(_client: ClientConfig) -> tuple[bool, str, str, int]:
+            msg = "network unreachable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _boom)
+
+        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
+
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        spawned = dispatch_tick(simple_config, adapter=adapter, native_daemon=daemon)
+
+        assert spawned == 1  # dispatch proceeded
+        assert any(
+            "freshness check failed" in r.message.lower() for r in caplog.records
+        )
 
 
 class TestDispatchTickReconcileErrors:

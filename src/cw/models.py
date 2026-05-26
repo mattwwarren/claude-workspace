@@ -117,6 +117,7 @@ class OrchestratorEventType(StrEnum):
     SESSION_SPAWNED = "session.spawned"
     SESSION_COMPLETED = "session.completed"
     SESSION_TIMED_OUT = "session.timed_out"
+    TICKET_NEEDS_SYNC = "ticket.needs_sync"
     STAGE_ENTERED = "stage.entered"
     STAGE_ERRORED = "stage.errored"
     PR_REGISTERED = "pr.registered"

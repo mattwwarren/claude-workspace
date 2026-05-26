@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- feat: pre-dispatch worktree freshness check in `dispatch_tick`; stale clients emit `ticket.needs_sync` and skip the tick without burning a dispatch slot
+- feat: new `cw dev-queue refresh-all` CLI subcommand fast-forwards each client's local `main` to `origin/main`
+- feat: new `OrchestratorEventType.TICKET_NEEDS_SYNC = "ticket.needs_sync"` event type
+
 ## [0.10.0] — 2026-05-25
 
 Pre-1.0 substrate release covering native-daemon dispatch hardening,

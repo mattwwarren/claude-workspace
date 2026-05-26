@@ -543,3 +543,8 @@ def test_stage_event_types_round_trip(
     restored = OrchestratorEvent.model_validate_json(event.model_dump_json())
     assert restored.type is event_type
     assert restored.payload == payload
+
+
+def test_orchestrator_event_type_includes_needs_sync() -> None:
+    """TICKET_NEEDS_SYNC event type has correct string value."""
+    assert OrchestratorEventType.TICKET_NEEDS_SYNC.value == "ticket.needs_sync"

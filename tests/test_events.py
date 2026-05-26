@@ -491,3 +491,16 @@ def test_cli_event_tail_type_filter_stage_entered(tmp_events_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "stage.entered" in result.output
     assert "pr.merged" not in result.output
+
+
+def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:
+    """ticket.needs_sync OrchestratorEvent round-trips through JSON serialisation."""
+    event = OrchestratorEvent(
+        type=OrchestratorEventType.TICKET_NEEDS_SYNC,
+        payload={"ticket_id": "CW-99", "client": "test-client"},
+    )
+    dumped = event.model_dump_json()
+    restored = OrchestratorEvent.model_validate_json(dumped)
+    assert restored.type == OrchestratorEventType.TICKET_NEEDS_SYNC
+    assert restored.payload["ticket_id"] == "CW-99"
+    assert restored.payload["client"] == "test-client"

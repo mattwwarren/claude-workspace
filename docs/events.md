@@ -39,6 +39,22 @@ A new ticket has been added to the work queue for an orchestrator client.
 }
 ```
 
+### `ticket.needs_sync`
+
+**Emitter:** `dispatch_tick`
+**Payload:** `{"ticket_id": "<str>", "client": "<str>"}`
+**Semantics:** Emitted once per PENDING task when the client's local
+`<default_branch>` is behind `origin/<default_branch>`. The task stays
+PENDING; the slot is skipped for this tick. Operator should run
+`cw dev-queue refresh-all` to fast-forward and unblock dispatch.
+
+```json
+{
+  "ticket_id": "CW-42",
+  "client": "my-client"
+}
+```
+
 ### `session.spawned`
 
 An orchestrator-managed session was started.
