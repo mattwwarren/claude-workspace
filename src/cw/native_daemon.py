@@ -126,7 +126,7 @@ class RealNativeDaemonClient:
         *permission_mode* overrides the default (``"auto"``). Pass ``None``
         to use the default.
         """
-        mode = permission_mode or _DEFAULT_PERMISSION_MODE
+        mode = _DEFAULT_PERMISSION_MODE if permission_mode is None else permission_mode
         cmd = ["claude", "--bg", "--permission-mode", mode]
         if extra_args:
             cmd.extend(extra_args)

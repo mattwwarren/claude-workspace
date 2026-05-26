@@ -330,7 +330,7 @@ class TestStartSession:
                 cwd: object,
                 prompt: object,
                 extra_args: object = None,
-                permission_mode: object = None,
+                permission_mode: str | None = None,
             ) -> str:
                 msg = "simulated daemon failure"
                 raise CwError(msg)
