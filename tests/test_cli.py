@@ -475,7 +475,7 @@ class TestSignalStop:
 
         hook_stdin = json.dumps(
             {
-                "session_id": "claude-uuid-stop",
+                "session_id": f"{short_id}-full-uuid",
                 "cwd": str(worktree),
                 "hook_event_name": "Stop",
             }
@@ -885,7 +885,7 @@ class TestSignalStop:
 
         hook_stdin = json.dumps(
             {
-                "session_id": "claude-uuid-daemon",
+                "session_id": f"{short_id}-daemon-full-uuid",
                 "cwd": str(worktree),
                 "hook_event_name": "Stop",
             }
@@ -896,7 +896,7 @@ class TestSignalStop:
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.COMPLETED
-        assert updated.claude_session_id == "claude-uuid-daemon"
+        assert updated.claude_session_id == f"{short_id}-daemon-full-uuid"
 
         events = read_events(
             consumer="test-daemon-regress",
@@ -1002,7 +1002,7 @@ class TestSignalStop:
 
         hook_stdin = json.dumps(
             {
-                "session_id": "claude-uuid-timed-out",
+                "session_id": f"{short_id}-timed-out-full-uuid",
                 "cwd": str(worktree),
                 "hook_event_name": "Stop",
                 "last_assistant_message": "Waiting for review agents to complete...",
@@ -1015,7 +1015,7 @@ class TestSignalStop:
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.TIMED_OUT
-        assert updated.claude_session_id == "claude-uuid-timed-out"
+        assert updated.claude_session_id == f"{short_id}-timed-out-full-uuid"
 
         # SESSION_TIMED_OUT event emitted with expected payload fields.
         events = read_events(
@@ -1766,6 +1766,264 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.COMPLETED
 
+    def test_signal_stop_stale_hook_guard_drops_mismatched_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stale stop hook whose claude_session_id doesn't match surface_ref is dropped.
+
+        Regression for GitHub issue #285. When dispatch rewrites cw-context.json
+        with session2's ID for a retry, a Stop hook fired by session1's still-live
+        Claude process carries session1's Claude UUID in its payload but reads
+        session2's CW session ID from context. The stale-hook guard must detect
+        the mismatch (payload UUID doesn't start with session2's surface_ref) and
+        return without modifying the task or session2's status.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        # Session2 is the current (retry) attempt; surface_ref="next0002".
+        worktree, session2 = self._setup_headless_session(
+            tmp_path, "sess-285-guard-s2", "worktree-285-guard"
+        )
+        state = load_state()
+        s2 = next(s for s in state.sessions if s.id == session2.id)
+        s2.surface_ref = "next0002"
+        save_state(state)
+
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session2.id,
+                    attempts=2,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        # cw-context.json points to session2 (dispatch overwrote it for retry).
+        self._write_headless_context(worktree, session_id=session2.id)
+
+        # Stale hook from session1: UUID starts with "prev0001", not "next0002".
+        stale_claude_id = "prev0001-old-session1-uuid"
+        fake_home = tmp_path / "fake-home-285-guard"
+        self._write_transcript(
+            worktree, stale_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": stale_claude_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        # Stale hook dropped — task still RUNNING for session2.
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.session_id == session2.id
+
+        # Session2 still ACTIVE — stale hook must not have completed it.
+        s2_after = next(s for s in load_state().sessions if s.id == session2.id)
+        assert s2_after.status == SessionStatus.ACTIVE
+
+    def test_signal_stop_blocked_retry_shipped_sequence_completes_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked→retry→shipped: task must end at COMPLETED, not PENDING.
+
+        Regression test for GitHub issue #285 (evidence from #139). The pre-fix
+        failure sequence:
+          1. Attempt 1 blocks (retry_eligible). signal_stop reverts task to
+             PENDING and calls native_daemon.stop(session1.surface_ref).
+          2. Dispatch re-claims: task RUNNING+session2.id. spawn_create_impl
+             overwrites cw-context.json with session2's CW ID.
+          3. Stale stop hook fires for session1 AFTER the overwrite. Hook
+             payload has session1's Claude UUID; cw-context reads session2's
+             CW ID. Without the guard: blocked sentinel applies to session2's
+             task → PENDING again; session2 marked COMPLETED prematurely.
+          4. Session2 ships but its real stop hook sees session2.status==COMPLETED
+             and returns early. Task stuck at PENDING.
+        With the stale-hook guard step 3 is a no-op, and session2's shipped
+        hook correctly transitions the task to COMPLETED.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        workspace = tmp_path / "workspace-285"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree-285-seq"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        # === Attempt 1: session1 runs, emits blocked+retry_eligible ===
+        session1 = Session(
+            id="sess-285-seq-s1",
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            surface_ref="aabb1100",
+            started_at=dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        state = load_state()
+        state.sessions.append(session1)
+        save_state(state)
+
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session1.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session1.id)
+
+        s1_claude_id = "aabb1100-session1-full-uuid"
+        fake_home = tmp_path / "fake-home-285-seq"
+        self._write_transcript(
+            worktree, s1_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        with freeze_time(dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
+            r1 = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": s1_claude_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert r1.exit_code == 0, r1.output
+
+        task_after_1 = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task_after_1.status == QueueItemStatus.PENDING
+        assert task_after_1.session_id is None
+
+        # === Dispatch re-claims: session2 spawned, cw-context.json overwritten ===
+        session2 = Session(
+            id="sess-285-seq-s2",
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            surface_ref="ccdd2200",
+            started_at=dt.datetime(2026, 1, 1, 0, 6, 0, tzinfo=UTC),
+        )
+        state2 = load_state()
+        state2.sessions.append(session2)
+        save_state(state2)
+
+        store2 = load_dev_queue()
+        task2 = next(t for t in store2.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        task2.status = QueueItemStatus.RUNNING
+        task2.session_id = session2.id
+        task2.attempts = 2
+        save_dev_queue(store2)
+
+        # spawn_create_impl overwrites cw-context.json with session2's CW ID.
+        self._write_headless_context(worktree, session_id=session2.id)
+
+        # === Stale hook fires for session1 after cw-context.json overwrite ===
+        # Hook payload still carries session1's Claude UUID ("aabb1100-…");
+        # cw-context.json now has session2's CW ID. Guard must drop this.
+        with freeze_time(dt.datetime(2026, 1, 1, 0, 6, 1, tzinfo=UTC)):
+            r_stale = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": s1_claude_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert r_stale.exit_code == 0, r_stale.output
+
+        task_after_stale = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task_after_stale.status == QueueItemStatus.RUNNING, (
+            "Stale hook must not have reverted the task to PENDING"
+        )
+        assert task_after_stale.session_id == session2.id
+        s2_mid = next(s for s in load_state().sessions if s.id == session2.id)
+        assert s2_mid.status == SessionStatus.ACTIVE, (
+            "Stale hook must not have completed session2 prematurely"
+        )
+
+        # === Attempt 2: session2 ships ===
+        s2_claude_id = "ccdd2200-session2-full-uuid"
+        self._write_transcript(worktree, s2_claude_id, _SENTINEL_285_SHIPPED, fake_home)
+
+        with freeze_time(dt.datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)):
+            r2 = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": s2_claude_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert r2.exit_code == 0, r2.output
+
+        task_final = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task_final.status == QueueItemStatus.COMPLETED, (
+            f"Expected COMPLETED but got {task_final.status} — "
+            "regression: stale stop hook left task PENDING after blocked→retry→shipped"
+        )
+
 
 class TestSentinelPresentInTranscript:
     """Direct tests for the real _sentinel_present_in_transcript helper.
@@ -2102,6 +2360,37 @@ _SENTINEL_251_BLOCKED_RETRY = (
     '"details": "local_main=abc, origin_main=def, ahead=1, behind=0", '
     '"retry_eligible": true, "retry_delay_seconds": null},\n'
     '  "next_actions": ["sync_local_main"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_285_SHIPPED = (
+    # Valid shipped sentinel for ticket "137" used in issue #285 regression tests.
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "shipped",\n'
+    '  "stage_reached": "stage5_post_create",\n'
+    '  "scope": {"tier": "small", "files": 2, "lines_estimate": 30, '
+    '"lines_actual": 25, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": "auto-dev/137",\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": "abc285",\n'
+    '  "commits": ["def285"],\n'
+    '  "pr": {"number": 285, '
+    '"url": "https://github.com/foo/bar/pull/285", '
+    '"auto_merge": true, "base": "main"},\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": ["wait_for_ci"]\n'
     "}\n"
     "AUTO_DEV_RESULT>>>"
 )

@@ -1063,6 +1063,25 @@ def signal_stop() -> None:
 
     claude_session_id = hook_payload.get("session_id")
 
+    # Issue #285: stale-hook guard. When dispatch reuses a worktree for a
+    # blocked→retry sequence, spawn_create_impl overwrites cw-context.json with
+    # the new session's ID *before* the old Claude process finishes. The old
+    # process can then fire one final Stop hook: the hook reads the new session's
+    # CW ID from context but carries the old Claude UUID in its payload. Without
+    # this guard the stale hook would parse the old (blocked) transcript and
+    # apply that sentinel to the new session's task, reverting it to PENDING.
+    # Fix: drop any DAEMON-origin hook whose Claude UUID doesn't match this
+    # session's surface_ref (the 8-char prefix stored at spawn time).
+    # USER-origin sessions are interactive and never have cw-context.json
+    # overwritten by dispatch, so the guard does not apply to them.
+    if (
+        session.origin is SessionOrigin.DAEMON
+        and isinstance(claude_session_id, str)
+        and session.surface_ref is not None
+        and not claude_session_id.startswith(session.surface_ref)
+    ):
+        return
+
     # Issue #165 Phase B: USER-origin sessions are interactive — the Stop
     # hook fires at every agent turn but the human is still driving. Mark
     # IDLE so wait loops / daemon triggers can react, but do NOT emit
