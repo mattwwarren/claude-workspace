@@ -20,6 +20,7 @@ from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse  # no
 from cw.cw_pr_events_channel import (  # noqa: E402
     _DEFAULT_BASE_URL,
     _NOTIFICATION_TYPE,
+    _build_meta,
     _build_outbound_notification,
     _extract_payload,
     _relay_upstream,
@@ -138,6 +139,64 @@ class TestExtractPayload:
 
 
 # ---------------------------------------------------------------------------
+# _build_meta
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMeta:
+    def test_basic_fields(self) -> None:
+        data = {"repo": "owner/repo", "pr_number": 42, "event_type": "ci_failed"}
+        meta = _build_meta(data)
+        assert meta["repo"] == "owner/repo"
+        assert meta["pr_number"] == "42"
+        assert meta["event_type"] == "ci_failed"
+
+    def test_empty_values_omitted(self) -> None:
+        # Empty string values must be filtered out; missing keys produce empty strings.
+        data = {
+            "repo": "",
+            "event_type": "merged",
+        }  # pr_number absent → str("") omitted
+        meta = _build_meta(data)
+        assert "repo" not in meta
+        assert "pr_number" not in meta
+        assert meta["event_type"] == "merged"
+
+    def test_pr_number_as_string(self) -> None:
+        data = {"repo": "r/r", "pr_number": 99, "event_type": "opened"}
+        meta = _build_meta(data)
+        assert isinstance(meta["pr_number"], str)
+        assert meta["pr_number"] == "99"
+
+    def test_role_from_payload(self) -> None:
+        data = {
+            "repo": "r/r",
+            "pr_number": 1,
+            "event_type": "review",
+            "payload": {"role": "author"},
+        }
+        meta = _build_meta(data)
+        assert meta["role"] == "author"
+
+    def test_client_from_payload(self) -> None:
+        data = {
+            "repo": "r/r",
+            "pr_number": 1,
+            "event_type": "review",
+            "payload": {"client": "acme"},
+        }
+        meta = _build_meta(data)
+        assert meta["client"] == "acme"
+
+    def test_missing_payload(self) -> None:
+        data = {"repo": "r/r", "pr_number": 5, "event_type": "merged"}
+        meta = _build_meta(data)
+        assert "role" not in meta
+        assert "client" not in meta
+        assert meta["repo"] == "r/r"
+
+
+# ---------------------------------------------------------------------------
 # _build_outbound_notification
 # ---------------------------------------------------------------------------
 
@@ -154,15 +213,15 @@ class TestBuildOutboundNotification:
         result = _build_outbound_notification(self._data())
         assert isinstance(result.message.root, JSONRPCNotification)
 
-    def test_method_is_notifications_message(self) -> None:
+    def test_method_is_notifications_claude_channel(self) -> None:
         result = _build_outbound_notification(self._data())
-        assert result.message.root.method == "notifications/message"
+        assert result.message.root.method == "notifications/claude/channel"
 
     def test_data_preserved(self) -> None:
         data = self._data()
         result = _build_outbound_notification(data)
         params = result.message.root.params or {}
-        assert params["data"] == data
+        assert json.loads(params["content"]) == data
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +256,9 @@ class TestRelayUpstream:
         assert isinstance(result, SessionMessage)
         root = result.message.root
         assert isinstance(root, JSONRPCNotification)
+        assert root.method == "notifications/claude/channel"
         params = root.params or {}
-        assert params["data"]["repo"] == "owner/repo"
+        assert json.loads(params["content"])["repo"] == "owner/repo"
 
     def test_exception_skipped(self) -> None:
         import anyio
