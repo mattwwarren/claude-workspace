@@ -321,8 +321,14 @@ def reconcile() -> ReconcileReport:
     )
 
     try:
+        # `claude agents --json` returns sessionId as a full UUID
+        # (e.g. "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"). cw's surface_ref
+        # is the 8-char short id (prefix of the UUID) — same shape
+        # `claude --bg` returns at spawn. Normalize to short id for
+        # comparison; otherwise reconcile sees every native session as a
+        # phantom because UUID != short-id.
         native_live = {
-            sid
+            sid[:8]
             for a in _claude_agents_json()
             if isinstance(sid := a.get("sessionId"), str)
         }
