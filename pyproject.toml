@@ -18,6 +18,9 @@ dependencies = [
 
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.27.1"]
+
 [project.urls]
 Homepage = "https://github.com/mattwwarren/claude-workspace"
 Repository = "https://github.com/mattwwarren/claude-workspace"
