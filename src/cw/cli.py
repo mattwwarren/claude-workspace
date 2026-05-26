@@ -1929,6 +1929,54 @@ def spawn_close(session_id: str) -> None:
     click.echo(f"Closed session: {session_id}")
 
 
+def _resolve_client(client_name: str | None) -> ClientConfig:
+    """Resolve --client to a ClientConfig, defaulting to the first configured client."""
+    clients = load_clients()
+    if client_name:
+        return get_client(client_name)
+    if not clients:
+        msg = "No clients configured. Add one to ~/.config/cw/clients.yaml."
+        raise CwError(msg)
+    return next(iter(clients.values()))
+
+
+@main.command(name="orchestrator-start")
+@click.option("--name", default="cw-orchestrator", help="Session label.")
+@click.option(
+    "--client",
+    default=None,
+    help="Client to scope the orchestrator to. Defaults to first configured client.",
+)
+@handle_errors
+def orchestrator_start(
+    name: str,
+    client: str | None,
+    native_daemon: NativeDaemonClient | None = None,
+) -> None:
+    """Spawn a long-running cw orchestrator session driven by the cw-pr-events channel.
+
+    The session listens for PR events emitted by cw daemon and reacts via
+    the cw-orchestrator agent skill.
+    """
+    client_cfg = _resolve_client(client)
+    extra_args = [
+        "--agent",
+        "cw-orchestrator",
+        "--dangerously-load-development-channels",
+        "server:cw-pr-events",
+    ]
+    session_id = spawn_create_impl(
+        client=client_cfg,
+        worktree=client_cfg.workspace_path,
+        prompt="You are the cw orchestrator session. Wait for channel events.",
+        label=name,
+        extra_args=extra_args,
+        permission_mode="acceptEdits",
+        native_daemon=native_daemon,
+    )
+    click.echo(f"Spawned orchestrator session: {session_id}")
+
+
 @main.group(name="pr-channel")
 def pr_channel() -> None:
     """PR channel server: push MCP notifications to subscribed Claude sessions."""
