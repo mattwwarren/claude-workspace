@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+import urllib.request
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
@@ -162,6 +164,44 @@ def _all_threads_addressed(thread_status: dict[str, Any]) -> bool:
     )
 
 
+_DEFAULT_CHANNEL_URL = "http://127.0.0.1:8788/pr-event"
+
+
+def _post_to_channel(
+    event_type: str,
+    repo: str,
+    pr_number: int,
+    payload: dict[str, Any],
+) -> None:
+    """Post a PR event to the channel server. Best-effort: logs on failure."""
+    url = os.environ.get("CW_PR_EVENTS_URL", _DEFAULT_CHANNEL_URL)
+    body = json.dumps(
+        {
+            "repo": repo,
+            "pr_number": pr_number,
+            "event_type": event_type,
+            "payload": payload,
+        }
+    ).encode()
+    req = urllib.request.Request(  # noqa: S310
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=2)  # noqa: S310
+    except Exception:  # noqa: BLE001
+        # Best-effort: channel server may not be running; never block PR watching.
+        # Justification: (1) failure modes are connection refused/timeout/HTTP error,
+        # (2) logged at debug with exc_info=True for traceability,
+        # (3) non-critical — PR watching must continue regardless,
+        # (4) tests verify resilience (test_channel_server_down_does_not_raise).
+        logger.debug(
+            "_post_to_channel failed url=%s event_type=%s",
+            url,
+            event_type,
+            exc_info=True,
+        )
+
+
 def watch_prs_for_client(
     client: ClientConfig,
     snapshot: WatcherSnapshot,
@@ -223,6 +263,9 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel(
+                    "merged", repo, pr_number, {"status": status, "role": role}
+                )
                 new_snapshot.pr_states[pr_key] = status
                 continue
 
@@ -247,6 +290,12 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel(
+                    "review_received",
+                    repo,
+                    pr_number,
+                    {"unresolved_threads": unresolved_now, "role": role},
+                )
                 new_snapshot.review_prs.add(pr_key)
 
             # --- PR_MERGEABLE: all threads addressed (and we've seen review before) ---
@@ -267,6 +316,7 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel("mergeable", repo, pr_number, {"role": role})
                 new_snapshot.mergeable_prs.add(pr_key)
 
             # --- PR_CI_FAILED: delta_findings mention CI failure ---
@@ -286,6 +336,12 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel(
+                    "ci_failed",
+                    repo,
+                    pr_number,
+                    {"findings_count": len(delta_findings), "role": role},
+                )
                 new_snapshot.ci_fail_prs.add(pr_key)
 
     return events, new_snapshot

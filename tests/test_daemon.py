@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 
 import pytest
 
 from cw.daemon import (
     ThrottleStore,
     WatcherSnapshot,
+    _post_to_channel,
     watch_prs_for_client,
 )
 from cw.models import (
@@ -432,3 +435,110 @@ class TestThrottleStore:
         store.mark_dispatched("client", "owner/repo#3", "author", "sess003")
         # "reviewer" role is different from "author"
         assert not store.is_throttled("client", "owner/repo#3", "reviewer", state)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _post_to_channel
+# ---------------------------------------------------------------------------
+
+
+class TestChannelPosting:
+    """Tests for the best-effort HTTP channel posting helper."""
+
+    def test_merged_posts_correct_payload(self) -> None:
+        """merged event_type sends correct JSON body to channel server."""
+        captured: list[dict[str, Any]] = []
+
+        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
+            captured.append(json.loads(req.data))
+            return MagicMock()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            _post_to_channel(
+                "merged",
+                "owner/my-repo",
+                42,
+                {"status": "complete", "role": "author"},
+            )
+
+        assert len(captured) == 1
+        assert captured[0]["event_type"] == "merged"
+        assert captured[0]["repo"] == "owner/my-repo"
+        assert captured[0]["pr_number"] == 42
+        assert captured[0]["payload"] == {"status": "complete", "role": "author"}
+
+    def test_ci_failed_posts_correct_payload(self) -> None:
+        """ci_failed event_type sends correct JSON body to channel server."""
+        captured: list[dict[str, Any]] = []
+
+        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
+            captured.append(json.loads(req.data))
+            return MagicMock()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            _post_to_channel(
+                "ci_failed", "owner/repo", 7, {"findings_count": 3, "role": "author"}
+            )
+
+        assert captured[0]["event_type"] == "ci_failed"
+        assert captured[0]["pr_number"] == 7
+
+    def test_review_received_posts_correct_payload(self) -> None:
+        """review_received event_type sends correct JSON body."""
+        captured: list[dict[str, Any]] = []
+
+        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
+            captured.append(json.loads(req.data))
+            return MagicMock()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            _post_to_channel(
+                "review_received",
+                "owner/repo",
+                5,
+                {"unresolved_threads": 2, "role": "author"},
+            )
+
+        assert captured[0]["event_type"] == "review_received"
+        assert captured[0]["payload"]["unresolved_threads"] == 2
+
+    def test_mergeable_posts_correct_payload(self) -> None:
+        """mergeable event_type sends correct JSON body."""
+        captured: list[dict[str, Any]] = []
+
+        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
+            captured.append(json.loads(req.data))
+            return MagicMock()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            _post_to_channel("mergeable", "owner/repo", 3, {"role": "author"})
+
+        assert captured[0]["event_type"] == "mergeable"
+
+    def test_channel_server_down_does_not_raise(self) -> None:
+        """URLError from unreachable server is silently swallowed."""
+        err_msg = "Connection refused"
+
+        def raise_url_error(req: Any, timeout: int = 0) -> None:
+            raise URLError(err_msg)
+
+        # Must not raise — best-effort design
+        with patch("cw.daemon.urllib.request.urlopen", raise_url_error):
+            _post_to_channel("merged", "owner/repo", 1, {})
+
+    def test_cw_pr_events_url_env_var_overrides_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CW_PR_EVENTS_URL env var controls the POST destination."""
+        custom_url = "http://custom-host:9999/pr-event"
+        monkeypatch.setenv("CW_PR_EVENTS_URL", custom_url)
+        captured_urls: list[str] = []
+
+        def fake_urlopen(req: Any, timeout: int = 0) -> MagicMock:
+            captured_urls.append(req.full_url)
+            return MagicMock()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            _post_to_channel("merged", "owner/repo", 1, {})
+
+        assert captured_urls == [custom_url]
