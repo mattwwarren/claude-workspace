@@ -1342,6 +1342,53 @@ class TestDispatchTickFreshnessGate:
 
         assert call_count == 1
 
+    def test_freshness_check_missing_workspace_no_traceback(
+        self,
+        tmp_dispatch_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """dispatch_tick with missing workspace_path: WARNING logged, no traceback."""
+        missing_dir = tmp_path / "nonexistent"  # intentionally not created
+        missing_client = ClientConfig(
+            name="missing-ws",
+            workspace_path=missing_dir,
+            default_branch="main",
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, missing_client)
+        add_ticket(TicketTask(ticket_id="CW-99", client="missing-ws"))
+
+        daemon = FakeNativeDaemonClient()
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        caplog.set_level(logging.WARNING, logger="cw.worktree")
+
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"missing-ws": 1},
+        )
+        # Should not raise even with missing workspace_path
+        dispatch_tick(config, native_daemon=daemon)
+
+        # No exc_info on freshness-related log records.
+        # (dispatch may log other errors if it proceeds to create_worktree with
+        # the missing path; those are separate concerns from the freshness gate.)
+        freshness_records = [
+            r
+            for r in caplog.records
+            if r.name in ("cw.dispatch", "cw.worktree")
+            and "freshness" in r.message.lower()
+        ]
+        assert not any(r.exc_info for r in freshness_records), (
+            "No traceback should appear for missing workspace freshness check — "
+            "got exc_info on: "
+            + str([r.message for r in freshness_records if r.exc_info])
+        )
+        # The freshness skip warning should appear
+        assert any("freshness_check_skip" in r.message for r in caplog.records), (
+            "Expected freshness_check_skip warning for missing workspace"
+        )
+
     def test_freshness_check_failure_does_not_block_dispatch(
         self,
         tmp_dispatch_dirs: Path,

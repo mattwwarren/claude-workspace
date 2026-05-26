@@ -31,6 +31,7 @@ from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
 from cw.native_daemon import _ROSTER_PATH
 from cw.reconcile import reconcile
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session
@@ -244,6 +245,26 @@ def _check_reconcile() -> CheckResult:
     )
 
 
+def _check_workspace_paths() -> list[CheckResult]:
+    """Verify each client's effective git directory exists."""
+    try:
+        clients = load_clients()
+    except Exception:  # noqa: BLE001
+        return []  # _check_config_file() already surfaces parse errors
+    results = []
+    for name, client in clients.items():
+        git_dir = _git_dir(client)
+        if not git_dir.exists():
+            results.append(
+                CheckResult(
+                    f"workspace/{name}",
+                    ok=False,
+                    detail=f"path does not exist: {git_dir}",
+                )
+            )
+    return results
+
+
 def run_doctor(*, reap: bool = False) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
@@ -271,6 +292,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_bypass_disclaimer())
     report.checks.append(_check_claude_version())
     report.checks.append(_check_daemon_reachable())
+    report.checks.extend(_check_workspace_paths())
 
     if reap:
         report.checks.append(_check_reconcile())
