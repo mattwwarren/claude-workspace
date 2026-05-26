@@ -164,26 +164,6 @@ def mock_native_daemon() -> FakeNativeDaemonClient:
 
 
 @pytest.fixture
-def sample_handoff_file(tmp_path: Path) -> Path:
-    """Create a .handoffs/session-*.md with valid resumption prompt."""
-    handoffs_dir = tmp_path / "workspace" / "test-project" / ".handoffs"
-    handoffs_dir.mkdir(parents=True)
-    handoff = handoffs_dir / "session-test123.md"
-    handoff.write_text(
-        "# Session Handoff\n\n"
-        "## Summary\n\n"
-        "Did some work on the feature.\n\n"
-        "## Resumption Prompt\n\n"
-        "Use this to resume:\n\n"
-        "```\n"
-        "Continue working on the auth feature. The login endpoint is done,\n"
-        "but the signup endpoint still needs validation.\n"
-        "```\n"
-    )
-    return handoff
-
-
-@pytest.fixture
 def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
     """Factory fixture to create git repos in tmp_path.
 
