@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,7 +31,7 @@ from cw.cw_pr_events_server import (  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _reset_subscribers() -> None:
+def _reset_subscribers() -> Generator[None]:
     """Clear global subscriber list between tests to prevent state bleed."""
     with _server_mod._lock:
         _server_mod._subscribers.clear()
@@ -40,24 +41,26 @@ def _reset_subscribers() -> None:
 
 
 class TestPREventPayloadValidation:
-    def test_valid_payload_accepted(self):
+    def test_valid_payload_accepted(self) -> None:
         event = PREventRequest(
             repo="owner/repo", pr_number=42, event_type="ci_failed", payload={}
         )
         assert event.repo == "owner/repo"
         assert event.pr_number == 42
 
-    def test_missing_required_field_rejected(self):
+    def test_missing_required_field_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            PREventRequest(pr_number=42, event_type="ci_failed")
+            PREventRequest.model_validate({"pr_number": 42, "event_type": "ci_failed"})
 
-    def test_invalid_event_type_rejected(self):
+    def test_invalid_event_type_rejected(self) -> None:
         with pytest.raises(ValidationError):
             PREventRequest(repo="x", pr_number=1, event_type="unknown_type")
 
-    def test_pr_number_must_be_int(self):
+    def test_pr_number_must_be_int(self) -> None:
         with pytest.raises(ValidationError):
-            PREventRequest(repo="x", pr_number="foo", event_type="ci_failed")
+            PREventRequest.model_validate(
+                {"repo": "x", "pr_number": "foo", "event_type": "ci_failed"}
+            )
 
 
 class TestMCPNotificationShape:
@@ -69,18 +72,18 @@ class TestMCPNotificationShape:
             payload={"key": "val"},
         )
 
-    def test_notification_has_correct_type(self):
+    def test_notification_has_correct_type(self) -> None:
         notif = _build_notification(self._make_event())
         assert notif["notification_type"] == _NOTIFICATION_TYPE
 
-    def test_notification_message_is_json(self):
+    def test_notification_message_is_json(self) -> None:
         notif = _build_notification(self._make_event())
         data = json.loads(notif["message"])
         assert "repo" in data
         assert "pr_number" in data
         assert "event_type" in data
 
-    def test_notification_title_is_short_string(self):
+    def test_notification_title_is_short_string(self) -> None:
         notif = _build_notification(self._make_event())
         assert "42" in notif["title"]
         assert isinstance(notif["title"], str)
@@ -88,27 +91,27 @@ class TestMCPNotificationShape:
     @pytest.mark.parametrize(
         "event_type", ["ci_failed", "review_received", "mergeable", "merged"]
     )
-    def test_all_known_event_types_produce_title(self, event_type: str):
+    def test_all_known_event_types_produce_title(self, event_type: str) -> None:
         event = self._make_event(event_type)
         notif = _build_notification(event)
         assert notif["title"]
 
 
 class TestSubscriberRegistry:
-    def test_subscribe_adds_to_registry(self):
+    def test_subscribe_adds_to_registry(self) -> None:
         q = subscribe()
         try:
             assert isinstance(q, queue.SimpleQueue)
         finally:
             unsubscribe(q)
 
-    def test_unsubscribe_removes_from_registry(self):
+    def test_unsubscribe_removes_from_registry(self) -> None:
         q = subscribe()
         unsubscribe(q)
         broadcast({"test": True})
         assert q.empty()
 
-    def test_broadcast_sends_to_all_queues(self):
+    def test_broadcast_sends_to_all_queues(self) -> None:
         q1 = subscribe()
         q2 = subscribe()
         try:
@@ -124,7 +127,7 @@ class TestHandlePostPrEvent:
     def _make_client(self) -> TestClient:
         return TestClient(make_app())
 
-    def test_valid_event_returns_ok(self):
+    def test_valid_event_returns_ok(self) -> None:
         client = self._make_client()
         resp = client.post(
             "/pr-event",
@@ -133,7 +136,7 @@ class TestHandlePostPrEvent:
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
-    def test_invalid_event_type_returns_400(self):
+    def test_invalid_event_type_returns_400(self) -> None:
         client = self._make_client()
         resp = client.post(
             "/pr-event",
@@ -142,7 +145,7 @@ class TestHandlePostPrEvent:
         assert resp.status_code == 400
         assert "error" in resp.json()
 
-    def test_missing_repo_returns_400(self):
+    def test_missing_repo_returns_400(self) -> None:
         client = self._make_client()
         resp = client.post(
             "/pr-event",
@@ -150,7 +153,7 @@ class TestHandlePostPrEvent:
         )
         assert resp.status_code == 400
 
-    def test_valid_event_broadcasts_notification(self):
+    def test_valid_event_broadcasts_notification(self) -> None:
         q = subscribe()
         try:
             client = self._make_client()
@@ -165,7 +168,7 @@ class TestHandlePostPrEvent:
         finally:
             unsubscribe(q)
 
-    def test_make_app_returns_starlette_app(self):
+    def test_make_app_returns_starlette_app(self) -> None:
         from starlette.applications import Starlette
 
         app = make_app()
@@ -173,7 +176,7 @@ class TestHandlePostPrEvent:
 
 
 class TestServe:
-    def test_serve_calls_uvicorn_run(self):
+    def test_serve_calls_uvicorn_run(self) -> None:
         mock_run = MagicMock()
         with patch("uvicorn.run", mock_run):
             serve(host="127.0.0.1", port=9999)
@@ -184,7 +187,7 @@ class TestServe:
 
 
 class TestCLIPrChannel:
-    def test_pr_channel_serve_command_invokes_serve(self):
+    def test_pr_channel_serve_command_invokes_serve(self) -> None:
         from cw.cli import main
 
         mock_serve = MagicMock()
