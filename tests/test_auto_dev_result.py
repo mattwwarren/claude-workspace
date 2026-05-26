@@ -1110,3 +1110,90 @@ class TestV4StatusPromotion:
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.status == "shipped"
+
+
+class TestStageReachedAliases:
+    """Short-form stage_reached aliases from the producer map to full-form values.
+
+    Issue #292: producer occasionally emits resume-detection substates
+    (``s5_ci_pending``, ``merged``, etc.) instead of canonical full-form
+    values. The ``_normalize_stage_reached`` field_validator maps them so
+    otherwise-valid sentinels don't fail with ``validation_failed``.
+    """
+
+    # Each tuple: (alias, expected_canonical, payload_factory)
+    # The payload_factory must return a payload whose status/scope are
+    # compatible with the expected_canonical stage.
+    @pytest.mark.parametrize(
+        ("alias", "expected"),
+        [
+            # pre-flight
+            ("pre_flight", "stage1_pre_flight"),
+            # Stage 1 substates
+            ("s1_drafting", "stage1_plan"),
+            ("s1_pending_ambiguity_resolution", "stage1_plan"),
+            ("s1_pending_human_approval", "stage1_plan"),
+            ("s1_plan_approved", "stage1_plan"),
+            # Stage 2
+            ("s2_implementing", "stage2_impl"),
+            # Stage 3
+            ("s3_review_pending", "stage3_review"),
+            ("s3_fix_loop", "stage3_review"),
+            # Stage 4 / 5 (PR created or later)
+            ("s4_pr_open", "stage5_post_create"),
+            ("s5_ci_pending", "stage5_post_create"),
+            ("s5_ci_passed", "stage5_post_create"),
+            ("s5_ci_failed", "stage5_post_create"),
+            ("merged", "stage5_post_create"),
+        ],
+    )
+    def test_short_form_aliases_normalize(self, alias: str, expected: str) -> None:
+        payload_for: dict[str, Any] = {
+            "stage1_pre_flight": _no_op_payload(),
+            "stage1_plan": _plan_pending_payload(),
+            "stage2_impl": _blocked_payload(),
+            "stage3_review": _review_pending_payload(),
+            "stage5_post_create": _shipped_payload(),
+        }
+        p = payload_for[expected]
+        p["stage_reached"] = alias
+        result = AutoDevResult.model_validate(p)
+        assert result.stage_reached == expected
+
+    @pytest.mark.parametrize("bad", ["stagee5", "", "stage_1", "s6_unknown", "MERGED"])
+    def test_misspelled_stage_still_rejects(self, bad: str) -> None:
+        p = _shipped_payload()
+        p["stage_reached"] = bad
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_full_form_values_pass_through_unchanged(self) -> None:
+        # Existing canonical values must not be mangled by the normalizer
+        for full_form, payload_fn in [
+            ("stage1_pre_flight", _no_op_payload),
+            ("stage1_plan", _plan_pending_payload),
+            ("stage2_impl", _blocked_payload),
+            ("stage3_review", _review_pending_payload),
+            ("stage4a_merge_gate", _merge_gate_payload),
+            ("stage5_post_create", _shipped_payload),
+        ]:
+            p = payload_fn()
+            result = AutoDevResult.model_validate(p)
+            assert result.stage_reached == full_form
+
+    def test_parse_stdout_shipped_with_s5_ci_pending(self) -> None:
+        # Regression for issue #292: producer emitted s5_ci_pending in a shipped
+        # sentinel; the task was left PENDING despite the PR being merged.
+        p = _shipped_payload()
+        p["stage_reached"] = "s5_ci_pending"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+        assert result.stage_reached == "stage5_post_create"
+
+    def test_parse_stdout_shipped_with_merged(self) -> None:
+        p = _shipped_payload()
+        p["stage_reached"] = "merged"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.stage_reached == "stage5_post_create"
