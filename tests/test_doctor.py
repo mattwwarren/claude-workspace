@@ -1267,6 +1267,22 @@ class TestCheckWorkspacePaths:
         results = _check_workspace_paths()
         assert results == []
 
+    def test_load_clients_exception_returns_empty(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """load_clients() raising any exception returns [] (no crash)."""
+        from cw.doctor import _check_workspace_paths
+
+        def boom() -> object:
+            msg = "unexpected parse error"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_clients", boom)
+        results = _check_workspace_paths()
+        assert results == []
+
     def test_run_doctor_includes_workspace_check(
         self,
         tmp_config_dir: Path,
