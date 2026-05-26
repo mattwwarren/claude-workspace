@@ -19,7 +19,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]>=1.27.1"]
+mcp = [
+    "mcp[cli]>=1.27.1",
+    "starlette>=1.1.0",
+    "uvicorn>=0.30.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/mattwwarren/claude-workspace"
@@ -141,10 +145,12 @@ mypy_path = "src"
 packages = ["cw"]
 
 [[tool.mypy.overrides]]
-# starlette, mcp, uvicorn are optional extras; ignore missing stubs when not installed
+# starlette, mcp, uvicorn, anyio are optional extras; ignore missing stubs when not installed
 module = [
-    "starlette.*",
+    "anyio",
+    "anyio.*",
     "mcp.*",
+    "starlette.*",
     "uvicorn",
 ]
 ignore_missing_imports = true

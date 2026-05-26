@@ -189,6 +189,8 @@ dependencies = [
 [package.optional-dependencies]
 mcp = [
     { name = "mcp", extra = ["cli"] },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -214,6 +216,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rich", specifier = ">=13.7" },
     { name = "ruamel-yaml", specifier = ">=0.18.6" },
+    { name = "starlette", marker = "extra == 'mcp'", specifier = ">=1.1.0" },
+    { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.30.0" },
 ]
 provides-extras = ["mcp"]
 

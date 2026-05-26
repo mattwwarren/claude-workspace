@@ -26,6 +26,8 @@ from cw.config import (
     save_state,
     show_config,
 )
+from cw.cw_pr_events_server import DEFAULT_HOST as _PR_CHANNEL_DEFAULT_HOST
+from cw.cw_pr_events_server import DEFAULT_PORT as _PR_CHANNEL_DEFAULT_PORT
 from cw.daemon import run_watcher_tick
 from cw.dev_queue import (
     add_ticket,
@@ -1909,8 +1911,8 @@ def pr_channel() -> None:
 
 
 @pr_channel.command(name="serve")
-@click.option("--port", default=8788, type=int, show_default=True)
-@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=_PR_CHANNEL_DEFAULT_PORT, type=int, show_default=True)
+@click.option("--host", default=_PR_CHANNEL_DEFAULT_HOST, show_default=True)
 def pr_channel_serve(port: int, host: str) -> None:
     """Start the cw-pr-events MCP channel server."""
     from cw.cw_pr_events_server import serve as _serve  # noqa: PLC0415

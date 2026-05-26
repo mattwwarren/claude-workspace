@@ -9,9 +9,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 from pydantic import ValidationError
-from starlette.testclient import TestClient
 
-from cw.cw_pr_events_server import (
+starlette = pytest.importorskip(
+    "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
+)
+
+from starlette.testclient import TestClient  # noqa: E402
+
+import cw.cw_pr_events_server as _server_mod  # noqa: E402
+from cw.cw_pr_events_server import (  # noqa: E402
     PREventRequest,
     _build_notification,
     broadcast,
@@ -20,6 +26,16 @@ from cw.cw_pr_events_server import (
     subscribe,
     unsubscribe,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_subscribers() -> None:
+    """Clear global subscriber list between tests to prevent state bleed."""
+    with _server_mod._lock:
+        _server_mod._subscribers.clear()
+    yield
+    with _server_mod._lock:
+        _server_mod._subscribers.clear()
 
 
 class TestPREventPayloadValidation:

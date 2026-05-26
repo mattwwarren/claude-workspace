@@ -20,8 +20,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PORT = 8788
-_DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8788
+DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = DEFAULT_PORT
+_DEFAULT_HOST = DEFAULT_HOST
 _VALID_EVENT_TYPES = frozenset({"ci_failed", "review_received", "mergeable", "merged"})
 _NOTIFICATION_TYPE = "cw-pr-event"
 
@@ -100,8 +102,11 @@ async def handle_post_pr_event(request: Request) -> Response:
 
 def make_app() -> Starlette:
     """Build and return the Starlette ASGI app with MCP SSE + /pr-event route."""
+    import anyio  # noqa: PLC0415
     from mcp.server import Server  # noqa: PLC0415
     from mcp.server.sse import SseServerTransport  # noqa: PLC0415
+    from mcp.shared.message import SessionMessage  # noqa: PLC0415
+    from mcp.types import JSONRPCMessage, JSONRPCNotification  # noqa: PLC0415
 
     mcp_server: Server[None, Any] = Server("cw-pr-events")
     sse = SseServerTransport("/messages")
@@ -110,11 +115,41 @@ def make_app() -> Starlette:
         scope: Any, receive: Any, send: Any
     ) -> None:
         async with sse.connect_sse(scope, receive, send) as streams:
-            await mcp_server.run(
-                streams[0],
-                streams[1],
-                mcp_server.create_initialization_options(),
-            )
+            read_stream, write_stream = streams
+            q = subscribe()
+            try:
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(
+                        mcp_server.run,
+                        read_stream,
+                        write_stream,
+                        mcp_server.create_initialization_options(),
+                    )
+
+                    async def _drain() -> None:  # pragma: no cover
+                        while True:
+                            try:
+                                notification = q.get_nowait()
+                            except queue.Empty:
+                                await anyio.sleep(0.05)
+                                continue
+                            json_rpc_notif = JSONRPCNotification(
+                                jsonrpc="2.0",
+                                method="notifications/message",
+                                params={
+                                    "level": "info",
+                                    "logger": "cw-pr-events",
+                                    "data": notification,
+                                },
+                            )
+                            session_msg = SessionMessage(
+                                message=JSONRPCMessage(json_rpc_notif)
+                            )
+                            await write_stream.send(session_msg)
+
+                    tg.start_soon(_drain)
+            finally:
+                unsubscribe(q)
 
     return Starlette(
         routes=[
