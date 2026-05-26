@@ -1069,7 +1069,12 @@ class _RaisingNativeDaemon(FakeNativeDaemonClient):
         self._exc = exc
 
     def spawn_bg(
-        self, *, cwd: Path, prompt: str, extra_args: list[str] | None = None
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        extra_args: list[str] | None = None,
+        permission_mode: str | None = None,
     ) -> str:
         self.spawn_calls.append((cwd, prompt))
         raise self._exc

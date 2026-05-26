@@ -347,6 +347,117 @@ class TestSpawnCreateImplWorkerModel:
         ]
 
 
+class TestSpawnCreateImplExtraArgsPermissionMode:
+    """Tests for extra_args and permission_mode on spawn_create_impl (issue #294)."""
+
+    def test_spawn_create_impl_passes_extra_args(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Caller-provided extra_args reach spawn_bg."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-extra-args")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            extra_args=["--resume", "abc12345"],
+        )
+
+        assert daemon.spawn_extra_args[0] == ["--resume", "abc12345"]
+
+    def test_spawn_create_impl_merges_worker_model_and_extra_args(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """worker_model args come first, then caller extra_args."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "merged"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="merged",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-merged-args")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            extra_args=["--resume", "abc12345"],
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--model",
+            "claude-sonnet-4-6-20251015",
+            "--resume",
+            "abc12345",
+        ]
+
+    def test_spawn_create_impl_passes_permission_mode(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Non-None permission_mode propagates to spawn_bg."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-permission-mode")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            permission_mode="bypassPermissions",
+        )
+
+        assert daemon.spawn_permission_modes[0] == "bypassPermissions"
+
+    def test_spawn_create_impl_permission_mode_default_is_none(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """permission_mode defaults to None (spawn_bg uses _DEFAULT_PERMISSION_MODE)."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-permission-default")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_permission_modes[0] is None
+
+
 class TestValidateWorktree:
     """Tests for the _validate_worktree pre-flight gate (issue #186).
 
