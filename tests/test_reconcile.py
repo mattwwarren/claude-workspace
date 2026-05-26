@@ -156,6 +156,39 @@ def test_compute_drift_native_daemon_live_set_counts_as_alive() -> None:
     assert report.phantom_session_ids == ["native-dead"]
 
 
+def test_reconcile_matches_short_id_against_full_uuid_session_id(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real `claude agents --json` returns sessionId as a full UUID; cw's
+    surface_ref is the 8-char short id. Reconcile must normalize by slicing
+    the UUID to its first 8 chars so the live-set comparison matches.
+
+    Regression test for the second bug in #271 — the FakeNativeDaemonClient
+    returns short ids, masking the mismatch in compute_drift unit tests.
+    Without this fix, every real daemon session looks phantom and gets
+    reaped right after the spawn grace window expires.
+    """
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+
+    # Session in cw state with the short-id surface_ref (Phase C format).
+    state = CwState(sessions=[_mk_session("alive-with-uuid-daemon", short_id)])
+    save_state(state)
+
+    # Real daemon shape: sessionId is the full UUID.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": full_uuid}],
+    )
+
+    report = reconcile()
+    assert report.phantom_session_ids == [], (
+        "Session whose short-id surface_ref is the prefix of a live "
+        "daemon UUID must not be reaped as phantom"
+    )
+
+
 def test_compute_drift_spawn_grace_window_protects_fresh_sessions() -> None:
     """Sessions younger than SPAWN_GRACE_SECONDS are not reaped as phantom.
 
@@ -309,13 +342,16 @@ def test_reconcile_noop_when_no_phantoms(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    live_ref = "alive-short-id"
-    sess = _mk_session("alive", live_ref)
+    # Use a realistic 8-char short id matching cw's _is_native_surface_ref
+    # contract (the daemon would return the full UUID; we'd slice to 8).
+    short_id = "abcd1234"
+    full_uuid = f"{short_id}-1111-2222-3333-444455556666"
+    sess = _mk_session("alive", short_id)
     save_state(CwState(sessions=[sess]))
 
     monkeypatch.setattr(
         "cw.reconcile._claude_agents_json",
-        lambda: [{"sessionId": live_ref}],
+        lambda: [{"sessionId": full_uuid}],
     )
     report = reconcile()
     assert report.phantom_session_ids == []
