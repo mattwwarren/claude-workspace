@@ -514,38 +514,6 @@ class TestBackgroundSession:
         with pytest.raises(CwError, match="not active or idle"):
             background_session("c/impl")
 
-    def test_finds_latest_handoff(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        handoffs_dir = sample_client.workspace_path / ".handoffs"
-        handoffs_dir.mkdir(parents=True)
-        handoff = handoffs_dir / "session-test.md"
-        handoff.write_text("# Handoff\n")
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="outside1",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                )
-            ]
-        )
-        save_state(state)
-
-        background_session("test-client/impl")
-
-        updated = load_state()
-        assert updated.sessions[0].last_handoff_path is not None
-        output = capsys.readouterr().out
-        assert "Marking as backgrounded" in output
-
     def test_session_not_found_raises(
         self,
         tmp_config_dir: Path,
@@ -827,68 +795,6 @@ class TestResumeSession:
             "550e8400-e29b-41d4-a716-446655440000",
         ]
 
-    def test_no_handoff_warns(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_native_daemon: FakeNativeDaemonClient,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
-        monkeypatch.setattr("cw.session._attach_session", _noop)
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="nohndff1",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.BACKGROUNDED,
-                    workspace_path=sample_client.workspace_path,
-                )
-            ]
-        )
-        save_state(state)
-
-        resume_session("test-client/impl", native_daemon=mock_native_daemon)
-
-        output = capsys.readouterr().out
-        assert "No handoff file" in output
-
-    def test_with_handoff_loads_context(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_native_daemon: FakeNativeDaemonClient,
-        monkeypatch: pytest.MonkeyPatch,
-        sample_handoff_file: Path,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
-        monkeypatch.setattr("cw.session._attach_session", _noop)
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="withhand1",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.BACKGROUNDED,
-                    workspace_path=sample_client.workspace_path,
-                    last_handoff_path=sample_handoff_file,
-                )
-            ]
-        )
-        save_state(state)
-
-        resume_session("test-client/impl", native_daemon=mock_native_daemon)
-
-        output = capsys.readouterr().out
-        assert "Loaded resumption context" in output
-
     def test_not_backgrounded_raises(
         self,
         tmp_config_dir: Path,
@@ -958,38 +864,6 @@ class TestResumeSession:
         out = capsys.readouterr().out
         assert "Ctrl+Z" in out
         assert "Ctrl+D" in out
-
-    def test_resume_preserves_handoff_file(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        mock_native_daemon: FakeNativeDaemonClient,
-        monkeypatch: pytest.MonkeyPatch,
-        sample_handoff_file: Path,
-    ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
-        monkeypatch.setattr("cw.session._attach_session", _noop)
-
-        state = CwState(
-            sessions=[
-                Session(
-                    id="cleanup2",
-                    name="test-client/impl",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.BACKGROUNDED,
-                    workspace_path=sample_client.workspace_path,
-                    last_handoff_path=sample_handoff_file,
-                )
-            ]
-        )
-        save_state(state)
-
-        resume_session("test-client/impl", native_daemon=mock_native_daemon)
-
-        assert sample_handoff_file.exists()
-        updated = load_state()
-        assert updated.sessions[0].last_handoff_path is not None
 
 
 # ---------------------------------------------------------------------------

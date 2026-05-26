@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 from cw.config import get_client, load_state, save_state
 from cw.exceptions import CwError
-from cw.handoff import extract_resumption_prompt, find_latest_handoff
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
     CompletionReason,
@@ -253,10 +252,6 @@ def background_session(
 
     click.echo(f"Backgrounding session: {session.name}...")
 
-    latest = find_latest_handoff(session.workspace_path)
-    if latest:
-        session.last_handoff_path = latest
-
     if session.status == SessionStatus.ACTIVE:
         click.echo(
             "Marking as backgrounded without /session-done injection"
@@ -334,25 +329,13 @@ def resume_session(
         )
         raise CwError(msg)
 
-    # Extract handoff context for the resumption prompt.
-    handoff_prompt: str | None = None
-    handoff_path = session.last_handoff_path
-    if handoff_path and handoff_path.exists():
-        handoff_prompt = extract_resumption_prompt(handoff_path)
-        if handoff_prompt:
-            click.echo(f"Loaded resumption context from: {handoff_path}")
-        else:
-            click.echo("Warning: Could not extract resumption prompt from handoff.")
-    else:
-        click.echo("No handoff file available. Starting fresh session.")
-
     client = get_client(session.client)
     context = build_session_context(
         session.client,
         str(client.workspace_path),
         session.purpose,
     )
-    full_prompt = f"{context}\n\n{handoff_prompt}" if handoff_prompt else context
+    full_prompt = context
 
     surface = session.surface_ref
     live_ids = daemon.list_live_session_short_ids()
