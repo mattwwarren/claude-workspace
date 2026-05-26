@@ -30,6 +30,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     HEADLESS_TIMEOUT_SECONDS,
+    _claude_agents_json,
     compute_drift,
     reconcile,
     revert_completed_silent_tasks,
@@ -55,6 +56,44 @@ def _mk_session(
         surface_ref=surface_ref,
         started_at=datetime(2026, 4, 19, tzinfo=UTC),
     )
+
+
+def test_claude_agents_json_parses_subprocess_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_claude_agents_json parses the subprocess output and returns a list."""
+    import json as _json
+
+    fake_output = _json.dumps([{"sessionId": "abc12345"}, {"sessionId": "def67890"}])
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        class _Result:
+            stdout = fake_output
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+    result = _claude_agents_json()
+    assert result == [{"sessionId": "abc12345"}, {"sessionId": "def67890"}]
+
+
+def test_claude_agents_json_returns_empty_on_non_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_claude_agents_json returns [] when daemon output is not a list."""
+    import json as _json
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        class _Result:
+            stdout = _json.dumps({"error": "not a list"})
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+    result = _claude_agents_json()
+    assert result == []
 
 
 def test_compute_drift_empty_state_returns_empty_report() -> None:

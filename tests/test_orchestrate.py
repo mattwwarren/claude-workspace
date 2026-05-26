@@ -317,6 +317,45 @@ class TestRetireMergedPRs:
 
 
 # ---------------------------------------------------------------------------
+# CLI tests: cw orchestrate retire
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestrateRetireCli:
+    def test_no_sessions_retired(
+        self,
+        tmp_orchestrate_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """CLI prints 'No sessions retired.' when nothing was retired."""
+        monkeypatch.setattr(
+            "cw.cli.retire_merged_prs",
+            lambda **_kw: [],
+        )
+        cli_runner = CliRunner()
+        result = cli_runner.invoke(main, ["orchestrate", "retire"])
+        assert result.exit_code == 0
+        assert "No sessions retired." in result.output
+
+    def test_sessions_retired_prints_ids(
+        self,
+        tmp_orchestrate_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """CLI lists retired session IDs when sessions were retired."""
+        monkeypatch.setattr(
+            "cw.cli.retire_merged_prs",
+            lambda **_kw: ["sess-abc", "sess-def"],
+        )
+        cli_runner = CliRunner()
+        result = cli_runner.invoke(main, ["orchestrate", "retire"])
+        assert result.exit_code == 0
+        assert "Retired 2 session(s)" in result.output
+        assert "sess-abc" in result.output
+        assert "sess-def" in result.output
+
+
+# ---------------------------------------------------------------------------
 # Tests: orchestrator_status
 # ---------------------------------------------------------------------------
 
