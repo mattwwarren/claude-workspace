@@ -486,3 +486,65 @@ class TestDurableReplay:
             assert {item["offset"] for item in items} == {0, 1, 2, 3, 4}
         finally:
             unsubscribe(q)
+
+
+class TestLoadCursors:
+    def test_returns_empty_for_missing_file(self) -> None:
+        from cw.cw_pr_events_server import _load_cursors
+
+        result = _load_cursors()
+        assert result == {}
+
+    def test_returns_persisted_cursors(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _load_cursors
+
+        path = state_dir() / "channel-cursors.json"
+        path.write_text(json.dumps({"sub-x": 5, "sub-y": 12}))
+        result = _load_cursors()
+        assert result == {"sub-x": 5, "sub-y": 12}
+
+    def test_returns_empty_on_corrupt_file(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _load_cursors
+
+        path = state_dir() / "channel-cursors.json"
+        path.write_text("not-json")
+        result = _load_cursors()
+        assert result == {}
+
+
+class TestLoadOffsetFromFile:
+    def test_returns_zero_for_missing_file(self) -> None:
+        from cw.cw_pr_events_server import _load_offset_from_file
+
+        result = _load_offset_from_file()
+        assert result == 0
+
+    def test_returns_max_offset_plus_one(self) -> None:
+        from cw.cw_pr_events_server import _append_event, _load_offset_from_file
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "b", "title": "b"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "c", "title": "c"}
+        )
+        result = _load_offset_from_file()
+        assert result == 3
+
+    def test_skips_malformed_lines(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _append_event, _load_offset_from_file
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        path = state_dir() / "channel-events.jsonl"
+        with path.open("a") as f:
+            f.write("bad-json\n")
+        result = _load_offset_from_file()
+        assert result == 1
