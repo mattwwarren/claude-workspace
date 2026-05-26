@@ -26,6 +26,39 @@ test -S ~/Library/Application\ Support/cmux/cmux.sock && echo cmux-ok
 peon status           # optional
 ```
 
+## 1.0 Prerequisites — One-time Setup Steps
+
+### Accept the bypass-permissions disclaimer
+
+Before `cw` can spawn background Claude sessions, the `claude` binary requires you to accept its bypass-permissions disclaimer. Run this once interactively:
+
+```bash
+claude --dangerously-skip-permissions
+```
+
+This persists `skipDangerousModePermissionPrompt: true` in `~/.claude/settings.json`. You only need to do this once; subsequent `cw` sessions will pick it up automatically.
+
+### Verify with `cw doctor`
+
+After installation, run `cw doctor` to confirm your environment is ready:
+
+```
+cw doctor
+```
+
+Expected output for a healthy setup:
+
+```
+  [OK]   bypass-disclaimer — accepted
+  [OK]   claude-version — 2.1.150 (Claude Code)
+  [WARN] daemon-reachable — roster.json not found at ... — daemon not started?
+```
+
+- `[OK] bypass-disclaimer — accepted` — disclaimer accepted; `cw` can spawn sessions.
+- `[WARN] bypass-disclaimer — ...` — disclaimer not yet accepted; run `claude --dangerously-skip-permissions` interactively.
+- `[OK] claude-version` — `claude` binary found and responsive.
+- `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
+
 ## Installation
 
 ### From GitHub (recommended)

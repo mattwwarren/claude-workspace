@@ -13,6 +13,9 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
+    OrchestratorConfig,
+    OrchestratorEvent,
+    OrchestratorEventType,
     Session,
     SessionPurpose,
     SessionStatus,
@@ -35,9 +38,10 @@ class TestSessionStatus:
         assert SessionStatus.IDLE.value == "idle"
         assert SessionStatus.BACKGROUNDED.value == "backgrounded"
         assert SessionStatus.COMPLETED.value == "completed"
+        assert SessionStatus.TIMED_OUT.value == "timed_out"
 
     def test_all_values(self) -> None:
-        assert len(SessionStatus) == 4
+        assert len(SessionStatus) == 5
 
 
 class TestSession:
@@ -227,6 +231,28 @@ class TestClientConfig:
         assert c.is_worktree_client is True
         # Explicit workspace_path is preserved
         assert c.workspace_path == Path("/explicit/path")
+
+    def test_worker_model_defaults_to_none(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.worker_model is None
+
+    def test_worker_model_accepts_opaque_string(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        assert c.worker_model == "claude-sonnet-4-6-20251015"
+
+    def test_worker_model_round_trip(self) -> None:
+        original = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored.worker_model == "claude-haiku-4-5-20251001"
 
 
 class TestCwState:
@@ -445,6 +471,80 @@ class TestCompletionReason:
         assert CompletionReason.HANDOFF.value == "handoff"
         assert CompletionReason.CRASHED.value == "crashed"
         assert CompletionReason.NORMAL.value == "normal"
+        assert CompletionReason.TIMED_OUT.value == "timed_out"
 
     def test_all_values(self) -> None:
-        assert len(CompletionReason) == 4
+        assert len(CompletionReason) == 5
+
+
+class TestOrchestratorConfigLegacyDefault:
+    """Migration of legacy ``per_client_max_parallel.default`` (issue #145)."""
+
+    def test_lifts_legacy_default_into_top_level_field(self) -> None:
+        """A stray ``default`` key under per_client_max_parallel is promoted
+        to ``default_max_parallel`` and removed from the per-client dict.
+        """
+        config = OrchestratorConfig.model_validate(
+            {
+                "per_client_max_parallel": {"default": 5, "real-client": 2},
+            }
+        )
+        assert config.default_max_parallel == 5
+        assert config.per_client_max_parallel == {"real-client": 2}
+        assert "default" not in config.per_client_max_parallel
+
+    def test_explicit_default_max_parallel_wins_over_legacy(self) -> None:
+        """If both new and legacy keys are present, the explicit field wins."""
+        config = OrchestratorConfig.model_validate(
+            {
+                "default_max_parallel": 7,
+                "per_client_max_parallel": {"default": 5},
+            }
+        )
+        assert config.default_max_parallel == 7
+
+    def test_no_legacy_key_leaves_default_at_one(self) -> None:
+        """Default fallback is 1 when neither field is set."""
+        config = OrchestratorConfig()
+        assert config.default_max_parallel == 1
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "abc12345",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "prev_stage": "s1_plan_reviewed",
+                "started_at": "2026-05-23T13:01:42Z",
+            },
+        ),
+        (
+            OrchestratorEventType.STAGE_ERRORED,
+            {
+                "session_id": "abc12345",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:01:42Z",
+                "error_kind": "agent_block",
+            },
+        ),
+    ],
+)
+def test_stage_event_types_round_trip(
+    event_type: OrchestratorEventType,
+    payload: dict[str, str],
+) -> None:
+    """STAGE_ENTERED / STAGE_ERRORED survive a Pydantic model round-trip."""
+    event = OrchestratorEvent(type=event_type, payload=payload)
+    restored = OrchestratorEvent.model_validate_json(event.model_dump_json())
+    assert restored.type is event_type
+    assert restored.payload == payload
+
+
+def test_orchestrator_event_type_includes_needs_sync() -> None:
+    """TICKET_NEEDS_SYNC event type has correct string value."""
+    assert OrchestratorEventType.TICKET_NEEDS_SYNC.value == "ticket.needs_sync"

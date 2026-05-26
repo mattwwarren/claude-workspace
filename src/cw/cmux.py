@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
+import yaml
+from pydantic import ValidationError
+
 from cw.config import load_orchestrator_config
 from cw.exceptions import CwError
 from cw.models import BackendName
@@ -77,6 +80,26 @@ class MultiplexerAdapter(Protocol):
         implementers must not return a subset. ``cw.reconcile`` treats an
         empty result as "possibly unreachable" and refuses to touch state
         when any known session still has a surface_ref.
+        """
+        ...
+
+    def list_live_surface_commands(self) -> dict[str, str]:
+        """Return a mapping of surface_ref to foreground command name.
+
+        Used as a second-pass filter in reconciliation to detect zombie
+        panes whose surface still exists but whose claude process has
+        exited (the pane is back at the shell prompt). Returns the same
+        keys as :meth:`list_surfaces`.
+
+        Same all-or-nothing contract as :meth:`list_surfaces`: return an
+        empty dict if the backend cannot enumerate commands reliably. An
+        empty return is treated by reconcile as "command info
+        unavailable; skip command filter" — fail-open, no false-positive
+        reaping.
+
+        For backends where command introspection is unsupported (cmux),
+        return every live surface mapped to a non-shell sentinel so the
+        zombie filter is a transparent no-op for those surfaces.
         """
         ...
 
@@ -197,6 +220,19 @@ class RealCmuxAdapter:
             return set()
         return live
 
+    def list_live_surface_commands(self) -> dict[str, str]:
+        """Return a no-op command map for cmux surfaces.
+
+        The cmux ``surface.list`` JSON-RPC response does not expose a
+        current-command or process-name field — only ``id``, ``ref``,
+        ``index``, ``type``, ``focused``, ``title`` (see
+        ``docs/cmux-protocol.md``). Until cmux exposes process info, every
+        live cmux surface is reported as running a non-shell sentinel so
+        the zombie-pane filter is transparent for the cmux backend. See
+        GitHub issue #144.
+        """
+        return dict.fromkeys(self.list_surfaces(), "cmux-surface")
+
 
 class FakeCmuxAdapter:
     """In-memory adapter for testing. Records all calls; no real I/O."""
@@ -208,8 +244,11 @@ class FakeCmuxAdapter:
             "close": [],
             "identify": [],
             "list_surfaces": [],
+            "list_live_surface_commands": [],
         }
         self._live: set[str] = set()
+        self._live_commands: dict[str, str] = {}
+        self._commands_fail: bool = False
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Record call and return a deterministic fake surface ref."""
@@ -217,12 +256,14 @@ class FakeCmuxAdapter:
         ref = f"fake-pane-{self._counter}"
         self.calls["spawn"].append((workspace, command, surface))
         self._live.add(ref)
+        self._live_commands[ref] = "claude"
         return ref
 
     def close(self, surface_ref: str) -> None:
         """Record call and drop from live set (idempotent)."""
         self.calls["close"].append((surface_ref,))
         self._live.discard(surface_ref)
+        self._live_commands.pop(surface_ref, None)
 
     def identify(self) -> dict[str, Any]:
         """Record call and return stub focus context."""
@@ -238,6 +279,26 @@ class FakeCmuxAdapter:
         """Return the current in-memory live-surface set (copy)."""
         self.calls["list_surfaces"].append(())
         return set(self._live)
+
+    def list_live_surface_commands(self) -> dict[str, str]:
+        """Return a copy of the current foreground-command map.
+
+        If ``_commands_fail`` is True, returns an empty dict to simulate a
+        backend enumeration failure (exercises the fail-open path in
+        :func:`cw.reconcile.compute_drift`).
+        """
+        self.calls["list_live_surface_commands"].append(())
+        if self._commands_fail:
+            return {}
+        return dict(self._live_commands)
+
+    def set_pane_command(self, surface_ref: str, command: str) -> None:
+        """Override the foreground command for a surface (test helper).
+
+        No assertion that the ref is in the live set — keeps test helpers
+        flexible for exercising edge-case scenarios.
+        """
+        self._live_commands[surface_ref] = command
 
 
 def _resolve_backend_name() -> BackendName:
@@ -259,7 +320,11 @@ def _resolve_backend_name() -> BackendName:
 
     try:
         config = load_orchestrator_config()
-    except Exception:  # pragma: no cover - config load shouldn't hard-fail selector
+    except (
+        OSError,
+        yaml.YAMLError,
+        ValidationError,
+    ):  # pragma: no cover - config load shouldn't hard-fail selector
         config = None
     if config is not None and config.backend is not None:
         return config.backend

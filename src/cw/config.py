@@ -64,8 +64,8 @@ DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30
-per_client_max_parallel:
-  default: 2
+default_max_parallel: 2
+per_client_max_parallel: {}
 linear_prefix_map: {}
 """
 
@@ -343,9 +343,10 @@ def _is_git_repo(path: Path) -> bool:
             check=False,
             env=clean_env,
         )
-        return result.returncode == 0
     except OSError:
         return False
+    else:
+        return result.returncode == 0
 
 
 _VALID_PURPOSES = frozenset(p.value for p in SessionPurpose)

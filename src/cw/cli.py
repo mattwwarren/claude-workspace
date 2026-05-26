@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
+import subprocess
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -14,7 +16,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw.cmux import CmuxAdapter, get_cmux_adapter
+from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
 from cw.config import (
     get_client,
     init_client,
@@ -25,22 +27,33 @@ from cw.config import (
     show_config,
 )
 from cw.daemon import run_watcher_tick
-from cw.dev_queue import add_ticket, list_tickets, resolve_client
+from cw.dev_queue import (
+    add_ticket,
+    clear_tickets,
+    dev_queue_lock,
+    list_tickets,
+    load_dev_queue,
+    remove_ticket,
+    resolve_client,
+    save_dev_queue,
+)
 from cw.dispatch import run_dispatch_loop
 from cw.doctor import format_report, run_doctor
 from cw.events import advance_cursor, read_events, record_event
-from cw.exceptions import CwError
+from cw.exceptions import CwError, WorktreeError
 from cw.models import (
     ClientConfig,
     CompletionReason,
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TaskSpec,
     TicketTask,
 )
+from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
@@ -62,7 +75,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
-from cw.reconcile import reconcile
+from cw.reconcile import reconcile, resolve_headless_budget
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -73,6 +86,7 @@ from cw.session import (
 from cw.spawn import spawn_create_impl
 from cw.tui import DetailLevel
 from cw.tui import watch as tui_watch
+from cw.worktree import fast_forward_main
 from cw.wrapper import run_claude_wrapper, signal_idle
 
 
@@ -255,6 +269,39 @@ def doctor(reap: bool) -> None:
         raise click.exceptions.Exit(1)
 
 
+@main.command(name="upgrade-workers")
+@handle_errors
+def upgrade_workers() -> None:
+    """Restart all daemon-managed background sessions via ``claude respawn --all``.
+
+    Run after upgrading cw or the Claude CLI so background workers pick up
+    the current Claude binary. Wraps ``claude respawn --all`` (RFC 0001 Row 7);
+    closes the gap previously filled by hand-rolled daemon-restart logic.
+
+    Propagates the subprocess exit code. Surfaces stdout to the user; on
+    non-zero exit also surfaces stderr.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "respawn", "--all"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        msg = (
+            "claude binary not found on PATH. Install Claude Code, "
+            "then re-run 'cw upgrade-workers'."
+        )
+        raise click.ClickException(msg) from e
+    if result.stdout:
+        click.echo(result.stdout, nl=False)
+    if result.returncode != 0:
+        if result.stderr:
+            click.echo(result.stderr, nl=False, err=True)
+        raise click.exceptions.Exit(result.returncode)
+
+
 @main.command(name="init")
 @click.argument("name", required=False, default=None)
 @click.option(
@@ -374,20 +421,16 @@ def _display_sessions() -> None:
 
 
 def _check_and_mark_dead_sessions() -> list[str]:
-    """Reconcile state with the live multiplexer and return reaped session names.
+    """Reconcile state with the native daemon and return reaped session names.
 
     Cheap passive reconciliation: called from every read path (``cw status``,
     ``cw list``, ``cw start``). The reconciler is idempotent and returns an
     empty list when nothing changed. :func:`cw.reconcile.reconcile` refuses
-    to mass-reap when the adapter reports an empty live set while active
-    sessions still have surface refs (backend-outage guard), so this helper
+    to mass-reap when the daemon is unreachable or the roster is empty while
+    active sessions still have surface refs (outage guard), so this helper
     is safe to run on every read path.
     """
-    try:
-        adapter = get_cmux_adapter()
-    except CwError:
-        return []
-    report = reconcile(adapter)
+    report = reconcile()
     return list(report.phantom_session_names)
 
 
@@ -645,8 +688,9 @@ def event_record(
     """Record an event to the inbox.
 
     EVENT_TYPE must be one of: ticket.enqueued, session.spawned,
-    session.completed, pr.registered, pr.ci_failed,
-    pr.review_received, pr.mergeable, pr.merged.
+    session.completed, session.timed_out, stage.entered, stage.errored,
+    pr.registered, pr.ci_failed, pr.review_received, pr.mergeable,
+    pr.merged.
     """
     if event_type not in _VALID_EVENT_TYPES:
         valid = ", ".join(sorted(_VALID_EVENT_TYPES))
@@ -772,6 +816,165 @@ def run_claude(extra_args: tuple[str, ...]) -> None:
     run_claude_wrapper(extra_args)
 
 
+# Max dispatch attempts before a validation_failed sentinel caps the task as
+# FAILED rather than reverting to PENDING. See issue #251 Bug B.
+_VALIDATION_FAILED_MAX_ATTEMPTS = 3
+
+# AutoDevResult statuses that represent terminal outcomes the dev-queue should
+# never auto-retry. Marking these COMPLETED prevents the race described in
+# issue #251 Bug A where revert_completed_silent_tasks reverts a task to
+# PENDING before consume_completed_sessions can process the SESSION_COMPLETED
+# event — causing no_op and similar outcomes to trigger infinite re-dispatch.
+_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = frozenset(
+    {
+        "shipped",
+        "no_op",
+        "plan_pending_approval",
+        "review_pending_approval",
+        "merge_gate_blocked",
+        "scope_exceeded",
+        "forbidden_area",
+    }
+)
+
+
+def _apply_sentinel_to_task(
+    ticket_id: str,
+    cw_session_id: str,
+    sentinel: AutoDevResult | BlockedResult,
+) -> None:
+    """Directly update the matching dev-queue task based on the sentinel result.
+
+    Called from signal_stop *before* the session is marked COMPLETED so the
+    task is already in its terminal state when revert_completed_silent_tasks
+    runs. This closes the race window where:
+
+      1. signal_stop marks session COMPLETED (save_state)
+      2. dispatch loop reconcile fires: sees COMPLETED session + RUNNING task
+         → reverts task to PENDING
+      3. consume_completed_sessions reads the SESSION_COMPLETED event but
+         finds task is PENDING (not RUNNING) → skips it
+      4. next tick re-dispatches the ticket (infinite loop for no_op)
+
+    See GitHub issue #251.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        target: TicketTask | None = None
+        for task in store.tasks:
+            if (
+                task.ticket_id == ticket_id
+                and task.session_id == cw_session_id
+                and task.status == QueueItemStatus.RUNNING
+            ):
+                target = task
+                break
+        if target is None:
+            return
+
+        if isinstance(sentinel, AutoDevResult):
+            if sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
+                target.status = QueueItemStatus.COMPLETED
+            elif sentinel.status == "blocked":
+                retry = (
+                    sentinel.blocker is not None
+                    and sentinel.blocker.retry_eligible is True
+                )
+                if retry:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+                else:
+                    target.status = QueueItemStatus.COMPLETED
+            else:
+                target.status = QueueItemStatus.COMPLETED
+        else:
+            # BlockedResult: sentinel failed to parse or was malformed.
+            if sentinel.blocker.reason == "validation_failed":
+                if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
+                    target.status = QueueItemStatus.FAILED
+                else:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+            else:
+                # Other parse failures (no_result_emitted, etc.) → retry.
+                target.status = QueueItemStatus.PENDING
+                target.session_id = None
+
+        save_dev_queue(store)
+
+
+def _parse_sentinel_from_transcript(
+    cwd: str,
+    claude_session_id: str | None,
+) -> AutoDevResult | BlockedResult | None:
+    """Return the parsed sentinel from the transcript, or None if absent.
+
+    Claude stores session transcripts at:
+      ``~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl``
+
+    where the encoded path replaces both ``/`` and ``.`` with ``-``. The JSONL
+    contains one event per line; ``assistant`` events carry ``message.content``
+    blocks whose ``text`` fields hold the model output, JSON-escaped (real
+    newlines become the two-character sequence ``\\n``). Running ``extract_block``
+    against the raw file therefore misses sentinels that are valid in their
+    decoded form, so this scans each assistant text block individually after
+    JSON decoding. Returns None on any I/O error or when no complete sentinel
+    pair is found — distinct from a BlockedResult, which means the sentinel
+    framing was present but the inner payload was unusable (§6 failure modes).
+
+    Used by ``signal_stop`` for headless DAEMON sessions, whose result must
+    be captured here because they bypass the cw wrapper entirely. See GitHub
+    issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
+    """
+    if not claude_session_id:
+        return None
+    encoded = cwd.replace("/", "-").replace(".", "-")
+    transcript_path = (
+        Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
+    )
+    if not transcript_path.is_file():
+        return None
+    try:
+        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "text":
+                        continue
+                    text = block.get("text")
+                    if isinstance(text, str) and extract_block(text) is not None:
+                        return parse_stdout(text)
+    except OSError:
+        return None
+    return None
+
+
+def _sentinel_present_in_transcript(
+    cwd: str,
+    claude_session_id: str | None,
+) -> bool:
+    """Return True if the AUTO_DEV_RESULT sentinel block appears in the transcript.
+
+    Thin wrapper around :func:`_parse_sentinel_from_transcript` preserved for
+    callers that only need the boolean (Layer 1 budget gate in signal_stop).
+    A non-None return — including a BlockedResult for malformed payloads —
+    means the agent emitted *something*; the result-capture path uses the
+    full parsed value, but the budget path only cares "did it emit?"
+    """
+    return _parse_sentinel_from_transcript(cwd, claude_session_id) is not None
+
+
 @main.command(name="signal-stop")
 @handle_errors
 def signal_stop() -> None:
@@ -792,6 +995,12 @@ def signal_stop() -> None:
 
     Best-effort: a missing or unreadable context file is a silent no-op
     so hook execution never blocks claude from exiting.
+
+    Defers when the hook payload carries a non-empty ``background_tasks``
+    list: the Stop hook fires at every main-agent turn boundary, and
+    dispatching a ``run_in_background: true`` subagent ends the parent's
+    turn while the subagent is still running. Completing the session
+    here would orphan the subagent. See issue #151.
     """
     try:
         stdin_text = sys.stdin.read()
@@ -820,17 +1029,160 @@ def signal_stop() -> None:
     if not isinstance(cw_session_id, str):
         return
 
-    state = load_state()
-    session = next((s for s in state.sessions if s.id == cw_session_id), None)
-    if session is None or session.status == SessionStatus.COMPLETED:
+    bg_tasks = hook_payload.get("background_tasks")
+    if isinstance(bg_tasks, list) and bg_tasks:
+        # Turn boundary with pending background work — leave the session
+        # in its current status; another Stop hook will fire when the bg
+        # work drains (the contract `claude --bg + run_in_background: true`
+        # relies on: the subagent's result arrives as the next main-agent
+        # turn, which then ends, firing Stop again with background_tasks
+        # empty). Without this guard, dispatching a run_in_background: true
+        # subagent causes the parent to be marked COMPLETED and, for
+        # DAEMON-origin sessions, killed via `claude stop`, orphaning the
+        # in-flight subagent. See issue #151.
+        #
+        # Fast path: no state I/O. The idempotency guard below is
+        # unreachable on this path by design — deferral leaves state
+        # untouched regardless of current session status.
+        #
+        # Backstop: if the second Stop hook ever fails to fire (daemon
+        # bug, subagent hard crash with no clean Stop), reconcile.py
+        # eventually detects the phantom and marks the session CRASHED,
+        # reverting any matching dev_queue task to PENDING for retry.
+        # Recovery, not silent wedge.
         return
 
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = datetime.now(UTC)
-    session.completed_reason = CompletionReason.NORMAL
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == cw_session_id), None)
+    if session is None or session.status in (
+        SessionStatus.COMPLETED,
+        SessionStatus.IDLE,
+        SessionStatus.TIMED_OUT,
+    ):
+        return
+
     claude_session_id = hook_payload.get("session_id")
+
+    # Issue #165 Phase B: USER-origin sessions are interactive — the Stop
+    # hook fires at every agent turn but the human is still driving. Mark
+    # IDLE so wait loops / daemon triggers can react, but do NOT emit
+    # SESSION_COMPLETED (no dev_queue task to retire) and do NOT call
+    # native_daemon.stop (no roster entry to clean up). DAEMON-origin
+    # falls through to the existing COMPLETED transition below.
+    if session.origin is SessionOrigin.USER:
+        if session.status != SessionStatus.ACTIVE:
+            # BACKGROUNDED (or any non-ACTIVE state) — silent no-op so a
+            # Stop hook firing on a session the user has explicitly
+            # parked doesn't flip its status.
+            return
+        session.status = SessionStatus.IDLE
+        if isinstance(claude_session_id, str):
+            session.claude_session_id = claude_session_id
+        save_state(state)
+        return
+
+    # Issue #176 Layer 1: headless backstop.
+    #
+    # A headless DAEMON session (ticket_id present in context) must NOT be
+    # silently marked COMPLETED unless it emitted an AUTO_DEV_RESULT sentinel.
+    # The bg_tasks guard above correctly defers when a subagent is in flight,
+    # but the parent's *next* turn may end (with background_tasks=[]) before
+    # it has finished its post-wait pipeline work — a silent orphan.
+    #
+    # Detection: DAEMON-origin + non-None ticket_id in context ≡ headless.
+    # Sentinel check: look for the sentinel open tag in the Claude transcript.
+    # Budget: if no sentinel AND wall-clock since session.started_at exceeds
+    # HEADLESS_TIMEOUT_SECONDS, transition to TIMED_OUT (retry-eligible) so
+    # the failure is loud and dev-queue can retry. Under budget: defer (return)
+    # so another Stop hook (or reconcile) can catch it later.
+    #
+    # The guard does NOT replace the bg_tasks deferral — both fire independently.
+    ticket_id_value = context.get("ticket_id")
+    # ``headless: true`` in cw-context.json is written by spawn_create_impl
+    # when dispatch launches a /auto-dev session. Absent (or False) for legacy
+    # sessions and non-headless daemon sessions — those fall through to the
+    # normal COMPLETED path unchanged.
+    is_headless = session.origin is SessionOrigin.DAEMON and bool(
+        context.get("headless")
+    )
+    now = datetime.now(UTC)
+    parsed_sentinel: AutoDevResult | BlockedResult | None = None
+    if is_headless:
+        parsed_sentinel = _parse_sentinel_from_transcript(
+            cwd_value, claude_session_id if isinstance(claude_session_id, str) else None
+        )
+        if parsed_sentinel is None:
+            elapsed = (now - session.started_at).total_seconds()
+            _headless_config = load_orchestrator_config()
+            _stop_task: TicketTask | None = None
+            if isinstance(ticket_id_value, str):
+                _stop_store = load_dev_queue()
+                _stop_task = next(
+                    (t for t in _stop_store.tasks if t.ticket_id == ticket_id_value),
+                    None,
+                )
+            _budget = resolve_headless_budget(_stop_task, session, _headless_config)
+            if elapsed < _budget:
+                # Under budget — defer. Another Stop hook turn will fire, or
+                # reconcile will eventually catch a phantom and CRASH it.
+                return
+            # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
+            last_msg = hook_payload.get("last_assistant_message", "")
+            excerpt = str(last_msg)[:500] if last_msg else ""
+            session.status = SessionStatus.TIMED_OUT
+            session.completed_at = now
+            session.completed_reason = CompletionReason.TIMED_OUT
+            if isinstance(claude_session_id, str):
+                session.claude_session_id = claude_session_id
+            save_state(state)
+            timed_out_payload: dict[str, object] = {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": context.get("client"),
+                "ticket_id": ticket_id_value,
+                "claude_session_id": claude_session_id,
+                "elapsed_seconds": elapsed,
+                "last_assistant_message_excerpt": excerpt,
+            }
+            record_event(OrchestratorEventType.SESSION_TIMED_OUT, timed_out_payload)
+            # Revert the owning TicketTask from RUNNING → PENDING so the
+            # dispatch loop can retry this ticket on the next tick.
+            with dev_queue_lock():
+                store = load_dev_queue()
+                for task in store.tasks:
+                    if (
+                        task.ticket_id == ticket_id_value
+                        and task.status == QueueItemStatus.RUNNING
+                    ):
+                        task.status = QueueItemStatus.PENDING
+                        task.session_id = None
+                        break
+                save_dev_queue(store)
+            if session.surface_ref is not None:
+                get_native_daemon_client().stop(session.surface_ref)
+            return
+
+    # Issue #251: directly update the dev-queue task *before* marking the
+    # session COMPLETED. This closes the race where revert_completed_silent_tasks
+    # sees a COMPLETED session with a still-RUNNING task and reverts it to
+    # PENDING before consume_completed_sessions can process the event — causing
+    # no_op and similar terminal outcomes to trigger infinite re-dispatch.
+    if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
+        _apply_sentinel_to_task(ticket_id_value, session.id, parsed_sentinel)
+
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = now
+    session.completed_reason = CompletionReason.NORMAL
     if isinstance(claude_session_id, str):
         session.claude_session_id = claude_session_id
+    # Issue #225: headless DAEMON sessions bypass the cw wrapper, so
+    # signal_completed (wrapper.py) never runs and last_result stayed None.
+    # Capture the parsed sentinel here before save_state so downstream
+    # consumers (consume_completed_sessions, /cw-followup) can route by
+    # status. parse_stdout returns BlockedResult on malformed payloads — we
+    # persist either shape; both serialize to a dict with a "status" field.
+    if parsed_sentinel is not None:
+        session.last_result = parsed_sentinel.model_dump(mode="json")
     save_state(state)
 
     payload: dict[str, object] = {
@@ -843,6 +1195,15 @@ def signal_stop() -> None:
         "crashed": False,
     }
     record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    # Native bg workers stay registered with the Claude daemon as
+    # ``idle`` after their turn ends; without an explicit stop they
+    # accumulate in roster.json across dispatches (the very failure
+    # mode that motivated GitHub issue #150 in the first place). The
+    # stop call is best-effort: native_daemon.stop logs and swallows
+    # missing-binary / timeout errors rather than failing the hook.
+    if session.origin is SessionOrigin.DAEMON and session.surface_ref is not None:
+        get_native_daemon_client().stop(session.surface_ref)
 
 
 @main.command(name="pane-exited")
@@ -928,19 +1289,81 @@ def dev_queue() -> None:
 @click.argument("tickets", nargs=-1, required=True)
 @click.option("--client", "-c", default=None, help="Target client name.")
 @click.option("--priority", "-p", type=int, default=0, help="Priority (higher=sooner).")
+@click.option(
+    "--timeout",
+    "-t",
+    "headless_timeout_override",
+    type=int,
+    default=None,
+    help="Override headless timeout (seconds) for this ticket.",
+)
 @handle_errors
-def dev_queue_add(tickets: tuple[str, ...], client: str | None, priority: int) -> None:
+def dev_queue_add(
+    tickets: tuple[str, ...],
+    client: str | None,
+    priority: int,
+    headless_timeout_override: int | None,
+) -> None:
     """Enqueue one or more tickets for dispatch."""
     config = load_orchestrator_config()
     for ticket_id in tickets:
         resolved = resolve_client(ticket_id, config, client)
-        task = TicketTask(ticket_id=ticket_id, client=resolved, priority=priority)
-        add_ticket(task)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=resolved,
+            priority=priority,
+            headless_timeout_override=headless_timeout_override,
+        )
+        inserted = add_ticket(task)
+        if not inserted:
+            click.echo(
+                f"Skipped {ticket_id} -> {resolved}: already queued"
+                " (pending or running).",
+                err=True,
+            )
+            continue
         record_event(
             OrchestratorEventType.TICKET_ENQUEUED,
             {"ticket_id": ticket_id, "client": resolved, "priority": priority},
         )
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
+
+
+@dev_queue.command(name="remove")
+@click.argument("tickets", nargs=-1, required=True)
+@click.option("--client", "-c", "client", required=True, help="Client name")
+@click.option(
+    "--all",
+    "-a",
+    "remove_all",
+    is_flag=True,
+    default=False,
+    help="Remove all matching entries when multiple match",
+)
+@handle_errors
+def dev_queue_remove(tickets: tuple[str, ...], client: str, remove_all: bool) -> None:
+    """Remove dev-queue task(s) for the given ticket(s) and client."""
+    for ticket in tickets:
+        remove_ticket(ticket, client, remove_all=remove_all)
+        click.echo(f"Removed {ticket} from {client} dev-queue.")
+
+
+@dev_queue.command(name="clear")
+@click.option("--client", "-c", "client", required=True, help="Client name")
+@click.option(
+    "--status",
+    "-s",
+    "status_filter",
+    type=click.Choice([e.value for e in QueueItemStatus]),
+    default=None,
+    help="Optional status filter",
+)
+@handle_errors
+def dev_queue_clear(client: str, status_filter: str | None) -> None:
+    """Clear dev-queue tasks for the given client, optionally filtered by status."""
+    status_enum = QueueItemStatus(status_filter) if status_filter else None
+    count = clear_tickets(client, status=status_enum)
+    click.echo(f"Cleared {count} dev-queue task(s) for {client}.")
 
 
 @dev_queue.command(name="status")
@@ -1031,18 +1454,19 @@ def _run_plan_impl(
     *,
     client_name: str,
     timeout: int,
-    adapter: CmuxAdapter,
     client_filter: str | None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> int:
     """Spawn the planner, persist the result, and report status.
 
-    Separated from the Click command so tests can inject the cmux adapter
-    directly.  Returns 0 on success, 1 on validation/timeout failure.
+    Separated from the Click command so tests can inject a fake native
+    daemon client directly.  Returns 0 on success, 1 on validation/timeout
+    failure.
     """
     client_config = get_client(client_name)
     result = run_planner(
         client=client_config,
-        adapter=adapter,
+        native_daemon=native_daemon,
         timeout_seconds=timeout,
         client_filter=client_filter,
     )
@@ -1086,15 +1510,38 @@ def dev_queue_plan(client: str, timeout: int, filter_client: str | None) -> None
 
     On validation failure or timeout, the dev queue is left unchanged.
     """
-    adapter = get_cmux_adapter()
     exit_code = _run_plan_impl(
         client_name=client,
         timeout=timeout,
-        adapter=adapter,
         client_filter=filter_client,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
+
+
+@dev_queue.command(name="refresh-all")
+@handle_errors
+def dev_queue_refresh_all() -> None:
+    """Fast-forward main on every configured client repo.
+
+    Runs ``git pull --ff-only origin <default_branch>`` for each client.
+    Does NOT emit events — absence of ``ticket.needs_sync`` on the next
+    dispatch tick confirms the refresh succeeded.
+    """
+    clients = load_clients()
+    had_error = False
+    for client in clients.values():
+        try:
+            before, after = fast_forward_main(client)
+            if before == after:
+                click.echo(f"{client.name}: already up to date ({before[:8]})")
+            else:
+                click.echo(f"{client.name}: updated {before[:8]}..{after[:8]}")
+        except WorktreeError as exc:
+            click.echo(f"{client.name}: ERROR — {exc}", err=True)
+            had_error = True
+    if had_error:
+        raise click.exceptions.Exit(1)
 
 
 # --- Orchestrate command group ---
@@ -1117,9 +1564,11 @@ def _format_status_human(status: OrchestratorStatus) -> str:
     )
 
     lines.extend(("", f"Running sessions:  {len(status.running_sessions)}"))
-    lines.extend(
-        f"  - {s.id}  {s.name}  status={s.status}" for s in status.running_sessions
-    )
+    for s in status.running_sessions:
+        line = f"  - {s.id}  {s.name}  status={s.status}"
+        if s.last_stage:
+            line += f"  last_stage={s.last_stage}"
+        lines.append(line)
 
     lines.extend(("", f"Monitored PRs:     {len(status.monitored_prs)}"))
     lines.extend(
@@ -1157,8 +1606,7 @@ def orchestrate_status(as_json: bool) -> None:
 @handle_errors
 def orchestrate_retire() -> None:
     """Run a single PR-retirement pass and print retired session IDs."""
-    adapter = get_cmux_adapter()
-    retired = retire_merged_prs(adapter=adapter)
+    retired = retire_merged_prs()
     if not retired:
         click.echo("No sessions retired.")
         return
@@ -1311,16 +1759,16 @@ def _spawn_create_impl(
     client: ClientConfig,
     worktree: Path,
     prompt_file: Path,
-    surface: str,
     label: str | None,
-    adapter: CmuxAdapter,
+    headless: bool = False,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> str:
     """Create a daemon-spawned session.
 
-    Separated from the Click command so tests can inject adapters directly.
-    Reads the prompt from disk at this CLI boundary and inlines it into the
-    spawn — keeping all file IO at the user-facing edge. Delegates the
-    actual spawn to :func:`cw.spawn.spawn_create_impl`.
+    Separated from the Click command so tests can inject a fake daemon
+    client directly. Reads the prompt from disk at this CLI boundary and
+    inlines it into the spawn — keeping all file IO at the user-facing
+    edge. Delegates the actual spawn to :func:`cw.spawn.spawn_create_impl`.
 
     Returns the new session's ID.
     """
@@ -1328,20 +1776,23 @@ def _spawn_create_impl(
         client=client,
         worktree=worktree,
         prompt=prompt_file.read_text(encoding="utf-8"),
-        surface=surface,
         label=label,
-        adapter=adapter,
+        headless=headless,
+        native_daemon=native_daemon,
     )
 
 
 def _spawn_close_impl(
     *,
     session_id: str,
-    adapter: CmuxAdapter,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
-    Separated from the Click command so tests can inject adapters directly.
+    DAEMON-origin sessions are stopped via the native daemon client.
+    USER-origin sessions with a legacy ``surface_ref`` are logged and
+    skipped — the multiplexer adapter has been removed. Separated from
+    the Click command so tests can inject the daemon client directly.
     """
     state = load_state()
     sess = state.find_by_name_or_id(session_id)
@@ -1353,7 +1804,15 @@ def _spawn_close_impl(
         raise CwError(msg)
 
     if sess.surface_ref is not None:
-        adapter.close(sess.surface_ref)
+        if sess.origin is SessionOrigin.DAEMON:
+            daemon = native_daemon or get_native_daemon_client()
+            daemon.stop(sess.surface_ref)
+        else:
+            logging.getLogger(__name__).warning(
+                "Session %s has legacy surface_ref %r; skipping surface close",
+                sess.id,
+                sess.surface_ref,
+            )
 
     sess.status = SessionStatus.COMPLETED
     sess.completed_at = datetime.now(UTC)
@@ -1365,14 +1824,20 @@ def _spawn_close_impl(
 @click.option("--client", "-c", default=None, help="Client name.")
 @click.option("--worktree", "-w", default=None, help="Worktree path.")
 @click.option("--prompt-file", "-f", default=None, help="Path to prompt file.")
-@click.option(
-    "--surface",
-    "-s",
-    default="split",
-    type=click.Choice(["split", "tab"]),
-    help="Surface type.",
-)
 @click.option("--label", "-l", default=None, help="Session label (default: daemon).")
+@click.option(
+    "--headless",
+    is_flag=True,
+    default=False,
+    help=(
+        "Mark the session as headless in cw-context.json so the signal_stop "
+        "Layer 1 backstop (issue #176) activates: a session that exits without "
+        "an AUTO_DEV_RESULT sentinel within the 30-min budget transitions to "
+        "TIMED_OUT (retry-eligible) instead of silently COMPLETED. Use when the "
+        "prompt invokes /auto-dev --headless or any other skill that emits the "
+        "sentinel contract."
+    ),
+)
 @click.pass_context
 @handle_errors
 def spawn(
@@ -1380,8 +1845,8 @@ def spawn(
     client: str | None,
     worktree: str | None,
     prompt_file: str | None,
-    surface: str,
     label: str | None,
+    headless: bool,
 ) -> None:
     """Spawn a daemon-managed Claude session or manage spawned sessions.
 
@@ -1412,14 +1877,12 @@ def spawn(
     # At this point client/worktree/prompt_file are guaranteed non-None
     # (the `if missing` guard above raised CwError if any were absent).
     client_config = get_client(cast("str", client))
-    adapter = get_cmux_adapter()
     session_id = _spawn_create_impl(
         client=client_config,
         worktree=Path(cast("str", worktree)),
         prompt_file=Path(cast("str", prompt_file)),
-        surface=surface,
         label=label,
-        adapter=adapter,
+        headless=headless,
     )
     click.echo(session_id)
 
@@ -1430,24 +1893,11 @@ def spawn(
 def spawn_close(session_id: str) -> None:
     """Close a spawned session by session ID.
 
-    Calls adapter.close on the associated surface and marks the session
-    as COMPLETED.
+    Stops the session via the native daemon and marks it as COMPLETED.
 
     \b
     Example:
       cw spawn close abc12345
     """
-    # Validate session exists before acquiring the adapter (adapter may fail on
-    # non-macOS when cmux is not installed).
-    state = load_state()
-    sess = state.find_by_name_or_id(session_id)
-    if sess is None:
-        not_found_msg = f"Session '{session_id}' not found."
-        raise CwError(not_found_msg)
-    if sess.status == SessionStatus.COMPLETED:
-        already_done_msg = f"Session '{session_id}' is already completed."
-        raise CwError(already_done_msg)
-
-    adapter = get_cmux_adapter()
-    _spawn_close_impl(session_id=session_id, adapter=adapter)
+    _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")

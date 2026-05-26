@@ -22,6 +22,11 @@ class SessionStatus(StrEnum):
     IDLE = "idle"
     BACKGROUNDED = "backgrounded"
     COMPLETED = "completed"
+    # Headless daemon session exceeded wall-clock budget without emitting a
+    # sentinel. Terminal-ish but retry-eligible: reconciler reverts the
+    # owning TicketTask to PENDING so the dispatch loop can retry.
+    # See GitHub issue #176 Layer 1.
+    TIMED_OUT = "timed_out"
 
 
 class CompletionReason(StrEnum):
@@ -29,6 +34,7 @@ class CompletionReason(StrEnum):
     HANDOFF = "handoff"
     CRASHED = "crashed"
     NORMAL = "normal"
+    TIMED_OUT = "timed_out"
 
 
 class SessionOrigin(StrEnum):
@@ -110,6 +116,10 @@ class OrchestratorEventType(StrEnum):
     TICKET_ENQUEUED = "ticket.enqueued"
     SESSION_SPAWNED = "session.spawned"
     SESSION_COMPLETED = "session.completed"
+    SESSION_TIMED_OUT = "session.timed_out"
+    TICKET_NEEDS_SYNC = "ticket.needs_sync"
+    STAGE_ENTERED = "stage.entered"
+    STAGE_ERRORED = "stage.errored"
     PR_REGISTERED = "pr.registered"
     PR_CI_FAILED = "pr.ci_failed"
     PR_REVIEW_RECEIVED = "pr.review_received"
@@ -146,6 +156,14 @@ class TicketTask(BaseModel):
     # persisted before this field existed — consumer falls back to
     # ticket_id-only matching in that case.
     session_id: str | None = None
+    # Incremented each time the task is claimed by _claim_next_pending. Used to
+    # apply a hard cap on validation_failed retries (see issue #251).
+    attempts: int = 0
+    # Per-ticket wall-clock budget override (seconds). When set, takes precedence
+    # over the per-tier default in OrchestratorConfig.headless_timeout_by_tier and
+    # the global HEADLESS_TIMEOUT_SECONDS fallback. Set via ``cw dev-queue add
+    # --timeout <s>``. None means "use tier or global default". See issue #265.
+    headless_timeout_override: int | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -183,12 +201,48 @@ class BackendName(StrEnum):
 
 
 class OrchestratorConfig(BaseModel):
-    """Parsed contents of orchestrator.yaml."""
+    """Parsed contents of orchestrator.yaml.
+
+    ``default_max_parallel`` is the cap applied to any client missing from
+    ``per_client_max_parallel``. The legacy yaml layout placed this value
+    under ``per_client_max_parallel.default``, but that key was treated as
+    a literal client name and silently ignored (see GitHub issue #145).
+    A model validator migrates any stray ``default`` key into the new
+    top-level field so old configs keep working with a one-time warning.
+    """
 
     tick_interval_seconds: int = 30
     per_client_max_parallel: dict[str, int] = Field(default_factory=dict)
+    default_max_parallel: int = 1
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)
     backend: BackendName | None = None
+    # Per-tier wall-clock budgets (seconds) for headless DAEMON sessions.
+    # Keyed by scope.tier from the auto-dev sentinel; unknown tiers fall back
+    # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.
+    headless_timeout_by_tier: dict[str, int] = Field(
+        default_factory=lambda: {"small": 1800, "large": 5400}
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_default_key(cls, data: object) -> object:
+        """Lift a stray ``per_client_max_parallel.default`` into the top field.
+
+        Only fires when the caller has not already set ``default_max_parallel``
+        explicitly — explicit configuration wins. The legacy key is removed
+        from the per-client dict so it doesn't shadow real client names.
+        """
+        if not isinstance(data, dict):
+            return data
+        per_client = data.get("per_client_max_parallel")
+        if not isinstance(per_client, dict):
+            return data
+        legacy = per_client.pop("default", None)
+        if legacy is None:
+            return data
+        if "default_max_parallel" not in data:
+            data["default_max_parallel"] = legacy
+        return data
 
 
 class HookRule(BaseModel):
@@ -218,6 +272,7 @@ class Session(BaseModel):
     worktree_path: Path | None = None
     branch: str | None = None
     surface_ref: str | None = None
+    # legacy: write-dead since #246, kept for state compat
     last_handoff_path: Path | None = None
     claude_session_id: str | None = None
     auto_backgrounded: bool = False
@@ -267,6 +322,13 @@ class ClientConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_AUTO_PURPOSES),
     )
     purpose_prompts: dict[str, str] = Field(default_factory=dict)
+    # When set, ``cw`` passes ``--model <worker_model>`` to ``claude --bg``
+    # for DAEMON-origin spawns (auto-dev workers, including resume re-spawns
+    # in :func:`cw.session.resume_session`). Opaque string — no validation;
+    # user is responsible for matching Anthropic's published model ids.
+    # Default ``None`` inherits the user's logged-in default model.
+    # See issue #248.
+    worker_model: str | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
     cmux_workspace: str | None = None

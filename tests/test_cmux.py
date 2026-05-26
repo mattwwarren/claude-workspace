@@ -72,10 +72,9 @@ class TestFakeCmuxAdapterClose:
         assert adapter.calls["close"][0] == ("ref-a",)
         assert adapter.calls["close"][1] == ("ref-b",)
 
-    def test_close_returns_none(self) -> None:
+    def test_close_does_not_raise(self) -> None:
         adapter = FakeCmuxAdapter()
-        result = adapter.close("any-ref")
-        assert result is None
+        adapter.close("any-ref")
 
 
 class TestFakeCmuxAdapterIdentify:
@@ -549,6 +548,79 @@ class TestGetBackendAdapter:
         assert isinstance(adapter, TmuxAdapter)
 
 
+def test_fake_adapter_list_live_surface_commands_tracks_spawn() -> None:
+    """FakeCmuxAdapter.list_live_surface_commands returns spawned refs as 'claude'."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    assert adapter.list_live_surface_commands() == {ref: "claude"}
+
+
+def test_fake_adapter_list_live_surface_commands_empty_after_close() -> None:
+    """Closing a surface removes it from the command map."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    adapter.close(ref)
+    assert ref not in adapter.list_live_surface_commands()
+
+
+def test_fake_adapter_set_pane_command_override() -> None:
+    """set_pane_command changes the command shown in the live command map."""
+    adapter = FakeCmuxAdapter()
+    ref = adapter.spawn("ws", "claude", "right")
+    adapter.set_pane_command(ref, "bash")
+    assert adapter.list_live_surface_commands() == {ref: "bash"}
+
+
+def test_fake_adapter_records_list_live_surface_commands_call() -> None:
+    """list_live_surface_commands call is recorded in adapter.calls."""
+    adapter = FakeCmuxAdapter()
+    adapter.spawn("ws", "claude", "right")
+    adapter.list_live_surface_commands()
+    assert len(adapter.calls["list_live_surface_commands"]) == 1
+
+
+def test_real_cmux_list_live_surface_commands_uses_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RealCmuxAdapter.list_live_surface_commands returns non-shell sentinel values.
+
+    The cmux surface.list response does not expose a current-command field,
+    so the adapter maps every live surface to a sentinel ('cmux-surface')
+    so the zombie filter is a transparent no-op for the cmux backend.
+    """
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    from cw.cmux import RealCmuxAdapter
+
+    def fake_call(
+        self: object, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        if method == "workspace.list":
+            return {
+                "workspaces": [
+                    {"id": "ws-a", "title": "client-a"},
+                ]
+            }
+        if method == "surface.list":
+            return {"surfaces": [{"id": "surf-1"}, {"id": "surf-2"}]}
+        msg = f"unexpected call: {method}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
+    adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
+
+    result = adapter.list_live_surface_commands()
+    assert set(result.keys()) == {"surf-1", "surf-2"}
+    # All values must be the non-shell sentinel — never a shell name.
+    shell_names = {"bash", "zsh", "sh", "fish", "dash", "tcsh", "ksh"}
+    for cmd in result.values():
+        assert cmd not in shell_names, (
+            f"Sentinel should not be a shell name, got {cmd!r}"
+        )
+
+
 def test_fake_adapter_list_surfaces_tracks_spawn_and_close() -> None:
     """FakeCmuxAdapter tracks live surfaces via spawn/close."""
     adapter = FakeCmuxAdapter()
@@ -598,7 +670,8 @@ def test_real_cmux_list_surfaces_aggregates_across_workspaces(
             if ws_id == "ws-a":
                 return {"surfaces": [{"id": "surf-a1"}, {"id": "surf-a2"}]}
             return {"surfaces": [{"id": "surf-b1"}]}
-        raise AssertionError(f"unexpected call: {method}")
+        msg = f"unexpected call: {method}"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
@@ -625,7 +698,8 @@ def test_real_cmux_list_surfaces_returns_empty_on_socket_error(
     def fake_call(
         self: object, method: str, params: dict[str, object]
     ) -> dict[str, object]:
-        raise CwError("connection refused")
+        msg = "connection refused"
+        raise CwError(msg)
 
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
@@ -660,9 +734,11 @@ def test_real_cmux_list_surfaces_aborts_on_surface_list_error(
             }
         if method == "surface.list":
             if params["workspace_id"] == "ws-broken":
-                raise CwError("permission denied")
+                msg = "permission denied"
+                raise CwError(msg)
             return {"surfaces": [{"id": "surf-ok"}]}
-        raise AssertionError(f"unexpected call: {method}")
+        msg = f"unexpected call: {method}"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(RealCmuxAdapter, "_call", fake_call)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
@@ -683,7 +759,8 @@ def test_real_cmux_call_translates_os_error_to_cwerror(
     from cw.exceptions import CwError
 
     def fake_connect(self: socket_module.socket, address: object) -> None:
-        raise ConnectionRefusedError("no such file")
+        msg = "no such file"
+        raise ConnectionRefusedError(msg)
 
     monkeypatch.setattr(socket_module.socket, "connect", fake_connect)
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/nonexistent.sock"))
@@ -718,9 +795,7 @@ def test_real_cmux_call_translates_json_decode_error_to_cwerror(
 
     monkeypatch.setattr(
         "socket.socket",
-        # FakeSock mimics the socket.socket protocol structurally; mypy
-        # cannot see that and flags the return type as incompatible.
-        lambda *_args: FakeSock(),  # type: ignore[misc]
+        lambda *_args: FakeSock(),
     )
     adapter = RealCmuxAdapter(socket_path=Path("/tmp/fake.sock"))
 

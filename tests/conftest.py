@@ -12,6 +12,7 @@ import pytest
 
 from cw.cmux import FakeCmuxAdapter
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
+from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,6 +55,25 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.DEV_PLAN_FILE", state_dir / "dev_plan.json")
     monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", state_dir / ".dev_plan.lock")
     monkeypatch.setattr("cw.config.DEV_PLAN_OUTPUT_DIR", state_dir / "plan_output")
+
+    # Redirect the native-daemon roster path so tests don't read the
+    # user's real ~/.claude/daemon/roster.json. RealNativeDaemonClient
+    # tolerates a missing file (returns empty set), so this isolates the
+    # native side of reconcile for any test that doesn't explicitly
+    # inject a fake daemon client.
+    monkeypatch.setattr(
+        "cw.native_daemon._ROSTER_PATH",
+        tmp_path / ".claude" / "daemon" / "roster.json",
+    )
+
+    # Stub _claude_agents_json so tests don't invoke the real ``claude``
+    # binary. Tests that want specific liveness behaviour override this with
+    # their own monkeypatch.setattr call; pytest patches stack and the
+    # test-level patch wins.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        list,
+    )
 
     return tmp_path
 
@@ -138,23 +158,9 @@ def mock_cmux_adapter() -> FakeCmuxAdapter:
 
 
 @pytest.fixture
-def sample_handoff_file(tmp_path: Path) -> Path:
-    """Create a .handoffs/session-*.md with valid resumption prompt."""
-    handoffs_dir = tmp_path / "workspace" / "test-project" / ".handoffs"
-    handoffs_dir.mkdir(parents=True)
-    handoff = handoffs_dir / "session-test123.md"
-    handoff.write_text(
-        "# Session Handoff\n\n"
-        "## Summary\n\n"
-        "Did some work on the feature.\n\n"
-        "## Resumption Prompt\n\n"
-        "Use this to resume:\n\n"
-        "```\n"
-        "Continue working on the auth feature. The login endpoint is done,\n"
-        "but the signup endpoint still needs validation.\n"
-        "```\n"
-    )
-    return handoff
+def mock_native_daemon() -> FakeNativeDaemonClient:
+    """A FakeNativeDaemonClient for testing daemon-origin spawn and reconcile."""
+    return FakeNativeDaemonClient()
 
 
 @pytest.fixture

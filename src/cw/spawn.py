@@ -3,18 +3,53 @@
 from __future__ import annotations
 
 import json
-import shlex
+import os
+import subprocess
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state
-from cw.exceptions import CwError
+from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose
+from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.cmux import CmuxAdapter
     from cw.models import ClientConfig
+    from cw.native_daemon import NativeDaemonClient
+
+
+def _validate_worktree(path: Path) -> None:
+    """Ensure *path* is a real git worktree, not an empty dir.
+
+    Catches the #186 symptom: a prior ``git worktree add -b <branch>``
+    failed (e.g. branch already taken) but the directory was mkdir'd
+    by the shell anyway, leaving cw spawn to run on an empty dir.
+    """
+    if not path.exists():
+        msg = f"Worktree path does not exist: {path}"
+        raise WorktreeError(msg)
+    if not (path / ".git").exists():
+        msg = (
+            f"Worktree path is not a git checkout: {path} (missing .git/). "
+            f"A prior 'git worktree add' likely failed; check that the "
+            f"branch name was not already taken."
+        )
+        raise WorktreeError(msg)
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-dir"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=clean_env,
+    )
+    if result.returncode != 0:
+        msg = (
+            f"Worktree path failed 'git rev-parse --git-dir': {path}\n"
+            f"stderr: {result.stderr.strip()}"
+        )
+        raise WorktreeError(msg)
 
 
 _HOOK_SETTINGS_TEMPLATE = {
@@ -37,6 +72,8 @@ def _write_hook_context(
     client: str,
     purpose: str,
     ticket_id: str | None,
+    origin: SessionOrigin,
+    headless: bool = False,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -48,10 +85,33 @@ def _write_hook_context(
       ``SESSION_COMPLETED`` event keyed back to the cw session + dev_queue
       task. Bypasses the env-var injection limitation on ``claude --bg``
       (see GitHub issue #133).
+
+    Origin-aware ``settings.local.json`` strategy (Option A from issue #165
+    Phase B):
+
+    - ``SessionOrigin.DAEMON``: the worktree was freshly created by cw;
+      any prior ``settings.local.json`` is from a defunct cw spawn, so we
+      blind-overwrite with the current hook template.
+    - ``SessionOrigin.USER``: the worktree may carry a user-owned
+      ``settings.local.json``. If one already exists, raise
+      :class:`HookContextConflictError` rather than clobbering. If none
+      exists, write the hook template (same content as the DAEMON path).
+
+    Phase C wires the typed error into a clean failure path so interactive
+    ``claude --bg`` sessions surface the conflict instead of trampling the
+    user's settings.
     """
     claude_dir = worktree / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
-    (claude_dir / "settings.local.json").write_text(
+    settings_path = claude_dir / "settings.local.json"
+    if origin is SessionOrigin.USER and settings_path.exists():
+        msg = (
+            "Cannot inject Stop hook: "
+            f"{settings_path} already exists in a USER-origin worktree. "
+            "Refusing to overwrite user-managed settings."
+        )
+        raise HookContextConflictError(msg)
+    settings_path.write_text(
         json.dumps(_HOOK_SETTINGS_TEMPLATE, indent=2) + "\n",
     )
     context = {
@@ -60,6 +120,7 @@ def _write_hook_context(
         "client": client,
         "purpose": purpose,
         "ticket_id": ticket_id,
+        "headless": headless,
     }
     (claude_dir / "cw-context.json").write_text(json.dumps(context, indent=2) + "\n")
 
@@ -69,29 +130,31 @@ def spawn_create_impl(
     client: ClientConfig,
     worktree: Path,
     prompt: str,
-    surface: str,
     label: str | None,
-    adapter: CmuxAdapter,
+    native_daemon: NativeDaemonClient | None = None,
     parent: str | None = None,
     ticket_id: str | None = None,
+    headless: bool = False,
 ) -> str:
-    """Create a daemon-spawned session.
+    """Create a daemon-spawned session via the native Claude background daemon.
 
-    Separated from the Click command so tests and the dispatch loop can
-    inject adapters directly. Returns the new session's ID.
+    Replaces the prior tmux/cmux-based path (see GitHub issue #150). The
+    worktree must already exist; cwd is passed to ``claude --bg`` so the
+    spawned agent inherits the right project context, picks up the
+    injected ``.claude/settings.local.json`` Stop hook, and reads the
+    correlation file at ``.claude/cw-context.json`` when signaling
+    completion.
 
-    Callers pass the prompt as a string. The CLI ``cw spawn`` reads it
-    from a file at the user-facing boundary; everything else inlines
-    directly. ``claude -w`` is NOT used — that flag takes a worktree
-    *name* and creates a nested worktree at a path cw cannot track. The
-    worktree is established by the caller (``create_worktree`` / the
-    interactive start path) and we just ``cd`` the spawned shell into it.
+    Returns the new cw session id. The Claude short session id (8 hex
+    chars) is stored on the Session as ``surface_ref`` so reconcile can
+    check liveness against the daemon's roster.
 
-    When *parent* is supplied, write bidirectional linkage in the same
-    state save: ``sess.parent_session_id = parent.id`` and append
+    When *parent* is supplied, writes bidirectional linkage in the same
+    state save: ``sess.parent_session_id = parent.id`` and appends
     ``sess.id`` to ``parent.worker_session_ids``. Raises :class:`CwError`
     if the parent session is not in state.
     """
+    _validate_worktree(worktree)
     state = load_state()
 
     parent_session: Session | None = None
@@ -101,12 +164,6 @@ def spawn_create_impl(
             msg = f"Parent session not found: {parent}"
             raise CwError(msg)
 
-    workspace = client.cmux_workspace or client.name
-    cwd = shlex.quote(str(worktree))
-
-    # Pre-create the Session so we can pass its ID into the spawned command
-    # via CW_SESSION_ID. The wrapper uses that to disambiguate when multiple
-    # daemon sessions share the same (client, purpose=impl) pair.
     session_label = label or "daemon"
     sess = Session(
         name=f"{client.name}/{session_label}",
@@ -119,8 +176,8 @@ def spawn_create_impl(
 
     # Inject Stop-hook config + correlation context into the worktree so
     # the spawned session emits a SESSION_COMPLETED event when its agent
-    # turn finishes — works even under ``claude --bg`` where env vars are
-    # not propagated. See GitHub issue #147.
+    # turn finishes — works under ``claude --bg`` where env vars are not
+    # propagated. See GitHub issue #147.
     _write_hook_context(
         worktree,
         session_id=sess.id,
@@ -128,16 +185,20 @@ def spawn_create_impl(
         client=client.name,
         purpose=SessionPurpose.IMPL.value,
         ticket_id=ticket_id,
+        origin=SessionOrigin.DAEMON,
+        headless=headless,
     )
 
-    env_prefix = (
-        f"CW_CLIENT={shlex.quote(client.name)} "
-        f"CW_PURPOSE={shlex.quote(SessionPurpose.IMPL.value)} "
-        f"CW_SESSION_ID={shlex.quote(sess.id)} "
+    extra_args: list[str] | None = None
+    if client.worker_model:
+        extra_args = ["--model", client.worker_model]
+
+    daemon = native_daemon or get_native_daemon_client()
+    sess.surface_ref = daemon.spawn_bg(
+        cwd=worktree,
+        prompt=prompt,
+        extra_args=extra_args,
     )
-    command = f"cd {cwd} && {env_prefix}cw run-claude -- --print {prompt!r}"
-    surface_ref = adapter.spawn(workspace, command, surface)
-    sess.surface_ref = surface_ref
 
     if parent_session is not None:
         sess.parent_session_id = parent_session.id

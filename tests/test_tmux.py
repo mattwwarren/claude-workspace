@@ -201,6 +201,71 @@ def test_tmux_list_surfaces_returns_empty_when_no_panes(
     assert adapter.list_surfaces() == set()
 
 
+def test_list_live_surface_commands_returns_ref_to_command_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_live_surface_commands parses pane-ref → command from list-panes output."""
+    monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert "list-panes" in cmd
+        assert "-a" in cmd
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="cw-client-a:0.0 cw\ncw-client-a:0.1 bash\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+    adapter = TmuxAdapter()
+    assert adapter.list_live_surface_commands() == {
+        "cw-client-a:0.0": "cw",
+        "cw-client-a:0.1": "bash",
+    }
+
+
+def test_list_live_surface_commands_returns_empty_on_server_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-zero returncode from tmux means server is down; return empty dict."""
+    monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr="no server running on /tmp/tmux-1000/default\n",
+        )
+
+    monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+    adapter = TmuxAdapter()
+    assert adapter.list_live_surface_commands() == {}
+
+
+def test_list_live_surface_commands_skips_malformed_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lines without a space (no command portion) are silently dropped."""
+    monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        # "cw-client-a:0.0 cw" is valid; "cw-client-a:0.2" has no command
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="cw-client-a:0.0 cw\ncw-client-a:0.2\ncw-client-b:1.0 bash\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+    adapter = TmuxAdapter()
+    result = adapter.list_live_surface_commands()
+    assert "cw-client-a:0.2" not in result
+    assert result == {"cw-client-a:0.0": "cw", "cw-client-b:1.0": "bash"}
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 class TestTmuxIntegration:

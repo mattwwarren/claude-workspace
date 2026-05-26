@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue, save_plan
 from cw.dispatch import (
@@ -15,7 +17,8 @@ from cw.dispatch import (
     dispatch_tick,
     persist_last_result,
 )
-from cw.events import record_event
+from cw.events import read_events, record_event
+from cw.exceptions import WorktreeError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -30,6 +33,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,12 +61,18 @@ def workspace_dir(make_git_repo: Callable[[str], Path]) -> Path:
 
 
 @pytest.fixture
-def sample_client_config(workspace_dir: Path) -> ClientConfig:
-    """A ClientConfig for use with dispatch tests."""
+def sample_client_config(workspace_dir: Path, tmp_path: Path) -> ClientConfig:
+    """A ClientConfig for use with dispatch tests.
+
+    Sets worktree_base to a tmp_path subdirectory so create_worktree
+    writes test worktrees under tmp_path (not ~/.cw/wt/), preventing
+    stale-directory accumulation across test runs.
+    """
     return ClientConfig(
         name="test-client",
         workspace_path=workspace_dir,
         default_branch="main",
+        worktree_base=tmp_path / "worktrees",
     )
 
 
@@ -89,12 +99,15 @@ def _make_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
     config_dir = tmp_path / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
     clients_file = config_dir / "clients.yaml"
-    clients_file.write_text(
-        f"clients:\n"
-        f"  {client.name}:\n"
-        f"    workspace_path: {client.workspace_path}\n"
-        f"    default_branch: {client.default_branch}\n"
-    )
+    lines = [
+        "clients:\n",
+        f"  {client.name}:\n",
+        f"    workspace_path: {client.workspace_path}\n",
+        f"    default_branch: {client.default_branch}\n",
+    ]
+    if client.worktree_base is not None:
+        lines.append(f"    worktree_base: {client.worktree_base}\n")
+    clients_file.write_text("".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +131,8 @@ class TestDispatchTickSpawnsSession:
         )
         add_ticket(task)
 
-        adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert spawned == 1
 
@@ -137,8 +150,8 @@ class TestDispatchTickSpawnsSession:
         assert sess.origin == SessionOrigin.DAEMON
         assert "GEN-100" in sess.name
 
-        # Adapter should have been called
-        assert len(adapter.calls["spawn"]) == 1
+        # Native daemon should have been called
+        assert len(daemon.spawn_calls) == 1
 
     def test_dispatch_tick_appends_headless_flag(
         self,
@@ -155,12 +168,12 @@ class TestDispatchTickSpawnsSession:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
-        dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
 
-        assert len(adapter.calls["spawn"]) == 1
-        _workspace, command, _surface = adapter.calls["spawn"][0]
-        assert "/auto-dev GEN-300 --headless" in command
+        assert len(daemon.spawn_calls) == 1
+        _cwd, prompt = daemon.spawn_calls[0]
+        assert prompt == "/auto-dev GEN-300 --headless"
 
     def test_dispatch_tick_links_workers_to_parent(
         self,
@@ -187,8 +200,8 @@ class TestDispatchTickSpawnsSession:
         for i in range(2):
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(cap2_config, adapter=adapter, parent=parent.id)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon, parent=parent.id)
         assert spawned == 2
 
         state = load_state()
@@ -217,8 +230,8 @@ class TestDispatchTickSpawnsSession:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-STAMP", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
-        dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
 
         store = load_dev_queue()
         running = store.running()
@@ -239,8 +252,8 @@ class TestDispatchTickSpawnsSession:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-400", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
-        dispatch_tick(simple_config, adapter=adapter)  # parent omitted
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)  # parent omitted
 
         state = load_state()
         worker = state.sessions[0]
@@ -266,14 +279,44 @@ class TestPerClientCapRespected:
         for i in range(3):
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(cap2_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon)
 
         assert spawned == 2
-        assert len(adapter.calls["spawn"]) == 2
+        assert len(daemon.spawn_calls) == 2
 
         store = load_dev_queue()
         assert len(store.running()) == 2
+        assert len(store.pending()) == 1
+
+    def test_unlisted_client_uses_default_max_parallel(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Client missing from per_client_max_parallel uses default_max_parallel.
+
+        Regression test for GitHub issue #145 — the cap fallback used to
+        be hardcoded to 1, so a top-level ``default_max_parallel: 3`` had
+        no effect on unlisted clients.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={},  # test-client deliberately unlisted
+            default_max_parallel=3,
+        )
+
+        for i in range(4):
+            add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(config, native_daemon=daemon)
+
+        # default_max_parallel=3 → spawn 3, leave 1 pending.
+        assert spawned == 3
+        store = load_dev_queue()
+        assert len(store.running()) == 3
         assert len(store.pending()) == 1
 
 
@@ -294,18 +337,18 @@ class TestNoDoubleDispatch:
 
         add_ticket(TicketTask(ticket_id="GEN-200", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
 
         # First tick claims the task
-        spawned1 = dispatch_tick(simple_config, adapter=adapter)
+        spawned1 = dispatch_tick(simple_config, native_daemon=daemon)
         assert spawned1 == 1
 
         # Second tick: running_count=1 >= cap=1, should skip
-        spawned2 = dispatch_tick(simple_config, adapter=adapter)
+        spawned2 = dispatch_tick(simple_config, native_daemon=daemon)
         assert spawned2 == 0
 
         # Only one spawn call total
-        assert len(adapter.calls["spawn"]) == 1
+        assert len(daemon.spawn_calls) == 1
 
         store = load_dev_queue()
         assert len(store.running()) == 1
@@ -700,8 +743,8 @@ class TestDispatchTickReturnsCount:
         add_ticket(TicketTask(ticket_id="GEN-500", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-501", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
-        count = dispatch_tick(cap2_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        count = dispatch_tick(cap2_config, native_daemon=daemon)
 
         assert count == 2
 
@@ -714,8 +757,8 @@ class TestDispatchTickReturnsCount:
         """Empty queue returns 0."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
-        adapter = FakeCmuxAdapter()
-        count = dispatch_tick(simple_config, adapter=adapter)
+        daemon = FakeNativeDaemonClient()
+        count = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert count == 0
 
@@ -743,12 +786,12 @@ class TestDispatchTickReturnsCount:
         # Enqueue a task
         add_ticket(TicketTask(ticket_id="GEN-600", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         # cap=1, running=1 => should not spawn
-        count = dispatch_tick(simple_config, adapter=adapter)
+        count = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert count == 0
-        assert len(adapter.calls["spawn"]) == 0
+        assert len(daemon.spawn_calls) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -784,9 +827,9 @@ class TestDispatchTickWithPlan:
             )
         )
 
-        adapter = FakeCmuxAdapter()
+        daemon = FakeNativeDaemonClient()
         # cap=2 => should claim C first, then A
-        spawned = dispatch_tick(cap2_config, adapter=adapter, use_plan=True)
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon, use_plan=True)
         assert spawned == 2
 
         store = load_dev_queue()
@@ -805,8 +848,8 @@ class TestDispatchTickWithPlan:
         add_ticket(TicketTask(ticket_id="GEN-FIRST", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-SECOND", client="test-client"))
 
-        adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(simple_config, adapter=adapter, use_plan=True)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon, use_plan=True)
         assert spawned == 1
 
         store = load_dev_queue()
@@ -831,8 +874,8 @@ class TestDispatchTickWithPlan:
             DispatchPlan(tasks=[TicketTask(ticket_id="GEN-B", client="test-client")])
         )
 
-        adapter = FakeCmuxAdapter()
-        spawned = dispatch_tick(cap2_config, adapter=adapter, use_plan=True)
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon, use_plan=True)
         # cap=2: claims B first (per plan), then A (fallback)
         assert spawned == 2
 
@@ -849,6 +892,7 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
     tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
     simple_config: OrchestratorConfig,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom DAEMON sessions do not block new dispatch."""
     _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -868,6 +912,10 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client_config.workspace_path,
                     surface_ref="dead",
+                    # started_at older than SPAWN_GRACE_SECONDS so this
+                    # session is eligible for phantom-reaping rather
+                    # than protected by the grace window.
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )
@@ -889,12 +937,15 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
         )
     )
 
-    adapter = FakeCmuxAdapter()
+    daemon = FakeNativeDaemonClient()
     # Non-empty live set bypasses reconcile's outage guard; "dead" ref still
     # isn't live so the phantom is reaped as intended.
-    adapter.spawn("decoy-ws", "echo")
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
 
-    spawned = dispatch_tick(simple_config, adapter=adapter)
+    spawned = dispatch_tick(simple_config, native_daemon=daemon)
     assert spawned == 1
 
     reloaded = load_state()
@@ -907,6 +958,7 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
     simple_config: OrchestratorConfig,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end: crash → reconcile revert → respawn → consumer disambiguates.
 
@@ -940,6 +992,8 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client_config.workspace_path,
                     surface_ref="dead",
+                    # Older than SPAWN_GRACE_SECONDS — phantom-eligible.
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )
@@ -957,12 +1011,16 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
         )
     )
 
-    adapter = FakeCmuxAdapter()
-    adapter.spawn("decoy-ws", "echo")  # non-empty live set bypasses outage guard
+    # Non-empty live set bypasses outage guard; "dead" ref still isn't live.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    daemon = FakeNativeDaemonClient()
 
     # Step 2: tick triggers reconcile (revert + emit crashed event), then
     # claims and respawns the same ticket with a new session id.
-    spawned = dispatch_tick(simple_config, adapter=adapter)
+    spawned = dispatch_tick(simple_config, native_daemon=daemon)
     assert spawned == 1
 
     queue = load_dev_queue()
@@ -992,3 +1050,474 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     completed = consume_completed_sessions()
     assert completed == 1
     assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchTickSpawnErrors
+# ---------------------------------------------------------------------------
+
+
+class _RaisingNativeDaemon(FakeNativeDaemonClient):
+    """Native daemon whose ``spawn_bg`` always raises the configured exception.
+
+    Used to exercise the spawn-failure containment added for issue #149:
+    a single failure must not crash dispatch_tick.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    def spawn_bg(
+        self, *, cwd: Path, prompt: str, extra_args: list[str] | None = None
+    ) -> str:
+        self.spawn_calls.append((cwd, prompt))
+        raise self._exc
+
+
+class TestDispatchTickSpawnErrors:
+    """Spawn failure inside dispatch_tick is contained, not propagated.
+
+    The dispatch loop is the substrate the dev queue runs on; a single
+    spawn failure (subprocess error, worktree error, native-daemon
+    exception) used to kill the entire loop and leave a half-claimed task
+    at ``status=RUNNING, session_id=None``.  These tests pin the new
+    behaviour: log + revert task to PENDING + don't propagate.
+    """
+
+    def test_subprocess_error_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-149A", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(
+            subprocess.CalledProcessError(
+                returncode=1,
+                cmd=["claude", "--bg"],
+                output=b"daemon unreachable",
+            ),
+        )
+
+        caplog.set_level(logging.ERROR, logger="cw.dispatch")
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+
+        queue = load_dev_queue()
+        assert len(queue.tasks) == 1
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+        assert any(
+            "spawn failed" in record.getMessage().lower()
+            for record in caplog.records
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
+        ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
+
+    def test_worktree_error_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-149B", client="test-client"))
+
+        def _boom(*_args: object, **_kwargs: object) -> Path:
+            msg = "git worktree add failed"
+            raise WorktreeError(msg)
+
+        # Patch the name as imported into cw.dispatch, not the source module.
+        monkeypatch.setattr("cw.dispatch.create_worktree", _boom)
+
+        daemon = FakeNativeDaemonClient()
+
+        caplog.set_level(logging.ERROR, logger="cw.dispatch")
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        assert daemon.spawn_calls == []
+
+        queue = load_dev_queue()
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+        assert any(
+            "spawn failed" in record.getMessage().lower()
+            for record in caplog.records
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
+        ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchTickFreshnessGate
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchTickFreshnessGate:
+    """Freshness-gate tests: stale main blocks dispatch and emits ticket.needs_sync."""
+
+    def test_stale_main_skips_dispatch_and_keeps_pending(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stale client: dispatch returns 0, task stays PENDING, event emitted."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-1", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 3),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.PENDING
+
+        assert len(daemon.spawn_calls) == 0
+
+        events = read_events(
+            consumer="test-freshness",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "CW-1"
+        assert events[0].payload["client"] == "test-client"
+
+    def test_stale_main_emits_event_once_per_pending_ticket(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two PENDING tasks emit two ticket.needs_sync events (one per task)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-10", client="test-client"))
+        add_ticket(TicketTask(ticket_id="CW-11", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 1),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-freshness-multi",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 2
+        ticket_ids = {e.payload["ticket_id"] for e in events}
+        assert ticket_ids == {"CW-10", "CW-11"}
+
+    def test_stale_check_skips_only_stale_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Stale client A skipped; fresh client B dispatches normally."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Create second fresh client
+        fresh_ws = make_git_repo("workspace/fresh-project")
+        fresh_client = ClientConfig(
+            name="fresh-client",
+            workspace_path=fresh_ws,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-fresh",
+        )
+        # Append fresh-client to clients.yaml
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        clients_file = config_dir / "clients.yaml"
+        existing = clients_file.read_text()
+        existing += (
+            f"  {fresh_client.name}:\n"
+            f"    workspace_path: {fresh_client.workspace_path}\n"
+            f"    default_branch: {fresh_client.default_branch}\n"
+            f"    worktree_base: {fresh_client.worktree_base}\n"
+        )
+        clients_file.write_text(existing)
+
+        add_ticket(TicketTask(ticket_id="CW-20", client="test-client"))
+        add_ticket(TicketTask(ticket_id="CW-21", client="fresh-client"))
+
+        def _freshness_check(client: ClientConfig) -> tuple[bool, str, str, int]:
+            if client.name == "test-client":
+                return (True, "aaa", "bbb", 2)
+            return (False, "abc", "abc", 0)
+
+        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _freshness_check)
+
+        # fresh-client also needs cap=1
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1, "fresh-client": 1},
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(config, native_daemon=daemon)
+
+        assert spawned == 1  # only fresh-client
+
+        events = read_events(
+            consumer="test-freshness-split",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+        assert events[0].payload["client"] == "test-client"
+
+    def test_fresh_main_dispatches_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fresh main: existing dispatch behaviour unchanged."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-30", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (False, "abc", "abc", 0),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 1
+
+        events = read_events(
+            consumer="test-freshness-no-event",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 0, "Fresh main should not emit ticket.needs_sync"
+
+    def test_freshness_check_called_once_per_client_per_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """is_main_behind_origin called exactly once per client even with 3 tasks."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        for i in range(3):
+            add_ticket(TicketTask(ticket_id=f"CW-4{i}", client="test-client"))
+
+        call_count = 0
+
+        def _counting(_client: ClientConfig) -> tuple[bool, str, str, int]:
+            nonlocal call_count
+            call_count += 1
+            return (False, "abc", "abc", 0)
+
+        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _counting)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert call_count == 1
+
+    def test_freshness_check_missing_workspace_no_traceback(
+        self,
+        tmp_dispatch_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """dispatch_tick with missing workspace_path: WARNING logged, no traceback."""
+        missing_dir = tmp_path / "nonexistent"  # intentionally not created
+        missing_client = ClientConfig(
+            name="missing-ws",
+            workspace_path=missing_dir,
+            default_branch="main",
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, missing_client)
+        add_ticket(TicketTask(ticket_id="CW-99", client="missing-ws"))
+
+        daemon = FakeNativeDaemonClient()
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        caplog.set_level(logging.WARNING, logger="cw.worktree")
+
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"missing-ws": 1},
+        )
+        # Should not raise even with missing workspace_path
+        dispatch_tick(config, native_daemon=daemon)
+
+        # No exc_info on freshness-related log records.
+        # (dispatch may log other errors if it proceeds to create_worktree with
+        # the missing path; those are separate concerns from the freshness gate.)
+        freshness_records = [
+            r
+            for r in caplog.records
+            if r.name in ("cw.dispatch", "cw.worktree")
+            and "freshness" in r.message.lower()
+        ]
+        assert not any(r.exc_info for r in freshness_records), (
+            "No traceback should appear for missing workspace freshness check — "
+            "got exc_info on: "
+            + str([r.message for r in freshness_records if r.exc_info])
+        )
+        # The freshness skip warning should appear
+        assert any("freshness_check_skip" in r.message for r in caplog.records), (
+            "Expected freshness_check_skip warning for missing workspace"
+        )
+
+    def test_freshness_check_failure_does_not_block_dispatch(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """RuntimeError from freshness check: WARNING logged, dispatch proceeds."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="CW-50", client="test-client"))
+
+        def _boom(_client: ClientConfig) -> tuple[bool, str, str, int]:
+            msg = "network unreachable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _boom)
+
+        daemon = FakeNativeDaemonClient()
+
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 1  # dispatch proceeded
+        assert any(
+            "freshness check failed" in r.message.lower() for r in caplog.records
+        )
+
+
+class TestDispatchTickReconcileErrors:
+    """Reconcile failure inside dispatch_tick is contained, not propagated.
+
+    Paired test for the sanctioned BLE001 broad-catch at
+    src/cw/dispatch.py:105. Reconcile is best-effort housekeeping; if it
+    fails (transient adapter outage, corrupted roster, OSError on stale
+    socket), dispatch_tick must log + continue, not propagate.
+    """
+
+    def test_reconcile_failure_does_not_crash_dispatch_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        def _boom_reconcile(*_args: object, **_kwargs: object) -> None:
+            msg = "simulated reconcile failure"
+            raise RuntimeError(msg)
+
+        # Patch the name as imported into cw.dispatch (not cw.reconcile).
+        monkeypatch.setattr("cw.dispatch.reconcile", _boom_reconcile)
+
+        daemon = FakeNativeDaemonClient()
+
+        caplog.set_level(logging.ERROR, logger="cw.dispatch")
+
+        # Must not raise; reconcile guard catches and logs, dispatch_tick
+        # continues to the dev-queue scan and returns normally.
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        assert any(
+            "reconcile failed" in record.getMessage().lower()
+            for record in caplog.records
+            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
+        ), "expected ERROR log from cw.dispatch mentioning 'reconcile failed'"
+
+
+class TestClaimNextPendingAttempts:
+    """_claim_next_pending increments TicketTask.attempts on each claim.
+
+    Regression for GitHub issue #251: the attempts counter must be
+    persisted at claim time so _apply_sentinel_to_task (called from
+    signal_stop before the session is marked COMPLETED) can enforce the
+    validation_failed hard cap.
+    """
+
+    def test_claim_next_pending_increments_attempts(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-251-attempts",
+            client="test-client",
+            attempts=0,
+        )
+        add_ticket(task)
+
+        daemon = FakeNativeDaemonClient()
+
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-attempts")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 1
+
+    def test_claim_next_pending_increments_attempts_cumulatively(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A task reverted to PENDING and re-claimed accumulates attempts."""
+        from cw.dev_queue import save_dev_queue
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Pre-seed with attempts=2 (simulates two prior claim+revert cycles).
+        task = TicketTask(
+            ticket_id="GEN-251-cumulative",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=2,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-cumulative")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 3

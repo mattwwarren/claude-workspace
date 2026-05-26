@@ -23,5 +23,17 @@ class TestExceptionHierarchy:
         assert str(err) == "branch-missing"
 
     def test_raise_and_catch_as_cw_error(self) -> None:
+        msg = "subclass caught by base"
         with pytest.raises(CwError, match="subclass"):
-            raise WorktreeError("subclass caught by base")
+            raise WorktreeError(msg)
+
+    def test_disclaimer_not_accepted_is_cw_error(self) -> None:
+        from cw.exceptions import DisclaimerNotAcceptedError
+
+        assert issubclass(DisclaimerNotAcceptedError, CwError)
+
+    def test_disclaimer_message_propagates(self) -> None:
+        from cw.exceptions import DisclaimerNotAcceptedError
+
+        err = DisclaimerNotAcceptedError("run interactively first")
+        assert "interactively" in str(err)

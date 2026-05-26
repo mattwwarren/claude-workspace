@@ -8,5 +8,6 @@ build/
 .ruff_cache/
 .pytest_cache/
 .coverage
+coverage.xml
 .handoffs/
 zellij-plugin/target/

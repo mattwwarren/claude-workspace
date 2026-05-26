@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.cmux import FakeCmuxAdapter
 from cw.dev_queue import add_ticket, load_dev_queue, load_plan
 from cw.exceptions import CwError
 from cw.models import (
@@ -16,10 +16,11 @@ from cw.models import (
     QueueItemStatus,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.plan import run_planner
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -27,10 +28,14 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def planner_client(tmp_path: Path) -> ClientConfig:
-    """A ClientConfig usable as the planner host."""
-    workspace = tmp_path / "workspace" / "planner-client"
-    workspace.mkdir(parents=True)
+def planner_client(make_git_repo: Callable[[str], Path]) -> ClientConfig:
+    """A ClientConfig usable as the planner host.
+
+    Uses a real git repo so spawn_create_impl's _validate_worktree check
+    passes (plan.py passes workspace_path as the worktree, which in
+    production is always a real git checkout).
+    """
+    workspace = make_git_repo("workspace/planner-client")
     return ClientConfig(
         name="planner-client",
         workspace_path=workspace,
@@ -38,10 +43,10 @@ def planner_client(tmp_path: Path) -> ClientConfig:
     )
 
 
-class _ScriptedAdapter(FakeCmuxAdapter):
-    """FakeCmuxAdapter that, on spawn, immediately writes a planned JSON file.
+class _ScriptedDaemon(FakeNativeDaemonClient):
+    """FakeNativeDaemonClient that, on spawn, writes a planned JSON file.
 
-    Reads the prompt file (path appears in the cmux command argument) to
+    Re-reads the most recent prompt file from ``DEV_PLAN_OUTPUT_DIR`` to
     discover the expected output_path declared by run_planner, then writes
     *output_payload* (string) to that path.  Mimics the production
     /orchestrate-plan skill side-effect without invoking Claude.
@@ -51,26 +56,23 @@ class _ScriptedAdapter(FakeCmuxAdapter):
         super().__init__()
         self._payload = output_payload
 
-    def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
-        ref = super().spawn(workspace, command, surface)
-        # The prompt file path appears in the command between the literal
-        # string repr quotes; recover it by looking for "/orchestrate-plan ".
-        # Easier path: re-read the prompt files in DEV_PLAN_OUTPUT_DIR.
+    def spawn_bg(
+        self, *, cwd: Path, prompt: str, extra_args: list[str] | None = None
+    ) -> str:
+        short_id = super().spawn_bg(cwd=cwd, prompt=prompt, extra_args=extra_args)
         from cw.config import DEV_PLAN_OUTPUT_DIR
 
         prompts = sorted(DEV_PLAN_OUTPUT_DIR.glob("prompt-*.txt"))
         if not prompts:
-            return ref
+            return short_id
         prompt_text = prompts[-1].read_text()
         first_line = prompt_text.splitlines()[0]
         # Format: "/orchestrate-plan <output_path>"
         parts = first_line.split(" ", maxsplit=1)
         if len(parts) == 2:
             output_path = parts[1].strip()
-            from pathlib import Path
-
             Path(output_path).write_text(self._payload)
-        return ref
+        return short_id
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +89,7 @@ class TestRunPlanner:
         with pytest.raises(CwError, match="No pending tickets"):
             run_planner(
                 client=planner_client,
-                adapter=FakeCmuxAdapter(),
+                native_daemon=FakeNativeDaemonClient(),
                 timeout_seconds=1,
             )
 
@@ -106,11 +108,11 @@ class TestRunPlanner:
             ],
             grouping_hints={"GEN-2": "should run first per planner heuristic"},
         ).model_dump_json()
-        adapter = _ScriptedAdapter(plan_payload)
+        daemon = _ScriptedDaemon(plan_payload)
 
         result = run_planner(
             client=planner_client,
-            adapter=adapter,
+            native_daemon=daemon,
             timeout_seconds=10,
             poll_interval=0.05,
         )
@@ -129,11 +131,11 @@ class TestRunPlanner:
         planner_client: ClientConfig,
     ) -> None:
         add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
-        adapter = _ScriptedAdapter("this is { not valid JSON")
+        daemon = _ScriptedDaemon("this is { not valid JSON")
 
         result = run_planner(
             client=planner_client,
-            adapter=adapter,
+            native_daemon=daemon,
             timeout_seconds=5,
             poll_interval=0.05,
         )
@@ -157,11 +159,11 @@ class TestRunPlanner:
         add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
         # Valid JSON but missing required ticket_task fields
         bad_payload = json.dumps({"tasks": [{"foo": "bar"}]})
-        adapter = _ScriptedAdapter(bad_payload)
+        daemon = _ScriptedDaemon(bad_payload)
 
         result = run_planner(
             client=planner_client,
-            adapter=adapter,
+            native_daemon=daemon,
             timeout_seconds=5,
             poll_interval=0.05,
         )
@@ -176,12 +178,12 @@ class TestRunPlanner:
         planner_client: ClientConfig,
     ) -> None:
         add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
-        # Plain FakeCmuxAdapter never writes the output file
-        adapter = FakeCmuxAdapter()
+        # Plain FakeNativeDaemonClient never writes the output file
+        daemon = FakeNativeDaemonClient()
 
         result = run_planner(
             client=planner_client,
-            adapter=adapter,
+            native_daemon=daemon,
             timeout_seconds=1,
             poll_interval=0.05,
         )
@@ -202,11 +204,11 @@ class TestRunPlanner:
         plan_payload = DispatchPlan(
             tasks=[TicketTask(ticket_id="GEN-1", client="planner-client")]
         ).model_dump_json()
-        adapter = _ScriptedAdapter(plan_payload)
+        daemon = _ScriptedDaemon(plan_payload)
 
         result = run_planner(
             client=planner_client,
-            adapter=adapter,
+            native_daemon=daemon,
             timeout_seconds=5,
             poll_interval=0.05,
             client_filter="planner-client",
@@ -245,8 +247,8 @@ class TestCLIDevQueuePlan:
         plan_payload = DispatchPlan(
             tasks=[TicketTask(ticket_id="GEN-1", client="planner-client")]
         ).model_dump_json()
-        adapter = _ScriptedAdapter(plan_payload)
-        monkeypatch.setattr("cw.cli.get_cmux_adapter", lambda: adapter)
+        daemon = _ScriptedDaemon(plan_payload)
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -277,8 +279,8 @@ class TestCLIDevQueuePlan:
 
         add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
 
-        adapter = _ScriptedAdapter("not valid json at all")
-        monkeypatch.setattr("cw.cli.get_cmux_adapter", lambda: adapter)
+        daemon = _ScriptedDaemon("not valid json at all")
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
         runner = CliRunner()
         result = runner.invoke(

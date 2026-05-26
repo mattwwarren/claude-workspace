@@ -30,9 +30,11 @@ _log = logging.getLogger(__name__)
 
 # v1 is the legacy shape; v2 adds the `no_op` status; v3 adds the
 # `stage1_pre_flight` stage_reached value and `none` plan_source (used
-# together for pre-flight no_op exits). All are accepted during the rollout
-# window — see docs/headless-contract.md §8.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
+# together for pre-flight no_op exits); v4 promotes
+# `ambiguities_pending_resolution` and `premises_pending_verification` to
+# canonical closed-enum statuses (issue #191). All are accepted during the
+# rollout window — see docs/headless-contract.md §8.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
 _CLOSE_SENTINEL = "AUTO_DEV_RESULT>>>"
@@ -60,17 +62,31 @@ Status = Literal[
     "forbidden_area",
     "blocked",
     "no_op",
+    "ambiguities_pending_resolution",
+    "premises_pending_verification",
 ]
 # Statuses introduced after v1. Emitting one under schema_version=1 is a
 # producer bug — it would silently degrade for downstream tools that key off
 # the version field.
 _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
+# Statuses introduced in v4 (issue #191). Emitting under schema_version<4 is
+# a producer bug.
+_V4_STATUSES: frozenset[str] = frozenset(
+    {"ambiguities_pending_resolution", "premises_pending_verification"}
+)
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
 # gated by schema_version. Spec §8 says enum additions require a version
 # bump (v3), and v3 IS the official home for these values, BUT the producer
 # skill emits them under v2 today (see #103). One-time rollout exception:
 # accept under v2 AND v3 until the skill bumps. When skill emits v3, this
 # exception can be removed and a `_V3_STAGES`/`_V3_PLAN_SOURCES` gate added.
+#
+# Also accepted ungated: "github_issue_existing" (PlanSource). The producer
+# emits this for GitHub-sourced runs (the post-Linear analog of
+# "linear_existing"); the parser previously rejected every such run as
+# validation_failed (see #190). Treated identically to "linear_existing" —
+# pure producer-side relabeling, no consumer behavior change. Accepted under
+# v2 and v3 (the producer emits at v2 today per captured payloads).
 StageReached = Literal[
     "stage1_pre_flight",
     "stage1_plan",
@@ -81,7 +97,13 @@ StageReached = Literal[
     "stage5_post_create",
 ]
 ScopeTier = Literal["small", "large"]
-PlanSource = Literal["linear_existing", "generated", "free_text", "none"]
+PlanSource = Literal[
+    "linear_existing",
+    "github_issue_existing",
+    "generated",
+    "free_text",
+    "none",
+]
 
 
 class Scope(BaseModel):
@@ -120,25 +142,73 @@ class Blocker(BaseModel):
     ``reason`` is intentionally typed as ``str`` (open enum per §4.2). The
     producer may add new reasons without a schema bump; consumers surface
     unknown reasons verbatim.
+
+    Phase B and Phase E of the queue-orchestrator observability expansion
+    (issue #174) added five optional fields. All default to None so v1/v2
+    blocks without them parse unchanged; producers emitting v3 should
+    populate them per the headless-contract spec.
     """
 
     stage: str
     reason: str
     details: str = ""
+    # Phase B — blocker context for orchestrator routing.
+    exception_type: str | None = None
+    message: str | None = None
+    recovery_hint: str | None = None
+    # Phase E — queue-aware retry semantics. ``retry_eligible=True`` paired
+    # with a non-null ``retry_delay_seconds`` means the orchestrator can
+    # safely re-dispatch after the given backoff. ``retry_eligible=False``
+    # means human intervention is required.
+    retry_eligible: bool | None = None
+    retry_delay_seconds: int | None = None
+
+    @model_validator(mode="after")
+    def _check_retry_invariants(self) -> Blocker:
+        # If retry_delay_seconds is set, retry_eligible must be True. The
+        # reverse is allowed — a producer can mark retry_eligible without
+        # committing to a specific backoff.
+        if self.retry_delay_seconds is not None and self.retry_eligible is not True:
+            msg = (
+                "retry_delay_seconds set without retry_eligible=True "
+                f"(got retry_eligible={self.retry_eligible!r})"
+            )
+            raise ValueError(msg)
+        if self.retry_delay_seconds is not None and self.retry_delay_seconds < 0:
+            msg = (
+                f"retry_delay_seconds must be non-negative, "
+                f"got {self.retry_delay_seconds}"
+            )
+            raise ValueError(msg)
+        return self
 
 
 _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
     {"scope_exceeded", "forbidden_area", "blocked"},
 )
 _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
-    {"plan_pending_approval", "scope_exceeded", "forbidden_area", "no_op"},
+    {
+        "plan_pending_approval",
+        "scope_exceeded",
+        "forbidden_area",
+        "no_op",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    },
+)
+# Pre-flight + blocked is a retry/escalation shape, not a terminal reject —
+# next_actions must signal the recovery verb. The Origin Sync block (#226)
+# emits `sync_local_main`; `manual_intervention` covers escalation cases
+# (e.g. local main has unmerged commits the orchestrator can't auto-resolve).
+_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
+    {"sync_local_main", "manual_intervention"},
 )
 
 
 class AutoDevResult(BaseModel):
     """Parsed sentinel block. All cross-field invariants from §3-§5 enforced."""
 
-    schema_version: Literal[1, 2, 3]
+    schema_version: Literal[1, 2, 3, 4]
     ticket_id: str
     status: Status
     stage_reached: StageReached
@@ -154,6 +224,11 @@ class AutoDevResult(BaseModel):
     friction_highlights: list[str] = Field(default_factory=list)
     blocker: Blocker | None = None
     next_actions: list[str] = Field(default_factory=list)
+    # v4: populated when status is ambiguities_pending_resolution or
+    # premises_pending_verification. Entry shapes are best-effort per §4.4 —
+    # all keys optional, tolerate producer-side key-name drift.
+    ambiguities: list[dict[str, Any]] = Field(default_factory=list)
+    premises: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_invariants(self) -> AutoDevResult:
@@ -162,6 +237,14 @@ class AutoDevResult(BaseModel):
         if self.schema_version < 2 and self.status in _V2_STATUSES:
             msg = (
                 f"status={self.status!r} requires schema_version>=2, "
+                f"got {self.schema_version}"
+            )
+            raise ValueError(msg)
+
+        # §8 v4-introduced statuses cannot ride on a pre-v4-tagged payload.
+        if self.schema_version < 4 and self.status in _V4_STATUSES:
+            msg = (
+                f"status={self.status!r} requires schema_version>=4, "
                 f"got {self.schema_version}"
             )
             raise ValueError(msg)
@@ -232,20 +315,76 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
-        # stage1_pre_flight can only exit as no_op (pre-flight exits before any
-        # plan is produced — other statuses are not possible here).
-        if self.stage_reached == "stage1_pre_flight" and self.status != "no_op":
+        # stage1_pre_flight can exit as no_op (work not needed) or blocked
+        # (work needed but a pre-flight gate failed, e.g. Origin Sync — see
+        # issue #226). Other statuses still violate the pre-impl contract.
+        pre_flight_blocked = (
+            self.stage_reached == "stage1_pre_flight" and self.status == "blocked"
+        )
+        if self.stage_reached == "stage1_pre_flight" and self.status not in (
+            "no_op",
+            "blocked",
+        ):
             msg = (
-                f"stage_reached='stage1_pre_flight' requires status='no_op', "
-                f"got status={self.status!r}"
+                f"stage_reached='stage1_pre_flight' requires status in "
+                f"('no_op', 'blocked'), got status={self.status!r}"
             )
             raise ValueError(msg)
 
-        # §4.3 terminal-reject statuses have empty next_actions
-        if self.status in _TERMINAL_REJECT_STATUSES and self.next_actions:
+        # Pre-flight + blocked is a retry/escalation shape: next_actions must
+        # be non-empty and drawn from the allowed verb set. The generic
+        # terminal-reject rule below (empty next_actions) does NOT apply here.
+        if pre_flight_blocked:
+            if not self.next_actions:
+                msg = (
+                    "next_actions must be non-empty when status='blocked' at "
+                    "stage1_pre_flight (got empty list); expected one of "
+                    f"{sorted(_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS)}"
+                )
+                raise ValueError(msg)
+            invalid = [
+                a
+                for a in self.next_actions
+                if a not in _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS
+            ]
+            if invalid:
+                msg = (
+                    f"next_actions {invalid!r} not allowed for blocked at "
+                    f"stage1_pre_flight; expected subset of "
+                    f"{sorted(_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS)}"
+                )
+                raise ValueError(msg)
+
+        # §4.3 terminal-reject statuses have empty next_actions, EXCEPT for
+        # the pre-flight + blocked retry shape covered above.
+        if (
+            self.status in _TERMINAL_REJECT_STATUSES
+            and self.next_actions
+            and not pre_flight_blocked
+        ):
             msg = (
                 f"next_actions must be empty for terminal-reject status "
                 f"{self.status!r}, got {self.next_actions!r}"
+            )
+            raise ValueError(msg)
+
+        # §4.3 (A2) v4 pending statuses require non-empty next_actions.
+        if self.status in _V4_STATUSES and not self.next_actions:
+            msg = f"next_actions must be non-empty when status is {self.status!r}"
+            raise ValueError(msg)
+
+        # §4.4 (A5) cross-field array invariants: arrays must be non-empty
+        # when their corresponding status is set (empty array is a producer bug
+        # — nothing for the consumer to act on).
+        if self.status == "ambiguities_pending_resolution" and not self.ambiguities:
+            msg = (
+                "ambiguities must be non-empty when "
+                "status='ambiguities_pending_resolution'"
+            )
+            raise ValueError(msg)
+        if self.status == "premises_pending_verification" and not self.premises:
+            msg = (
+                "premises must be non-empty when status='premises_pending_verification'"
             )
             raise ValueError(msg)
 
@@ -374,6 +513,8 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         "forbidden_area",
         "blocked",
         "no_op",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
     }:
         return BlockedResult(
             blocker=Blocker(

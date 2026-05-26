@@ -382,3 +382,125 @@ def test_cli_event_tail_since_consumer_advances_cursor(tmp_events_dir: Path) -> 
     assert ev3.id in result2.output
     assert ev1.id not in result2.output
     assert ev2.id not in result2.output
+
+
+# ---------------------------------------------------------------------------
+# Stage event tests (issue #173)
+# ---------------------------------------------------------------------------
+
+
+def test_record_event_stage_entered_persists(tmp_events_dir: Path) -> None:
+    """record_event persists a STAGE_ENTERED event with its full payload."""
+    payload = {
+        "session_id": "abc12345",
+        "ticket_id": "173",
+        "stage": "s2_impl_started",
+        "prev_stage": "s1_plan_reviewed",
+        "started_at": "2026-05-23T13:01:42Z",
+    }
+    events_record_event(OrchestratorEventType.STAGE_ENTERED, payload)
+
+    events = read_events()
+    assert len(events) == 1
+    assert events[0].type is OrchestratorEventType.STAGE_ENTERED
+    assert events[0].payload == payload
+
+
+def test_record_event_stage_errored_persists(tmp_events_dir: Path) -> None:
+    """record_event persists a STAGE_ERRORED event including error_kind."""
+    payload = {
+        "session_id": "abc12345",
+        "ticket_id": "173",
+        "stage": "s2_impl_started",
+        "started_at": "2026-05-23T13:01:42Z",
+        "error_kind": "agent_block",
+    }
+    events_record_event(OrchestratorEventType.STAGE_ERRORED, payload)
+
+    events = read_events()
+    assert len(events) == 1
+    assert events[0].type is OrchestratorEventType.STAGE_ERRORED
+    assert events[0].payload == payload
+
+
+def test_read_events_type_filter_stage_entered(tmp_events_dir: Path) -> None:
+    """read_events(event_types=[STAGE_ENTERED]) returns only stage_entered events."""
+    ev_stage = events_record_event(
+        OrchestratorEventType.STAGE_ENTERED,
+        {
+            "session_id": "abc",
+            "ticket_id": "173",
+            "stage": "s2_impl_started",
+            "started_at": "2026-05-23T13:01:42Z",
+        },
+    )
+    events_record_event(OrchestratorEventType.PR_MERGED, {"pr": 1})
+    events_record_event(
+        OrchestratorEventType.STAGE_ERRORED,
+        {
+            "session_id": "abc",
+            "ticket_id": "173",
+            "stage": "s2_impl_started",
+            "started_at": "2026-05-23T13:01:45Z",
+            "error_kind": "agent_block",
+        },
+    )
+
+    result = read_events(event_types=[OrchestratorEventType.STAGE_ENTERED])
+    assert len(result) == 1
+    assert result[0].id == ev_stage.id
+
+
+def test_cli_event_record_stage_entered_works(tmp_events_dir: Path) -> None:
+    """cw event record stage.entered persists a STAGE_ENTERED event to disk."""
+    payload_json = (
+        '{"session_id":"x","ticket_id":"173",'
+        '"stage":"s2_impl_started","started_at":"2026-05-23T13:01:42Z"}'
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "record", "stage.entered", "--payload", payload_json],
+    )
+    assert result.exit_code == 0, result.output
+
+    events = read_events()
+    assert len(events) == 1
+    assert events[0].type is OrchestratorEventType.STAGE_ENTERED
+    assert events[0].payload["stage"] == "s2_impl_started"
+
+
+def test_cli_event_tail_type_filter_stage_entered(tmp_events_dir: Path) -> None:
+    """cw event tail --type stage.entered filters out non-stage events."""
+    events_record_event(
+        OrchestratorEventType.STAGE_ENTERED,
+        {
+            "session_id": "abc",
+            "ticket_id": "173",
+            "stage": "s2_impl_started",
+            "started_at": "2026-05-23T13:01:42Z",
+        },
+    )
+    events_record_event(OrchestratorEventType.PR_MERGED, {"pr": 99})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "tail", "--type", "stage.entered"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "stage.entered" in result.output
+    assert "pr.merged" not in result.output
+
+
+def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:
+    """ticket.needs_sync OrchestratorEvent round-trips through JSON serialisation."""
+    event = OrchestratorEvent(
+        type=OrchestratorEventType.TICKET_NEEDS_SYNC,
+        payload={"ticket_id": "CW-99", "client": "test-client"},
+    )
+    dumped = event.model_dump_json()
+    restored = OrchestratorEvent.model_validate_json(dumped)
+    assert restored.type == OrchestratorEventType.TICKET_NEEDS_SYNC
+    assert restored.payload["ticket_id"] == "CW-99"
+    assert restored.payload["client"] == "test-client"

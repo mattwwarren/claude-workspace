@@ -278,6 +278,92 @@ def _blocked_payload() -> dict[str, Any]:
     }
 
 
+def _ambiguities_pending_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-ambig",
+        "status": "ambiguities_pending_resolution",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 80,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "ambiguities": [
+            {
+                "question": "Should the enum be open or closed?",
+                "plan_assumption": "closed",
+                "alternatives": ["open"],
+                "why_it_matters": "affects consumer contract",
+                "ticket_evidence": "option 1 in the ticket",
+            }
+        ],
+        "premises": [],
+        "next_actions": ["user_resolve_ambiguities"],
+    }
+
+
+def _premises_pending_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-premise",
+        "status": "premises_pending_verification",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 2,
+            "lines_estimate": 40,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "ambiguities": [],
+        "premises": [
+            {
+                "claim": "The existing PR #198 codified a deliberate decision",
+                "plan_depends_on_it_for": "deciding whether to override §4.4",
+                "how_to_verify": "read PR #198 body",
+            }
+        ],
+        "next_actions": ["user_verify_premises"],
+    }
+
+
 def _wrap_sentinel(payload: dict[str, Any]) -> str:
     body = json.dumps(payload)
     return f"some narrative\n<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
@@ -299,6 +385,8 @@ def _wrap_sentinel(payload: dict[str, Any]) -> str:
         _forbidden_area_payload,
         _blocked_payload,
         _no_op_payload,
+        _ambiguities_pending_payload,
+        _premises_pending_payload,
     ],
 )
 class TestStatusRoundTrips:
@@ -561,6 +649,107 @@ class TestInvariants:
 
 
 # ---------------------------------------------------------------------------
+# Phase B + E — Blocker context and retry semantics (#174)
+# ---------------------------------------------------------------------------
+
+
+class TestBlockerPhaseBE:
+    def test_v2_block_without_new_fields_still_parses(self) -> None:
+        """Back-compat: producers on v1/v2 emit no new fields; parser accepts."""
+        p = _blocked_payload()
+        result = AutoDevResult.model_validate(p)
+        assert isinstance(result.blocker, type(result.blocker))
+        assert result.blocker is not None
+        assert result.blocker.exception_type is None
+        assert result.blocker.message is None
+        assert result.blocker.recovery_hint is None
+        assert result.blocker.retry_eligible is None
+        assert result.blocker.retry_delay_seconds is None
+
+    def test_phase_b_fields_round_trip(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {
+                "exception_type": "PlanValidationError",
+                "message": (
+                    "Plan contains MUST_FIX findings that persist after revision"
+                ),
+                "recovery_hint": "Manual review required; update plan and retry",
+            },
+        )
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.exception_type == "PlanValidationError"
+        assert "MUST_FIX" in (result.blocker.message or "")
+        assert "Manual review" in (result.blocker.recovery_hint or "")
+
+    def test_phase_e_retry_eligible_with_delay(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {
+                "reason": "ci_timeout",
+                "retry_eligible": True,
+                "retry_delay_seconds": 120,
+            },
+        )
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds == 120
+
+    def test_phase_e_retry_ineligible_no_delay(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {
+                "reason": "plan_unreviewable",
+                "retry_eligible": False,
+                "retry_delay_seconds": None,
+            },
+        )
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is False
+        assert result.blocker.retry_delay_seconds is None
+
+    def test_retry_delay_without_eligible_rejected(self) -> None:
+        # A delay only makes sense when the orchestrator is allowed to retry.
+        p = _blocked_payload()
+        p["blocker"].update(
+            {"retry_eligible": False, "retry_delay_seconds": 30},
+        )
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_retry_delay_negative_rejected(self) -> None:
+        p = _blocked_payload()
+        p["blocker"].update(
+            {"retry_eligible": True, "retry_delay_seconds": -5},
+        )
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_phase_b_and_e_together_on_v3_block(self) -> None:
+        p = _blocked_payload()
+        p["schema_version"] = 3
+        p["blocker"].update(
+            {
+                "reason": "ci_timeout",
+                "exception_type": "CITimeoutError",
+                "message": "CI did not complete within 30 minutes",
+                "recovery_hint": "Re-dispatch with a 2-minute delay",
+                "retry_eligible": True,
+                "retry_delay_seconds": 120,
+            },
+        )
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.exception_type == "CITimeoutError"
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds == 120
+
+
+# ---------------------------------------------------------------------------
 # stage1_pre_flight + plan_source=none (v3, with v2 backward-compat exception)
 # ---------------------------------------------------------------------------
 
@@ -585,8 +774,13 @@ class TestPreFlightNoOp:
         assert result.plan_source == "none"
         assert result.schema_version == 2
 
-    def test_stage1_pre_flight_requires_no_op_status(self) -> None:
-        # stage_reached=stage1_pre_flight with any non-no_op status is rejected.
+    def test_stage1_pre_flight_rejects_incompatible_status(self) -> None:
+        """Pre-flight exit only allows {no_op, blocked} — shipped et al are rejected.
+
+        The `blocked` admission was added for #226 (Origin Sync block); see
+        TestStage1PreFlightBlocked for the positive cases. Any other status
+        at pre-flight is still a contract violation.
+        """
         p = _no_op_payload()
         p["status"] = "shipped"
         p["pr"] = {
@@ -613,3 +807,306 @@ class TestPreFlightNoOp:
         p["scope"]["lines_actual"] = 10
         with pytest.raises(ValidationError, match="lines_actual"):
             AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# stage1_pre_flight + blocked (added per #226 — Origin Sync block emits this
+# combo legitimately; the consumer previously rejected it as a §4.3 violation,
+# so every Origin-Sync-blocked sentinel became validation_failed). When status
+# is blocked at pre-flight, next_actions is constrained to retry/escalation
+# verbs rather than empty (which is required for the generic terminal-reject
+# `blocked` shape at later stages).
+# ---------------------------------------------------------------------------
+
+
+def _pre_flight_blocked_payload() -> dict[str, Any]:
+    """Origin-Sync-shaped sentinel: stage1_pre_flight + blocked + sync_local_main.
+
+    Matches the producer's emit shape from commit 97c92b3 (cf #178). The
+    blocker.reason is open-enum (§4.2) — `origin_sync_required` is the
+    canonical value but any string is allowed.
+    """
+    return {
+        "schema_version": 3,
+        "ticket_id": "GEN-pre-flight-blocked",
+        "status": "blocked",
+        "stage_reached": "stage1_pre_flight",
+        "scope": {
+            "tier": "small",
+            "files": 0,
+            "lines_estimate": 0,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "none",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage1_pre_flight",
+            "reason": "origin_sync_required",
+            "details": "local main behind origin/main; sync before dispatch",
+        },
+        "next_actions": ["sync_local_main"],
+    }
+
+
+class TestStage1PreFlightBlocked:
+    def test_origin_sync_shaped_sentinel_parses_cleanly(self) -> None:
+        """The exact shape the producer emits for Origin Sync block (#226)."""
+        p = _pre_flight_blocked_payload()
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "blocked"
+        assert result.stage_reached == "stage1_pre_flight"
+        assert result.next_actions == ["sync_local_main"]
+        assert result.blocker is not None
+        assert result.blocker.reason == "origin_sync_required"
+
+    def test_manual_intervention_next_action_allowed(self) -> None:
+        """Escalation path: blocker that needs human action, not retry."""
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["manual_intervention"]
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["manual_intervention"]
+
+    def test_empty_next_actions_rejected_when_blocked_at_pre_flight(self) -> None:
+        """Pre-flight blocked must signal a recovery path — empty list is a bug.
+
+        A producer emitting `blocked` with no next_actions at pre-flight
+        gives the orchestrator nothing to route on. Force the producer to
+        emit at least one of the allowed verbs.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_invalid_next_action_rejected_at_pre_flight_blocked(self) -> None:
+        """next_actions for pre-flight blocked is a closed set, not free-form.
+
+        ``wait_for_ci`` would short-circuit on the earlier §4.3 ``wait_for_ci
+        iff shipped`` rule, so use a verb that only the pre-flight closed-set
+        check can reject. Asserts the rejection message points at the
+        closed-set so we know the right branch fired.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["close_issue_as_completed"]  # valid for no_op, not blocked
+        with pytest.raises(ValidationError, match="expected subset of"):
+            AutoDevResult.model_validate(p)
+
+    def test_mixed_valid_and_invalid_next_actions_rejected(self) -> None:
+        """If any entry is outside the allowed set, the whole list is invalid.
+
+        Producer must emit a pure list of allowed verbs — partial validity
+        doesn't pass.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["sync_local_main", "free_text_recovery"]
+        with pytest.raises(ValidationError, match="free_text_recovery"):
+            AutoDevResult.model_validate(p)
+
+    def test_pre_flight_blocked_through_parse_stdout(self) -> None:
+        """End-to-end: a captured sentinel block round-trips via parse_stdout.
+
+        The wrapper path (`_parse_sentinel_from_transcript` in signal_stop)
+        uses parse_stdout, so the round-trip must succeed without falling
+        into the BlockedResult fail-open path.
+        """
+        p = _pre_flight_blocked_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.stage_reached == "stage1_pre_flight"
+
+    def test_blocked_at_later_stage_still_requires_empty_next_actions(self) -> None:
+        """Regression guard: widening for pre-flight must NOT widen mid-pipeline.
+
+        A `blocked` exit at stage2_impl is the generic terminal-reject shape
+        — §4.3 still requires empty next_actions there.
+        """
+        p = _blocked_payload()  # blocked at stage2_impl
+        p["next_actions"] = ["sync_local_main"]
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# plan_source="github_issue_existing" (added per #190 — producer-side rename
+# of "linear_existing" for GitHub-sourced runs; treated identically).
+# ---------------------------------------------------------------------------
+
+
+class TestPlanSourceGitHubIssueExisting:
+    def test_shipped_run_with_github_issue_existing_parses(self) -> None:
+        """A real shipped payload (#149 captured) emitted under v2."""
+        p = _shipped_payload()
+        p["schema_version"] = 2
+        p["plan_source"] = "github_issue_existing"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_source == "github_issue_existing"
+        assert result.status == "shipped"
+        assert result.schema_version == 2
+
+    def test_no_op_run_with_github_issue_existing_parses(self) -> None:
+        """A pre-flight no_op payload (#136 captured) with the GitHub plan_source."""
+        p = _no_op_payload()
+        p["schema_version"] = 2
+        p["plan_source"] = "github_issue_existing"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_source == "github_issue_existing"
+        assert result.status == "no_op"
+
+
+class TestV4StatusPromotion:
+    def test_ambiguities_pending_parses_at_v4(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_ambiguities_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+        assert result.schema_version == 4
+
+    def test_premises_pending_parses_at_v4(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_premises_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert result.schema_version == 4
+
+    def test_ambiguities_pending_rejected_at_v3(self) -> None:
+        # v4-gated status must not parse under schema_version=3
+        p = _ambiguities_pending_payload()
+        p["schema_version"] = 3
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "validation_failed"
+
+    def test_premises_pending_rejected_at_v3(self) -> None:
+        p = _premises_pending_payload()
+        p["schema_version"] = 3
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "validation_failed"
+
+    def test_v4_schema_accepted(self) -> None:
+        p = _ambiguities_pending_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.schema_version == 4
+
+    def test_v5_schema_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["schema_version"] = 5
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "schema_version_unsupported"
+
+    # A5 — empty arrays rejected via cross-field validator
+    def test_empty_ambiguities_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = []
+        with pytest.raises(ValidationError, match="ambiguities"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_premises_rejected(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = []
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    # A2 — next_actions must be non-empty
+    def test_ambiguities_empty_next_actions_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_empty_next_actions_rejected(self) -> None:
+        p = _premises_pending_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    # A4 — pre-branch status: branch must be null
+    def test_ambiguities_rejects_branch(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["branch"] = "dev/sneak"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_rejects_branch(self) -> None:
+        p = _premises_pending_payload()
+        p["branch"] = "dev/sneak"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    # A4 — lines_actual must be null (pre-impl exit)
+    def test_ambiguities_rejects_lines_actual(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["scope"]["lines_actual"] = 50
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_rejects_lines_actual(self) -> None:
+        p = _premises_pending_payload()
+        p["scope"]["lines_actual"] = 30
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+    # A3 — entry fields are all optional (best-effort)
+    def test_ambiguities_entry_with_minimal_keys_accepted(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [{"question": "only question provided"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.ambiguities) == 1
+
+    def test_premises_entry_with_minimal_keys_accepted(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [{"claim": "minimal premise"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_premises_entry_with_alternate_key_shapes_accepted(self) -> None:
+        # Producer uses various key names; parser must tolerate any shape
+        p = _premises_pending_payload()
+        p["premises"] = [
+            {
+                "premise": "alternate key",
+                "verify_by": "read the doc",
+                "verified": False,
+            }
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_round_trip_preserves_ambiguities(self) -> None:
+        p = _ambiguities_pending_payload()
+        result = AutoDevResult.model_validate(p)
+        dumped = result.model_dump(mode="json")
+        assert dumped["status"] == "ambiguities_pending_resolution"
+        assert len(dumped["ambiguities"]) == 1
+
+    def test_round_trip_preserves_premises(self) -> None:
+        p = _premises_pending_payload()
+        result = AutoDevResult.model_validate(p)
+        dumped = result.model_dump(mode="json")
+        assert dumped["status"] == "premises_pending_verification"
+        assert len(dumped["premises"]) == 1
+
+    def test_existing_statuses_unaffected_by_v4_addition(self) -> None:
+        # Regression guard: shipped (v1 payload) still parses under v4-aware parser
+        p = _shipped_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"

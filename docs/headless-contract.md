@@ -86,7 +86,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "ticket_id": "GEN-1234",
   "status": "shipped",
   "stage_reached": "stage5_post_create",
@@ -127,16 +127,16 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | int | Currently `2` (legacy `1` still accepted during the rollout window). Bump rules in §8. |
+| `schema_version` | int | Currently `4` (legacy `1`, `2`, `3` accepted during the rollout window). Bump rules in §8. |
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
-| `status` | string enum | See §4. |
+| `status` | string enum | See §4. Closed set; parsers MUST treat unknown values as §6 (5) errors. |
 | `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_pre_flight`, `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Pre-flight exits (e.g. already-satisfied tickets) use `stage1_pre_flight`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
 | `scope.tier` | `"small"` \| `"large"` | Per the Guard Matrix in `commands/auto-dev.md`. |
 | `scope.files` | int | File count touched (or planned, if exited pre-impl). |
 | `scope.lines_estimate` | int | Plan-time line estimate. |
 | `scope.lines_actual` | int \| null | Actual lines touched; `null` if exited before impl. |
 | `scope.forbidden_touched` | bool | Whether any `--forbidden` area was touched. |
-| `plan_source` | `"linear_existing"` \| `"generated"` \| `"free_text"` \| `"none"` | How the plan was sourced. `"none"` is used for pre-flight exits where no plan was produced. |
+| `plan_source` | `"linear_existing"` \| `"github_issue_existing"` \| `"generated"` \| `"free_text"` \| `"none"` | How the plan was sourced. `"linear_existing"` and `"github_issue_existing"` are equivalent (the latter is the post-Linear, GitHub-Issues-era label — producers should emit whichever matches their tracker). `"none"` is used for pre-flight exits where no plan was produced. |
 | `branch` | string \| null | Branch name; `null` if exited before branch creation (e.g. `plan_pending_approval`). |
 | `worktree_path` | string \| null | Absolute path; `null` if no worktree was created. |
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
@@ -168,11 +168,30 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started. |
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details. |
 | `no_op` | Pre-flight detected the ticket already satisfied (or otherwise not work-bearing); no plan, no branch, no PR. Introduced at `schema_version=2`. Rationale: terse, neutral wording — does not presume the cause (already-merged dupe, invalid ticket, code already covers it). The actor (skill / cw) decides what to do via `next_actions` (typically `close_issue_as_completed`). Emitted at `schema_version=3` with `stage_reached='stage1_pre_flight'` and `plan_source='none'`. (During the rollout window, parsers also accept this shape under `schema_version=2`.) |
+| `ambiguities_pending_resolution` | Planning halted because the ambiguity scan surfaced clarifying questions that exceed the auto-resolve threshold; no branch created. The `ambiguities` array is non-empty. Introduced at `schema_version=4`. |
+| `premises_pending_verification` | Planning halted because the Plan Soundness Reviewer flagged unverified premises; no branch created. The `premises` array is non-empty. Promoted from §4.4 interim state at `schema_version=4`. |
 
 ### 4.2 `blocker.reason` (when `status = "blocked"`)
 
+Minimum shape (v1+):
+
 ```json
 {"stage": "stage2_impl", "reason": "agent_block", "details": "<verbatim blocker text>"}
+```
+
+Full v3 shape with Phase B and Phase E fields (issue #174):
+
+```json
+{
+  "stage": "stage4a_merge_gate",
+  "reason": "ci_timeout",
+  "details": "<verbatim blocker text>",
+  "exception_type": "CITimeoutError",
+  "message": "CI did not complete within 30 minutes",
+  "recovery_hint": "Re-dispatch after CI watchers settle",
+  "retry_eligible": true,
+  "retry_delay_seconds": 120
+}
 ```
 
 | Reason | Meaning |
@@ -182,6 +201,28 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
 
 `blocker.reason` is an **open enum** — the producer may add new reasons without a `schema_version` bump. Consumers MUST treat unknown reasons as opaque strings and surface verbatim. (Unlike `status`, which is closed: see §4 and §8.)
+
+#### Phase B fields (orchestrator routing context)
+
+| Field | Type | Notes |
+|---|---|---|
+| `exception_type` | string \| null | Producer-side exception class name when the blocker originated from a raised exception. Free-form; consumers surface verbatim. |
+| `message` | string \| null | Single-line summary of the blocker suitable for notification text. Distinct from `details` (which is verbatim multi-line context). |
+| `recovery_hint` | string \| null | Producer's suggestion for the recovery action — typically what the human or orchestrator should try next. Free-form text. |
+
+All three are optional. Producers SHOULD populate them when the underlying failure has a structured exception; they MAY remain null for blocker reasons that don't map to an exception (e.g. soft-blocks like `review_blocked`).
+
+#### Phase E fields (queue-aware retry semantics)
+
+| Field | Type | Notes |
+|---|---|---|
+| `retry_eligible` | bool \| null | `true` when the orchestrator MAY re-dispatch this ticket without human intervention. `false` when human review is required (MUST_FIX persistence, scope ambiguity, etc.). `null` means the producer didn't commit either way — consumer defaults to human escalation. |
+| `retry_delay_seconds` | int \| null | Suggested backoff before re-dispatch when `retry_eligible=true`. Non-negative. Set to `null` to mean "no specific delay required". Invariant: a non-null `retry_delay_seconds` REQUIRES `retry_eligible=true`. |
+
+The pair encodes three policies:
+- **Retry now**: `retry_eligible=true`, `retry_delay_seconds=null` — transient or no-backoff failures.
+- **Retry after delay**: `retry_eligible=true`, `retry_delay_seconds=N` — CI timeouts, classifier non-determinism (issue #183), rate-limit hits.
+- **Human required**: `retry_eligible=false`, `retry_delay_seconds=null` — semantic blockers where another try with the same input won't help.
 
 ### 4.3 `next_actions` Vocabulary
 
@@ -194,8 +235,30 @@ Advisory only. cw acts on these without parsing prose.
 | `user_approve_review` | `status = review_pending_approval` | Notify user that a branch is pushed for review. |
 | `resolve_merge_gate` | `status = merge_gate_blocked` | Notify user that the prior pipeline PR must merge first. The user then manually re-invokes `/auto-dev` for this ticket; no automatic re-dispatch exists. |
 | `close_issue_as_completed` | `status = no_op` | Close the ticket as already completed (the work was a no-op because the system is already in the desired state). Consumer chooses how to close — Linear "Done", GitHub `gh issue close --reason completed`, etc. |
+| `user_resolve_ambiguities` | `status = ambiguities_pending_resolution` | Notify user that the ambiguity scan surfaced questions requiring human disposition. The `ambiguities` array holds the structured questions. Re-dispatch the ticket after answers are recorded on the issue. |
+| `user_verify_premises` | `status = premises_pending_verification` | Notify user that one or more premises must be verified before the plan can proceed. The `premises` array holds the structured entries. Re-dispatch after verification results are recorded on the issue. |
 
-Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`. `next_actions` is otherwise an open vocabulary — parsers MUST pass unknown actions through unchanged (do not act on them, do not reject the payload).
+Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`. For `ambiguities_pending_resolution` and `premises_pending_verification`, `next_actions` is non-empty. `next_actions` is otherwise an open vocabulary — parsers MUST pass unknown actions through unchanged (do not act on them, do not reject the payload).
+
+### 4.4 `ambiguities` and `premises` payload arrays (v4)
+
+Both `ambiguities_pending_resolution` and `premises_pending_verification` (§4.1) carry structured context arrays at the top level of the sentinel payload.
+
+| Field | Status | Notes |
+|---|---|---|
+| `ambiguities` | `ambiguities_pending_resolution` | Non-empty list of ambiguity entries. Each entry typically carries `question`, `plan_assumption`, `alternatives`, `why_it_matters`, `ticket_evidence`; **treat all keys as best-effort** (§4.4 / A3 decision, issue #191). |
+| `premises` | `premises_pending_verification` | Non-empty list of premise entries. Each entry carries at minimum a description (key may be `premise` or `claim`) and producer-supplied verification context (any of `verify_by` / `plan_depends_on_it_for` / `evidence_in_ticket` / `how_to_verify` / `verified` / `resolution`); **treat all keys as best-effort**. |
+
+**Cross-field invariants (enforced by parser):**
+- `status='ambiguities_pending_resolution'` requires `ambiguities` non-empty (A5).
+- `status='premises_pending_verification'` requires `premises` non-empty (A5).
+- Both statuses require `next_actions` non-empty (A2).
+- Both statuses prohibit `branch` (pre-branch, A4) and require `scope.lines_actual=null` (pre-impl, A4).
+- Both statuses require `schema_version >= 4` (A1).
+
+**Consumer guidance:** Key off `result.status` directly — these are now canonical statuses. Route `user_resolve_ambiguities` / `user_verify_premises` via `next_actions`. The `ambiguities` and `premises` arrays hold the structured entries for human presentation.
+
+**Migration note:** Before v4, these values were emitted by the producer but not recognized by the parser — they routed through synthetic `BlockedResult` with `reason=status_unknown`. Skills that previously keyed off `extract_block` raw JSON (`/cw-followup`, `/cw-validate-result`) can now use the typed `result.status` directly. The `result.ambiguities` / `result.premises` fields carry the same data that was previously accessed via raw JSON. Promoted via #191.
 
 ---
 
@@ -250,7 +313,7 @@ The skill can fail to emit a complete sentinel block. cw must handle:
 2. **Opening sentinel present, closing sentinel missing** — skill crashed mid-emit. Same handling as (1).
 3. **Block present but JSON does not parse** — skill bug. Same handling as (1); include the raw block in `details`.
 4. **`schema_version` higher than parser supports** — skill upgraded ahead of cw. Surface verbatim and refuse to act on `next_actions`; do not auto-merge or auto-route.
-5. **Unknown `status` value** — same as (4).
+5. **Unknown `status` value** — same as (4). The closed enum in §4.1 covers all recognized values including `ambiguities_pending_resolution` and `premises_pending_verification` (promoted to canonical status in v4 via #191). Any value outside this set routes through `reason=status_unknown`.
 6. **Multiple complete sentinel blocks in one invocation's stdout** — skill bug (the contract is exactly one per invocation; see §3.1). Same handling as (1), with `reason: "multiple_result_blocks"` and `details` containing the count and the LAST block's raw payload.
 
 Parser must NEVER act on a partial parse — if any of the above fire, treat the run as blocked and require human attention.
@@ -267,7 +330,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 
 ## 8. Versioning
 
-`schema_version: 3` is the current contract. Parsers also accept `schema_version: 1` and `schema_version: 2` during the rollout window.
+`schema_version: 4` is the current contract. Parsers also accept `schema_version: 1`, `2`, and `3` during the rollout window.
 
 **Version history:**
 
@@ -275,7 +338,8 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 |---|---|
 | 1 | Initial contract. |
 | 2 | Added `no_op` status (§4.1) and `close_issue_as_completed` advisory action (§4.3). v1-tagged payloads with `status=no_op` are rejected as `validation_failed`. |
-| 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). |
+| 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). Also added `github_issue_existing` to `plan_source` (the post-Linear analog of `linear_existing`; treated identically). Accepted under v2 and v3 — same rollout-exception treatment, since the producer emits this value at v2 today (see #190). |
+| 4 | Promoted `ambiguities_pending_resolution` and `premises_pending_verification` from §4.4 interim states (not in closed enum) to canonical `Status` values (§4.1). Added `ambiguities` and `premises` top-level fields with cross-field invariants (non-empty when corresponding status is set, §4.4). Added `user_resolve_ambiguities` and `user_verify_premises` to §4.3 vocabulary. v3-tagged payloads with either new status are rejected as `validation_failed`. Tracked in #191. |
 
 **Bump required when:**
 - Any field is removed or renamed.
@@ -288,7 +352,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 - A new `next_actions` entry is added (parsers already treat unknown actions as advisory).
 - A new `blocker.reason` value is added (open enum — see §4.2).
 
-**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'` and `plan_source='none'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness.
+**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'`, `plan_source='none'`, and `plan_source='github_issue_existing'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness.
 
 When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. **Order matters:** the parser must accept the new version BEFORE the skill emits it, otherwise in-flight emissions land in deployed parsers that don't recognize them. Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
 
@@ -304,3 +368,61 @@ When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lock
   - cw#59 — https://github.com/mattwwarren/claude-workspace/issues/59
 - **Substrate** (cw 0.8.0 milestone, prerequisite for #56–#59): cw#52–#55.
 - **Skill-side resume implementation:** https://github.com/mattwwarren/global-claude/issues/2.
+
+---
+
+## 10. Stage Event Taxonomy (Producer Contract)
+
+### 10.1 Event Types
+
+`stage.entered` and `stage.errored` are **orchestrator events** — recorded on cw's event bus, not part of the `<<<AUTO_DEV_RESULT` sentinel block in §3. The skill records them via `cw event record …` at each stage boundary while running in headless mode. Consumers (cw status output, TUI dashboard, automation hooks) read them back through `cw event tail` and `read_events`.
+
+### 10.2 Stage Identifiers (closed enum)
+
+Every `stage` and `prev_stage` payload value MUST match one of:
+
+- `s0_intake`
+- `s1_plan_generated`
+- `s1_ambiguity_scan_complete`
+- `s1_plan_reviewed`
+- `s2_impl_started`
+- `s2_impl_complete`
+- `s3_review_started`
+- `s3_review_complete`
+- `s4_pr_created`
+- `s5_ci_waiting`
+- `done`
+
+### 10.3 Payload Schema
+
+**Required for both `stage.entered` and `stage.errored`:**
+
+- `session_id` (str) — the cw session that owns the run.
+- `ticket_id` (str) — the ticket being worked.
+- `stage` (str) — the stage being entered or that errored; MUST match the closed enum in §10.2.
+- `started_at` (str) — ISO8601 UTC timestamp, e.g. `2026-05-23T13:01:42Z`.
+
+**Optional:**
+
+- `prev_stage` (str) — the stage being departed; MUST also match the closed enum in §10.2.
+
+**`stage.errored`-only:**
+
+- `error_kind` (str) — free-form classifier such as `agent_block`, `impl_failed`, `review_blocked`. Open enum — consumers MUST tolerate unknown values.
+
+### 10.4 Producer Invocation
+
+The skill emits stage transitions via `cw event record` from inside the headless session:
+
+```bash
+cw event record stage.entered \
+  --payload '{"session_id":"$CW_SESSION_ID","ticket_id":"173","stage":"s2_impl_started","prev_stage":"s1_plan_reviewed","started_at":"2026-05-23T13:01:42Z"}'
+```
+
+### 10.5 Consumer Behavior
+
+cw surfaces `last_stage` per running session in `cw orchestrate status` (text output) and the TUI sessions table (rendered by `cw orchestrate watch`). The value is derived at render time by filtering recorded events to `STAGE_ENTERED` and mapping `payload.session_id → payload.stage` (latest event wins). `STAGE_ERRORED` events are visible in `cw event tail` and `recent_events` but do NOT redefine `last_stage`. Sessions with no stage events render as `—` in the TUI and omit the `last_stage=…` token in the text output.
+
+### 10.6 Cross-Repo Status
+
+The producer side ships in `mattwwarren/global-claude` `commands/auto-dev.md` as a coordinated PR; the consumer side (event taxonomy + `last_stage` plumbing) ships in cw#173.
