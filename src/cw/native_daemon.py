@@ -61,7 +61,12 @@ class NativeDaemonClient(Protocol):
     """Protocol for interacting with the Claude background daemon."""
 
     def spawn_bg(
-        self, *, cwd: Path, prompt: str, extra_args: list[str] | None = None
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        extra_args: list[str] | None = None,
+        permission_mode: str | None = None,
     ) -> str:
         """Spawn a backgrounded Claude session in *cwd* running *prompt*.
 
@@ -71,6 +76,9 @@ class NativeDaemonClient(Protocol):
         An empty or falsy *prompt* is omitted from the command so the
         session starts idle (tempo=blocked), ready for the user's first
         message.
+
+        *permission_mode* overrides ``_DEFAULT_PERMISSION_MODE`` for the
+        spawned session. Pass ``None`` to use the default (``"auto"``).
 
         Returns the 8-char short session id. Raises :class:`CwError` on
         spawn failure or unparseable stdout.
@@ -102,15 +110,24 @@ class RealNativeDaemonClient:
         self._roster_path: Path = roster_path or _ROSTER_PATH
 
     def spawn_bg(
-        self, *, cwd: Path, prompt: str, extra_args: list[str] | None = None
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        extra_args: list[str] | None = None,
+        permission_mode: str | None = None,
     ) -> str:
-        """Invoke ``claude --bg --permission-mode auto`` and parse short id.
+        """Invoke ``claude --bg --permission-mode <mode>`` and parse short id.
 
         *extra_args* are inserted after ``--permission-mode <mode>`` and
         before *prompt*. An empty *prompt* is omitted so the session starts
         idle (tempo=blocked), ready for the user's first message.
+
+        *permission_mode* overrides the default (``"auto"``). Pass ``None``
+        to use the default.
         """
-        cmd = ["claude", "--bg", "--permission-mode", _DEFAULT_PERMISSION_MODE]
+        mode = permission_mode or _DEFAULT_PERMISSION_MODE
+        cmd = ["claude", "--bg", "--permission-mode", mode]
         if extra_args:
             cmd.extend(extra_args)
         if prompt:
@@ -195,17 +212,24 @@ class FakeNativeDaemonClient:
         self._counter = 0
         self.spawn_calls: list[tuple[Path, str]] = []
         self.spawn_extra_args: list[list[str] | None] = []
+        self.spawn_permission_modes: list[str | None] = []
         self.stop_calls: list[str] = []
         self._live: set[str] = set()
 
     def spawn_bg(
-        self, *, cwd: Path, prompt: str, extra_args: list[str] | None = None
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        extra_args: list[str] | None = None,
+        permission_mode: str | None = None,
     ) -> str:
         """Record call, register a deterministic short id, return it."""
         self._counter += 1
         short_id = f"{self._counter:08x}"
         self.spawn_calls.append((cwd, prompt))
         self.spawn_extra_args.append(extra_args)
+        self.spawn_permission_modes.append(permission_mode)
         self._live.add(short_id)
         return short_id
 

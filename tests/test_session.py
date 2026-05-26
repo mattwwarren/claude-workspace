@@ -325,7 +325,12 @@ class TestStartSession:
 
         class FlakyDaemon(FakeNativeDaemonClient):
             def spawn_bg(
-                self, *, cwd: object, prompt: object, extra_args: object = None
+                self,
+                *,
+                cwd: object,
+                prompt: object,
+                extra_args: object = None,
+                permission_mode: object = None,
             ) -> str:
                 msg = "simulated daemon failure"
                 raise CwError(msg)
