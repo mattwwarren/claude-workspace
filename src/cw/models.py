@@ -159,6 +159,11 @@ class TicketTask(BaseModel):
     # Incremented each time the task is claimed by _claim_next_pending. Used to
     # apply a hard cap on validation_failed retries (see issue #251).
     attempts: int = 0
+    # Per-ticket wall-clock budget override (seconds). When set, takes precedence
+    # over the per-tier default in OrchestratorConfig.headless_timeout_by_tier and
+    # the global HEADLESS_TIMEOUT_SECONDS fallback. Set via ``cw dev-queue add
+    # --timeout <s>``. None means "use tier or global default". See issue #265.
+    headless_timeout_override: int | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -211,6 +216,12 @@ class OrchestratorConfig(BaseModel):
     default_max_parallel: int = 1
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)
     backend: BackendName | None = None
+    # Per-tier wall-clock budgets (seconds) for headless DAEMON sessions.
+    # Keyed by scope.tier from the auto-dev sentinel; unknown tiers fall back
+    # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.
+    headless_timeout_by_tier: dict[str, int] = Field(
+        default_factory=lambda: {"small": 1800, "large": 5400}
+    )
 
     @model_validator(mode="before")
     @classmethod

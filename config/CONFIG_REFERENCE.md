@@ -164,6 +164,31 @@ Scope: forwarded as `--model <id>` to `claude --bg` from both
 `spawn_create_impl` (initial DAEMON spawn) and `resume_session` (DAEMON-origin
 resume of a dead surface). USER-origin sessions ignore this field.
 
+## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
+
+Controls the autonomous dispatch loop. Created with defaults on first run.
+
+```yaml
+tick_interval_seconds: 30
+default_max_parallel: 2
+per_client_max_parallel: {}
+linear_prefix_map: {}
+
+# Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
+# known (from the auto-dev sentinel scope field) are budgeted by this map.
+# Sessions without a known tier fall back to the global HEADLESS_TIMEOUT_SECONDS.
+# Explicit per-ticket overrides (cw dev-queue add --timeout <s>) always win.
+headless_timeout_by_tier:
+  small: 1800   # 30 min — tight cap for small-scope tickets
+  large: 5400   # 90 min — room for 11-file, 600-line implementations
+```
+
+Override a single ticket's budget at enqueue time:
+
+```bash
+cw dev-queue add GEN-123 --client my-project --timeout 7200
+```
+
 ## Managing Configuration
 
 ```bash

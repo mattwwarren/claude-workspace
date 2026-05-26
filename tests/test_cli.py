@@ -948,10 +948,10 @@ class TestSignalStop:
         # Seed session started 61 minutes ago (past the 60-min budget).
         import datetime as dt
 
-        from cw.cli import HEADLESS_TIMEOUT_SECONDS
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
+        from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
 
         started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         hook_time = dt.datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
@@ -3044,3 +3044,52 @@ class TestDevQueueRefreshAll:
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
         assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueAddTimeout (GitHub issue #265)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueAddTimeout:
+    """Tests for ``--timeout`` flag on ``cw dev-queue add``."""
+
+    def test_dev_queue_add_timeout_flag(self, tmp_config_dir: Path) -> None:
+        """--timeout sets headless_timeout_override on the created TicketTask."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "add",
+                "GEN-123",
+                "--client",
+                "client-a",
+                "--timeout",
+                "5400",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-123"), None)
+        assert task is not None
+        assert task.headless_timeout_override == 5400
+
+    def test_dev_queue_add_no_timeout(self, tmp_config_dir: Path) -> None:
+        """Without --timeout, headless_timeout_override is None."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "GEN-456", "--client", "client-b"],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-456"), None)
+        assert task is not None
+        assert task.headless_timeout_override is None
