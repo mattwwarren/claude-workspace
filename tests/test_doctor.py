@@ -101,6 +101,9 @@ def test_run_doctor_reap_flag_reconciles_and_reports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """run_doctor(reap=True) invokes reconcile and reports reaped sessions."""
+    from datetime import UTC
+    from datetime import datetime as _dt
+
     from cw.config import load_state, save_state
     from cw.doctor import run_doctor
     from cw.models import CwState, Session, SessionPurpose, SessionStatus
@@ -116,6 +119,8 @@ def test_run_doctor_reap_flag_reconciles_and_reports(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                     surface_ref="gone",
+                    # Older than SPAWN_GRACE_SECONDS — phantom-eligible.
+                    started_at=_dt(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -911,6 +912,10 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client_config.workspace_path,
                     surface_ref="dead",
+                    # started_at older than SPAWN_GRACE_SECONDS so this
+                    # session is eligible for phantom-reaping rather
+                    # than protected by the grace window.
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )
@@ -987,6 +992,8 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client_config.workspace_path,
                     surface_ref="dead",
+                    # Older than SPAWN_GRACE_SECONDS — phantom-eligible.
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )

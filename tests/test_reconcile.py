@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +30,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     HEADLESS_TIMEOUT_SECONDS,
+    SPAWN_GRACE_SECONDS,
     _claude_agents_json,
     compute_drift,
     reconcile,
@@ -43,6 +44,7 @@ def _mk_session(
     sid: str,
     surface_ref: str | None,
     status: SessionStatus = SessionStatus.ACTIVE,
+    started_at: datetime | None = None,
 ) -> Session:
     return Session(
         id=sid,
@@ -54,7 +56,9 @@ def _mk_session(
             name="client-a", workspace_path=Path("/tmp/ws")
         ).workspace_path,
         surface_ref=surface_ref,
-        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+        started_at=(
+            started_at if started_at is not None else datetime(2026, 4, 19, tzinfo=UTC)
+        ),
     )
 
 
@@ -150,6 +154,40 @@ def test_compute_drift_native_daemon_live_set_counts_as_alive() -> None:
     )
     report = compute_drift(state, native_live)
     assert report.phantom_session_ids == ["native-dead"]
+
+
+def test_compute_drift_spawn_grace_window_protects_fresh_sessions() -> None:
+    """Sessions younger than SPAWN_GRACE_SECONDS are not reaped as phantom.
+
+    Regression test for #271: ``claude --bg`` spawn → daemon roster
+    registration is async. A reconcile call in the same dispatch tick as
+    the spawn would otherwise see the not-yet-registered session as a
+    phantom and reap it within 1 second. Real-world latency observed
+    2026-05-26: 0.3-1.5s between spawn and roster registration.
+    """
+    now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    fresh = _mk_session("fresh", "fresh-ref", started_at=now - timedelta(seconds=2))
+    old = _mk_session("old", "old-ref", started_at=now - timedelta(seconds=120))
+    state = CwState(sessions=[fresh, old])
+
+    # native_live is empty (both refs missing from daemon roster)
+    report = compute_drift(state, set(), now=now)
+
+    # Only the old one is reaped; the fresh one is in the grace window.
+    assert report.phantom_session_ids == ["old"]
+
+
+def test_compute_drift_grace_expires_after_spawn_grace_seconds() -> None:
+    """A session just past SPAWN_GRACE_SECONDS is eligible for phantom-reaping."""
+    now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    just_expired = _mk_session(
+        "expired",
+        "expired-ref",
+        started_at=now - timedelta(seconds=SPAWN_GRACE_SECONDS + 1),
+    )
+    state = CwState(sessions=[just_expired])
+    report = compute_drift(state, set(), now=now)
+    assert report.phantom_session_ids == ["expired"]
 
 
 def test_compute_drift_empty_live_set_from_both_backends_is_reconciled() -> None:

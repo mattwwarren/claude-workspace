@@ -1273,6 +1273,9 @@ def test_start_session_reaps_phantom_before_existing_check(
         f"    workspace_path: {sample_client.workspace_path}\n"
     )
 
+    from datetime import UTC
+    from datetime import datetime as _dt
+
     save_state(
         CwState(
             sessions=[
@@ -1284,6 +1287,8 @@ def test_start_session_reaps_phantom_before_existing_check(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                     surface_ref="gone-ref",
+                    # Older than SPAWN_GRACE_SECONDS — phantom-eligible.
+                    started_at=_dt(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )
