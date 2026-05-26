@@ -1114,7 +1114,14 @@ def signal_stop() -> None:
         if parsed_sentinel is None:
             elapsed = (now - session.started_at).total_seconds()
             _headless_config = load_orchestrator_config()
-            _budget = resolve_headless_budget(None, session, _headless_config)
+            _stop_task: TicketTask | None = None
+            if isinstance(ticket_id_value, str):
+                _stop_store = load_dev_queue()
+                _stop_task = next(
+                    (t for t in _stop_store.tasks if t.ticket_id == ticket_id_value),
+                    None,
+                )
+            _budget = resolve_headless_budget(_stop_task, session, _headless_config)
             if elapsed < _budget:
                 # Under budget — defer. Another Stop hook turn will fire, or
                 # reconcile will eventually catch a phantom and CRASH it.
