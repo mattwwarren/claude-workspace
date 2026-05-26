@@ -523,7 +523,7 @@ class TestChannelPosting:
             raise URLError(err_msg)
 
         # Must not raise — best-effort design
-        with patch("cw.daemon.urllib.request.urlopen", raise_url_error):
+        with patch("urllib.request.urlopen", raise_url_error):
             _post_to_channel("merged", "owner/repo", 1, {})
 
     def test_cw_pr_events_url_env_var_overrides_default(
