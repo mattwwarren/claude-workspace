@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import threading
 from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,7 @@ from cw.cw_pr_events_server import (  # noqa: E402
     make_app,
     serve,
     subscribe,
+    subscribe_with_cursor,
     unsubscribe,
 )
 
@@ -38,6 +40,18 @@ def _reset_subscribers() -> Generator[None]:
     yield
     with _server_mod._lock:
         _server_mod._subscribers.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_channel_state() -> Generator[None]:
+    """Reset durable-replay in-memory state between tests."""
+    with _server_mod._file_lock:
+        _server_mod._cursors.clear()
+        _server_mod._event_offset[0] = 0
+    yield
+    with _server_mod._file_lock:
+        _server_mod._cursors.clear()
+        _server_mod._event_offset[0] = 0
 
 
 class TestPREventPayloadValidation:
@@ -196,3 +210,341 @@ class TestCLIPrChannel:
             result = runner.invoke(main, ["pr-channel", "serve", "--port", "9123"])
         assert result.exit_code == 0
         mock_serve.assert_called_once_with(host="127.0.0.1", port=9123)
+
+
+class TestAppendEvent:
+    def test_appends_to_jsonl_file(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _append_event
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "m", "title": "t"}
+        )
+        path = state_dir() / "channel-events.jsonl"
+        assert path.exists()
+        lines = path.read_text().splitlines()
+        assert len(lines) == 1
+
+    def test_offset_increments_monotonically(self) -> None:
+        from cw.cw_pr_events_server import _append_event
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "m", "title": "t"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "m2", "title": "t2"}
+        )
+        assert _server_mod._event_offset[0] == 2
+
+    def test_record_contains_offset_field(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _append_event
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "m", "title": "t"}
+        )
+        path = state_dir() / "channel-events.jsonl"
+        record = json.loads(path.read_text().splitlines()[0])
+        assert record["offset"] == 0
+
+    def test_thread_safe_under_concurrent_appends(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _append_event
+
+        def worker() -> None:
+            _append_event(
+                {"notification_type": "cw-pr-event", "message": "x", "title": "x"}
+            )
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        path = state_dir() / "channel-events.jsonl"
+        lines = path.read_text().splitlines()
+        assert len(lines) == 10
+        records = [json.loads(line) for line in lines]
+        offsets = {r["offset"] for r in records}
+        assert len(offsets) == 10  # all unique
+
+
+class TestReadEventsFromOffset:
+    def test_returns_empty_for_missing_file(self) -> None:
+        from cw.cw_pr_events_server import _read_events_from_offset
+
+        result = _read_events_from_offset(0)
+        assert result == []
+
+    def test_returns_all_events_from_zero(self) -> None:
+        from cw.cw_pr_events_server import _append_event, _read_events_from_offset
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "b", "title": "b"}
+        )
+        result = _read_events_from_offset(0)
+        assert len(result) == 2
+
+    def test_respects_offset_filter(self) -> None:
+        from cw.cw_pr_events_server import _append_event, _read_events_from_offset
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "b", "title": "b"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "c", "title": "c"}
+        )
+        result = _read_events_from_offset(1)
+        assert len(result) == 2
+        assert result[0]["offset"] == 1
+        assert result[1]["offset"] == 2
+
+    def test_skips_malformed_lines(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _append_event, _read_events_from_offset
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        path = state_dir() / "channel-events.jsonl"
+        with path.open("a") as f:
+            f.write("not-json\n")
+        result = _read_events_from_offset(0)
+        assert len(result) == 1
+
+
+class TestSubscribeWithCursor:
+    def test_returns_queue(self) -> None:
+        q = subscribe_with_cursor("sub1")
+        assert isinstance(q, queue.SimpleQueue)
+        unsubscribe(q)
+
+    def test_replays_missed_events(self) -> None:
+        from cw.cw_pr_events_server import _append_event
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "b", "title": "b"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "c", "title": "c"}
+        )
+
+        _server_mod._cursors["sub2"] = 1
+        q = subscribe_with_cursor("sub2")
+        try:
+            items = []
+            while not q.empty():
+                items.append(q.get_nowait())
+            assert len(items) == 2
+            assert items[0]["offset"] == 1
+            assert items[1]["offset"] == 2
+        finally:
+            unsubscribe(q)
+
+    def test_no_replay_when_caught_up(self) -> None:
+        from cw.cw_pr_events_server import _append_event
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "b", "title": "b"}
+        )
+
+        _server_mod._cursors["sub3"] = 2
+        q = subscribe_with_cursor("sub3")
+        try:
+            assert q.empty()
+        finally:
+            unsubscribe(q)
+
+    def test_registers_for_future_events(self) -> None:
+        q = subscribe_with_cursor("sub4")
+        try:
+            broadcast(
+                {"notification_type": "cw-pr-event", "message": "future", "title": "f"}
+            )
+            item = q.get_nowait()
+            assert item["notification_type"] == "cw-pr-event"
+        finally:
+            unsubscribe(q)
+
+
+class TestAckOffset:
+    def test_persists_cursor_to_file(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import ack_offset
+
+        ack_offset("sub-a", 3)
+        path = state_dir() / "channel-cursors.json"
+        data = json.loads(path.read_text())
+        assert data == {"sub-a": 3}
+
+    def test_updates_in_memory_cursors(self) -> None:
+        from cw.cw_pr_events_server import ack_offset
+
+        ack_offset("sub-b", 7)
+        assert _server_mod._cursors["sub-b"] == 7
+
+    def test_overwrites_previous_cursor(self) -> None:
+        from cw.cw_pr_events_server import ack_offset
+
+        ack_offset("sub-c", 1)
+        ack_offset("sub-c", 5)
+        assert _server_mod._cursors["sub-c"] == 5
+
+
+class TestHandlePostAck:
+    def _make_client(self) -> TestClient:
+        return TestClient(make_app())
+
+    def test_valid_request_returns_ok(self) -> None:
+        client = self._make_client()
+        resp = client.post("/ack", json={"client_id": "c1", "offset": 0})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    def test_invalid_body_returns_400(self) -> None:
+        client = self._make_client()
+        resp = client.post("/ack", json={"client_id": "c1"})
+        assert resp.status_code == 400
+
+    def test_updates_cursor(self) -> None:
+        client = self._make_client()
+        client.post("/ack", json={"client_id": "c2", "offset": 42})
+        assert _server_mod._cursors["c2"] == 42
+
+    def test_route_registered(self) -> None:
+        app = make_app()
+        route_paths = [r.path for r in app.routes]
+        assert "/ack" in route_paths
+
+
+class TestBroadcastDurable:
+    def test_appends_to_file(self) -> None:
+        from cw.config import state_dir
+
+        broadcast({"notification_type": "cw-pr-event", "message": "m", "title": "t"})
+        path = state_dir() / "channel-events.jsonl"
+        assert path.exists()
+        lines = path.read_text().splitlines()
+        assert len(lines) == 1
+
+    def test_persists_before_subscriber_receives(self) -> None:
+        from cw.config import state_dir
+
+        # Verify file is written as part of broadcast
+        q = subscribe()
+        try:
+            broadcast(
+                {"notification_type": "cw-pr-event", "message": "m", "title": "t"}
+            )
+            # File must exist after broadcast completes
+            path = state_dir() / "channel-events.jsonl"
+            assert path.exists()
+            # Subscriber also received it
+            item = q.get_nowait()
+            assert item["notification_type"] == "cw-pr-event"
+        finally:
+            unsubscribe(q)
+
+
+class TestDurableReplay:
+    def test_five_events_survive_subscriber_restart(self) -> None:
+        """Primary acceptance criterion from ticket."""
+
+        # 1. Broadcast 5 events
+        for i in range(5):
+            broadcast(
+                {
+                    "notification_type": "cw-pr-event",
+                    "message": f"msg{i}",
+                    "title": f"t{i}",
+                }
+            )
+
+        # 2. Subscribe with cursor at 0 (no prior cursor) — simulates reconnect
+        q = subscribe_with_cursor("dispatcher")
+        try:
+            # 3. Drain queue
+            items = []
+            while not q.empty():
+                items.append(q.get_nowait())
+
+            # 4. Assert exactly 5 notifications with offsets 0-4
+            assert len(items) == 5
+            assert {item["offset"] for item in items} == {0, 1, 2, 3, 4}
+        finally:
+            unsubscribe(q)
+
+
+class TestLoadCursors:
+    def test_returns_empty_for_missing_file(self) -> None:
+        from cw.cw_pr_events_server import _load_cursors
+
+        result = _load_cursors()
+        assert result == {}
+
+    def test_returns_persisted_cursors(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _load_cursors
+
+        path = state_dir() / "channel-cursors.json"
+        path.write_text(json.dumps({"sub-x": 5, "sub-y": 12}))
+        result = _load_cursors()
+        assert result == {"sub-x": 5, "sub-y": 12}
+
+    def test_returns_empty_on_corrupt_file(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _load_cursors
+
+        path = state_dir() / "channel-cursors.json"
+        path.write_text("not-json")
+        result = _load_cursors()
+        assert result == {}
+
+
+class TestLoadOffsetFromFile:
+    def test_returns_zero_for_missing_file(self) -> None:
+        from cw.cw_pr_events_server import _load_offset_from_file
+
+        result = _load_offset_from_file()
+        assert result == 0
+
+    def test_returns_max_offset_plus_one(self) -> None:
+        from cw.cw_pr_events_server import _append_event, _load_offset_from_file
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "b", "title": "b"}
+        )
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "c", "title": "c"}
+        )
+        result = _load_offset_from_file()
+        assert result == 3
+
+    def test_skips_malformed_lines(self) -> None:
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _append_event, _load_offset_from_file
+
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "a", "title": "a"}
+        )
+        path = state_dir() / "channel-events.jsonl"
+        with path.open("a") as f:
+            f.write("bad-json\n")
+        result = _load_offset_from_file()
+        assert result == 1
