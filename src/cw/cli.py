@@ -1264,7 +1264,8 @@ def daemon(once: bool) -> None:
     """
     click.echo(
         "Note: cw daemon's PR-dispatch role is deprecated as of 0.11. "
-        "Use `cw orchestrator-start` to run the channel-based orchestrator. "
+        "The channel-based orchestrator (cw orchestrator-start, arriving in #115b) "
+        "will replace this dispatch role. "
         "The PR watcher loop (this command's other role) is still required.",
         err=True,
     )

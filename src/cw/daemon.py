@@ -371,8 +371,9 @@ def run_watcher_tick(*, once: bool = False) -> None:
             _events, updated_snapshot = watch_prs_for_client(client, snapshot)
             _save_snapshot(client_name, updated_snapshot)
 
-        # As of 2026-05-26 the orchestrator skill (cw-orchestrator.md) replaces the
-        # in-daemon dispatch role of pr_responder.respond_to_pr_events().
+        # As of 2026-05-26 the orchestrator skill
+        # (see .claude/agents/cw-orchestrator.md) replaces the in-daemon
+        # dispatch role of pr_responder.respond_to_pr_events().
         # The watcher loop continues to detect PRs and post events into the
         # cw-pr-events channel; the orchestrator session (spawn with
         # `cw orchestrator-start`) consumes the channel and routes spawns.

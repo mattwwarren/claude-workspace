@@ -547,28 +547,18 @@ class TestChannelPosting:
 
 
 def test_run_watcher_tick_does_not_call_respond_to_pr_events() -> None:
-    """respond_to_pr_events must NOT be called from run_watcher_tick.
+    """respond_to_pr_events must NOT be imported or called in run_watcher_tick.
 
     The orchestrator skill (cw-orchestrator.md) replaced the in-daemon
-    dispatch role of pr_responder.respond_to_pr_events().  This is a
-    regression guard so the removal stays removed.
+    dispatch role of pr_responder.respond_to_pr_events(). This regression
+    guard ensures the import stays removed.
     """
-    from cw.daemon import run_watcher_tick
+    import importlib
 
-    with (
-        patch("cw.daemon.load_orchestrator_config") as mock_config,
-        patch("cw.daemon.load_clients", return_value={}),
-        patch("cw.daemon.load_state") as mock_state,
-        patch("cw.daemon._load_throttle") as mock_throttle,
-        patch("cw.daemon._save_throttle"),
-        patch("cw.daemon.clear_completed_pr_sessions"),
-        patch("cw.daemon.retire_merged_prs"),
-        patch("cw.pr_responder.respond_to_pr_events") as mock_respond,
-    ):
-        mock_config.return_value = MagicMock(tick_interval_seconds=1)
-        mock_state.return_value = MagicMock()
-        mock_throttle.return_value = MagicMock()
+    import cw.daemon
 
-        run_watcher_tick(once=True)
-
-    mock_respond.assert_not_called()
+    importlib.reload(cw.daemon)
+    assert not hasattr(cw.daemon, "respond_to_pr_events"), (
+        "respond_to_pr_events must not be imported in cw.daemon — "
+        "the orchestrator skill replaced its dispatch role"
+    )
