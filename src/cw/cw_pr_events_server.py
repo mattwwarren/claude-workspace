@@ -16,6 +16,8 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
+from cw.config import state_dir
+
 if TYPE_CHECKING:
     from starlette.requests import Request
 
@@ -52,7 +54,7 @@ _subscribers: list[queue.SimpleQueue[dict[str, Any]]] = []
 
 _file_lock = threading.Lock()
 _cursors: dict[str, int] = {}
-_event_offset: int = 0
+_event_offset: list[int] = [0]
 
 
 def subscribe() -> queue.SimpleQueue[dict[str, Any]]:
@@ -73,53 +75,51 @@ def unsubscribe(q: queue.SimpleQueue[dict[str, Any]]) -> None:
 
 def _append_event(notification: dict[str, Any]) -> None:
     """Persist notification to channel-events.jsonl with a monotonic offset."""
-    from cw.config import state_dir  # noqa: PLC0415
-
-    global _event_offset  # noqa: PLW0603
     with _file_lock:
         path = state_dir() / "channel-events.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
-        record = {**notification, "offset": _event_offset}
+        record = {**notification, "offset": _event_offset[0]}
         with path.open("a") as f:
             f.write(json.dumps(record) + "\n")
             f.flush()
-        _event_offset += 1
+        _event_offset[0] += 1
 
 
 def _read_events_from_offset(from_offset: int) -> list[dict[str, Any]]:
     """Read all events with offset >= from_offset from channel-events.jsonl."""
-    from cw.config import state_dir  # noqa: PLC0415
-
-    path = state_dir() / "channel-events.jsonl"
-    if not path.exists():
-        return []
-    results: list[dict[str, Any]] = []
-    for raw_line in path.read_text().splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        try:
-            record: dict[str, Any] = json.loads(stripped)
-        except json.JSONDecodeError:
-            logger.warning(
-                "channel-events.jsonl: skipping malformed line: %r", stripped
-            )
-            continue
-        if record.get("offset", -1) >= from_offset:
-            results.append(record)
-    return results
+    with _file_lock:
+        path = state_dir() / "channel-events.jsonl"
+        if not path.exists():
+            return []
+        results: list[dict[str, Any]] = []
+        for raw_line in path.read_text().splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                record: dict[str, Any] = json.loads(stripped)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "channel-events.jsonl: skipping malformed line: %r", stripped
+                )
+                continue
+            if record.get("offset", -1) >= from_offset:
+                results.append(record)
+        return results
 
 
 def _load_cursors() -> dict[str, int]:
     """Load per-subscriber cursors from disk."""
-    from cw.config import state_dir  # noqa: PLC0415
-
     with _file_lock:
         path = state_dir() / "channel-cursors.json"
         if not path.exists():
             return {}
         try:
-            return json.loads(path.read_text())  # type: ignore[no-any-return]
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                logger.warning("channel-cursors.json: unexpected shape, ignoring")
+                return {}
+            return {str(k): int(v) for k, v in data.items()}
         except json.JSONDecodeError:
             logger.warning("channel-cursors.json: corrupt, ignoring")
             return {}
@@ -127,8 +127,6 @@ def _load_cursors() -> dict[str, int]:
 
 def _load_offset_from_file() -> int:
     """Determine current offset from channel-events.jsonl on disk."""
-    from cw.config import state_dir  # noqa: PLC0415
-
     with _file_lock:
         path = state_dir() / "channel-events.jsonl"
         if not path.exists():
@@ -161,8 +159,6 @@ def subscribe_with_cursor(client_id: str) -> queue.SimpleQueue[dict[str, Any]]:
 
 def ack_offset(client_id: str, offset: int) -> None:
     """Advance the per-subscriber cursor and persist to disk."""
-    from cw.config import state_dir  # noqa: PLC0415
-
     with _file_lock:
         _cursors[client_id] = offset
         path = state_dir() / "channel-cursors.json"
@@ -219,6 +215,10 @@ async def handle_post_ack(request: Request) -> Response:
         return JSONResponse({"error": msg}, status_code=400)
     ack_offset(req.client_id, req.offset)
     return JSONResponse({"status": "ok"})
+
+
+_cursors.update(_load_cursors())
+_event_offset[0] = _load_offset_from_file()
 
 
 def make_app() -> Starlette:

@@ -47,11 +47,11 @@ def _reset_channel_state() -> Generator[None]:
     """Reset durable-replay in-memory state between tests."""
     with _server_mod._file_lock:
         _server_mod._cursors.clear()
-        _server_mod._event_offset = 0
+        _server_mod._event_offset[0] = 0
     yield
     with _server_mod._file_lock:
         _server_mod._cursors.clear()
-        _server_mod._event_offset = 0
+        _server_mod._event_offset[0] = 0
 
 
 class TestPREventPayloadValidation:
@@ -234,7 +234,7 @@ class TestAppendEvent:
         _append_event(
             {"notification_type": "cw-pr-event", "message": "m2", "title": "t2"}
         )
-        assert _server_mod._event_offset == 2
+        assert _server_mod._event_offset[0] == 2
 
     def test_record_contains_offset_field(self) -> None:
         from cw.config import state_dir
