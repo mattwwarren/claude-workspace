@@ -24,7 +24,7 @@ import logging
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 _log = logging.getLogger(__name__)
 
@@ -96,6 +96,27 @@ StageReached = Literal[
     "stage4b_pr_create",
     "stage5_post_create",
 ]
+# Short-form stage codes emitted by the auto-dev producer's resume-detection
+# substates (e.g. ``s5_ci_pending`` instead of ``stage5_post_create``).
+# ``AutoDevResult._normalize_stage_reached`` maps these to their nearest
+# full-form canonical equivalent before Pydantic validates the Literal.
+# Unknown values pass through unchanged and fail the Literal check loudly.
+# See issue #292 for the root-cause analysis.
+_STAGE_REACHED_ALIASES: dict[str, str] = {
+    "pre_flight": "stage1_pre_flight",
+    "s1_drafting": "stage1_plan",
+    "s1_pending_ambiguity_resolution": "stage1_plan",
+    "s1_pending_human_approval": "stage1_plan",
+    "s1_plan_approved": "stage1_plan",
+    "s2_implementing": "stage2_impl",
+    "s3_review_pending": "stage3_review",
+    "s3_fix_loop": "stage3_review",
+    "s4_pr_open": "stage5_post_create",
+    "s5_ci_pending": "stage5_post_create",
+    "s5_ci_passed": "stage5_post_create",
+    "s5_ci_failed": "stage5_post_create",
+    "merged": "stage5_post_create",
+}
 ScopeTier = Literal["small", "large"]
 PlanSource = Literal[
     "linear_existing",
@@ -229,6 +250,13 @@ class AutoDevResult(BaseModel):
     # all keys optional, tolerate producer-side key-name drift.
     ambiguities: list[dict[str, Any]] = Field(default_factory=list)
     premises: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("stage_reached", mode="before")
+    @classmethod
+    def _normalize_stage_reached(cls, v: object) -> object:
+        if isinstance(v, str) and v in _STAGE_REACHED_ALIASES:
+            return _STAGE_REACHED_ALIASES[v]
+        return v
 
     @model_validator(mode="after")
     def _check_invariants(self) -> AutoDevResult:
