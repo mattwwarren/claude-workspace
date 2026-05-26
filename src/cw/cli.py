@@ -1929,6 +1929,10 @@ def spawn_close(session_id: str) -> None:
     click.echo(f"Closed session: {session_id}")
 
 
+_ORCHESTRATOR_AGENT = "cw-orchestrator"
+_ORCHESTRATOR_CHANNEL = "server:cw-pr-events"
+
+
 def _resolve_client(client_name: str | None) -> ClientConfig:
     """Resolve --client to a ClientConfig, defaulting to the first configured client."""
     clients = load_clients()
@@ -1941,7 +1945,7 @@ def _resolve_client(client_name: str | None) -> ClientConfig:
 
 
 @main.command(name="orchestrator-start")
-@click.option("--name", default="cw-orchestrator", help="Session label.")
+@click.option("--name", default=_ORCHESTRATOR_AGENT, help="Session label.")
 @click.option(
     "--client",
     default=None,
@@ -1961,9 +1965,9 @@ def orchestrator_start(
     client_cfg = _resolve_client(client)
     extra_args = [
         "--agent",
-        "cw-orchestrator",
+        _ORCHESTRATOR_AGENT,
         "--dangerously-load-development-channels",
-        "server:cw-pr-events",
+        _ORCHESTRATOR_CHANNEL,
     ]
     session_id = spawn_create_impl(
         client=client_cfg,

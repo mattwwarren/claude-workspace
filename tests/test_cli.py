@@ -3502,44 +3502,46 @@ class TestDevQueueAddTimeout:
 # ---------------------------------------------------------------------------
 
 
+def _write_clients_yaml_for_test(
+    tmp_config_dir: Path,
+    clients: list[tuple[str, str]],
+) -> None:
+    """Write a minimal clients.yaml with the given (name, workspace_path) tuples."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["clients:\n"]
+    for name, ws in clients:
+        lines.append(f"  {name}:\n")
+        lines.append(f"    workspace_path: {ws}\n")
+    (config_dir / "clients.yaml").write_text("".join(lines))
+
+
+def _make_git_workspace_for_test(tmp_path: Path, name: str) -> Path:
+    """Create a minimal git repo suitable for spawn_create_impl's _validate_worktree."""
+    import os
+    import subprocess
+
+    repo = tmp_path / name
+    repo.mkdir(parents=True, exist_ok=True)
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            check=True,
+            env=clean_env,
+        )
+
+    _git("init", "-b", "main")
+    _git("config", "user.email", "t@t.com")
+    _git("config", "user.name", "t")
+    _git("commit", "--allow-empty", "-m", "init")
+    return repo
+
+
 class TestOrchestratorStart:
     """Tests for ``cw orchestrator-start`` command."""
-
-    def _write_clients_yaml(
-        self,
-        tmp_config_dir: Path,
-        clients: list[tuple[str, str]],
-    ) -> None:
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        lines = ["clients:\n"]
-        for name, ws in clients:
-            lines.append(f"  {name}:\n")
-            lines.append(f"    workspace_path: {ws}\n")
-        (config_dir / "clients.yaml").write_text("".join(lines))
-
-    def _make_git_workspace(self, tmp_path: Path, name: str) -> Path:
-        """Create a minimal git repo suitable for _validate_worktree."""
-        import os
-        import subprocess
-
-        repo = tmp_path / name
-        repo.mkdir(parents=True, exist_ok=True)
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-
-        def _git(*args: str) -> None:
-            subprocess.run(
-                ["git", "-C", str(repo), *args],
-                capture_output=True,
-                check=True,
-                env=clean_env,
-            )
-
-        _git("init", "-b", "main")
-        _git("config", "user.email", "t@t.com")
-        _git("config", "user.name", "t")
-        _git("commit", "--allow-empty", "-m", "init")
-        return repo
 
     def test_orchestrator_start_with_explicit_client_spawns_session(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3547,8 +3549,8 @@ class TestOrchestratorStart:
         """cw orchestrator-start --client mytest spawns a session and prints its id."""
         from cw.native_daemon import FakeNativeDaemonClient
 
-        ws = self._make_git_workspace(tmp_path, "ws-explicit")
-        self._write_clients_yaml(tmp_config_dir, [("mytest", str(ws))])
+        ws = _make_git_workspace_for_test(tmp_path, "ws-explicit")
+        _write_clients_yaml_for_test(tmp_config_dir, [("mytest", str(ws))])
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
@@ -3574,7 +3576,7 @@ class TestOrchestratorStart:
         """--client unknown-name exits with error mentioning the unknown name."""
         ws = tmp_path / "ws-unknown"
         ws.mkdir()
-        self._write_clients_yaml(tmp_config_dir, [("real-client", str(ws))])
+        _write_clients_yaml_for_test(tmp_config_dir, [("real-client", str(ws))])
 
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrator-start", "--client", "unknown-name"])
@@ -3588,8 +3590,8 @@ class TestOrchestratorStart:
         """Without --client, command uses the first configured client."""
         from cw.native_daemon import FakeNativeDaemonClient
 
-        ws = self._make_git_workspace(tmp_path, "ws-default")
-        self._write_clients_yaml(tmp_config_dir, [("first-client", str(ws))])
+        ws = _make_git_workspace_for_test(tmp_path, "ws-default")
+        _write_clients_yaml_for_test(tmp_config_dir, [("first-client", str(ws))])
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
@@ -3604,10 +3606,11 @@ class TestOrchestratorStart:
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """extra_args contain --agent and --dangerously-load-development-channels."""
+        from cw.cli import _ORCHESTRATOR_AGENT, _ORCHESTRATOR_CHANNEL
         from cw.native_daemon import FakeNativeDaemonClient
 
-        ws = self._make_git_workspace(tmp_path, "ws-args")
-        self._write_clients_yaml(tmp_config_dir, [("args-client", str(ws))])
+        ws = _make_git_workspace_for_test(tmp_path, "ws-args")
+        _write_clients_yaml_for_test(tmp_config_dir, [("args-client", str(ws))])
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
@@ -3618,7 +3621,7 @@ class TestOrchestratorStart:
         assert daemon.spawn_extra_args[0] is not None
         extra = daemon.spawn_extra_args[0]
         assert "--agent" in extra
-        assert "cw-orchestrator" in extra
+        assert _ORCHESTRATOR_AGENT in extra
         assert "--dangerously-load-development-channels" in extra
-        assert "server:cw-pr-events" in extra
+        assert _ORCHESTRATOR_CHANNEL in extra
         assert daemon.spawn_permission_modes[0] == "acceptEdits"
