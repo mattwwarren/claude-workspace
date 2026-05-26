@@ -36,7 +36,7 @@ jobs:
         run: brew install tmux
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --extra mcp
 
       - name: Lint
         run: uv run ruff check src/ tests/

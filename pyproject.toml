@@ -18,6 +18,13 @@ dependencies = [
 
 ]
 
+[project.optional-dependencies]
+mcp = [
+    "mcp[cli]>=1.27.1",
+    "starlette>=1.1.0",
+    "uvicorn>=0.30.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/mattwwarren/claude-workspace"
 Repository = "https://github.com/mattwwarren/claude-workspace"
@@ -136,3 +143,14 @@ python_version = "3.13"
 strict = true
 mypy_path = "src"
 packages = ["cw"]
+
+[[tool.mypy.overrides]]
+# starlette, mcp, uvicorn, anyio are optional extras; ignore missing stubs when not installed
+module = [
+    "anyio",
+    "anyio.*",
+    "mcp.*",
+    "starlette.*",
+    "uvicorn",
+]
+ignore_missing_imports = true
