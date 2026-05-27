@@ -13,6 +13,8 @@ from cw.cli import main
 from cw.config import load_orchestrator_config
 from cw.dev_queue import (
     add_ticket,
+    cancel_task_for_session,
+    cancel_ticket,
     clear_tickets,
     list_tickets,
     load_dev_queue,
@@ -884,3 +886,184 @@ class TestCLIDevQueueClear:
         )
         assert result.exit_code != 0
         assert "Invalid value" in result.output or "invalid choice" in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestCancelTicket
+# ---------------------------------------------------------------------------
+
+
+class TestCancelTicket:
+    def test_cancel_pending_task_marks_cancelled(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(
+            ticket_id="TKT-C1", client="genhealth", status=QueueItemStatus.PENDING
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cancel_ticket("TKT-C1", "genhealth")
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TKT-C1")
+        assert t.status == QueueItemStatus.CANCELLED
+        assert t.session_id is None
+
+    def test_cancel_running_task_marks_cancelled(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(
+            ticket_id="TKT-C2",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-abc",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cleared = cancel_ticket("TKT-C2", "genhealth")
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TKT-C2")
+        assert t.status == QueueItemStatus.CANCELLED
+        assert t.session_id is None
+        # cancel_ticket returns the cleared session_ids atomically
+        assert cleared == ["sess-abc"]
+
+    def test_cancel_returns_cleared_session_id(self, tmp_dev_queue: Path) -> None:
+        """cancel_ticket returns the cleared session_id list atomically."""
+        task = TicketTask(
+            ticket_id="TKT-RET",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-xyz",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cleared = cancel_ticket("TKT-RET", "genhealth")
+        assert cleared == ["sess-xyz"]
+
+    def test_cancel_pending_task_returns_none_session_id(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """PENDING tasks have session_id=None; cancel_ticket returns [None]."""
+        task = TicketTask(
+            ticket_id="TKT-PRET",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cleared = cancel_ticket("TKT-PRET", "genhealth")
+        assert cleared == [None]
+
+    def test_cancel_already_cancelled_returns_empty_list(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """Already-CANCELLED tasks are skipped; cancel_ticket returns []."""
+        task = TicketTask(
+            ticket_id="TKT-ARET",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cleared = cancel_ticket("TKT-ARET", "genhealth")
+        assert cleared == []
+
+    def test_cancel_nonexistent_raises_cwerror(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        pattern = "No dev-queue task found for ticket 'TKT-MISS' in client 'genhealth'"
+        with pytest.raises(CwError, match=pattern):
+            cancel_ticket("TKT-MISS", "genhealth")
+
+    def test_cancel_already_cancelled_is_idempotent(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(
+            ticket_id="TKT-C3",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        # Should not raise
+        cancel_ticket("TKT-C3", "genhealth")
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TKT-C3")
+        assert t.status == QueueItemStatus.CANCELLED
+
+    def test_cancel_does_not_affect_other_client(self, tmp_dev_queue: Path) -> None:
+        tasks = [
+            TicketTask(
+                ticket_id="TKT-X", client="genhealth", status=QueueItemStatus.PENDING
+            ),
+            TicketTask(
+                ticket_id="TKT-X", client="other-client", status=QueueItemStatus.PENDING
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        cancel_ticket("TKT-X", "genhealth")
+        store = load_dev_queue()
+        gh_task = next(t for t in store.tasks if t.client == "genhealth")
+        other_task = next(t for t in store.tasks if t.client == "other-client")
+        assert gh_task.status == QueueItemStatus.CANCELLED
+        assert other_task.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# TestCancelTaskForSession
+# ---------------------------------------------------------------------------
+
+
+class TestCancelTaskForSession:
+    def test_cancels_running_task_by_session_id(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(
+            ticket_id="SID-1",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-001",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        result = cancel_task_for_session("sess-001")
+        assert result is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "SID-1")
+        assert t.status == QueueItemStatus.CANCELLED
+        assert t.session_id is None
+
+    def test_returns_false_when_no_match(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        result = cancel_task_for_session("nonexistent-sess")
+        assert result is False
+
+    def test_ignores_non_running_task(self, tmp_dev_queue: Path) -> None:
+        """Only RUNNING tasks are cancelled; PENDING/COMPLETED are ignored."""
+        task = TicketTask(
+            ticket_id="SID-2",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            session_id="sess-002",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        result = cancel_task_for_session("sess-002")
+        assert result is False
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "SID-2")
+        assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueueCancel
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueueCancel:
+    def test_cancel_pending_task_via_cli(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(
+            ticket_id="CLI-C1", client="genhealth", status=QueueItemStatus.PENDING
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "cancel", "CLI-C1", "--client", "genhealth"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Cancelled CLI-C1" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "CLI-C1")
+        assert t.status == QueueItemStatus.CANCELLED
+
+    def test_cancel_nonexistent_errors(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "cancel", "CLI-MISS", "--client", "genhealth"]
+        )
+        assert result.exit_code != 0
+        assert "No dev-queue task found" in result.output

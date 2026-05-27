@@ -29,6 +29,8 @@ from cw.config import (
 from cw.daemon import run_watcher_tick
 from cw.dev_queue import (
     add_ticket,
+    cancel_task_for_session,
+    cancel_ticket,
     clear_tickets,
     dev_queue_lock,
     list_tickets,
@@ -1378,6 +1380,28 @@ def dev_queue_remove(tickets: tuple[str, ...], client: str, remove_all: bool) ->
         click.echo(f"Removed {ticket} from {client} dev-queue.")
 
 
+@dev_queue.command(name="cancel")
+@click.argument("tickets", nargs=-1, required=True)
+@click.option("--client", "-c", "client", required=True, help="Client name")
+@handle_errors
+def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
+    """Cancel dev-queue task(s) and stop any running session."""
+    state = load_state()
+    daemon = get_native_daemon_client()
+    for ticket in tickets:
+        cleared_session_ids = cancel_ticket(ticket, client)
+        for old_session_id in cleared_session_ids:
+            if old_session_id is not None:
+                sess = state.find_by_name_or_id(old_session_id)
+                if (
+                    sess is not None
+                    and sess.surface_ref is not None
+                    and sess.origin is SessionOrigin.DAEMON
+                ):
+                    daemon.stop(sess.surface_ref)
+        click.echo(f"Cancelled {ticket} in {client} dev-queue.")
+
+
 @dev_queue.command(name="clear")
 @click.option("--client", "-c", "client", required=True, help="Client name")
 @click.option(
@@ -1416,9 +1440,12 @@ def dev_queue_status(client: str | None) -> None:
             by_client[task.client] = []
         by_client[task.client].append(task)
 
-    header = f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'COMPLETED':>9}  TICKETS"
+    header = (
+        f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'COMPLETED':>9}"
+        f"  {'CANCELLED':>9}  TICKETS"
+    )
     click.echo(header)
-    click.echo("-" * 70)
+    click.echo("-" * 82)
     for client_name in clients_seen:
         client_tasks = by_client[client_name]
         pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
@@ -1426,10 +1453,13 @@ def dev_queue_status(client: str | None) -> None:
         completed_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.COMPLETED
         ]
+        cancelled_tasks = [
+            t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
+        ]
         ticket_ids = ", ".join(t.ticket_id for t in client_tasks)
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
-            f"  {len(completed_tasks):>9}  {ticket_ids}"
+            f"  {len(completed_tasks):>9}  {len(cancelled_tasks):>9}  {ticket_ids}"
         )
 
 
@@ -1843,6 +1873,13 @@ def _spawn_close_impl(
                 sess.id,
                 sess.surface_ref,
             )
+
+    # For DAEMON sessions, atomically cancel any RUNNING TicketTask that owns
+    # this session so revert_completed_silent_tasks cannot revert it to PENDING
+    # and the dispatcher cannot re-spawn the same ticket in the same tick.
+    # (See GitHub issue #317.)
+    if sess.origin is SessionOrigin.DAEMON:
+        cancel_task_for_session(sess.id)
 
     sess.status = SessionStatus.COMPLETED
     sess.completed_at = datetime.now(UTC)
