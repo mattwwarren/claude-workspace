@@ -827,6 +827,8 @@ _VALIDATION_FAILED_MAX_ATTEMPTS = 3
 # issue #251 Bug A where revert_completed_silent_tasks reverts a task to
 # PENDING before consume_completed_sessions can process the SESSION_COMPLETED
 # event — causing no_op and similar outcomes to trigger infinite re-dispatch.
+# Also covers ambiguities_pending_resolution and premises_pending_verification
+# (issue #316): these are terminal-pending-user, not retry candidates.
 _TERMINAL_NO_RETRY_STATUSES: frozenset[str] = frozenset(
     {
         "shipped",
@@ -836,6 +838,8 @@ _TERMINAL_NO_RETRY_STATUSES: frozenset[str] = frozenset(
         "merge_gate_blocked",
         "scope_exceeded",
         "forbidden_area",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
     }
 )
 

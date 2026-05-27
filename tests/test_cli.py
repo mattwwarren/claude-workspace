@@ -1525,6 +1525,134 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.COMPLETED
 
+    def test_signal_stop_premises_pending_v2_marks_task_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """premises_pending_verification at schema_version=2 → COMPLETED.
+
+        Regression for GitHub issue #316: schema_version<4 gate caused
+        validation_failed BlockedResult → retry loop. After fix, parses
+        as AutoDevResult → COMPLETED.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-316-premises", "worktree-316-premises"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-316-premises"
+        fake_home = tmp_path / "fake-home-316-premises"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_316_PREMISES_PENDING_V2, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_signal_stop_ambiguities_pending_v2_marks_task_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ambiguities_pending_resolution at schema_version=2 → COMPLETED.
+
+        Regression for GitHub issue #316.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-316-ambiguities", "worktree-316-ambiguities"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-316-ambiguities"
+        fake_home = tmp_path / "fake-home-316-ambiguities"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_316_AMBIGUITIES_PENDING_V2, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
     def test_signal_stop_validation_failed_reverts_to_pending_under_cap(
         self,
         tmp_config_dir: Path,
@@ -2431,6 +2559,64 @@ _SENTINEL_251_BLOCKED_NO_RETRY = (
     '"details": "MUST_FIX persists after revision", '
     '"retry_eligible": false, "retry_delay_seconds": null},\n'
     '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# mirrors _premises_pending_payload in test_auto_dev_result.py at schema_version=2
+_SENTINEL_316_PREMISES_PENDING_V2 = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "premises_pending_verification",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 2, "lines_estimate": 40, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, '
+    '"fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "premises": [{"claim": "PR #198 codified a deliberate decision"}],\n'
+    '  "ambiguities": [],\n'
+    '  "next_actions": ["user_verify_premises"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# mirrors _ambiguities_pending_payload in test_auto_dev_result.py at schema_version=2
+_SENTINEL_316_AMBIGUITIES_PENDING_V2 = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "ambiguities_pending_resolution",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 2, "lines_estimate": 40, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, '
+    '"fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "ambiguities": [{"question": "Should we retry on timeout?"}],\n'
+    '  "premises": [],\n'
+    '  "next_actions": ["user_resolve_ambiguities"]\n'
     "}\n"
     "AUTO_DEV_RESULT>>>"
 )
