@@ -44,7 +44,9 @@ _ROSTER_PATH = Path.home() / ".claude" / "daemon" / "roster.json"
 
 # Regex that matches the short session id Claude prints on a successful
 # ``claude --bg`` invocation: ``backgrounded · <8 hex chars>``.
-_BG_STDOUT_PATTERN = re.compile(r"backgrounded\s*·\s*([0-9a-f]{8})")
+_BG_STDOUT_PATTERN = re.compile(
+    rf"backgrounded\s*·\s*([0-9a-f]{{{SHORT_SESSION_ID_LEN}}})"
+)
 
 # Claude Code 2.1.150 wraps the short id in ANSI color escapes
 # (``backgrounded · \x1b[36m<id>\x1b[39m``). Strip CSI SGR sequences before

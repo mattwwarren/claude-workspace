@@ -46,6 +46,9 @@ class TestNativeDaemonSmoke:
         """Stopping an already-stopped session must not raise."""
         client = RealNativeDaemonClient()
         short_id = client.spawn_bg(cwd=tmp_path, prompt="/version")
-        client.stop(short_id)
-        # Second stop should silently succeed (claude stop is best-effort).
-        client.stop(short_id)
+        try:
+            client.stop(short_id)
+            # Second stop should silently succeed (claude stop is best-effort).
+            client.stop(short_id)
+        finally:
+            client.stop(short_id)
