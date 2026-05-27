@@ -46,6 +46,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.notify import fire_push_notification
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session
@@ -66,6 +67,13 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 # 626 lines) hit the 30-min cap mid-implementation. Per-ticket / per-tier
 # override mechanism tracked in #265.
 HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
+
+# Watchdog budget for DAEMON RUNNING sessions that emit no sentinel at all.
+# These are sessions whose wrapper process exited before any AUTO_DEV_RESULT
+# block was written — typically because the child self-backgrounded a subagent
+# and exited early (GitHub #105, #121). After this window, reconcile flags
+# them as BLOCKED_ON_USER and fires a push notification.
+IDLE_WATCHDOG_SECONDS = 300  # 5 minutes
 
 
 # Grace window for a newly-spawned session to register with the daemon
@@ -328,6 +336,88 @@ def revert_stalled_headless_sessions(
     return reverted
 
 
+def _has_terminal_sentinel(session: Session) -> bool:
+    """True when the session has already emitted a terminal sentinel."""
+    return session.last_result is not None
+
+
+def flag_silently_idle_daemon_sessions(
+    state: CwState, *, now: datetime, native_live: set[str]
+) -> list[str]:
+    """Flag DAEMON RUNNING sessions idle past the watchdog budget with no sentinel.
+
+    These are sessions the wrapper never got a chance to signal — typically
+    because the child process self-backgrounded a subagent and exited before
+    the subagent returned (GitHub #105, #121). They appear ACTIVE/IDLE in cw
+    state while producing no output.
+
+    Only targets sessions whose ``surface_ref`` is currently in *native_live*
+    (the daemon still has them). Sessions with a dead surface ref are handled
+    by the phantom sweep → PENDING for retry.
+
+    Returns list of ticket IDs whose queue task was set to BLOCKED_ON_USER.
+    """
+    candidates: list[tuple[Session, str | None]] = []
+    for session in state.sessions:
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if _has_terminal_sentinel(session):
+            continue
+        # Only target sessions whose daemon surface is still live — phantom
+        # sessions (dead surface) are handled by the crashed-phantom sweep.
+        if session.surface_ref is None or session.surface_ref not in native_live:
+            continue
+        elapsed = (now - session.started_at).total_seconds()
+        if elapsed <= IDLE_WATCHDOG_SECONDS:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        candidates.append((session, ticket_id))
+
+    if not candidates:
+        return []
+
+    for session, _ in candidates:
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+
+    save_state(state)
+
+    blocked: list[str] = []
+    ticket_ids_to_block = [tid for _, tid in candidates if tid]
+    if ticket_ids_to_block:
+        ticket_id_set = set(ticket_ids_to_block)
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id in ticket_id_set
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    blocked.append(task.ticket_id)
+            if blocked:
+                save_dev_queue(store)
+
+    for session, ticket_id in candidates:
+        payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "paused_status": "silently_idle",
+            "breadcrumbs": "",
+            "crashed": False,
+        }
+        record_event(OrchestratorEventType.SESSION_NEEDS_ATTENTION, payload)
+        fire_push_notification(session.name, session.client)
+
+    return blocked
+
+
 def reconcile() -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
@@ -380,6 +470,10 @@ def reconcile() -> ReconcileReport:
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
+    silently_idle_ticket_ids = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live=native_live
+    )
+
     drift = compute_drift(state, native_live, now=now)
     if not drift.phantom_session_ids:
         # No phantom sessions to reap, but still run the TIMED_OUT and
@@ -389,7 +483,10 @@ def reconcile() -> ReconcileReport:
         completed_silent_ticket_ids = revert_completed_silent_tasks()
         all_reverted = list(
             dict.fromkeys(
-                stalled_reverted + timed_out_ticket_ids + completed_silent_ticket_ids
+                stalled_reverted
+                + silently_idle_ticket_ids
+                + timed_out_ticket_ids
+                + completed_silent_ticket_ids
             )
         )
         return ReconcileReport(reverted_ticket_ids=all_reverted)
@@ -451,6 +548,7 @@ def reconcile() -> ReconcileReport:
     all_reverted = list(
         dict.fromkeys(
             stalled_reverted
+            + silently_idle_ticket_ids
             + reverted
             + timed_out_ticket_ids
             + completed_silent_ticket_ids
