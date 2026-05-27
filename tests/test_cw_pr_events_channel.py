@@ -398,6 +398,14 @@ class TestRunProxyEnvVars:
         params = urllib.parse.parse_qs(parsed.query)
         assert params.get("client_id") == [socket.gethostname()]
 
+    def test_sse_url_uses_trailing_slash(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SSE URL must use /sse/ to connect directly, not /sse which redirects."""
+        monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
+        monkeypatch.delenv("CW_PR_EVENTS_CLIENT_ID", raising=False)
+        url = self._invoke_proxy_capture_url(monkeypatch)
+        parsed = urllib.parse.urlparse(url)
+        assert parsed.path == "/sse/", f"Expected /sse/ path, got {parsed.path!r}"
+
 
 # ---------------------------------------------------------------------------
 # CLI
