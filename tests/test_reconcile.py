@@ -1218,3 +1218,31 @@ def test_revert_stalled_uses_per_session_budget(
 
     assert "per-sess-small" in reverted
     assert sess.status == SessionStatus.TIMED_OUT
+
+
+# ---------------------------------------------------------------------------
+# CANCELLED task skipped by revert_completed_silent_tasks
+# ---------------------------------------------------------------------------
+
+
+def test_revert_completed_silent_tasks_skips_cancelled_task(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON COMPLETED session + CANCELLED task → no revert, task stays CANCELLED."""
+    sess = _mk_daemon_completed_session("comp-sess-cancel")
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TKT-CANCEL",
+        client="client-a",
+        status=QueueItemStatus.CANCELLED,
+        session_id=None,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reverted = revert_completed_silent_tasks()
+    assert reverted == []
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "TKT-CANCEL")
+    assert t.status == QueueItemStatus.CANCELLED

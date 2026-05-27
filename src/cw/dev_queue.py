@@ -161,6 +161,34 @@ def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> N
         save_dev_queue(store)
 
 
+def cancel_ticket(ticket_id: str, client: str) -> None:
+    """Mark a TicketTask as CANCELLED, clearing its session_id.
+
+    Raises CwError when no task matches (ticket_id + client).  Already-CANCELLED
+    tasks are silently skipped (idempotent).  Acquires the file lock atomically.
+    """
+    with _lock():
+        store = load_dev_queue()
+        matches = [
+            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+        ]
+        if not matches:
+            msg = (
+                f"No dev-queue task found for ticket '{ticket_id}'"
+                f" in client '{client}'."
+            )
+            raise CwError(msg)
+        changed = False
+        for task in matches:
+            if task.status == QueueItemStatus.CANCELLED:
+                continue
+            task.status = QueueItemStatus.CANCELLED
+            task.session_id = None
+            changed = True
+        if changed:
+            save_dev_queue(store)
+
+
 def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
     """Remove all TicketTasks for *client*, optionally filtered by *status*.
 

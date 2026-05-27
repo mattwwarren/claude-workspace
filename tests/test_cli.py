@@ -3625,3 +3625,118 @@ class TestOrchestratorStart:
         assert "--dangerously-load-development-channels" in extra
         assert _ORCHESTRATOR_CHANNEL in extra
         assert daemon.spawn_permission_modes[0] == "acceptEdits"
+
+
+# ---------------------------------------------------------------------------
+# TestSpawnCloseTaskCancellation — issue #317
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnCloseTaskCancellation:
+    """_spawn_close_impl must atomically CANCEL the owning RUNNING TicketTask."""
+
+    def _make_daemon_session(
+        self, tmp_path: Path, sess_id: str = "close-sess-1"
+    ) -> Session:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        sess = Session(
+            id=sess_id,
+            name=f"test-client/auto-dev/{sess_id}",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            status=SessionStatus.ACTIVE,
+            surface_ref="fake-ref",
+        )
+        state = load_state()
+        state.sessions.append(sess)
+        save_state(state)
+        return sess
+
+    def test_spawn_close_cancels_running_task(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON session + RUNNING task with session_id → after close → CANCELLED."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        sess = self._make_daemon_session(tmp_path)
+        task = TicketTask(
+            ticket_id="CLOSE-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=sess.id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "CLOSE-1")
+        assert t.status == QueueItemStatus.CANCELLED
+        assert t.session_id is None
+
+    def test_spawn_close_user_origin_does_not_touch_task(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """USER-origin session close → RUNNING task is NOT cancelled."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        workspace = tmp_path / "workspace2"
+        workspace.mkdir(parents=True, exist_ok=True)
+        sess = Session(
+            id="user-close-sess",
+            name="test-client/auto-dev/user-close-sess",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.USER,
+            workspace_path=workspace,
+            status=SessionStatus.ACTIVE,
+            surface_ref=None,
+        )
+        state = load_state()
+        state.sessions.append(sess)
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="USER-CLOSE-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=sess.id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "USER-CLOSE-1")
+        assert t.status == QueueItemStatus.RUNNING
+
+    def test_spawn_close_no_task_for_session_is_ok(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON session with no matching task → close succeeds without error."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        sess = self._make_daemon_session(tmp_path, sess_id="no-task-sess")
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        daemon = FakeNativeDaemonClient()
+        # Should not raise.
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == sess.id)
+        assert updated.status == SessionStatus.COMPLETED
