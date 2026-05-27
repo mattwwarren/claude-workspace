@@ -13,16 +13,13 @@ Run manually::
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import pytest
 
-from cw.native_daemon import RealNativeDaemonClient
+from cw.native_daemon import SHORT_SESSION_ID_RE, RealNativeDaemonClient
 
 pytestmark = pytest.mark.integration
-
-_SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
 _REAL_API = os.environ.get("INTEGRATION_REAL_API", "").strip() not in ("", "0")
 
@@ -31,17 +28,19 @@ _REAL_API = os.environ.get("INTEGRATION_REAL_API", "").strip() not in ("", "0")
 class TestNativeDaemonSmoke:
     """End-to-end against the real claude --bg daemon.
 
-    Each test spawns a background session then stops it in teardown so the
-    nightly runner does not accumulate orphaned sessions.
+    Each test stops the spawned session in a finally block so the nightly
+    runner does not accumulate orphaned sessions on assertion failures.
     """
 
     def test_spawn_returns_short_id(self, tmp_path: Path) -> None:
         client = RealNativeDaemonClient()
         short_id = client.spawn_bg(cwd=tmp_path, prompt="/version")
-        assert _SHORT_ID_RE.match(short_id), (
-            f"Expected 8-hex short id, got {short_id!r}"
-        )
-        client.stop(short_id)
+        try:
+            assert SHORT_SESSION_ID_RE.match(short_id), (
+                f"Expected 8-hex short id, got {short_id!r}"
+            )
+        finally:
+            client.stop(short_id)
 
     def test_stop_is_idempotent(self, tmp_path: Path) -> None:
         """Stopping an already-stopped session must not raise."""

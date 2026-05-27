@@ -43,8 +43,7 @@ jobs:
         run: uv run pytest tests/ -v --tb=short -m 'not cmux'
 
       # Run native-daemon smoke tests that call the real claude CLI.
-      # Gated on ANTHROPIC_API_KEY being set; silently skipped on forks or
-      # when the secret is absent so the job does not fail on PRs.
+      # Skipped when ANTHROPIC_API_KEY secret is not configured in this repo.
       - name: Test (native daemon smoke)
         if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
         env:
