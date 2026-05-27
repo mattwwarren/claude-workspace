@@ -1032,20 +1032,45 @@ class TestV4StatusPromotion:
         assert result.status == "premises_pending_verification"
         assert result.schema_version == 4
 
-    def test_ambiguities_pending_rejected_at_v3(self) -> None:
-        # v4-gated status must not parse under schema_version=3
-        p = _ambiguities_pending_payload()
-        p["schema_version"] = 3
-        result = parse_stdout(_wrap_sentinel(p))
-        assert isinstance(result, BlockedResult)
-        assert result.blocker.reason == "validation_failed"
+    def test_ambiguities_pending_accepted_at_v2(self) -> None:
+        """ambiguities_pending_resolution parses at schema_version=2.
 
-    def test_premises_pending_rejected_at_v3(self) -> None:
-        p = _premises_pending_payload()
-        p["schema_version"] = 3
-        result = parse_stdout(_wrap_sentinel(p))
-        assert isinstance(result, BlockedResult)
-        assert result.blocker.reason == "validation_failed"
+        Rollout exception: producer emits v2 today (issue #316).
+        """
+        payload = {**_ambiguities_pending_payload(), "schema_version": 2}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_premises_pending_accepted_at_v2(self) -> None:
+        """premises_pending_verification parses at schema_version=2.
+
+        Rollout exception: producer emits v2 today (issue #316).
+        """
+        payload = {**_premises_pending_payload(), "schema_version": 2}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+
+    def test_ambiguities_pending_accepted_at_v3(self) -> None:
+        """ambiguities_pending_resolution parses at schema_version=3.
+
+        Rollout exception: accept under v3 as well (issue #316).
+        """
+        payload = {**_ambiguities_pending_payload(), "schema_version": 3}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_premises_pending_accepted_at_v3(self) -> None:
+        """premises_pending_verification parses at schema_version=3.
+
+        Rollout exception: accept under v3 as well (issue #316).
+        """
+        payload = {**_premises_pending_payload(), "schema_version": 3}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
 
     def test_v4_schema_accepted(self) -> None:
         p = _ambiguities_pending_payload()
