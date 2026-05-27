@@ -26,10 +26,12 @@ from cw.wrapper import (
     _detect_claude_session_id,
     _idle_signal_path,
     _is_headless,
+    _is_paused_for_user_input,
     _run_claude_streaming,
     run_claude_wrapper,
     signal_completed,
     signal_idle,
+    signal_needs_attention,
 )
 
 
@@ -37,46 +39,82 @@ def _make_result(
     *,
     status: str = "shipped",
     ticket_id: str = "T-1",
+    next_actions: list[str] | None = None,
 ) -> AutoDevResult:
     """Build a minimal AutoDevResult that satisfies §3-§5 invariants."""
+    _base_health: dict[str, Any] = {
+        "lowest_agent_confidence": "HIGH",
+        "any_incomplete_risk": False,
+        "recommendation": "PROCEED",
+    }
+    _base_review: dict[str, Any] = {
+        "must_fix_initial": 0,
+        "should_fix": 0,
+        "fix_cycles_used": 0,
+    }
+
+    # Statuses that exit before branch creation
+    pre_branch = status in {
+        "no_op",
+        "plan_pending_approval",
+        "scope_exceeded",
+        "forbidden_area",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    }
+
     payload: dict[str, Any] = {
         "schema_version": 2,
         "ticket_id": ticket_id,
         "status": status,
-        "stage_reached": "stage4b_pr_create",
         "scope": {
             "tier": "small",
             "files": 1,
             "lines_estimate": 10,
-            "lines_actual": 8,
             "forbidden_touched": False,
         },
         "plan_source": "generated",
-        "branch": "auto-dev/T-1",
-        "fork_point_sha": "abc123",
-        "commits": ["c1"],
-        "pr": {
+        "commits": [],
+        "pr": None,
+        "branch": None,
+        "review": _base_review,
+        "health": _base_health,
+        "next_actions": next_actions if next_actions is not None else [],
+    }
+
+    if pre_branch:
+        payload["stage_reached"] = "stage1_plan"
+        payload["scope"]["lines_actual"] = None
+    else:
+        payload["stage_reached"] = "stage4b_pr_create"
+        payload["scope"]["lines_actual"] = 8
+        payload["branch"] = f"auto-dev/{ticket_id}"
+        payload["fork_point_sha"] = "abc123"
+        payload["commits"] = ["c1"]
+
+    if status == "shipped":
+        payload["pr"] = {
             "number": 42,
             "url": "https://example.com/pr/42",
             "auto_merge": True,
             "base": "main",
-        },
-        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
-        "health": {
-            "lowest_agent_confidence": "HIGH",
-            "any_incomplete_risk": False,
-            "recommendation": "PROCEED",
-        },
-        "next_actions": ["wait_for_ci"],
-    }
-    if status == "no_op":
-        payload["status"] = "no_op"
-        payload["branch"] = None
-        payload["pr"] = None
-        payload["next_actions"] = []
-        payload["stage_reached"] = "stage1_plan"
-        payload["scope"]["lines_actual"] = None
-        payload["commits"] = []
+        }
+        payload["next_actions"] = (
+            next_actions if next_actions is not None else ["wait_for_ci"]
+        )
+
+    if status == "ambiguities_pending_resolution":
+        payload["ambiguities"] = [{"question": "Which approach?"}]
+        payload["next_actions"] = (
+            next_actions if next_actions is not None else ["user_resolve_ambiguities"]
+        )
+
+    if status == "premises_pending_verification":
+        payload["premises"] = [{"premise": "API endpoint exists"}]
+        payload["next_actions"] = (
+            next_actions if next_actions is not None else ["user_verify_premises"]
+        )
+
     return AutoDevResult.model_validate(payload)
 
 
@@ -696,3 +734,337 @@ class TestRunClaudeStreaming:
 
         assert rc == 7
         assert captured == ""
+
+
+class TestIsPausedForUserInput:
+    def test_ambiguities_pending_returns_true(self) -> None:
+        result = _make_result(status="ambiguities_pending_resolution")
+        assert _is_paused_for_user_input(result) is True
+
+    def test_premises_pending_returns_true(self) -> None:
+        result = _make_result(status="premises_pending_verification")
+        assert _is_paused_for_user_input(result) is True
+
+    def test_shipped_returns_false(self) -> None:
+        result = _make_result(status="shipped")
+        assert _is_paused_for_user_input(result) is False
+
+    def test_no_op_returns_false(self) -> None:
+        result = _make_result(status="no_op")
+        assert _is_paused_for_user_input(result) is False
+
+    def test_blocked_with_user_resolve_returns_true(self) -> None:
+        """blocked + user_resolve_ next_action → paused for input."""
+        payload: dict[str, Any] = {
+            "schema_version": 2,
+            "ticket_id": "T-X",
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+            "scope": {
+                "tier": "small",
+                "files": 1,
+                "lines_estimate": 5,
+                "lines_actual": 0,
+                "forbidden_touched": False,
+            },
+            "plan_source": "generated",
+            "branch": "auto-dev/T-X",
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "recommendation": "PROCEED",
+            },
+            "next_actions": [],
+            "blocker": {
+                "stage": "stage2_impl",
+                "reason": "impl_failed",
+                "details": "agent returned BLOCK",
+            },
+        }
+        result = AutoDevResult.model_validate(payload)
+        assert _is_paused_for_user_input(result) is False
+
+    def test_blocked_without_user_prefix_returns_false(self) -> None:
+        """blocked with no user_ next_action → not paused for input."""
+        payload: dict[str, Any] = {
+            "schema_version": 2,
+            "ticket_id": "T-Z",
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+            "scope": {
+                "tier": "small",
+                "files": 1,
+                "lines_estimate": 5,
+                "lines_actual": 0,
+                "forbidden_touched": False,
+            },
+            "plan_source": "generated",
+            "branch": "auto-dev/T-Z",
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "recommendation": "PROCEED",
+            },
+            "next_actions": [],
+            "blocker": {
+                "stage": "stage2_impl",
+                "reason": "review_blocked",
+                "details": "fix loop exhausted",
+            },
+        }
+        result = AutoDevResult.model_validate(payload)
+        assert _is_paused_for_user_input(result) is False
+
+
+class TestSignalNeedsAttention:
+    def _seed_active_session(self, sid: str = "s1") -> Session:
+        sess = Session(
+            id=sid,
+            name="c/auto-dev/T-1",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+        return sess
+
+    def test_transitions_active_to_completed(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_needs_attention transitions ACTIVE → COMPLETED."""
+        self._seed_active_session("na1")
+        with patch("cw.wrapper.fire_push_notification"):
+            signal_needs_attention(
+                "c",
+                "impl",
+                breadcrumbs="some output",
+                session_id="na1",
+                claude_session_id=None,
+            )
+        updated = load_state()
+        sess = updated.sessions[0]
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.completed_reason == CompletionReason.NORMAL
+        assert sess.completed_at is not None
+
+    def test_stores_breadcrumbs_in_last_result(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """Breadcrumbs stored in session.last_result."""
+        self._seed_active_session("na2")
+        with patch("cw.wrapper.fire_push_notification"):
+            signal_needs_attention(
+                "c",
+                "impl",
+                breadcrumbs="line1\nline2",
+                session_id="na2",
+                claude_session_id=None,
+            )
+        updated = load_state()
+        assert updated.sessions[0].last_result == {
+            "breadcrumbs": "line1\nline2",
+            "needs_attention": True,
+        }
+
+    def test_emits_session_needs_attention_event(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """SESSION_NEEDS_ATTENTION event emitted with correct fields."""
+        self._seed_active_session("na3")
+        with patch("cw.wrapper.fire_push_notification"):
+            signal_needs_attention(
+                "c",
+                "impl",
+                breadcrumbs="tail output",
+                session_id="na3",
+                claude_session_id="csid-999",
+            )
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["session_id"] == "na3"
+        assert ev.payload["client"] == "c"
+        assert ev.payload["crashed"] is False
+        assert ev.payload["breadcrumbs"] == "tail output"
+        assert ev.payload["claude_session_id"] == "csid-999"
+
+    def test_idempotent_already_completed(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """Calling on COMPLETED session is a no-op."""
+        sess = Session(
+            id="na4",
+            name="c/auto-dev/T-1",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.COMPLETED,
+            completed_reason=CompletionReason.CRASHED,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+        with patch("cw.wrapper.fire_push_notification") as mock_notify:
+            signal_needs_attention(
+                "c",
+                "impl",
+                breadcrumbs="",
+                session_id="na4",
+                claude_session_id=None,
+            )
+        # Completed reason preserved, no notification fired
+        updated = load_state()
+        assert updated.sessions[0].completed_reason == CompletionReason.CRASHED
+        mock_notify.assert_not_called()
+
+    def test_no_session_found_is_noop(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """Missing session → no exception."""
+        save_state(CwState(sessions=[]))
+        with patch("cw.wrapper.fire_push_notification"):
+            signal_needs_attention(
+                "c",
+                "impl",
+                breadcrumbs="",
+                session_id="missing",
+                claude_session_id=None,
+            )
+
+    def test_calls_fire_push_notification(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """fire_push_notification called once per invocation."""
+        self._seed_active_session("na5")
+        with patch("cw.wrapper.fire_push_notification") as mock_notify:
+            signal_needs_attention(
+                "c",
+                "impl",
+                breadcrumbs="",
+                session_id="na5",
+                claude_session_id=None,
+            )
+        mock_notify.assert_called_once_with("c/auto-dev/T-1", "c")
+
+
+class TestRunClaudeWrapperNeedsAttention:
+    def _seed_active_session(self, sid: str, name: str = "c/auto-dev/T-1") -> Session:
+        sess = Session(
+            id=sid,
+            name=name,
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+        return sess
+
+    def test_paused_status_routes_to_signal_needs_attention(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """ambiguities_pending_resolution sentinel → signal_needs_attention."""
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "rw1")
+        self._seed_active_session("rw1")
+
+        result = _make_result(status="ambiguities_pending_resolution")
+        captured = _sentinel_stdout(result)
+
+        with (
+            patch("cw.wrapper._run_claude_streaming", return_value=(0, captured)),
+            patch("cw.wrapper.fire_push_notification"),
+        ):
+            run_claude_wrapper(("--print", "/auto-dev T-1 --headless"))
+
+        updated = load_state()
+        sess = updated.sessions[0]
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.last_result is not None
+        assert sess.last_result["needs_attention"] is True
+
+    def test_nonzero_exit_routes_to_signal_idle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """Nonzero returncode → signal_idle (not needs_attention)."""
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "rw2")
+        self._seed_active_session("rw2")
+
+        result = _make_result(status="ambiguities_pending_resolution")
+        captured = _sentinel_stdout(result)
+
+        with patch("cw.wrapper._run_claude_streaming", return_value=(1, captured)):
+            run_claude_wrapper(("--print", "/auto-dev T-1 --headless"))
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.IDLE
+
+    def test_headless_no_sentinel_routes_to_signal_needs_attention(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """Headless exit code 0 + no sentinel → signal_needs_attention."""
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "rw3")
+        self._seed_active_session("rw3")
+
+        with (
+            patch(
+                "cw.wrapper._run_claude_streaming",
+                return_value=(0, "output but no sentinel\n"),
+            ),
+            patch("cw.wrapper.fire_push_notification"),
+        ):
+            run_claude_wrapper(("--print", "/auto-dev T-1 --headless"))
+
+        updated = load_state()
+        sess = updated.sessions[0]
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.last_result is not None
+        assert sess.last_result["needs_attention"] is True
+
+    def test_premises_pending_routes_to_signal_needs_attention(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """premises_pending_verification sentinel → signal_needs_attention."""
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "rw4")
+        self._seed_active_session("rw4")
+
+        result = _make_result(status="premises_pending_verification")
+        captured = _sentinel_stdout(result)
+
+        with (
+            patch("cw.wrapper._run_claude_streaming", return_value=(0, captured)),
+            patch("cw.wrapper.fire_push_notification"),
+        ):
+            run_claude_wrapper(("--print", "/auto-dev T-1 --headless"))
+
+        updated = load_state()
+        sess = updated.sessions[0]
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.last_result is not None
+        assert sess.last_result["needs_attention"] is True
