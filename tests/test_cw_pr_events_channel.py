@@ -322,10 +322,6 @@ class TestRelayUpstream:
 # ---------------------------------------------------------------------------
 
 
-def _build_expected_sse_url(base: str, client_id: str) -> str:
-    return f"{base}/sse?client_id={urllib.parse.quote(client_id)}"
-
-
 class TestRunProxyEnvVars:
     def _invoke_proxy_capture_url(
         self,
@@ -362,13 +358,17 @@ class TestRunProxyEnvVars:
         monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
         monkeypatch.delenv("CW_PR_EVENTS_CLIENT_ID", raising=False)
         url = self._invoke_proxy_capture_url(monkeypatch)
-        assert url.startswith(f"{_DEFAULT_BASE_URL}/sse")
+        parsed = urllib.parse.urlparse(url)
+        assert parsed.scheme + "://" + parsed.netloc == _DEFAULT_BASE_URL
+        assert parsed.path == "/sse/"
 
     def test_custom_base_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CW_PR_EVENTS_BASE_URL", "http://example.com:9999")
         monkeypatch.delenv("CW_PR_EVENTS_CLIENT_ID", raising=False)
         url = self._invoke_proxy_capture_url(monkeypatch)
-        assert url.startswith("http://example.com:9999/sse")
+        parsed = urllib.parse.urlparse(url)
+        assert parsed.netloc == "example.com:9999"
+        assert parsed.path == "/sse/"
 
     def test_custom_client_id_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
