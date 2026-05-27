@@ -548,3 +548,53 @@ class TestLoadOffsetFromFile:
             f.write("bad-json\n")
         result = _load_offset_from_file()
         assert result == 1
+
+
+class TestLazyStarlette:
+    """Verify starlette is not required at module-load time (lazy-import contract)."""
+
+    def test_module_import_does_not_require_starlette(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib
+        import sys
+
+        # Block starlette sub-modules to simulate the [mcp] extra being absent
+        for key in (
+            "starlette",
+            "starlette.applications",
+            "starlette.responses",
+            "starlette.routing",
+            "starlette.requests",
+        ):
+            monkeypatch.setitem(sys.modules, key, None)
+
+        server_mod_name = "cw.cw_pr_events_server"
+        original_mod = sys.modules.pop(server_mod_name, None)
+        try:
+            mod = importlib.import_module(server_mod_name)
+            assert mod is not None
+        finally:
+            sys.modules.pop(server_mod_name, None)
+            if original_mod is not None:
+                sys.modules[server_mod_name] = original_mod
+
+    def test_make_app_raises_clear_importerror_without_starlette(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "starlette.applications", None)
+
+        with pytest.raises(ImportError, match=r"channel server requires \[mcp\] extra"):
+            _server_mod.make_app()
+
+    def test_serve_raises_clear_importerror_without_starlette(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "starlette.applications", None)
+
+        with pytest.raises(ImportError, match=r"channel server requires \[mcp\] extra"):
+            _server_mod.serve()

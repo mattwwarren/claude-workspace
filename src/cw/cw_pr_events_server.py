@@ -12,17 +12,21 @@ import urllib.parse
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, field_validator
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route
 
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
 
 if TYPE_CHECKING:
+    from starlette.applications import Starlette
     from starlette.requests import Request
+    from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+_MCP_EXTRA_MSG = (
+    "channel server requires [mcp] extra; "
+    "run 'uv pip install cw[mcp]' or 'uv sync --extra mcp'"
+)
 
 DEFAULT_PORT = 8788
 DEFAULT_HOST = "127.0.0.1"
@@ -194,6 +198,8 @@ def _build_notification(event: PREventRequest) -> dict[str, Any]:
 
 async def handle_post_pr_event(request: Request) -> Response:
     """Handle POST /pr-event: validate JSON body and broadcast MCP notification."""
+    from starlette.responses import JSONResponse  # noqa: PLC0415
+
     try:
         body = await request.json()
         event = PREventRequest.model_validate(body)
@@ -207,6 +213,8 @@ async def handle_post_pr_event(request: Request) -> Response:
 
 async def handle_post_ack(request: Request) -> Response:
     """Handle POST /ack: advance per-subscriber cursor."""
+    from starlette.responses import JSONResponse  # noqa: PLC0415
+
     try:
         body = await request.json()
         req = AckRequest.model_validate(body)
@@ -224,6 +232,11 @@ _event_offset[0] = _load_offset_from_file()
 
 def make_app() -> Starlette:
     """Build and return the Starlette ASGI app with MCP SSE + /pr-event route."""
+    try:
+        from starlette.applications import Starlette  # noqa: PLC0415
+        from starlette.routing import Mount, Route  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(_MCP_EXTRA_MSG) from exc
     import anyio  # noqa: PLC0415
     from mcp.server import Server  # noqa: PLC0415
     from mcp.server.sse import SseServerTransport  # noqa: PLC0415
