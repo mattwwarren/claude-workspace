@@ -754,38 +754,36 @@ class TestIsPausedForUserInput:
         assert _is_paused_for_user_input(result) is False
 
     def test_blocked_with_user_resolve_returns_true(self) -> None:
-        """blocked + user_resolve_ next_action → paused for input."""
-        payload: dict[str, Any] = {
-            "schema_version": 2,
-            "ticket_id": "T-X",
-            "status": "blocked",
-            "stage_reached": "stage2_impl",
-            "scope": {
-                "tier": "small",
-                "files": 1,
-                "lines_estimate": 5,
-                "lines_actual": 0,
-                "forbidden_touched": False,
-            },
-            "plan_source": "generated",
-            "branch": "auto-dev/T-X",
-            "commits": [],
-            "pr": None,
-            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
-            "health": {
-                "lowest_agent_confidence": "HIGH",
-                "any_incomplete_risk": False,
-                "recommendation": "PROCEED",
-            },
-            "next_actions": [],
-            "blocker": {
-                "stage": "stage2_impl",
-                "reason": "impl_failed",
-                "details": "agent returned BLOCK",
-            },
-        }
-        result = AutoDevResult.model_validate(payload)
-        assert _is_paused_for_user_input(result) is False
+        """blocked + user_resolve_ next_action → paused for input.
+
+        AutoDevResult currently rejects blocked + non-empty next_actions for
+        non-pre-flight stages (forward-compatible code path). Use a mock to
+        exercise the branch directly.
+        """
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.status = "blocked"
+        result.next_actions = ["user_resolve_ambiguities"]
+        assert _is_paused_for_user_input(result) is True
+
+    def test_blocked_with_user_decide_returns_true(self) -> None:
+        """blocked + user_decide_ next_action → paused for input."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.status = "blocked"
+        result.next_actions = ["user_decide_approach"]
+        assert _is_paused_for_user_input(result) is True
+
+    def test_blocked_with_user_verify_returns_true(self) -> None:
+        """blocked + user_verify_ next_action → paused for input."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.status = "blocked"
+        result.next_actions = ["user_verify_something"]
+        assert _is_paused_for_user_input(result) is True
 
     def test_blocked_without_user_prefix_returns_false(self) -> None:
         """blocked with no user_ next_action → not paused for input."""
@@ -896,6 +894,8 @@ class TestSignalNeedsAttention:
         assert ev.payload["crashed"] is False
         assert ev.payload["breadcrumbs"] == "tail output"
         assert ev.payload["claude_session_id"] == "csid-999"
+        assert ev.payload["paused_status"] is None
+        assert ev.payload["ticket_id"] == "T-1"
 
     def test_idempotent_already_completed(
         self, tmp_config_dir: Path, tmp_state_dir: Path

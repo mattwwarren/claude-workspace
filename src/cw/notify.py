@@ -5,29 +5,30 @@ from __future__ import annotations
 import contextlib
 import json
 import subprocess
+import threading
+from functools import lru_cache
 from pathlib import Path
 
 _PEON_TIMEOUT = 5  # seconds
+_HOOK_EVENT_NAME = "Notification"
+_NOTIFICATION_TYPE = "input.required"
 
 _SUBPROCESS_ERRORS = (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError)
 
 
+@lru_cache(maxsize=1)
 def _peon_sh_path() -> Path | None:
     """Locate peon.sh in the standard install location."""
     p = Path.home() / ".claude" / "hooks" / "peon-ping" / "peon.sh"
     return p if p.is_file() else None
 
 
-def fire_push_notification(session_name: str, client: str, *, cwd: str = "") -> None:
-    """Fire a push notification for a session that needs operator attention.
-
-    Calls peon-ping (if installed) then tries notify-send as a Linux fallback.
-    All failures are swallowed — notification is best-effort.
-    """
+def _fire_push_notification_sync(session_name: str, client: str, cwd: str = "") -> None:
+    """Blocking implementation — called in a daemon thread by fire_push_notification."""
     payload = json.dumps(
         {
-            "hook_event_name": "Notification",
-            "notification_type": "input.required",
+            "hook_event_name": _HOOK_EVENT_NAME,
+            "notification_type": _NOTIFICATION_TYPE,
             "session_name": session_name,
             "client": client,
             "cwd": cwd,
@@ -56,3 +57,16 @@ def fire_push_notification(session_name: str, client: str, *, cwd: str = "") -> 
             capture_output=True,
             check=False,
         )
+
+
+def fire_push_notification(session_name: str, client: str, *, cwd: str = "") -> None:
+    """Fire a push notification for a session that needs operator attention.
+
+    Runs in a daemon thread — non-blocking. Calls peon-ping (if installed) then
+    tries notify-send as a Linux fallback. All failures are swallowed.
+    """
+    threading.Thread(
+        target=_fire_push_notification_sync,
+        args=(session_name, client, cwd),
+        daemon=True,
+    ).start()

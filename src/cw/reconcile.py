@@ -75,6 +75,10 @@ HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 # them as BLOCKED_ON_USER and fires a push notification.
 IDLE_WATCHDOG_SECONDS = 300  # 5 minutes
 
+# Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
+# the watchdog flags (no sentinel ever emitted, daemon surface still live).
+_SILENTLY_IDLE_REASON = "silently_idle"
+
 
 # Grace window for a newly-spawned session to register with the daemon
 # (`claude agents --json`). `claude --bg` spawn → daemon roster registration
@@ -408,7 +412,7 @@ def flag_silently_idle_daemon_sessions(
             "client": session.client,
             "ticket_id": ticket_id,
             "claude_session_id": session.claude_session_id,
-            "paused_status": "silently_idle",
+            "paused_status": _SILENTLY_IDLE_REASON,
             "breadcrumbs": "",
             "crashed": False,
         }

@@ -26,13 +26,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import AutoDevResult, parse_stdout
+from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
+    AutoDevResult,
+    parse_stdout,
+)
 from cw.config import events_dir, load_state, save_state
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as record_orchestrator_event
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
     CompletionReason,
     OrchestratorEventType,
+    QueueItemStatus,
     SessionStatus,
 )
 from cw.notify import fire_push_notification
@@ -51,6 +57,25 @@ _TAIL_CAPTURE_BYTES = 1_048_576
 # signal_needs_attention. Enough to capture the final state summary without
 # bloating the session record.
 _NEEDS_ATTENTION_BREADCRUMB_LINES = 20
+
+# Prefix that daemon session names use to embed the ticket id. Mirrors the
+# AUTO_DEV_LABEL_PREFIX constant in reconcile.py — inlined here to avoid a
+# dependency from the lower-level wrapper module to the higher-level reconcile
+# module.
+_AUTO_DEV_LABEL_PREFIX = "auto-dev/"
+
+
+def _tail_breadcrumbs(captured: str) -> str:
+    """Return the last _NEEDS_ATTENTION_BREADCRUMB_LINES lines of captured output."""
+    return "\n".join(captured.splitlines()[-_NEEDS_ATTENTION_BREADCRUMB_LINES:])
+
+
+def _ticket_id_for_session_name(session_name: str) -> str | None:
+    """Extract ticket id from a daemon session name like 'client/auto-dev/T-123'."""
+    _, _, tail = session_name.partition("/")
+    if tail.startswith(_AUTO_DEV_LABEL_PREFIX):
+        return tail[len(_AUTO_DEV_LABEL_PREFIX) :]
+    return None
 
 
 def _idle_signal_path(client: str, purpose: str) -> Path:
@@ -135,10 +160,7 @@ def _is_paused_for_user_input(result: AutoDevResult) -> bool:
     - status is ``blocked`` AND at least one ``next_actions`` entry starts with a
       user-directed prefix (``user_resolve_``, ``user_decide_``, ``user_verify_``).
     """
-    if result.status in (
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
-    ):
+    if result.status in PAUSED_FOR_USER_INPUT_STATUSES:
         return True
     if result.status == "blocked":
         user_prefixes = ("user_resolve_", "user_decide_", "user_verify_")
@@ -153,12 +175,16 @@ def signal_needs_attention(
     breadcrumbs: str,
     session_id: str | None,
     claude_session_id: str | None,
+    paused_status: str | None = None,
 ) -> None:
     """Transition session to COMPLETED and emit SESSION_NEEDS_ATTENTION.
 
     Mirrors ``signal_completed`` but for sessions that paused waiting for
     operator input rather than completing work normally. Idempotent — a
     no-op when the session is already COMPLETED.
+
+    Also transitions the RUNNING TicketTask (if any) to BLOCKED_ON_USER so
+    the dispatch loop does not re-enqueue the ticket on the next reconcile tick.
     """
     state = load_state()
     session = _resolve_session(client, purpose, session_id=session_id, state=state)
@@ -186,13 +212,26 @@ def signal_needs_attention(
         session.claude_session_id = claude_session_id
     save_state(state)
 
+    ticket_id = _ticket_id_for_session_name(session.name)
+    if ticket_id:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id == ticket_id
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    save_dev_queue(store)
+                    break
+
     payload: dict[str, object] = {
         "session_id": session.id,
         "session_name": session.name,
         "client": client,
-        "ticket_id": None,
+        "ticket_id": ticket_id,
         "claude_session_id": claude_session_id,
-        "paused_status": None,
+        "paused_status": paused_status,
         "breadcrumbs": breadcrumbs,
         "crashed": False,
     }
@@ -233,15 +272,13 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
         parsed = parse_stdout(captured)
         if isinstance(parsed, AutoDevResult):
             if _is_paused_for_user_input(parsed):
-                breadcrumbs = "\n".join(
-                    captured.splitlines()[-_NEEDS_ATTENTION_BREADCRUMB_LINES:]
-                )
                 signal_needs_attention(
                     client,
                     purpose,
-                    breadcrumbs=breadcrumbs,
+                    breadcrumbs=_tail_breadcrumbs(captured),
                     session_id=session_id_env,
                     claude_session_id=claude_session_id,
+                    paused_status=parsed.status,
                 )
                 return
             signal_completed(
@@ -255,13 +292,10 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
 
         # headless + returncode==0 + no valid sentinel → signal_needs_attention
         if _is_headless(extra_args):
-            breadcrumbs = "\n".join(
-                captured.splitlines()[-_NEEDS_ATTENTION_BREADCRUMB_LINES:]
-            )
             signal_needs_attention(
                 client,
                 purpose,
-                breadcrumbs=breadcrumbs,
+                breadcrumbs=_tail_breadcrumbs(captured),
                 session_id=session_id_env,
                 claude_session_id=claude_session_id,
             )

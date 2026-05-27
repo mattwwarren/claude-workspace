@@ -6,6 +6,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import freezegun
 
@@ -1288,9 +1289,11 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    blocked = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}
-    )
+    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}
+        )
+        mock_notify.assert_called_once_with(sess.name, sess.client)
 
     assert "SILENT-1" in blocked
     assert sess.status == SessionStatus.COMPLETED
