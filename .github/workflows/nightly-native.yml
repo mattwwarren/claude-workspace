@@ -1,9 +1,7 @@
 name: Nightly (native daemon integration)
 
 on:
-  schedule:
-    # 04:00 UTC daily — off peak, 1h before the cmux nightly
-    - cron: "0 4 * * *"
+  # TODO: add schedule trigger once API budget allocated — see #110
   workflow_dispatch: {}
 
 jobs:
@@ -43,9 +41,18 @@ jobs:
         run: uv run pytest tests/ -v --tb=short -m 'not cmux'
 
       # Run native-daemon smoke tests that call the real claude CLI.
-      # Skipped when ANTHROPIC_API_KEY secret is not configured in this repo.
+      # Fails fast with a clear message when ANTHROPIC_API_KEY is not configured.
+      - name: Verify ANTHROPIC_API_KEY is configured
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ERROR: ANTHROPIC_API_KEY secret is not set."
+            echo "Configure it in Settings → Secrets → Actions before running this workflow."
+            exit 1
+          fi
+
       - name: Test (native daemon smoke)
-        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           INTEGRATION_REAL_API: "1"

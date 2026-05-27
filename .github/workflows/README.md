@@ -4,7 +4,7 @@
 |---|---|---|---|
 | `ci.yml` | Push / PR | ubuntu + macOS | Lint, type check, unit tests, tmux integration, diff coverage |
 | `nightly.yml` | 09:00 UTC daily | macOS | cmux integration (requires live cmux daemon) |
-| `nightly-native.yml` | 04:00 UTC daily | ubuntu | Full test suite (excl. cmux) + native daemon smoke tests |
+| `nightly-native.yml` | Manual (`workflow_dispatch`) | ubuntu | Full test suite (excl. cmux) + native daemon smoke tests |
 | `release.yml` | Tag push | ubuntu | Build and publish to PyPI |
 
 ## Triggering workflows manually

@@ -30,7 +30,7 @@ _log = logging.getLogger(__name__)
 # Length of the short Claude session id printed by ``claude --bg`` and
 # used as the worker key in roster.json (first 8 hex chars of the UUID).
 SHORT_SESSION_ID_LEN = 8
-SHORT_SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+SHORT_SESSION_ID_RE = re.compile(rf"^[0-9a-f]{{{SHORT_SESSION_ID_LEN}}}$")
 
 # Default permission mode for dispatched workers — non-interactive, so a
 # permission prompt would deadlock the session. ``auto`` matches the
