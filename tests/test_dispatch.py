@@ -1560,12 +1560,14 @@ class TestDispatchDoesNotTouchMainCheckout:
         add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
 
         after_head = subprocess.check_output(
             ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
             text=True,
         ).strip()
+        assert spawned == 1, "session should have been spawned in the branch worktree"
+        assert len(daemon.spawn_calls) == 1
         assert after_head == before_head
 
     def test_dispatch_tick_with_worktree_equal_to_main_checkout_reverts_task(

@@ -20,7 +20,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
 from cw.spawn import spawn_create_impl
-from cw.worktree import create_worktree, is_main_behind_origin
+from cw.worktree import _git_dir, create_worktree, is_main_behind_origin
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,7 +43,7 @@ def _assert_worktree_not_main_checkout(
     of the intended branch worktree.  Extracted into a helper so the raise does
     not sit directly inside dispatch_tick's broad try/except (TRY301).
     """
-    main_checkout = client.repo_path or client.workspace_path
+    main_checkout = _git_dir(client)
     if worktree_path.resolve() == main_checkout.resolve():
         msg = (
             f"Refusing to spawn session in main checkout: "
