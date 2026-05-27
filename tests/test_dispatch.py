@@ -1548,8 +1548,6 @@ class TestDispatchDoesNotTouchMainCheckout:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Normal dispatch: main checkout HEAD must be unchanged after the tick."""
-        import subprocess
-
         workspace_dir = sample_client_config.workspace_path
         before_head = subprocess.check_output(
             ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
@@ -1603,3 +1601,4 @@ class TestDispatchDoesNotTouchMainCheckout:
         tasks = [t for t in store.tasks if t.ticket_id == "GEN-300-guard"]
         assert len(tasks) == 1
         assert tasks[0].status == QueueItemStatus.PENDING
+        assert tasks[0].attempts == 1
