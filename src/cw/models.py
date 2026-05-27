@@ -48,6 +48,7 @@ class QueueItemStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    BLOCKED_ON_USER = "blocked_on_user"
 
 
 # Schema versions for persisted state. Bump when making a breaking change
@@ -118,6 +119,7 @@ class OrchestratorEventType(StrEnum):
     SESSION_SPAWNED = "session.spawned"
     SESSION_COMPLETED = "session.completed"
     SESSION_TIMED_OUT = "session.timed_out"
+    SESSION_NEEDS_ATTENTION = "session.needs_attention"
     TICKET_NEEDS_SYNC = "ticket.needs_sync"
     STAGE_ENTERED = "stage.entered"
     STAGE_ERRORED = "stage.errored"
