@@ -230,10 +230,30 @@ _cursors.update(_load_cursors())
 _event_offset[0] = _load_offset_from_file()
 
 
+class _SSESlashMiddleware:
+    """Rewrite bare /sse → /sse/ at ASGI scope level.
+
+    Starlette's Mount("/sse") regex requires a trailing slash to produce a
+    FULL match.  Without this rewrite, a GET /sse request falls through to
+    the redirect_slashes handler and returns a 307.  We normalise the path
+    internally so neither the client nor the router needs to care which form
+    was used.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope.get("path") == "/sse":
+            scope = dict(scope, path="/sse/")
+        await self._app(scope, receive, send)
+
+
 def make_app() -> Starlette:
     """Build and return the Starlette ASGI app with MCP SSE + /pr-event route."""
     try:
         from starlette.applications import Starlette  # noqa: PLC0415
+        from starlette.middleware import Middleware  # noqa: PLC0415
         from starlette.routing import Mount, Route  # noqa: PLC0415
     except ImportError as exc:
         raise ImportError(_MCP_EXTRA_MSG) from exc
@@ -291,14 +311,17 @@ def make_app() -> Starlette:
             finally:
                 unsubscribe(q)
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Mount("/sse", app=_sse_asgi),
             Mount("/messages", app=sse.handle_post_message),
             Route("/pr-event", handle_post_pr_event, methods=["POST"]),
             Route("/ack", handle_post_ack, methods=["POST"]),
-        ]
+        ],
+        middleware=[Middleware(_SSESlashMiddleware)],
     )
+    app.router.redirect_slashes = False
+    return app
 
 
 def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:

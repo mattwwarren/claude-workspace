@@ -19,7 +19,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
 from cw.spawn import spawn_create_impl
-from cw.worktree import create_worktree, is_main_behind_origin
+from cw.worktree import check_not_main_checkout, create_worktree, is_main_behind_origin
 
 if TYPE_CHECKING:
     from cw.models import OrchestratorConfig, TicketTask
@@ -184,6 +184,13 @@ def dispatch_tick(
                 # ``claude -w`` to turn it into a worktree, which never
                 # worked because that flag takes a name rather than a path.
                 worktree_path = create_worktree(client, branch)
+
+                # Guard against the #300 regression: if create_worktree
+                # returns the main checkout path (degenerate path-computation
+                # or symlink indirection), refuse the spawn.  create_worktree
+                # normally catches this itself, but a mocked or buggy
+                # implementation could still return the same path.
+                check_not_main_checkout(worktree_path, client)
 
                 label = branch
                 session_id = spawn_create_impl(

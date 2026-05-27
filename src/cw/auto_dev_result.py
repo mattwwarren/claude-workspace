@@ -69,8 +69,9 @@ Status = Literal[
 # producer bug — it would silently degrade for downstream tools that key off
 # the version field.
 _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
-# Statuses introduced in v4 (issue #191). Emitting under schema_version<4 is
-# a producer bug.
+# Statuses introduced in v4 (issue #191). Per rollout exception (issue #316),
+# accepted under all supported schema versions (v2, v3, v4) until the producer
+# skill bumps its emitted schema_version to v4.
 _V4_STATUSES: frozenset[str] = frozenset(
     {"ambiguities_pending_resolution", "premises_pending_verification"}
 )
@@ -269,13 +270,13 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
-        # §8 v4-introduced statuses cannot ride on a pre-v4-tagged payload.
-        if self.schema_version < 4 and self.status in _V4_STATUSES:
-            msg = (
-                f"status={self.status!r} requires schema_version>=4, "
-                f"got {self.schema_version}"
-            )
-            raise ValueError(msg)
+        # NOTE: ambiguities_pending_resolution and premises_pending_verification
+        # (_V4_STATUSES) are NOT gated by schema_version. Spec §8 says enum
+        # additions require a version bump (v4), and v4 IS the official home for
+        # these values, BUT the producer skill emits them under v2 today (see
+        # issue #316). One-time rollout exception: accept under v2, v3, AND v4
+        # until the skill bumps. When skill emits v4, this exception can be
+        # removed and the _V4_STATUSES gate re-added.
 
         # §3.3 pr: non-null iff status == shipped
         if self.status == "shipped" and self.pr is None:

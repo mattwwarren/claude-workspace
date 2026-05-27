@@ -161,6 +161,55 @@ def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> N
         save_dev_queue(store)
 
 
+def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
+    """Mark a TicketTask as CANCELLED, clearing its session_id.
+
+    Returns the list of session_ids that were cleared (one per cancelled task).
+    Raises CwError when no task matches. Idempotent for already-CANCELLED tasks.
+    """
+    with _lock():
+        store = load_dev_queue()
+        matches = [
+            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+        ]
+        if not matches:
+            msg = (
+                f"No dev-queue task found for ticket '{ticket_id}'"
+                f" in client '{client}'."
+            )
+            raise CwError(msg)
+        cleared: list[str | None] = []
+        changed = False
+        for task in matches:
+            if task.status == QueueItemStatus.CANCELLED:
+                continue
+            cleared.append(task.session_id)
+            task.status = QueueItemStatus.CANCELLED
+            task.session_id = None
+            changed = True
+        if changed:
+            save_dev_queue(store)
+    return cleared
+
+
+def cancel_task_for_session(session_id: str) -> bool:
+    """Mark the RUNNING TicketTask that owns *session_id* as CANCELLED.
+
+    Returns True if a task was cancelled, False if none matched.
+    Used by _spawn_close_impl to atomically preempt the dispatcher before
+    the session is marked COMPLETED. See GitHub issue #317.
+    """
+    with _lock():
+        store = load_dev_queue()
+        for task in store.tasks:
+            if task.session_id == session_id and task.status == QueueItemStatus.RUNNING:
+                task.status = QueueItemStatus.CANCELLED
+                task.session_id = None
+                save_dev_queue(store)
+                return True
+    return False
+
+
 def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
     """Remove all TicketTasks for *client*, optionally filtered by *status*.
 

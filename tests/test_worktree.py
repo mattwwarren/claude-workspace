@@ -16,6 +16,7 @@ from cw.models import ClientConfig
 from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
+    check_not_main_checkout,
     create_worktree,
     fast_forward_main,
     is_main_behind_origin,
@@ -26,7 +27,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 
 class TestSlugifyBranch:
@@ -253,6 +254,98 @@ class TestCreateWorktree:
         create_worktree(client, "feat/existing")
         add_call = git_calls[-1]
         assert "-b" not in add_call
+
+    def test_create_worktree_rejects_path_equal_to_main_checkout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Guard against #300: create_worktree must refuse if wt_path == git_cwd.
+
+        When worktree_path_for degenerately returns the client's own git
+        directory, the guard must fire before any git operation to prevent
+        accidental overwrites of the main checkout.
+        """
+        repo = make_git_repo("main-checkout")
+        client = ClientConfig(
+            name="test",
+            workspace_path=repo,
+            worktree_base=tmp_path / "wt",
+        )
+
+        # Simulate the degenerate case: worktree_path_for returns the repo itself.
+        monkeypatch.setattr(
+            "cw.worktree.worktree_path_for", lambda _client, _branch: repo
+        )
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            create_worktree(client, "auto-dev-300")
+
+    def test_create_worktree_rejects_symlink_to_main_checkout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Guard catches symlinks: resolve() normalises a symlink to main checkout."""
+        repo = make_git_repo("main-checkout")
+        symlink_path = tmp_path / "link-to-main"
+        symlink_path.symlink_to(repo)
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=repo,
+            worktree_base=tmp_path / "wt",
+        )
+        monkeypatch.setattr(
+            "cw.worktree.worktree_path_for", lambda _client, _branch: symlink_path
+        )
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            create_worktree(client, "auto-dev-300")
+
+
+class TestCheckNotMainCheckout:
+    """Unit tests for check_not_main_checkout."""
+
+    def test_raises_when_paths_are_equal(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Raises WorktreeError when worktree_path resolves to main checkout."""
+        repo = make_git_repo("main-checkout")
+        client = ClientConfig(name="test", workspace_path=repo)
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            check_not_main_checkout(repo, client)
+
+    def test_raises_via_symlink(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Raises even when worktree_path is a symlink to main checkout."""
+        repo = make_git_repo("main-checkout")
+        symlink_path = tmp_path / "link-to-main"
+        symlink_path.symlink_to(repo)
+        client = ClientConfig(name="test", workspace_path=repo)
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            check_not_main_checkout(symlink_path, client)
+
+    def test_does_not_raise_for_distinct_path(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Does not raise when worktree_path is a genuinely separate directory."""
+        repo = make_git_repo("main-checkout")
+        other = make_git_repo("branch-worktree")
+        client = ClientConfig(name="test", workspace_path=repo)
+
+        check_not_main_checkout(other, client)
 
 
 class TestSubmoduleInit:

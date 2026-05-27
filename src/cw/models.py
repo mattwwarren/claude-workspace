@@ -47,6 +47,7 @@ class QueueItemStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # Schema versions for persisted state. Bump when making a breaking change
@@ -187,6 +188,9 @@ class DevQueueStore(BaseModel):
 
     def completed(self) -> list[TicketTask]:
         return [t for t in self.tasks if t.status == QueueItemStatus.COMPLETED]
+
+    def cancelled(self) -> list[TicketTask]:
+        return [t for t in self.tasks if t.status == QueueItemStatus.CANCELLED]
 
     def by_client(self, client: str) -> list[TicketTask]:
         return [t for t in self.tasks if t.client == client]
