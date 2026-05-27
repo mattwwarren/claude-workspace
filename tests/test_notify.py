@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
+
+if TYPE_CHECKING:
+    import pytest
 
 from cw.notify import (
     _fire_push_notification_sync,
@@ -111,3 +116,39 @@ class TestFirePushNotification:
                 daemon=True,
             )
             mock_thread.start.assert_called_once()
+
+    def test_peon_failure_logs_debug(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A peon-ping failure logs at DEBUG level; function returns cleanly."""
+        _peon_sh_path.cache_clear()
+        peon_dir = tmp_path / ".claude" / "hooks" / "peon-ping"
+        peon_dir.mkdir(parents=True)
+        (peon_dir / "peon.sh").write_text("#!/bin/bash")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("subprocess.run", side_effect=OSError("peon-ping exploded")),
+            caplog.at_level(logging.DEBUG, logger="cw.notify"),
+        ):
+            _fire_push_notification_sync("my-session", "my-client")
+        assert any(
+            "peon-ping" in r.message and "acceptable" in r.message
+            for r in caplog.records
+        ), f"Expected peon-ping debug log, got: {[r.message for r in caplog.records]}"
+
+    def test_notify_send_failure_logs_debug(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A notify-send failure logs at DEBUG level; function returns cleanly."""
+        _peon_sh_path.cache_clear()
+        # No peon.sh → only notify-send path runs
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("subprocess.run", side_effect=OSError("notify-send missing")),
+            caplog.at_level(logging.DEBUG, logger="cw.notify"),
+        ):
+            _fire_push_notification_sync("my-session", "my-client")
+        assert any(
+            "notify-send" in r.message and "acceptable" in r.message
+            for r in caplog.records
+        ), f"Expected notify-send debug log, got: {[r.message for r in caplog.records]}"
