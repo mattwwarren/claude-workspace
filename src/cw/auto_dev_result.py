@@ -436,6 +436,19 @@ def _tail(text: str, lines: int = _TAIL_LINES) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def _strip_code_fence(raw: str) -> str:
+    """Strip a markdown code fence wrapper from a sentinel block payload.
+
+    Only strips known-safe language specs (json or plain). Unknown specs
+    (e.g. typescript) and missing closing fences are left for json.loads
+    to reject loudly.
+    """
+    for prefix in ("```json\n", "```\n"):
+        if raw.startswith(prefix) and raw.endswith("\n```"):
+            return raw[len(prefix) : -4]
+    return raw
+
+
 def extract_block(text: str) -> str | None:
     """Return the JSON text inside the LAST complete sentinel pair, or None.
 
@@ -483,7 +496,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
             blocker=Blocker(stage="unknown", reason=reason, details=details),
         )
 
-    raw_block = matches[0].group(1)
+    raw_block = _strip_code_fence(matches[0].group(1))
 
     # §6 (3) JSON does not parse.
     try:

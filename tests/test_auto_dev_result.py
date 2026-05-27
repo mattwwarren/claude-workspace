@@ -522,6 +522,54 @@ class TestSentinelFraming:
 
 
 # ---------------------------------------------------------------------------
+# Code-fence stripping
+# ---------------------------------------------------------------------------
+
+
+class TestCodeFenceStripping:
+    """parse_stdout must handle code-fence-wrapped JSON payloads."""
+
+    def test_json_fence_parses_same_as_raw(self) -> None:
+        """```json\n...\n``` wrapper produces same AutoDevResult as raw JSON."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = (
+            f"narrative\n<<<AUTO_DEV_RESULT\n```json\n{body}\n```\nAUTO_DEV_RESULT>>>\n"
+        )
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_plain_fence_parses_same_as_raw(self) -> None:
+        """```\n...\n``` (no language specifier) also parses."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n<<<AUTO_DEV_RESULT\n```\n{body}\n```\nAUTO_DEV_RESULT>>>\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_misformed_fence_wrong_language_fails(self) -> None:
+        """Unknown language spec (typescript) is NOT stripped; json.loads rejects it."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        sentinel = "<<<AUTO_DEV_RESULT\n```typescript\n"
+        text = f"narrative\n{sentinel}{body}\n```\nAUTO_DEV_RESULT>>>\n"
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "no_result_emitted"
+
+    def test_misformed_fence_no_closing_fails(self) -> None:
+        """```json\n... without closing ``` is NOT stripped — json.loads rejects it."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n<<<AUTO_DEV_RESULT\n```json\n{body}\nAUTO_DEV_RESULT>>>\n"
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "no_result_emitted"
+
+
+# ---------------------------------------------------------------------------
 # Cross-field invariants (per the owner's comment + §3-§5)
 # ---------------------------------------------------------------------------
 
