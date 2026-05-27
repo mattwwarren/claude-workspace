@@ -29,6 +29,7 @@ from cw.config import (
 from cw.daemon import run_watcher_tick
 from cw.dev_queue import (
     add_ticket,
+    cancel_task_for_session,
     cancel_ticket,
     clear_tickets,
     dev_queue_lock,
@@ -1384,24 +1385,16 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
     state = load_state()
     daemon = get_native_daemon_client()
     for ticket in tickets:
-        store = load_dev_queue()
-        old_session_id = next(
-            (
-                t.session_id
-                for t in store.tasks
-                if t.ticket_id == ticket and t.client == client
-            ),
-            None,
-        )
-        cancel_ticket(ticket, client)
-        if old_session_id is not None:
-            sess = state.find_by_name_or_id(old_session_id)
-            if (
-                sess is not None
-                and sess.surface_ref is not None
-                and sess.origin is SessionOrigin.DAEMON
-            ):
-                daemon.stop(sess.surface_ref)
+        cleared_session_ids = cancel_ticket(ticket, client)
+        for old_session_id in cleared_session_ids:
+            if old_session_id is not None:
+                sess = state.find_by_name_or_id(old_session_id)
+                if (
+                    sess is not None
+                    and sess.surface_ref is not None
+                    and sess.origin is SessionOrigin.DAEMON
+                ):
+                    daemon.stop(sess.surface_ref)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
 
 
@@ -1882,19 +1875,7 @@ def _spawn_close_impl(
     # and the dispatcher cannot re-spawn the same ticket in the same tick.
     # (See GitHub issue #317.)
     if sess.origin is SessionOrigin.DAEMON:
-        with dev_queue_lock():
-            store = load_dev_queue()
-            changed = False
-            for task in store.tasks:
-                if (
-                    task.session_id == sess.id
-                    and task.status == QueueItemStatus.RUNNING
-                ):
-                    task.status = QueueItemStatus.CANCELLED
-                    task.session_id = None
-                    changed = True
-            if changed:
-                save_dev_queue(store)
+        cancel_task_for_session(sess.id)
 
     sess.status = SessionStatus.COMPLETED
     sess.completed_at = datetime.now(UTC)

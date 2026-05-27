@@ -13,6 +13,7 @@ from cw.cli import main
 from cw.config import load_orchestrator_config
 from cw.dev_queue import (
     add_ticket,
+    cancel_task_for_session,
     cancel_ticket,
     clear_tickets,
     list_tickets,
@@ -912,11 +913,51 @@ class TestCancelTicket:
             session_id="sess-abc",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
-        cancel_ticket("TKT-C2", "genhealth")
+        cleared = cancel_ticket("TKT-C2", "genhealth")
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "TKT-C2")
         assert t.status == QueueItemStatus.CANCELLED
         assert t.session_id is None
+        # cancel_ticket returns the cleared session_ids atomically
+        assert cleared == ["sess-abc"]
+
+    def test_cancel_returns_cleared_session_id(self, tmp_dev_queue: Path) -> None:
+        """cancel_ticket returns the cleared session_id list atomically."""
+        task = TicketTask(
+            ticket_id="TKT-RET",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-xyz",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cleared = cancel_ticket("TKT-RET", "genhealth")
+        assert cleared == ["sess-xyz"]
+
+    def test_cancel_pending_task_returns_none_session_id(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """PENDING tasks have session_id=None; cancel_ticket returns [None]."""
+        task = TicketTask(
+            ticket_id="TKT-PRET",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cleared = cancel_ticket("TKT-PRET", "genhealth")
+        assert cleared == [None]
+
+    def test_cancel_already_cancelled_returns_empty_list(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """Already-CANCELLED tasks are skipped; cancel_ticket returns []."""
+        task = TicketTask(
+            ticket_id="TKT-ARET",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cleared = cancel_ticket("TKT-ARET", "genhealth")
+        assert cleared == []
 
     def test_cancel_nonexistent_raises_cwerror(self, tmp_dev_queue: Path) -> None:
         save_dev_queue(DevQueueStore(tasks=[]))
@@ -953,6 +994,48 @@ class TestCancelTicket:
         other_task = next(t for t in store.tasks if t.client == "other-client")
         assert gh_task.status == QueueItemStatus.CANCELLED
         assert other_task.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# TestCancelTaskForSession
+# ---------------------------------------------------------------------------
+
+
+class TestCancelTaskForSession:
+    def test_cancels_running_task_by_session_id(self, tmp_dev_queue: Path) -> None:
+        task = TicketTask(
+            ticket_id="SID-1",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-001",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        result = cancel_task_for_session("sess-001")
+        assert result is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "SID-1")
+        assert t.status == QueueItemStatus.CANCELLED
+        assert t.session_id is None
+
+    def test_returns_false_when_no_match(self, tmp_dev_queue: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        result = cancel_task_for_session("nonexistent-sess")
+        assert result is False
+
+    def test_ignores_non_running_task(self, tmp_dev_queue: Path) -> None:
+        """Only RUNNING tasks are cancelled; PENDING/COMPLETED are ignored."""
+        task = TicketTask(
+            ticket_id="SID-2",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            session_id="sess-002",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        result = cancel_task_for_session("sess-002")
+        assert result is False
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "SID-2")
+        assert t.status == QueueItemStatus.PENDING
 
 
 # ---------------------------------------------------------------------------
