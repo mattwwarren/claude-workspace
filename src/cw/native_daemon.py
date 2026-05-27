@@ -30,6 +30,7 @@ _log = logging.getLogger(__name__)
 # Length of the short Claude session id printed by ``claude --bg`` and
 # used as the worker key in roster.json (first 8 hex chars of the UUID).
 SHORT_SESSION_ID_LEN = 8
+SHORT_SESSION_ID_RE = re.compile(rf"^[0-9a-f]{{{SHORT_SESSION_ID_LEN}}}$")
 
 # Default permission mode for dispatched workers — non-interactive, so a
 # permission prompt would deadlock the session. ``auto`` matches the
@@ -43,7 +44,9 @@ _ROSTER_PATH = Path.home() / ".claude" / "daemon" / "roster.json"
 
 # Regex that matches the short session id Claude prints on a successful
 # ``claude --bg`` invocation: ``backgrounded · <8 hex chars>``.
-_BG_STDOUT_PATTERN = re.compile(r"backgrounded\s*·\s*([0-9a-f]{8})")
+_BG_STDOUT_PATTERN = re.compile(
+    rf"backgrounded\s*·\s*([0-9a-f]{{{SHORT_SESSION_ID_LEN}}})"
+)
 
 # Claude Code 2.1.150 wraps the short id in ANSI color escapes
 # (``backgrounded · \x1b[36m<id>\x1b[39m``). Strip CSI SGR sequences before
