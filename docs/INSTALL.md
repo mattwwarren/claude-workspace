@@ -70,7 +70,7 @@ uv tool install git+https://github.com/mattwwarren/claude-workspace.git
 Pin to a specific release:
 
 ```bash
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.4.0
+uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.10.0
 ```
 
 ### From Local Clone

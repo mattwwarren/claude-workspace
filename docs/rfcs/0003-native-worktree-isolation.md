@@ -2,12 +2,17 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — ready for review |
+| Status | Accepted — `worktree.py` kept as thin policy layer |
 | Owner | @mattwwarren |
 | Spike ticket | #107 |
 | CLI version under test | Claude Code 2.1.148 |
 | Date | 2026-05-22 |
 | Sibling RFCs | 0001 (#105 backend), 0002 (#106 SDK/channels) |
+
+> **Implementation note (2026-05-27):** Decision affirmed in 0.10.0 —
+> `worktree.py` remains the policy layer over native `claude --bg`
+> worktree primitives. Recent hardening (e.g. #300 / #311 worktree==main
+> guard) reflects the "thin policy layer" verdict below.
 
 ## Summary
 

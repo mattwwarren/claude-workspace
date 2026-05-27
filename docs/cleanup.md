@@ -1,4 +1,12 @@
-# cw Code Cleanup Audit (Issue #6)
+# cw Code Cleanup Audit (Issue #6) — HISTORICAL
+
+> **Status: historical (2025).** This audit predates the native-daemon
+> orchestrator (see ADR-0000 and CHANGELOG 0.8.x / 0.10.0). Several
+> verdicts here have since been **reversed by subsequent design** —
+> notably `SessionOrigin.DAEMON`, which is now load-bearing for the
+> dispatch loop and reconciler. Treat this file as a record of an early
+> cleanup pass, not as guidance for current behavior. Do not act on the
+> "DELETE" verdicts below without re-checking against today's source.
 
 Audit of dead code candidates identified after the orchestrator subsystem landed.
 

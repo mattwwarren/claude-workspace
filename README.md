@@ -11,7 +11,7 @@ Manage multiple Claude Code sessions across projects and purposes (implementatio
 uv tool install git+https://github.com/mattwwarren/claude-workspace.git
 
 # Or pin to a specific release
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.4.0
+uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.10.0
 
 # Or install from local clone
 git clone https://github.com/mattwwarren/claude-workspace.git
@@ -52,22 +52,57 @@ cw status
 
 ## Commands
 
+### Session lifecycle
+
 | Command | Description |
 |---------|-------------|
-| `cw init <name> --path <path>` | Add a new project |
+| `cw init <name> --path <path>` | Register a new client/project |
 | `cw start <client>` | Start or resume sessions in the active multiplexer |
 | `cw bg` | Background current session (triggers handoff) |
 | `cw resume <session>` | Resume a backgrounded session |
 | `cw done <session>` | Mark a session as completed |
-| `cw list` | List all sessions |
+| `cw list` | List all sessions across clients |
 | `cw status` | Show session health dashboard |
-| `cw queue add <client> "task"` | Queue work for later |
+| `cw config` | Show current configuration |
+
+### Per-client task queue (human-driven async work)
+
+| Command | Description |
+|---------|-------------|
+| `cw queue add <client> "task"` | Queue work for a session to pick up |
 | `cw queue list <client>` | View queued items |
 | `cw queue next <client>` | Claim next queued item |
-| `cw config` | Show configuration |
-| `cw run-claude` | Internal: pane command wrapper |
-| `cw pane-exited` | Internal: pane exit handler |
-| `cw completion <shell>` | Show shell completion snippet |
+
+### Dispatcher / orchestrator (autonomous worker pipeline)
+
+| Command | Description |
+|---------|-------------|
+| `cw dev-queue add` | Enqueue tickets for dispatch |
+| `cw dev-queue status` | Show dispatch queue grouped by client |
+| `cw dev-queue run` | Run one dispatch tick |
+| `cw dev-queue refresh-all` | Fast-forward `main` on every configured client repo |
+| `cw orchestrate` | Orchestrator pipeline: status snapshot and PR triage |
+| `cw orchestrator-start` | Spawn a long-running orchestrator session |
+| `cw spawn` | Spawn a daemon-managed Claude session (used by dispatch) |
+| `cw upgrade-workers` | Restart all daemon-managed background sessions |
+| `cw event` | Manage the orchestrator event bus |
+| `cw pr-channel` | PR channel server: push MCP notifications to subscribers |
+
+### Diagnostics and shell
+
+| Command | Description |
+|---------|-------------|
+| `cw doctor` | Environment preflight checks (claude version, bypass-disclaimer, daemon reachability) |
+| `cw completion <shell>` | Output shell completion activation script |
+
+### Internal (invoked by panes/hooks; not for direct use)
+
+| Command | Description |
+|---------|-------------|
+| `cw run-claude` | Wrapper around `claude` that signals IDLE on exit |
+| `cw signal-stop` | Emit `SESSION_COMPLETED` on a Stop hook fire |
+| `cw pane-exited` | Signal that Claude exited in a pane |
+| `cw daemon` | Deprecated PR event watcher; superseded by `cw orchestrator-start` |
 
 ## Workflow
 
@@ -94,20 +129,42 @@ The core workflow is: **init** → **start** → **work** → **bg/resume** → 
 
 ### For Agents (Claude Code Slash Commands)
 
-Agents interact with `cw` through Claude Code slash commands that queue and execute work:
+`cw` ships a set of Claude Code slash commands and skills that wrap the CLI for in-session use. They live under `.claude/commands/` and `.claude/skills/` and are picked up automatically when `claude` is launched from this repo (or when these files are installed into your global `~/.claude/` tree).
 
-1. **`/queue-plan`** — Queue an approved plan for implementation. Adds it to the client's task queue with context files and success criteria.
-2. **`/queue-debt`** — Queue a tech debt item for later cleanup.
-3. **`/pull-and-execute`** — Pull the next queued item, spawn agent teams to implement it, review the results, and mark it complete.
+**Queue / dispatch pipeline:**
 
-This creates an async pipeline: humans (or planning sessions) populate the queue, and execution sessions drain it.
+| Command | Purpose |
+|---------|---------|
+| `/queue-plan` | Queue an approved plan for implementation (with context files and success criteria) |
+| `/queue-debt` | Queue a tech debt item for later cleanup |
+| `/pull-and-execute` | Pull the next queued item, spawn agent teams, review the results, mark complete |
+| `/orchestrate-phase` | Drive the automated implementation workflow for a single phase |
+| `/ship-it` | Ship the current branch as a PR with auto-merge enabled |
+
+**Session lifecycle:**
+
+| Command | Purpose |
+|---------|---------|
+| `/session-done` | Wrap up the session with handoff generation and progress sync |
+| `/handoff` | Emergency handoff for abnormal endings (context exhaustion, debug fork) |
+| `/install-cw` | Install or upgrade the `cw` CLI from inside a Claude session |
+
+**Skills (autonomous orchestrator helpers):**
+
+| Skill | Purpose |
+|-------|---------|
+| `cw-followup` | React to a completed `/auto-dev` session's sentinel and perform the appropriate post-run action |
+| `cw-smoke-test` | Dogfood the `/auto-dev --headless` pipeline end-to-end against a single ticket |
+| `cw-validate-result` | Inspect what a `cw`-dispatched `/auto-dev` session actually did, validate against the headless contract |
+
+This creates an async pipeline: humans (or planning sessions) populate the queue; execution sessions drain it; orchestrator skills validate and follow up.
 
 ```
-Planning Session          Queue              Execution Session
-┌─────────────┐    ┌──────────────┐    ┌───────────────────┐
-│ /queue-plan │───>│ cw queue add │───>│ /pull-and-execute │
-│ /queue-debt │    │              │    │                   │
-└─────────────┘    └──────────────┘    └───────────────────┘
+Planning Session          Queue              Execution Session         Follow-up
+┌─────────────┐    ┌──────────────┐    ┌───────────────────┐    ┌──────────────┐
+│ /queue-plan │───>│ cw queue add │───>│ /pull-and-execute │───>│ /cw-followup │
+│ /queue-debt │    │              │    │ /orchestrate-phase│    │              │
+└─────────────┘    └──────────────┘    └───────────────────┘    └──────────────┘
 ```
 
 ### Multi-Client Workflow

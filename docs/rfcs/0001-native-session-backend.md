@@ -2,12 +2,17 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — ready for review |
+| Status | Implemented (0.10.0) |
 | Owner | @mattwwarren |
 | Spike ticket | #105 |
 | CLI version under test | Claude Code 2.1.148 |
 | Date | 2026-05-22 |
 | Phase gated | Phase 1 (#108–#110) |
+
+> **Implementation note (2026-05-27):** Native session backend shipped in
+> 0.10.0. `cw start` / `cw resume` now use `claude --bg + attach`. See
+> ADR-0000 and the 0.10.0 CHANGELOG entry. This RFC is retained as the
+> design record.
 
 ## Summary
 

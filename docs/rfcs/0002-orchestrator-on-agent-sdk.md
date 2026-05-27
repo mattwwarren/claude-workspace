@@ -2,13 +2,19 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — ready for review |
+| Status | Partially implemented (0.10.0) |
 | Owner | @mattwwarren |
 | Spike ticket | #106 |
 | CLI version under test | Claude Code 2.1.148 |
 | SDK version under test | `claude-agent-sdk` 0.2.85 |
 | Date | 2026-05-22 |
 | Sibling RFCs | 0001 (#105 backend), 0003 (#107 worktree) |
+
+> **Implementation note (2026-05-27):** MCP PR-events channel server
+> (Phase 3) shipped in 0.10.0 (`cw pr-channel`, see #282 / #284 / #291).
+> Agent SDK-based dispatch rewrite (Phase 4) is in progress; the
+> existing dispatch tick loop remains authoritative for now. This RFC
+> is retained as the design record.
 
 ## Summary
 
