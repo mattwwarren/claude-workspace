@@ -140,6 +140,14 @@ def create_worktree(
     wt_path = worktree_path_for(client, branch)
     git_cwd = _git_dir(client)
 
+    if wt_path.resolve() == git_cwd.resolve():
+        msg = (
+            f"Refusing to create worktree at main checkout path: {wt_path} "
+            f"resolves to the same location as the client's git directory "
+            f"({git_cwd}). This would overwrite the main checkout."
+        )
+        raise WorktreeError(msg)
+
     if wt_path.exists():
         return wt_path
 

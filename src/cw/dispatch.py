@@ -10,6 +10,7 @@ from cw.auto_dev_result import AutoDevResult, parse_stdout
 from cw.config import load_clients, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
+from cw.exceptions import WorktreeError
 from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
@@ -22,11 +23,35 @@ from cw.spawn import spawn_create_impl
 from cw.worktree import create_worktree, is_main_behind_origin
 
 if TYPE_CHECKING:
-    from cw.models import OrchestratorConfig, TicketTask
+    from pathlib import Path
+
+    from cw.models import ClientConfig, OrchestratorConfig, TicketTask
     from cw.native_daemon import NativeDaemonClient
 
 _DISPATCH_CONSUMER = "dispatch"
 _log = logging.getLogger(__name__)
+
+
+def _assert_worktree_not_main_checkout(
+    worktree_path: Path,
+    client: ClientConfig,
+) -> None:
+    """Raise WorktreeError if *worktree_path* resolves to the client's main checkout.
+
+    Guards against the #300 regression: if create_worktree returns a path that
+    is (or symlinks to) the main checkout, git commits would land there instead
+    of the intended branch worktree.  Extracted into a helper so the raise does
+    not sit directly inside dispatch_tick's broad try/except (TRY301).
+    """
+    main_checkout = client.repo_path or client.workspace_path
+    if worktree_path.resolve() == main_checkout.resolve():
+        msg = (
+            f"Refusing to spawn session in main checkout: "
+            f"worktree path {worktree_path} resolves to the "
+            f"same location as the client's main checkout "
+            f"({main_checkout})."
+        )
+        raise WorktreeError(msg)
 
 
 def _claim_next_pending(
@@ -184,6 +209,13 @@ def dispatch_tick(
                 # ``claude -w`` to turn it into a worktree, which never
                 # worked because that flag takes a name rather than a path.
                 worktree_path = create_worktree(client, branch)
+
+                # Guard against the #300 regression: if create_worktree
+                # returns the main checkout path (degenerate path-computation
+                # or symlink indirection), refuse the spawn.  create_worktree
+                # normally catches this itself, but a mocked or buggy
+                # implementation could still return the same path.
+                _assert_worktree_not_main_checkout(worktree_path, client)
 
                 label = branch
                 session_id = spawn_create_impl(

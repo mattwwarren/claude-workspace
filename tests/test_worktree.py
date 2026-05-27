@@ -26,7 +26,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 
 class TestSlugifyBranch:
@@ -253,6 +253,33 @@ class TestCreateWorktree:
         create_worktree(client, "feat/existing")
         add_call = git_calls[-1]
         assert "-b" not in add_call
+
+    def test_create_worktree_rejects_path_equal_to_main_checkout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Guard against #300: create_worktree must refuse if wt_path == git_cwd.
+
+        When worktree_path_for degenerately returns the client's own git
+        directory, the guard must fire before any git operation to prevent
+        accidental overwrites of the main checkout.
+        """
+        repo = make_git_repo("main-checkout")
+        client = ClientConfig(
+            name="test",
+            workspace_path=repo,
+            worktree_base=tmp_path / "wt",
+        )
+
+        # Simulate the degenerate case: worktree_path_for returns the repo itself.
+        monkeypatch.setattr(
+            "cw.worktree.worktree_path_for", lambda _client, _branch: repo
+        )
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            create_worktree(client, "auto-dev-300")
 
 
 class TestSubmoduleInit:
