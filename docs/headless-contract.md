@@ -368,7 +368,10 @@ When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lock
 
 2. **Silent exit** — `wrapper.py` receives headless exit code 0 but no AUTO_DEV_RESULT sentinel in stdout (the child self-backgrounded a subagent and exited early). `signal_needs_attention` fires.
 
-3. **Watchdog** — `reconcile()` finds a DAEMON RUNNING session with no `last_result`, surface still live in the native daemon, and `(now - started_at) > IDLE_WATCHDOG_SECONDS` (300s). `flag_silently_idle_daemon_sessions` fires.
+3. **Watchdog** — `reconcile()` finds a DAEMON RUNNING session with no `last_result`, surface still live in the native daemon, and `(now - started_at) > budget`. `flag_silently_idle_daemon_sessions` fires. The budget follows a three-level lookup via `resolve_idle_watchdog_budget`:
+   - **Per-ticket** (`TicketTask.idle_watchdog_override`) — explicit escape hatch; beats everything.
+   - **Per-tier** (`OrchestratorConfig.idle_watchdog_by_tier[task.scope_hint]`) — keyed by `TicketTask.scope_hint` (e.g., `"large": 600`). Default config ships `{"large": 600}` so large-tier sessions, which can legitimately stall >5min on slow tests/mypy, get a 10-minute window.
+   - **Global fallback** (`IDLE_WATCHDOG_SECONDS = 300`) — used when no task is found or scope_hint is unset.
 
 ### SESSION_NEEDS_ATTENTION Event
 

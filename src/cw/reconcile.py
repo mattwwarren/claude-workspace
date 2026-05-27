@@ -345,8 +345,28 @@ def _has_terminal_sentinel(session: Session) -> bool:
     return session.last_result is not None
 
 
+def resolve_idle_watchdog_budget(
+    task: TicketTask | None,
+    config: OrchestratorConfig,
+) -> int:
+    """Return the idle-watchdog budget (seconds) for a session's ticket.
+
+    Precedence (highest first):
+    1. task.idle_watchdog_override — explicit per-ticket escape hatch.
+    2. task.scope_hint — look up per-tier default in config.
+    3. IDLE_WATCHDOG_SECONDS — global fallback.
+    """
+    if task is not None and task.idle_watchdog_override is not None:
+        return task.idle_watchdog_override
+    if task is not None and task.scope_hint is not None:
+        tier_budget = config.idle_watchdog_by_tier.get(task.scope_hint)
+        if tier_budget is not None:
+            return tier_budget
+    return IDLE_WATCHDOG_SECONDS
+
+
 def flag_silently_idle_daemon_sessions(
-    state: CwState, *, now: datetime, native_live: set[str]
+    state: CwState, *, now: datetime, native_live: set[str], config: OrchestratorConfig
 ) -> list[str]:
     """Flag DAEMON RUNNING sessions idle past the watchdog budget with no sentinel.
 
@@ -361,6 +381,9 @@ def flag_silently_idle_daemon_sessions(
 
     Returns list of ticket IDs whose queue task was set to BLOCKED_ON_USER.
     """
+    store_ro = load_dev_queue()
+    task_by_ticket: dict[str, TicketTask] = {t.ticket_id: t for t in store_ro.tasks}
+
     candidates: list[tuple[Session, str | None]] = []
     for session in state.sessions:
         if session.origin is not SessionOrigin.DAEMON:
@@ -374,9 +397,11 @@ def flag_silently_idle_daemon_sessions(
         if session.surface_ref is None or session.surface_ref not in native_live:
             continue
         elapsed = (now - session.started_at).total_seconds()
-        if elapsed <= IDLE_WATCHDOG_SECONDS:
-            continue
         ticket_id = ticket_id_for_session(session.name)
+        task = task_by_ticket.get(ticket_id) if ticket_id else None
+        budget = resolve_idle_watchdog_budget(task, config)
+        if elapsed <= budget:
+            continue
         candidates.append((session, ticket_id))
 
     if not candidates:
@@ -475,7 +500,7 @@ def reconcile() -> ReconcileReport:
         return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
     silently_idle_ticket_ids = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live=native_live
+        state, now=now, native_live=native_live, config=orchestrator_config
     )
 
     drift = compute_drift(state, native_live, now=now)
