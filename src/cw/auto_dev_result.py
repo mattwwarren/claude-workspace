@@ -75,6 +75,10 @@ _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
 _V4_STATUSES: frozenset[str] = frozenset(
     {"ambiguities_pending_resolution", "premises_pending_verification"}
 )
+# Public alias for consumers that need to check whether a status indicates the
+# session is paused waiting for human input (issue #129).
+PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES
+
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
 # gated by schema_version. Spec §8 says enum additions require a version
 # bump (v3), and v3 IS the official home for these values, BUT the producer
