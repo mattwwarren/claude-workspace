@@ -520,13 +520,17 @@ class TestHeadlessWrapper:
         # No IDLE signal file written for the completed path.
         assert not _idle_signal_path("c", "impl").exists()
 
-    def test_print_without_sentinel_falls_back_to_idle(
+    def test_print_without_sentinel_routes_to_needs_attention(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_config_dir: Path,
         tmp_state_dir: Path,
     ) -> None:
-        """--print but no sentinel block → falls back to signal_idle."""
+        """--print but no sentinel block → signal_needs_attention (not idle).
+
+        Headless exit code 0 with no AUTO_DEV_RESULT sentinel means the child
+        self-backgrounded a subagent and exited early — operator must review.
+        """
         monkeypatch.setenv("CW_CLIENT", "c")
         monkeypatch.setenv("CW_PURPOSE", "impl")
         monkeypatch.setenv("CW_SESSION_ID", "h2")
@@ -541,15 +545,22 @@ class TestHeadlessWrapper:
         )
         save_state(CwState(sessions=[sess]))
 
-        with patch(
-            "cw.wrapper._run_claude_streaming",
-            return_value=(0, "just some output, no sentinel here\n"),
+        with (
+            patch(
+                "cw.wrapper._run_claude_streaming",
+                return_value=(0, "just some output, no sentinel here\n"),
+            ),
+            patch("cw.wrapper.fire_push_notification"),
         ):
             run_claude_wrapper(("--print", "/auto-dev T-2"))
 
         updated = load_state()
-        # Idle path was taken, not completed.
-        assert updated.sessions[0].status == SessionStatus.IDLE
+        # Needs-attention path: session is COMPLETED, not IDLE.
+        assert updated.sessions[0].status == SessionStatus.COMPLETED
+        assert updated.sessions[0].last_result == {
+            "breadcrumbs": "just some output, no sentinel here",
+            "needs_attention": True,
+        }
 
     def test_print_nonzero_exit_skips_completed(
         self,

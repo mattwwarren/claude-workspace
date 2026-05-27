@@ -35,6 +35,7 @@ from cw.models import (
     OrchestratorEventType,
     SessionStatus,
 )
+from cw.notify import fire_push_notification
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session
@@ -45,6 +46,11 @@ _log = logging.getLogger(__name__)
 # lives at the tail of stdout, so we keep the last N bytes and let earlier
 # noise fall off. 1 MiB comfortably holds any realistic auto-dev run.
 _TAIL_CAPTURE_BYTES = 1_048_576
+
+# Number of trailing stdout lines to store as breadcrumbs when routing to
+# signal_needs_attention. Enough to capture the final state summary without
+# bloating the session record.
+_NEEDS_ATTENTION_BREADCRUMB_LINES = 20
 
 
 def _idle_signal_path(client: str, purpose: str) -> Path:
@@ -120,6 +126,80 @@ def _run_claude_streaming(
     return returncode, buf.decode("utf-8", errors="replace")
 
 
+def _is_paused_for_user_input(result: AutoDevResult) -> bool:
+    """Return True when the result indicates the session is waiting for human input.
+
+    Covers three cases:
+    - status is ``ambiguities_pending_resolution`` or ``premises_pending_verification``
+      (planning halted, structured questions posted).
+    - status is ``blocked`` AND at least one ``next_actions`` entry starts with a
+      user-directed prefix (``user_resolve_``, ``user_decide_``, ``user_verify_``).
+    """
+    if result.status in (
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    ):
+        return True
+    if result.status == "blocked":
+        user_prefixes = ("user_resolve_", "user_decide_", "user_verify_")
+        return any(action.startswith(user_prefixes) for action in result.next_actions)
+    return False
+
+
+def signal_needs_attention(
+    client: str,
+    purpose: str,
+    *,
+    breadcrumbs: str,
+    session_id: str | None,
+    claude_session_id: str | None,
+) -> None:
+    """Transition session to COMPLETED and emit SESSION_NEEDS_ATTENTION.
+
+    Mirrors ``signal_completed`` but for sessions that paused waiting for
+    operator input rather than completing work normally. Idempotent — a
+    no-op when the session is already COMPLETED.
+    """
+    state = load_state()
+    session = _resolve_session(client, purpose, session_id=session_id, state=state)
+    if session is None:
+        _log.debug(
+            "signal_needs_attention: no session found for client=%s purpose=%s id=%s",
+            client,
+            purpose,
+            session_id,
+        )
+        return
+    if session.status == SessionStatus.COMPLETED:
+        _log.debug(
+            "signal_needs_attention: session %s already COMPLETED — no-op",
+            session.id,
+        )
+        return
+
+    now = datetime.now(UTC)
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = now
+    session.completed_reason = CompletionReason.NORMAL
+    session.last_result = {"breadcrumbs": breadcrumbs, "needs_attention": True}
+    if claude_session_id:
+        session.claude_session_id = claude_session_id
+    save_state(state)
+
+    payload: dict[str, object] = {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": client,
+        "ticket_id": None,
+        "claude_session_id": claude_session_id,
+        "paused_status": None,
+        "breadcrumbs": breadcrumbs,
+        "crashed": False,
+    }
+    record_orchestrator_event(OrchestratorEventType.SESSION_NEEDS_ATTENTION, payload)
+    fire_push_notification(session.name, client)
+
+
 def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
     """Run Claude and signal cw on exit.
 
@@ -152,10 +232,36 @@ def run_claude_wrapper(extra_args: tuple[str, ...]) -> None:
     if captured and returncode == 0:
         parsed = parse_stdout(captured)
         if isinstance(parsed, AutoDevResult):
+            if _is_paused_for_user_input(parsed):
+                breadcrumbs = "\n".join(
+                    captured.splitlines()[-_NEEDS_ATTENTION_BREADCRUMB_LINES:]
+                )
+                signal_needs_attention(
+                    client,
+                    purpose,
+                    breadcrumbs=breadcrumbs,
+                    session_id=session_id_env,
+                    claude_session_id=claude_session_id,
+                )
+                return
             signal_completed(
                 client,
                 purpose,
                 result=parsed,
+                session_id=session_id_env,
+                claude_session_id=claude_session_id,
+            )
+            return
+
+        # headless + returncode==0 + no valid sentinel → signal_needs_attention
+        if _is_headless(extra_args):
+            breadcrumbs = "\n".join(
+                captured.splitlines()[-_NEEDS_ATTENTION_BREADCRUMB_LINES:]
+            )
+            signal_needs_attention(
+                client,
+                purpose,
+                breadcrumbs=breadcrumbs,
                 session_id=session_id_env,
                 claude_session_id=claude_session_id,
             )
