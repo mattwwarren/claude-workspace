@@ -12,15 +12,19 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.config import events_dir, load_state, save_state
+from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.history import EventType, load_history
 from cw.models import (
     CompletionReason,
     CwState,
+    DevQueueStore,
     OrchestratorEventType,
+    QueueItemStatus,
     Session,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
 from cw.wrapper import (
     _detect_claude_session_id,
@@ -953,6 +957,27 @@ class TestSignalNeedsAttention:
             )
         mock_notify.assert_called_once_with("c/auto-dev/T-1", "c")
 
+    def test_transitions_queue_task_to_blocked_on_user(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """RUNNING queue task for the session's ticket is set to BLOCKED_ON_USER."""
+        self._seed_active_session("na6")
+        task = TicketTask(ticket_id="T-1", client="c", status=QueueItemStatus.RUNNING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with patch("cw.wrapper.fire_push_notification"):
+            signal_needs_attention(
+                "c",
+                "impl",
+                breadcrumbs="",
+                session_id="na6",
+                claude_session_id=None,
+            )
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "T-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
 
 class TestRunClaudeWrapperNeedsAttention:
     def _seed_active_session(self, sid: str, name: str = "c/auto-dev/T-1") -> Session:
@@ -993,6 +1018,12 @@ class TestRunClaudeWrapperNeedsAttention:
         assert sess.status == SessionStatus.COMPLETED
         assert sess.last_result is not None
         assert sess.last_result["needs_attention"] is True
+
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert len(events) == 1
+        assert events[0].payload["paused_status"] == "ambiguities_pending_resolution"
 
     def test_nonzero_exit_routes_to_signal_idle(
         self,

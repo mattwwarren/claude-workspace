@@ -387,8 +387,6 @@ def flag_silently_idle_daemon_sessions(
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
 
-    save_state(state)
-
     blocked: list[str] = []
     ticket_ids_to_block = [tid for _, tid in candidates if tid]
     if ticket_ids_to_block:
@@ -404,6 +402,8 @@ def flag_silently_idle_daemon_sessions(
                     blocked.append(task.ticket_id)
             if blocked:
                 save_dev_queue(store)
+
+    save_state(state)
 
     for session, ticket_id in candidates:
         payload: dict[str, object] = {

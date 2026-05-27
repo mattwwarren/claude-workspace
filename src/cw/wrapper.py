@@ -42,6 +42,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.notify import fire_push_notification
+from cw.reconcile import ticket_id_for_session
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session
@@ -58,24 +59,10 @@ _TAIL_CAPTURE_BYTES = 1_048_576
 # bloating the session record.
 _NEEDS_ATTENTION_BREADCRUMB_LINES = 20
 
-# Prefix that daemon session names use to embed the ticket id. Mirrors the
-# AUTO_DEV_LABEL_PREFIX constant in reconcile.py — inlined here to avoid a
-# dependency from the lower-level wrapper module to the higher-level reconcile
-# module.
-_AUTO_DEV_LABEL_PREFIX = "auto-dev/"
-
 
 def _tail_breadcrumbs(captured: str) -> str:
     """Return the last _NEEDS_ATTENTION_BREADCRUMB_LINES lines of captured output."""
     return "\n".join(captured.splitlines()[-_NEEDS_ATTENTION_BREADCRUMB_LINES:])
-
-
-def _ticket_id_for_session_name(session_name: str) -> str | None:
-    """Extract ticket id from a daemon session name like 'client/auto-dev/T-123'."""
-    _, _, tail = session_name.partition("/")
-    if tail.startswith(_AUTO_DEV_LABEL_PREFIX):
-        return tail[len(_AUTO_DEV_LABEL_PREFIX) :]
-    return None
 
 
 def _idle_signal_path(client: str, purpose: str) -> Path:
@@ -210,9 +197,8 @@ def signal_needs_attention(
     session.last_result = {"breadcrumbs": breadcrumbs, "needs_attention": True}
     if claude_session_id:
         session.claude_session_id = claude_session_id
-    save_state(state)
 
-    ticket_id = _ticket_id_for_session_name(session.name)
+    ticket_id = ticket_id_for_session(session.name)
     if ticket_id:
         with dev_queue_lock():
             store = load_dev_queue()
@@ -224,6 +210,8 @@ def signal_needs_attention(
                     task.status = QueueItemStatus.BLOCKED_ON_USER
                     save_dev_queue(store)
                     break
+
+    save_state(state)
 
     payload: dict[str, object] = {
         "session_id": session.id,
