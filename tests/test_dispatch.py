@@ -1526,3 +1526,79 @@ class TestClaimNextPendingAttempts:
         claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-cumulative")
         assert claimed.status == QueueItemStatus.RUNNING
         assert claimed.attempts == 3
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchDoesNotTouchMainCheckout
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchDoesNotTouchMainCheckout:
+    """Regression tests for #300: dispatch must never commit to the main checkout.
+
+    When create_worktree degenerately returns the main checkout path, the
+    identity guard in dispatch_tick must refuse the spawn and revert
+    the task to PENDING — no session created, no commits to the main repo.
+    """
+
+    def test_dispatch_tick_does_not_modify_main_checkout_head(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Normal dispatch: main checkout HEAD must be unchanged after the tick."""
+        workspace_dir = sample_client_config.workspace_path
+        before_head = subprocess.check_output(
+            ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        after_head = subprocess.check_output(
+            ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        assert spawned == 1, "session should have been spawned in the branch worktree"
+        assert len(daemon.spawn_calls) == 1
+        assert after_head == before_head
+
+    def test_dispatch_tick_with_worktree_equal_to_main_checkout_reverts_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Degenerate path: create_worktree returns main checkout → PENDING revert.
+
+        Simulates the #300 regression: if create_worktree returns the main
+        checkout path (due to a path-computation bug), the identity guard in
+        dispatch_tick must refuse and the dispatch loop must revert the
+        task to PENDING with no daemon spawn.
+        """
+        workspace_dir = sample_client_config.workspace_path
+        monkeypatch.setattr(
+            "cw.dispatch.create_worktree",
+            lambda _client, _branch: workspace_dir,
+        )
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-300-guard", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        assert daemon.spawn_calls == []
+
+        store = load_dev_queue()
+        tasks = [t for t in store.tasks if t.ticket_id == "GEN-300-guard"]
+        assert len(tasks) == 1
+        assert tasks[0].status == QueueItemStatus.PENDING
+        assert tasks[0].attempts == 1
