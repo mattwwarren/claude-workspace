@@ -99,7 +99,7 @@ def run_proxy(client_id: str | None = None) -> None:
     base_url = os.environ.get("CW_PR_EVENTS_BASE_URL", _DEFAULT_BASE_URL)
     if client_id is None:
         client_id = os.environ.get("CW_PR_EVENTS_CLIENT_ID", socket.gethostname())
-    sse_url = f"{base_url}/sse?client_id={urllib.parse.quote(client_id)}"
+    sse_url = f"{base_url}/sse/?client_id={urllib.parse.quote(client_id)}"
 
     mcp_server: Server = Server("cw-pr-events")
     init_options = mcp_server.create_initialization_options(
