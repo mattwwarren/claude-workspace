@@ -1299,6 +1299,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     assert sess.status == SessionStatus.COMPLETED
     assert sess.completed_reason == CompletionReason.NORMAL
     assert sess.completed_at == now
+    assert sess.last_result == {"paused_status": "silently_idle"}
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "SILENT-1")
@@ -1313,6 +1314,59 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     assert payload["session_id"] == "silent-1"
     assert payload["paused_status"] == "silently_idle"
     assert payload["crashed"] is False
+
+
+def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Crash recovery: session COMPLETED+last_result on disk, queue still RUNNING.
+
+    Simulates the on-disk state after a crash between save_state (succeeded)
+    and save_dev_queue (not yet called). The watchdog must skip the session
+    because it is no longer in _LIVE_STATUSES, preventing a duplicate
+    SESSION_NEEDS_ATTENTION event. (GitHub #324)
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="crash-silent",
+        name="client-a/auto-dev/CRASH-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.COMPLETED,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        last_result={"paused_status": "silently_idle"},
+        completed_at=now,
+        completed_reason=CompletionReason.NORMAL,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="CRASH-S",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="crash-silent",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}
+    )
+
+    assert blocked == []
+    events = read_events(
+        consumer="test-crash-recovery",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 0
 
 
 def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
