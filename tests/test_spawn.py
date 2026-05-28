@@ -10,7 +10,6 @@ import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.cmux import FakeCmuxAdapter
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
 from cw.models import (
@@ -25,7 +24,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +59,10 @@ class TestSpawnCreate:
     """Tests for the spawn_create business logic."""
 
     def test_happy_path_creates_session(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn create: happy path stores session with correct fields."""
         from cw.cli import _spawn_create_impl
@@ -68,8 +70,7 @@ class TestSpawnCreate:
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path, "Implement the feature.")
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree" / "feat-branch"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-happy")
 
         session_id = _spawn_create_impl(
             client=client,
@@ -94,7 +95,10 @@ class TestSpawnCreate:
         assert sess.status == SessionStatus.ACTIVE
 
     def test_default_label_is_daemon(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn create: default label produces 'client/daemon' session name."""
         from cw.cli import _spawn_create_impl
@@ -102,8 +106,7 @@ class TestSpawnCreate:
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-default-label")
 
         _spawn_create_impl(
             client=client,
@@ -117,7 +120,10 @@ class TestSpawnCreate:
         assert state.sessions[0].name == "test-client/daemon"
 
     def test_daemon_receives_cwd_and_prompt(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn_bg gets the worktree path and the raw prompt verbatim.
 
@@ -131,8 +137,7 @@ class TestSpawnCreate:
         client = _make_client(tmp_path, name="acme")
         prompt = "Fix the login bug."
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-cwd-prompt")
 
         spawn_create_impl(
             client=client,
@@ -148,7 +153,10 @@ class TestSpawnCreate:
         assert prompt_arg == prompt
 
     def test_surface_ref_stores_native_short_id(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """surface_ref carries the short Claude session id returned by spawn_bg."""
         from cw.cli import _spawn_create_impl
@@ -156,8 +164,7 @@ class TestSpawnCreate:
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-surface-ref")
 
         _spawn_create_impl(
             client=client,
@@ -172,7 +179,10 @@ class TestSpawnCreate:
         assert state.sessions[0].surface_ref == "00000001"
 
     def test_parent_linkage_writes_both_directions(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn create with parent: worker.parent_session_id set and parent's
         worker_session_ids list contains the new worker id (single state save).
@@ -181,8 +191,7 @@ class TestSpawnCreate:
 
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-parent-linkage")
 
         # Seed a parent orchestrator session in state.
         parent_workspace = tmp_path / "workspace" / "orch"
@@ -215,15 +224,17 @@ class TestSpawnCreate:
         assert worker_id in refreshed_parent.worker_session_ids
 
     def test_parent_not_found_raises(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn create with bogus parent ID: CwError, no session created, no spawn."""
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-parent-not-found")
 
         with pytest.raises(CwError, match="Parent session not found"):
             spawn_create_impl(
@@ -241,19 +252,384 @@ class TestSpawnCreate:
         assert daemon.spawn_calls == []
 
 
+class TestSpawnCreateImplWorkerModel:
+    """Tests for ClientConfig.worker_model forwarding through spawn_create_impl
+    to ``claude --bg`` via ``extra_args`` (issue #248).
+    """
+
+    def test_spawn_create_impl_with_worker_model_pins_model(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """When worker_model is set, spawn_bg gets --model <id> as extra_args."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "acme"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="acme",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-worker-model")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--model",
+            "claude-sonnet-4-6-20251015",
+        ]
+
+    def test_spawn_create_impl_no_worker_model_omits_model_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """When worker_model is unset, extra_args is None (no --model flag)."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-no-worker-model")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] is None
+
+    def test_spawn_create_impl_worker_model_haiku_passes_through_opaque(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """worker_model is opaque — any string is threaded verbatim."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "thrifty"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="thrifty",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-haiku-pinned")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--model",
+            "claude-haiku-4-5-20251001",
+        ]
+
+
+class TestSpawnCreateImplExtraArgsPermissionMode:
+    """Tests for extra_args and permission_mode on spawn_create_impl (issue #294)."""
+
+    def test_spawn_create_impl_passes_extra_args(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Caller-provided extra_args reach spawn_bg."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-extra-args")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            extra_args=["--resume", "abc12345"],
+        )
+
+        assert daemon.spawn_extra_args[0] == ["--resume", "abc12345"]
+
+    def test_spawn_create_impl_merges_worker_model_and_extra_args(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """worker_model args come first, then caller extra_args."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "merged"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="merged",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-merged-args")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            extra_args=["--resume", "abc12345"],
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--model",
+            "claude-sonnet-4-6-20251015",
+            "--resume",
+            "abc12345",
+        ]
+
+    def test_spawn_create_impl_passes_permission_mode(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Non-None permission_mode propagates to spawn_bg."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-permission-mode")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            permission_mode="bypassPermissions",
+        )
+
+        assert daemon.spawn_permission_modes[0] == "bypassPermissions"
+
+    def test_spawn_create_impl_permission_mode_default_is_none(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """permission_mode defaults to None (spawn_bg uses _DEFAULT_PERMISSION_MODE)."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-permission-default")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_permission_modes[0] is None
+
+
+class TestValidateWorktree:
+    """Tests for the _validate_worktree pre-flight gate (issue #186).
+
+    Catches the bug where 'git worktree add -b <branch>' fails (branch already
+    exists) but the directory was already mkdir'd by the shell, leaving cw
+    spawn to run on an empty dir without complaint.
+    """
+
+    def test_spawn_create_impl_rejects_nonexistent_worktree(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Nonexistent path raises WorktreeError; no daemon call or state write."""
+        from cw.exceptions import WorktreeError
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = tmp_path / "does-not-exist"
+        # Deliberately NOT mkdir'd.
+
+        with pytest.raises(WorktreeError, match="does not exist"):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev 186 --headless",
+                label=None,
+                native_daemon=daemon,
+            )
+
+        state = load_state()
+        assert state.sessions == []
+        assert daemon.spawn_calls == []
+
+    def test_spawn_create_impl_rejects_worktree_without_git_dir(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Bare directory (no .git/): WorktreeError raised, no side effects.
+
+        Regression for the exact #186 symptom: shell mkdir'd the path but
+        'git worktree add' failed, leaving an empty dir.
+        """
+        from cw.exceptions import WorktreeError
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = tmp_path / "empty"
+        worktree.mkdir()  # Plain dir, no .git/.
+
+        with pytest.raises(WorktreeError, match="not a git checkout"):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev 186 --headless",
+                label=None,
+                native_daemon=daemon,
+            )
+
+        state = load_state()
+        assert state.sessions == []
+        assert daemon.spawn_calls == []
+        # cw-context.json must NOT have been written either.
+        assert not (worktree / ".claude").exists()
+
+    def test_spawn_create_impl_rejects_worktree_where_rev_parse_fails(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`.git` exists as a stray file (not a real worktree marker): WorktreeError.
+
+        Belt-and-suspenders: `.git` can be a file (worktree gitdir pointer) or
+        symlink — existence alone is insufficient. `git rev-parse --git-dir`
+        is the ground truth that git itself accepts the path.
+        """
+        from cw.exceptions import WorktreeError
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = tmp_path / "corrupt"
+        worktree.mkdir()
+        # `.git` as a file with garbage — passes the existence check but
+        # `git rev-parse --git-dir` will reject it.
+        (worktree / ".git").write_text("garbage not a gitdir pointer")
+
+        with pytest.raises(WorktreeError, match="rev-parse"):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev 186 --headless",
+                label=None,
+                native_daemon=daemon,
+            )
+
+        state = load_state()
+        assert state.sessions == []
+        assert daemon.spawn_calls == []
+
+    def test_spawn_create_impl_accepts_valid_worktree(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Happy path: real git repo passes validation, session is created."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("valid-worktree")
+
+        session_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 186 --headless",
+            label="valid",
+            native_daemon=daemon,
+        )
+
+        state = load_state()
+        assert len(state.sessions) == 1
+        assert state.sessions[0].id == session_id
+
+    def test_dispatch_path_rejects_invalid_worktree(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Regression for the dispatch.py:153 call site (issue #186 decision #3).
+
+        Simulates create_worktree returning an unvalidated path (as it does
+        today — it does no post-validation). The validation gate in
+        spawn_create_impl catches it before any daemon spawn.
+        """
+        from cw.exceptions import WorktreeError
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        # Simulate the #186 symptom: create_worktree's git worktree add failed
+        # but the dir got mkdir'd anyway by the shell.
+        bad_worktree = tmp_path / "wt" / "auto-dev-186"
+        bad_worktree.mkdir(parents=True)
+
+        with pytest.raises(WorktreeError, match="not a git checkout"):
+            spawn_create_impl(
+                client=client,
+                worktree=bad_worktree,
+                prompt="/auto-dev 186 --headless",
+                label="auto-dev/186",
+                native_daemon=daemon,
+                ticket_id="186",
+                headless=True,
+            )
+
+        state = load_state()
+        assert state.sessions == []
+        assert daemon.spawn_calls == []
+
+
 class TestHookContextInjection:
     """Tests for the Stop-hook + cw-context file injection (issue #147)."""
 
     def test_writes_settings_and_context_files(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """spawn_create_impl writes .claude/settings.local.json + cw-context.json."""
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-hook-ctx")
 
         session_id = spawn_create_impl(
             client=client,
@@ -283,15 +659,17 @@ class TestHookContextInjection:
         assert context["ticket_id"] == "137"
 
     def test_ticket_id_optional_writes_null(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """When no ticket_id is supplied, cw-context.json carries null."""
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-ticket-null")
 
         spawn_create_impl(
             client=client,
@@ -305,7 +683,10 @@ class TestHookContextInjection:
         assert context["ticket_id"] is None
 
     def test_cli_headless_flag_writes_headless_true_to_context(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """`cw spawn --headless` plumbs `headless: true` into cw-context.json.
 
@@ -320,8 +701,7 @@ class TestHookContextInjection:
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path, "/auto-dev 171 --headless")
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree" / "manual-headless"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-headless-true")
 
         _spawn_create_impl(
             client=client,
@@ -336,7 +716,10 @@ class TestHookContextInjection:
         assert context["headless"] is True
 
     def test_cli_headless_flag_defaults_to_false(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
         """`cw spawn` (no --headless) leaves `headless: false` in context.
 
@@ -348,8 +731,7 @@ class TestHookContextInjection:
         client = _make_client(tmp_path)
         prompt_file = _make_prompt_file(tmp_path, "some prompt")
         daemon = FakeNativeDaemonClient()
-        worktree = tmp_path / "worktree" / "manual-default"
-        worktree.mkdir(parents=True)
+        worktree = make_git_repo("worktree-headless-false")
 
         _spawn_create_impl(
             client=client,
@@ -489,10 +871,9 @@ class TestSpawnClose:
         from cw.cli import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id=sess.id, adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
 
         state = load_state()
         closed = state.find_by_name_or_id(sess.id)
@@ -504,22 +885,20 @@ class TestSpawnClose:
     def test_daemon_close_routes_through_native_daemon(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """DAEMON-origin sessions get stopped via claude stop, not adapter.close."""
+        """DAEMON-origin sessions are stopped via the native daemon client."""
         from cw.cli import _spawn_close_impl
 
         sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id=sess.id, adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
 
         assert daemon.stop_calls == ["abc12345"]
-        assert adapter.calls["close"] == []
 
-    def test_user_origin_close_routes_through_adapter(
+    def test_user_origin_legacy_surface_ref_skipped(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """USER-origin sessions still close via the multiplexer adapter."""
+        """USER-origin sessions with legacy surface_ref are logged and skipped."""
         from cw.cli import _spawn_close_impl
 
         workspace = tmp_path / "workspace" / "test-client"
@@ -535,13 +914,17 @@ class TestSpawnClose:
             surface_ref="tmux-pane-7",
         )
         save_state(CwState(sessions=[sess]))
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id="user0001", adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id="user0001", native_daemon=daemon)
 
-        assert adapter.calls["close"] == [("tmux-pane-7",)]
+        # No native daemon stop (not a DAEMON session)
         assert daemon.stop_calls == []
+        # Session still marked COMPLETED
+        state = load_state()
+        closed = state.find_by_name_or_id("user0001")
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
 
     def test_missing_session_raises_cw_error(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -549,13 +932,10 @@ class TestSpawnClose:
         """spawn close: raises CwError when session_id not found."""
         from cw.cli import _spawn_close_impl
 
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
         error_msg = ""
         try:
-            _spawn_close_impl(
-                session_id="nonexistent", adapter=adapter, native_daemon=daemon
-            )
+            _spawn_close_impl(session_id="nonexistent", native_daemon=daemon)
         except CwError as exc:
             error_msg = str(exc)
         else:
@@ -581,13 +961,10 @@ class TestSpawnClose:
             workspace_path=workspace,
         )
         save_state(CwState(sessions=[sess]))
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
         with pytest.raises(CwError, match="already completed"):
-            _spawn_close_impl(
-                session_id="done1234", adapter=adapter, native_daemon=daemon
-            )
+            _spawn_close_impl(session_id="done1234", native_daemon=daemon)
 
     def test_no_surface_ref_skips_backend_close(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -608,12 +985,10 @@ class TestSpawnClose:
             surface_ref=None,
         )
         save_state(CwState(sessions=[sess]))
-        adapter = FakeCmuxAdapter()
         daemon = FakeNativeDaemonClient()
 
-        _spawn_close_impl(session_id="nosurf1", adapter=adapter, native_daemon=daemon)
+        _spawn_close_impl(session_id="nosurf1", native_daemon=daemon)
 
-        assert adapter.calls["close"] == []
         assert daemon.stop_calls == []
         state = load_state()
         closed = state.find_by_name_or_id("nosurf1")

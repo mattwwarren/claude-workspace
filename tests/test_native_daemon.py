@@ -63,6 +63,36 @@ class TestRealNativeDaemonClientSpawn:
         ]
         assert captured["cwd"] == worktree
 
+    def test_parses_short_id_from_ansi_coded_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression #203: Claude Code 2.1.150 wraps the short id in CSI SGR.
+
+        Real captured output from claude --bg on 2026-05-23::
+
+            'backgrounded \xc2\xb7 \\x1b[36m7719118f\\x1b[39m\\n'
+            '\\x1b[2m  claude agents    list sessions\\x1b[22m\\n'
+            ...
+
+        The parser must strip ANSI escapes before searching, otherwise the
+        ``\\x1b[36m`` between ``\xc2\xb7`` and the hex id breaks the match.
+        """
+        ansi_stdout = (
+            "backgrounded · \x1b[36m7719118f\x1b[39m\n"
+            "\x1b[2m  claude agents             list sessions\x1b[22m\n"
+            "\x1b[2m  claude attach 7719118f    open in this terminal\x1b[22m\n"
+            "\x1b[2m  claude logs 7719118f      show recent output\x1b[22m\n"
+            "\x1b[2m  claude stop 7719118f      stop this session\x1b[22m\n"
+        )
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_, **__: _FakeCompleted(stdout=ansi_stdout),
+        )
+        client = RealNativeDaemonClient()
+
+        assert client.spawn_bg(cwd=tmp_path, prompt="x") == "7719118f"
+
     def test_missing_short_id_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -79,7 +109,8 @@ class TestRealNativeDaemonClientSpawn:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def fake_run(*_args: object, **_kwargs: object) -> _FakeCompleted:
-            raise FileNotFoundError("no claude")
+            msg = "no claude"
+            raise FileNotFoundError(msg)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         client = RealNativeDaemonClient()
@@ -101,6 +132,78 @@ class TestRealNativeDaemonClientSpawn:
         client = RealNativeDaemonClient()
         with pytest.raises(CwError, match="claude --bg exited 2"):
             client.spawn_bg(cwd=tmp_path, prompt="x")
+
+    def test_disclaimer_not_accepted_raises_typed_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uses FULL verified stderr from claude binary 2.1.150."""
+        from cw.exceptions import DisclaimerNotAcceptedError
+
+        full_stderr = (
+            "--bg with bypassPermissions requires accepting the disclaimer first. "
+            "Run `claude --dangerously-skip-permissions` once interactively."
+        )
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(
+                1, ["claude"], output="", stderr=full_stderr
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        with pytest.raises(DisclaimerNotAcceptedError, match="disclaimer"):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+    def test_disclaimer_error_message_contains_verbatim_ac_substring(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: error message must contain verbatim AC2 lowercase-r substring."""
+        from cw.exceptions import DisclaimerNotAcceptedError
+
+        full_stderr = (
+            "--bg with bypassPermissions requires accepting the disclaimer first. "
+            "Run `claude --dangerously-skip-permissions` once interactively."
+        )
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(
+                1, ["claude"], output="", stderr=full_stderr
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        exc_info: pytest.ExceptionInfo[DisclaimerNotAcceptedError]
+        with pytest.raises(DisclaimerNotAcceptedError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+        # Verbatim AC2 substring (lowercase 'r') must appear in the message.
+        assert "run `claude --dangerously-skip-permissions` once" in str(exc_info.value)
+
+    def test_spawn_bg_permission_mode_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """permission_mode override replaces _DEFAULT_PERMISSION_MODE in cmd."""
+        captured: dict[str, object] = {}
+
+        def fake_run(args: Sequence[str], **kwargs: object) -> _FakeCompleted:
+            captured["args"] = list(args)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        client.spawn_bg(
+            cwd=tmp_path, prompt="do it", permission_mode="bypassPermissions"
+        )
+
+        args = captured["args"]
+        assert isinstance(args, list)
+        assert args[:5] == [
+            "claude",
+            "--bg",
+            "--permission-mode",
+            "bypassPermissions",
+            "do it",
+        ]
 
 
 class TestRealNativeDaemonClientRoster:

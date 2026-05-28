@@ -24,15 +24,17 @@ import logging
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 _log = logging.getLogger(__name__)
 
 # v1 is the legacy shape; v2 adds the `no_op` status; v3 adds the
 # `stage1_pre_flight` stage_reached value and `none` plan_source (used
-# together for pre-flight no_op exits). All are accepted during the rollout
-# window — see docs/headless-contract.md §8.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
+# together for pre-flight no_op exits); v4 promotes
+# `ambiguities_pending_resolution` and `premises_pending_verification` to
+# canonical closed-enum statuses (issue #191). All are accepted during the
+# rollout window — see docs/headless-contract.md §8.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
 _CLOSE_SENTINEL = "AUTO_DEV_RESULT>>>"
@@ -42,6 +44,12 @@ _CLOSE_SENTINEL = "AUTO_DEV_RESULT>>>"
 # the literal sentinel string (e.g., this docstring).
 _BLOCK_RE = re.compile(
     r"<<<AUTO_DEV_RESULT\s*\n(.*?)\nAUTO_DEV_RESULT>>>",
+    re.DOTALL,
+)
+# Fallback locator for sentinels emitted as bare code-fenced JSON without
+# AUTO_DEV_RESULT markers (GitHub #337). Matches ```json or ``` fenced blocks.
+_LOOSE_FENCE_RE = re.compile(
+    r"```(?:json)?\n(.*?)\n```",
     re.DOTALL,
 )
 
@@ -60,17 +68,36 @@ Status = Literal[
     "forbidden_area",
     "blocked",
     "no_op",
+    "ambiguities_pending_resolution",
+    "premises_pending_verification",
 ]
 # Statuses introduced after v1. Emitting one under schema_version=1 is a
 # producer bug — it would silently degrade for downstream tools that key off
 # the version field.
 _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
+# Statuses introduced in v4 (issue #191). Per rollout exception (issue #316),
+# accepted under all supported schema versions (v2, v3, v4) until the producer
+# skill bumps its emitted schema_version to v4.
+_V4_STATUSES: frozenset[str] = frozenset(
+    {"ambiguities_pending_resolution", "premises_pending_verification"}
+)
+# Public alias for consumers that need to check whether a status indicates the
+# session is paused waiting for human input (issue #129).
+PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES
+
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
 # gated by schema_version. Spec §8 says enum additions require a version
 # bump (v3), and v3 IS the official home for these values, BUT the producer
 # skill emits them under v2 today (see #103). One-time rollout exception:
 # accept under v2 AND v3 until the skill bumps. When skill emits v3, this
 # exception can be removed and a `_V3_STAGES`/`_V3_PLAN_SOURCES` gate added.
+#
+# Also accepted ungated: "github_issue_existing" (PlanSource). The producer
+# emits this for GitHub-sourced runs (the post-Linear analog of
+# "linear_existing"); the parser previously rejected every such run as
+# validation_failed (see #190). Treated identically to "linear_existing" —
+# pure producer-side relabeling, no consumer behavior change. Accepted under
+# v2 and v3 (the producer emits at v2 today per captured payloads).
 StageReached = Literal[
     "stage1_pre_flight",
     "stage1_plan",
@@ -80,8 +107,35 @@ StageReached = Literal[
     "stage4b_pr_create",
     "stage5_post_create",
 ]
+# Short-form stage codes emitted by the auto-dev producer's resume-detection
+# substates (e.g. ``s5_ci_pending`` instead of ``stage5_post_create``).
+# ``AutoDevResult._normalize_stage_reached`` maps these to their nearest
+# full-form canonical equivalent before Pydantic validates the Literal.
+# Unknown values pass through unchanged and fail the Literal check loudly.
+# See issue #292 for the root-cause analysis.
+_STAGE_REACHED_ALIASES: dict[str, str] = {
+    "pre_flight": "stage1_pre_flight",
+    "s1_drafting": "stage1_plan",
+    "s1_pending_ambiguity_resolution": "stage1_plan",
+    "s1_pending_human_approval": "stage1_plan",
+    "s1_plan_approved": "stage1_plan",
+    "s2_implementing": "stage2_impl",
+    "s3_review_pending": "stage3_review",
+    "s3_fix_loop": "stage3_review",
+    "s4_pr_open": "stage5_post_create",
+    "s5_ci_pending": "stage5_post_create",
+    "s5_ci_passed": "stage5_post_create",
+    "s5_ci_failed": "stage5_post_create",
+    "merged": "stage5_post_create",
+}
 ScopeTier = Literal["small", "large"]
-PlanSource = Literal["linear_existing", "generated", "free_text", "none"]
+PlanSource = Literal[
+    "linear_existing",
+    "github_issue_existing",
+    "generated",
+    "free_text",
+    "none",
+]
 
 
 class Scope(BaseModel):
@@ -165,14 +219,37 @@ _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
     {"scope_exceeded", "forbidden_area", "blocked"},
 )
 _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
-    {"plan_pending_approval", "scope_exceeded", "forbidden_area", "no_op"},
+    {
+        "plan_pending_approval",
+        "scope_exceeded",
+        "forbidden_area",
+        "no_op",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    },
+)
+# Pre-flight + blocked is a retry/escalation shape, not a terminal reject —
+# next_actions must signal the recovery verb. The Origin Sync block (#226)
+# emits `sync_local_main`; `manual_intervention` covers escalation cases
+# (e.g. local main has unmerged commits the orchestrator can't auto-resolve).
+_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
+    {"sync_local_main", "manual_intervention"},
+)
+# next_actions prefixes that indicate a blocked session is paused for human
+# input (issue #328). A blocked result carrying only these prefixes is not a
+# terminal-reject shape — it will be re-dispatched once the human acts.
+# Public so wrapper.py can import and reuse the same list without duplicating.
+USER_DIRECTED_PREFIXES: tuple[str, ...] = (
+    "user_resolve_",
+    "user_decide_",
+    "user_verify_",
 )
 
 
 class AutoDevResult(BaseModel):
     """Parsed sentinel block. All cross-field invariants from §3-§5 enforced."""
 
-    schema_version: Literal[1, 2, 3]
+    schema_version: Literal[1, 2, 3, 4]
     ticket_id: str
     status: Status
     stage_reached: StageReached
@@ -188,6 +265,18 @@ class AutoDevResult(BaseModel):
     friction_highlights: list[str] = Field(default_factory=list)
     blocker: Blocker | None = None
     next_actions: list[str] = Field(default_factory=list)
+    # v4: populated when status is ambiguities_pending_resolution or
+    # premises_pending_verification. Entry shapes are best-effort per §4.4 —
+    # all keys optional, tolerate producer-side key-name drift.
+    ambiguities: list[dict[str, Any]] = Field(default_factory=list)
+    premises: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("stage_reached", mode="before")
+    @classmethod
+    def _normalize_stage_reached(cls, v: object) -> object:
+        if isinstance(v, str) and v in _STAGE_REACHED_ALIASES:
+            return _STAGE_REACHED_ALIASES[v]
+        return v
 
     @model_validator(mode="after")
     def _check_invariants(self) -> AutoDevResult:
@@ -199,6 +288,14 @@ class AutoDevResult(BaseModel):
                 f"got {self.schema_version}"
             )
             raise ValueError(msg)
+
+        # NOTE: ambiguities_pending_resolution and premises_pending_verification
+        # (_V4_STATUSES) are NOT gated by schema_version. Spec §8 says enum
+        # additions require a version bump (v4), and v4 IS the official home for
+        # these values, BUT the producer skill emits them under v2 today (see
+        # issue #316). One-time rollout exception: accept under v2, v3, AND v4
+        # until the skill bumps. When skill emits v4, this exception can be
+        # removed and the _V4_STATUSES gate re-added.
 
         # §3.3 pr: non-null iff status == shipped
         if self.status == "shipped" and self.pr is None:
@@ -266,20 +363,87 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
-        # stage1_pre_flight can only exit as no_op (pre-flight exits before any
-        # plan is produced — other statuses are not possible here).
-        if self.stage_reached == "stage1_pre_flight" and self.status != "no_op":
+        # stage1_pre_flight can exit as no_op (work not needed) or blocked
+        # (work needed but a pre-flight gate failed, e.g. Origin Sync — see
+        # issue #226). Other statuses still violate the pre-impl contract.
+        pre_flight_blocked = (
+            self.stage_reached == "stage1_pre_flight" and self.status == "blocked"
+        )
+        if self.stage_reached == "stage1_pre_flight" and self.status not in (
+            "no_op",
+            "blocked",
+        ):
             msg = (
-                f"stage_reached='stage1_pre_flight' requires status='no_op', "
-                f"got status={self.status!r}"
+                f"stage_reached='stage1_pre_flight' requires status in "
+                f"('no_op', 'blocked'), got status={self.status!r}"
             )
             raise ValueError(msg)
 
-        # §4.3 terminal-reject statuses have empty next_actions
-        if self.status in _TERMINAL_REJECT_STATUSES and self.next_actions:
+        # Pre-flight + blocked is a retry/escalation shape: next_actions must
+        # be non-empty and drawn from the allowed verb set. The generic
+        # terminal-reject rule below (empty next_actions) does NOT apply here.
+        if pre_flight_blocked:
+            if not self.next_actions:
+                msg = (
+                    "next_actions must be non-empty when status='blocked' at "
+                    "stage1_pre_flight (got empty list); expected one of "
+                    f"{sorted(_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS)}"
+                )
+                raise ValueError(msg)
+            invalid = [
+                a
+                for a in self.next_actions
+                if a not in _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS
+            ]
+            if invalid:
+                msg = (
+                    f"next_actions {invalid!r} not allowed for blocked at "
+                    f"stage1_pre_flight; expected subset of "
+                    f"{sorted(_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS)}"
+                )
+                raise ValueError(msg)
+
+        # blocked + all-user-directed next_actions = paused for human input
+        # (issue #328). Not a terminal-reject shape — will be re-dispatched.
+        user_directed_blocked = (
+            self.status == "blocked"
+            and bool(self.next_actions)
+            and all(a.startswith(USER_DIRECTED_PREFIXES) for a in self.next_actions)
+        )
+
+        # §4.3 terminal-reject statuses have empty next_actions, EXCEPT for
+        # the pre-flight + blocked retry shape covered above, and the
+        # user-directed blocked shape where all actions start with a user_*
+        # prefix (issue #328).
+        if (
+            self.status in _TERMINAL_REJECT_STATUSES
+            and self.next_actions
+            and not pre_flight_blocked
+            and not user_directed_blocked
+        ):
             msg = (
                 f"next_actions must be empty for terminal-reject status "
                 f"{self.status!r}, got {self.next_actions!r}"
+            )
+            raise ValueError(msg)
+
+        # §4.3 (A2) v4 pending statuses require non-empty next_actions.
+        if self.status in _V4_STATUSES and not self.next_actions:
+            msg = f"next_actions must be non-empty when status is {self.status!r}"
+            raise ValueError(msg)
+
+        # §4.4 (A5) cross-field array invariants: arrays must be non-empty
+        # when their corresponding status is set (empty array is a producer bug
+        # — nothing for the consumer to act on).
+        if self.status == "ambiguities_pending_resolution" and not self.ambiguities:
+            msg = (
+                "ambiguities must be non-empty when "
+                "status='ambiguities_pending_resolution'"
+            )
+            raise ValueError(msg)
+        if self.status == "premises_pending_verification" and not self.premises:
+            msg = (
+                "premises must be non-empty when status='premises_pending_verification'"
             )
             raise ValueError(msg)
 
@@ -301,6 +465,39 @@ class BlockedResult(BaseModel):
 
 def _tail(text: str, lines: int = _TAIL_LINES) -> str:
     return "\n".join(text.splitlines()[-lines:])
+
+
+def _strip_code_fence(raw: str) -> str:
+    """Strip a markdown code fence wrapper from a sentinel block payload.
+
+    Only strips known-safe language specs (json or plain). Unknown specs
+    (e.g. typescript) and missing closing fences are left for json.loads
+    to reject loudly.
+    """
+    for prefix in ("```json\n", "```\n"):
+        if raw.startswith(prefix) and raw.endswith("\n```"):
+            return raw[len(prefix) : -4]
+    return raw
+
+
+def _extract_loose_sentinel_json(text: str) -> str | None:
+    """Scan for the last code-fenced block that parses as an auto-dev payload.
+
+    Used as a fallback when ``parse_stdout`` finds no AUTO_DEV_RESULT markers
+    (GitHub #337 — producer occasionally emits the payload in a code fence
+    without the sentinel framing). Accepts only blocks whose inner JSON is a
+    dict containing both ``schema_version`` and ``status`` keys, distinguishing
+    an auto-dev result from unrelated code blocks in the output.
+    """
+    for m in reversed(list(_LOOSE_FENCE_RE.finditer(text))):
+        candidate = m.group(1).strip()
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "schema_version" in obj and "status" in obj:
+            return candidate
+    return None
 
 
 def extract_block(text: str) -> str | None:
@@ -337,20 +534,37 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         )
 
     if not matches:
-        # §6 (1) no sentinel, or §6 (2) opening without close. We don't
-        # distinguish — both indicate the skill failed before/during the
-        # emit step.
         if _OPEN_SENTINEL in text:
-            reason = "no_result_emitted"
-            details = f"opening sentinel present, close missing; tail:\n{_tail(text)}"
-        else:
-            reason = "no_result_emitted"
-            details = f"no sentinel block in stdout; tail:\n{_tail(text)}"
-        return BlockedResult(
-            blocker=Blocker(stage="unknown", reason=reason, details=details),
+            # §6 (2) opening sentinel present, close missing — skill crashed mid-emit
+            return BlockedResult(
+                blocker=Blocker(
+                    stage="unknown",
+                    reason="no_result_emitted",
+                    details=(
+                        f"opening sentinel present, close missing; tail:\n{_tail(text)}"
+                    ),
+                ),
+            )
+        # §6 (1) No AUTO_DEV_RESULT markers. Tolerate bare code-fenced JSON:
+        # the producer occasionally emits the payload in a ``` block without
+        # sentinel framing (GitHub #337). Accept iff the last fenced block
+        # parses as a JSON object with both schema_version and status.
+        loose_json = _extract_loose_sentinel_json(text)
+        if loose_json is None:
+            return BlockedResult(
+                blocker=Blocker(
+                    stage="unknown",
+                    reason="no_result_emitted",
+                    details=f"no sentinel block in stdout; tail:\n{_tail(text)}",
+                ),
+            )
+        _log.warning(
+            "auto-dev: sentinel emitted as bare code-fenced JSON without "
+            "AUTO_DEV_RESULT markers; using loose fallback (GitHub #337)"
         )
-
-    raw_block = matches[0].group(1)
+        raw_block = loose_json
+    else:
+        raw_block = _strip_code_fence(matches[0].group(1))
 
     # §6 (3) JSON does not parse.
     try:
@@ -408,6 +622,8 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         "forbidden_area",
         "blocked",
         "no_op",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
     }:
         return BlockedResult(
             blocker=Blocker(

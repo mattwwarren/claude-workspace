@@ -278,6 +278,92 @@ def _blocked_payload() -> dict[str, Any]:
     }
 
 
+def _ambiguities_pending_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-ambig",
+        "status": "ambiguities_pending_resolution",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 80,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "ambiguities": [
+            {
+                "question": "Should the enum be open or closed?",
+                "plan_assumption": "closed",
+                "alternatives": ["open"],
+                "why_it_matters": "affects consumer contract",
+                "ticket_evidence": "option 1 in the ticket",
+            }
+        ],
+        "premises": [],
+        "next_actions": ["user_resolve_ambiguities"],
+    }
+
+
+def _premises_pending_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-premise",
+        "status": "premises_pending_verification",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 2,
+            "lines_estimate": 40,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "ambiguities": [],
+        "premises": [
+            {
+                "claim": "The existing PR #198 codified a deliberate decision",
+                "plan_depends_on_it_for": "deciding whether to override §4.4",
+                "how_to_verify": "read PR #198 body",
+            }
+        ],
+        "next_actions": ["user_verify_premises"],
+    }
+
+
 def _wrap_sentinel(payload: dict[str, Any]) -> str:
     body = json.dumps(payload)
     return f"some narrative\n<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
@@ -299,6 +385,8 @@ def _wrap_sentinel(payload: dict[str, Any]) -> str:
         _forbidden_area_payload,
         _blocked_payload,
         _no_op_payload,
+        _ambiguities_pending_payload,
+        _premises_pending_payload,
     ],
 )
 class TestStatusRoundTrips:
@@ -431,6 +519,136 @@ class TestSentinelFraming:
         )
         result = parse_stdout(text)
         assert isinstance(result, AutoDevResult)
+
+
+# ---------------------------------------------------------------------------
+# Code-fence stripping
+# ---------------------------------------------------------------------------
+
+
+class TestCodeFenceStripping:
+    """parse_stdout must handle code-fence-wrapped JSON payloads."""
+
+    def test_json_fence_parses_same_as_raw(self) -> None:
+        """```json\n...\n``` wrapper produces same AutoDevResult as raw JSON."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = (
+            f"narrative\n<<<AUTO_DEV_RESULT\n```json\n{body}\n```\nAUTO_DEV_RESULT>>>\n"
+        )
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_plain_fence_parses_same_as_raw(self) -> None:
+        """```\n...\n``` (no language specifier) also parses."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n<<<AUTO_DEV_RESULT\n```\n{body}\n```\nAUTO_DEV_RESULT>>>\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_misformed_fence_wrong_language_fails(self) -> None:
+        """Unknown language spec (typescript) is NOT stripped; json.loads rejects it."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        sentinel = "<<<AUTO_DEV_RESULT\n```typescript\n"
+        text = f"narrative\n{sentinel}{body}\n```\nAUTO_DEV_RESULT>>>\n"
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "no_result_emitted"
+
+    def test_misformed_fence_no_closing_fails(self) -> None:
+        """```json\n... without closing ``` is NOT stripped — json.loads rejects it."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n<<<AUTO_DEV_RESULT\n```json\n{body}\nAUTO_DEV_RESULT>>>\n"
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "no_result_emitted"
+
+
+# ---------------------------------------------------------------------------
+# Loose fallback: code-fenced JSON without AUTO_DEV_RESULT markers (GH #337)
+# ---------------------------------------------------------------------------
+
+
+class TestLooseFallback:
+    """parse_stdout must recover a valid payload from bare code-fenced JSON."""
+
+    def test_json_fence_without_markers_parses(self) -> None:
+        """```json\\n{...}\\n``` without markers is accepted as a loose fallback."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_plain_fence_without_markers_parses(self) -> None:
+        """```\\n{...}\\n``` (no language tag) is also accepted."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"All done:\n\n```\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_last_fence_wins_when_multiple(self) -> None:
+        """When multiple code fences exist, the last auto-dev-shaped one is used."""
+        shipped = _shipped_payload()
+        plan = _plan_pending_payload()
+        shipped_body = json.dumps(shipped)
+        plan_body = json.dumps(plan)
+        text = f"```json\n{shipped_body}\n```\nmore\n```json\n{plan_body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "plan_pending_approval"
+
+    def test_non_auto_dev_fence_not_accepted(self) -> None:
+        """A code fence without schema_version+status is not treated as a sentinel."""
+        text = '```json\n{"foo": "bar"}\n```\n'
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "no_result_emitted"
+
+    def test_opening_sentinel_present_takes_precedence(self) -> None:
+        """If the opening sentinel IS present (but close is missing), the
+        crash-mid-emit path fires — loose fallback does NOT apply."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        # Has the opening marker but no close; also has a bare code fence.
+        text = f"<<<AUTO_DEV_RESULT\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert "opening sentinel present" in result.blocker.details
+
+    def test_invalid_json_fence_skipped_valid_earlier_one_used(self) -> None:
+        """Invalid-JSON fence at end is skipped; earlier valid one is used.
+
+        _extract_loose_sentinel_json iterates reversed (last fence first).  The
+        last fence here contains unparseable text — exercises the JSONDecodeError
+        branch — then falls back to the earlier valid fence.
+        """
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        # Valid fence FIRST; invalid fence LAST (scanned first in reversed order).
+        text = f"```json\n{body}\n```\n\n```json\nnot parseable at all\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_loose_fallback_preserves_all_fields(self) -> None:
+        """Loose-parsed result round-trips all required fields correctly."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"worker output:\n\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.ticket_id == payload["ticket_id"]
+        assert result.pr is not None
+        assert result.pr.number == payload["pr"]["number"]
 
 
 # ---------------------------------------------------------------------------
@@ -686,8 +904,13 @@ class TestPreFlightNoOp:
         assert result.plan_source == "none"
         assert result.schema_version == 2
 
-    def test_stage1_pre_flight_requires_no_op_status(self) -> None:
-        # stage_reached=stage1_pre_flight with any non-no_op status is rejected.
+    def test_stage1_pre_flight_rejects_incompatible_status(self) -> None:
+        """Pre-flight exit only allows {no_op, blocked} — shipped et al are rejected.
+
+        The `blocked` admission was added for #226 (Origin Sync block); see
+        TestStage1PreFlightBlocked for the positive cases. Any other status
+        at pre-flight is still a contract violation.
+        """
         p = _no_op_payload()
         p["status"] = "shipped"
         p["pr"] = {
@@ -714,3 +937,509 @@ class TestPreFlightNoOp:
         p["scope"]["lines_actual"] = 10
         with pytest.raises(ValidationError, match="lines_actual"):
             AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# stage1_pre_flight + blocked (added per #226 — Origin Sync block emits this
+# combo legitimately; the consumer previously rejected it as a §4.3 violation,
+# so every Origin-Sync-blocked sentinel became validation_failed). When status
+# is blocked at pre-flight, next_actions is constrained to retry/escalation
+# verbs rather than empty (which is required for the generic terminal-reject
+# `blocked` shape at later stages).
+# ---------------------------------------------------------------------------
+
+
+def _pre_flight_blocked_payload() -> dict[str, Any]:
+    """Origin-Sync-shaped sentinel: stage1_pre_flight + blocked + sync_local_main.
+
+    Matches the producer's emit shape from commit 97c92b3 (cf #178). The
+    blocker.reason is open-enum (§4.2) — `origin_sync_required` is the
+    canonical value but any string is allowed.
+    """
+    return {
+        "schema_version": 3,
+        "ticket_id": "GEN-pre-flight-blocked",
+        "status": "blocked",
+        "stage_reached": "stage1_pre_flight",
+        "scope": {
+            "tier": "small",
+            "files": 0,
+            "lines_estimate": 0,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "none",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage1_pre_flight",
+            "reason": "origin_sync_required",
+            "details": "local main behind origin/main; sync before dispatch",
+        },
+        "next_actions": ["sync_local_main"],
+    }
+
+
+class TestStage1PreFlightBlocked:
+    def test_origin_sync_shaped_sentinel_parses_cleanly(self) -> None:
+        """The exact shape the producer emits for Origin Sync block (#226)."""
+        p = _pre_flight_blocked_payload()
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "blocked"
+        assert result.stage_reached == "stage1_pre_flight"
+        assert result.next_actions == ["sync_local_main"]
+        assert result.blocker is not None
+        assert result.blocker.reason == "origin_sync_required"
+
+    def test_manual_intervention_next_action_allowed(self) -> None:
+        """Escalation path: blocker that needs human action, not retry."""
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["manual_intervention"]
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["manual_intervention"]
+
+    def test_empty_next_actions_rejected_when_blocked_at_pre_flight(self) -> None:
+        """Pre-flight blocked must signal a recovery path — empty list is a bug.
+
+        A producer emitting `blocked` with no next_actions at pre-flight
+        gives the orchestrator nothing to route on. Force the producer to
+        emit at least one of the allowed verbs.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_invalid_next_action_rejected_at_pre_flight_blocked(self) -> None:
+        """next_actions for pre-flight blocked is a closed set, not free-form.
+
+        ``wait_for_ci`` would short-circuit on the earlier §4.3 ``wait_for_ci
+        iff shipped`` rule, so use a verb that only the pre-flight closed-set
+        check can reject. Asserts the rejection message points at the
+        closed-set so we know the right branch fired.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["close_issue_as_completed"]  # valid for no_op, not blocked
+        with pytest.raises(ValidationError, match="expected subset of"):
+            AutoDevResult.model_validate(p)
+
+    def test_mixed_valid_and_invalid_next_actions_rejected(self) -> None:
+        """If any entry is outside the allowed set, the whole list is invalid.
+
+        Producer must emit a pure list of allowed verbs — partial validity
+        doesn't pass.
+        """
+        p = _pre_flight_blocked_payload()
+        p["next_actions"] = ["sync_local_main", "free_text_recovery"]
+        with pytest.raises(ValidationError, match="free_text_recovery"):
+            AutoDevResult.model_validate(p)
+
+    def test_pre_flight_blocked_through_parse_stdout(self) -> None:
+        """End-to-end: a captured sentinel block round-trips via parse_stdout.
+
+        The wrapper path (`_parse_sentinel_from_transcript` in signal_stop)
+        uses parse_stdout, so the round-trip must succeed without falling
+        into the BlockedResult fail-open path.
+        """
+        p = _pre_flight_blocked_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.stage_reached == "stage1_pre_flight"
+
+    def test_blocked_at_later_stage_still_requires_empty_next_actions(self) -> None:
+        """Regression: non-user-directed next_actions still rejected at stage2_impl.
+
+        A `blocked` exit at stage2_impl with `sync_local_main` (a pre-flight
+        recovery verb, not a user-directed prefix) must still fail — widening
+        for pre-flight and for user-directed actions must NOT carry over here.
+        """
+        p = _blocked_payload()  # blocked at stage2_impl
+        p["next_actions"] = ["sync_local_main"]
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# blocked + user-directed next_actions (issue #328 — schema must accept
+# `status=blocked` payloads whose next_actions all start with a user_*
+# prefix, so _is_paused_for_user_input can be tested against real instances).
+# ---------------------------------------------------------------------------
+
+
+def _user_directed_blocked_payload(next_actions: list[str]) -> dict[str, Any]:
+    """blocked at stage2_impl with user-directed next_actions."""
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-user-blocked",
+        "status": "blocked",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 5,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": "auto-dev/GEN-user-blocked",
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage2_impl",
+            "reason": "awaiting_user_input",
+            "details": "blocked pending user action",
+        },
+        "next_actions": next_actions,
+    }
+
+
+class TestBlockedWithUserDirectedNextActions:
+    """Schema must accept blocked payloads whose next_actions are all user_*-prefixed.
+
+    These payloads signal that the session is paused for human input rather
+    than being a terminal-reject — _is_paused_for_user_input reads them at
+    runtime. See issue #328.
+    """
+
+    def test_user_resolve_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_resolve_ambiguities"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_resolve_ambiguities"]
+
+    def test_user_decide_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_decide_approach"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_decide_approach"]
+
+    def test_user_verify_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_verify_something"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_verify_something"]
+
+    def test_mixed_user_directed_prefixes_allowed(self) -> None:
+        """Multiple user_* entries in next_actions are all valid."""
+        p = _user_directed_blocked_payload(
+            ["user_resolve_ambiguities", "user_verify_premises"]
+        )
+        result = AutoDevResult.model_validate(p)
+        assert len(result.next_actions) == 2
+
+    def test_non_user_prefix_still_rejected(self) -> None:
+        """A non-user-directed action mixed with user_* must still fail."""
+        p = _user_directed_blocked_payload(
+            ["user_resolve_ambiguities", "sync_local_main"]
+        )
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_next_actions_still_valid_for_blocked(self) -> None:
+        """Generic terminal-reject blocked shape (empty next_actions) unchanged."""
+        p = _user_directed_blocked_payload([])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == []
+
+
+# ---------------------------------------------------------------------------
+# plan_source="github_issue_existing" (added per #190 — producer-side rename
+# of "linear_existing" for GitHub-sourced runs; treated identically).
+# ---------------------------------------------------------------------------
+
+
+class TestPlanSourceGitHubIssueExisting:
+    def test_shipped_run_with_github_issue_existing_parses(self) -> None:
+        """A real shipped payload (#149 captured) emitted under v2."""
+        p = _shipped_payload()
+        p["schema_version"] = 2
+        p["plan_source"] = "github_issue_existing"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_source == "github_issue_existing"
+        assert result.status == "shipped"
+        assert result.schema_version == 2
+
+    def test_no_op_run_with_github_issue_existing_parses(self) -> None:
+        """A pre-flight no_op payload (#136 captured) with the GitHub plan_source."""
+        p = _no_op_payload()
+        p["schema_version"] = 2
+        p["plan_source"] = "github_issue_existing"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.plan_source == "github_issue_existing"
+        assert result.status == "no_op"
+
+
+class TestV4StatusPromotion:
+    def test_ambiguities_pending_parses_at_v4(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_ambiguities_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+        assert result.schema_version == 4
+
+    def test_premises_pending_parses_at_v4(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_premises_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert result.schema_version == 4
+
+    def test_ambiguities_pending_accepted_at_v2(self) -> None:
+        """ambiguities_pending_resolution parses at schema_version=2.
+
+        Rollout exception: producer emits v2 today (issue #316).
+        """
+        payload = {**_ambiguities_pending_payload(), "schema_version": 2}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_premises_pending_accepted_at_v2(self) -> None:
+        """premises_pending_verification parses at schema_version=2.
+
+        Rollout exception: producer emits v2 today (issue #316).
+        """
+        payload = {**_premises_pending_payload(), "schema_version": 2}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+
+    def test_ambiguities_pending_accepted_at_v3(self) -> None:
+        """ambiguities_pending_resolution parses at schema_version=3.
+
+        Rollout exception: accept under v3 as well (issue #316).
+        """
+        payload = {**_ambiguities_pending_payload(), "schema_version": 3}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_premises_pending_accepted_at_v3(self) -> None:
+        """premises_pending_verification parses at schema_version=3.
+
+        Rollout exception: accept under v3 as well (issue #316).
+        """
+        payload = {**_premises_pending_payload(), "schema_version": 3}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+
+    def test_v4_schema_accepted(self) -> None:
+        p = _ambiguities_pending_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.schema_version == 4
+
+    def test_v5_schema_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["schema_version"] = 5
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "schema_version_unsupported"
+
+    # A5 — empty arrays rejected via cross-field validator
+    def test_empty_ambiguities_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = []
+        with pytest.raises(ValidationError, match="ambiguities"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_premises_rejected(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = []
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    # A2 — next_actions must be non-empty
+    def test_ambiguities_empty_next_actions_rejected(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_empty_next_actions_rejected(self) -> None:
+        p = _premises_pending_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    # A4 — pre-branch status: branch must be null
+    def test_ambiguities_rejects_branch(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["branch"] = "dev/sneak"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_rejects_branch(self) -> None:
+        p = _premises_pending_payload()
+        p["branch"] = "dev/sneak"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    # A4 — lines_actual must be null (pre-impl exit)
+    def test_ambiguities_rejects_lines_actual(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["scope"]["lines_actual"] = 50
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+    def test_premises_rejects_lines_actual(self) -> None:
+        p = _premises_pending_payload()
+        p["scope"]["lines_actual"] = 30
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+    # A3 — entry fields are all optional (best-effort)
+    def test_ambiguities_entry_with_minimal_keys_accepted(self) -> None:
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [{"question": "only question provided"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.ambiguities) == 1
+
+    def test_premises_entry_with_minimal_keys_accepted(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [{"claim": "minimal premise"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_premises_entry_with_alternate_key_shapes_accepted(self) -> None:
+        # Producer uses various key names; parser must tolerate any shape
+        p = _premises_pending_payload()
+        p["premises"] = [
+            {
+                "premise": "alternate key",
+                "verify_by": "read the doc",
+                "verified": False,
+            }
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_round_trip_preserves_ambiguities(self) -> None:
+        p = _ambiguities_pending_payload()
+        result = AutoDevResult.model_validate(p)
+        dumped = result.model_dump(mode="json")
+        assert dumped["status"] == "ambiguities_pending_resolution"
+        assert len(dumped["ambiguities"]) == 1
+
+    def test_round_trip_preserves_premises(self) -> None:
+        p = _premises_pending_payload()
+        result = AutoDevResult.model_validate(p)
+        dumped = result.model_dump(mode="json")
+        assert dumped["status"] == "premises_pending_verification"
+        assert len(dumped["premises"]) == 1
+
+    def test_existing_statuses_unaffected_by_v4_addition(self) -> None:
+        # Regression guard: shipped (v1 payload) still parses under v4-aware parser
+        p = _shipped_payload()
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+
+class TestStageReachedAliases:
+    """Short-form stage_reached aliases from the producer map to full-form values.
+
+    Issue #292: producer occasionally emits resume-detection substates
+    (``s5_ci_pending``, ``merged``, etc.) instead of canonical full-form
+    values. The ``_normalize_stage_reached`` field_validator maps them so
+    otherwise-valid sentinels don't fail with ``validation_failed``.
+    """
+
+    # Each tuple: (alias, expected_canonical, payload_factory)
+    # The payload_factory must return a payload whose status/scope are
+    # compatible with the expected_canonical stage.
+    @pytest.mark.parametrize(
+        ("alias", "expected"),
+        [
+            # pre-flight
+            ("pre_flight", "stage1_pre_flight"),
+            # Stage 1 substates
+            ("s1_drafting", "stage1_plan"),
+            ("s1_pending_ambiguity_resolution", "stage1_plan"),
+            ("s1_pending_human_approval", "stage1_plan"),
+            ("s1_plan_approved", "stage1_plan"),
+            # Stage 2
+            ("s2_implementing", "stage2_impl"),
+            # Stage 3
+            ("s3_review_pending", "stage3_review"),
+            ("s3_fix_loop", "stage3_review"),
+            # Stage 4 / 5 (PR created or later)
+            ("s4_pr_open", "stage5_post_create"),
+            ("s5_ci_pending", "stage5_post_create"),
+            ("s5_ci_passed", "stage5_post_create"),
+            ("s5_ci_failed", "stage5_post_create"),
+            ("merged", "stage5_post_create"),
+        ],
+    )
+    def test_short_form_aliases_normalize(self, alias: str, expected: str) -> None:
+        payload_for: dict[str, Any] = {
+            "stage1_pre_flight": _no_op_payload(),
+            "stage1_plan": _plan_pending_payload(),
+            "stage2_impl": _blocked_payload(),
+            "stage3_review": _review_pending_payload(),
+            "stage5_post_create": _shipped_payload(),
+        }
+        p = payload_for[expected]
+        p["stage_reached"] = alias
+        result = AutoDevResult.model_validate(p)
+        assert result.stage_reached == expected
+
+    @pytest.mark.parametrize("bad", ["stagee5", "", "stage_1", "s6_unknown", "MERGED"])
+    def test_misspelled_stage_still_rejects(self, bad: str) -> None:
+        p = _shipped_payload()
+        p["stage_reached"] = bad
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_full_form_values_pass_through_unchanged(self) -> None:
+        # Existing canonical values must not be mangled by the normalizer
+        for full_form, payload_fn in [
+            ("stage1_pre_flight", _no_op_payload),
+            ("stage1_plan", _plan_pending_payload),
+            ("stage2_impl", _blocked_payload),
+            ("stage3_review", _review_pending_payload),
+            ("stage4a_merge_gate", _merge_gate_payload),
+            ("stage5_post_create", _shipped_payload),
+        ]:
+            p = payload_fn()
+            result = AutoDevResult.model_validate(p)
+            assert result.stage_reached == full_form
+
+    def test_parse_stdout_shipped_with_s5_ci_pending(self) -> None:
+        # Regression for issue #292: producer emitted s5_ci_pending in a shipped
+        # sentinel; the task was left PENDING despite the PR being merged.
+        p = _shipped_payload()
+        p["stage_reached"] = "s5_ci_pending"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+        assert result.stage_reached == "stage5_post_create"
+
+    def test_parse_stdout_shipped_with_merged(self) -> None:
+        p = _shipped_payload()
+        p["stage_reached"] = "merged"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.stage_reached == "stage5_post_create"

@@ -192,6 +192,16 @@ class TestCli:
             assert result.exit_code != 0
             assert "Test error message" in result.output
 
+    def test_daemon_once_emits_deprecation_warning(self) -> None:
+        """cw daemon --once prints deprecation warning (via click.echo err=True)."""
+        runner = CliRunner()
+        with patch("cw.cli.run_watcher_tick"):
+            result = runner.invoke(main, ["daemon", "--once"])
+        assert result.exit_code == 0
+        assert "Note: cw daemon's PR-dispatch role is deprecated as of 0.11." in (
+            result.output
+        )
+
 
 class TestUpgradeWorkers:
     def test_happy_path(self) -> None:
@@ -475,7 +485,7 @@ class TestSignalStop:
 
         hook_stdin = json.dumps(
             {
-                "session_id": "claude-uuid-stop",
+                "session_id": f"{short_id}-full-uuid",
                 "cwd": str(worktree),
                 "hook_event_name": "Stop",
             }
@@ -885,7 +895,7 @@ class TestSignalStop:
 
         hook_stdin = json.dumps(
             {
-                "session_id": "claude-uuid-daemon",
+                "session_id": f"{short_id}-daemon-full-uuid",
                 "cwd": str(worktree),
                 "hook_event_name": "Stop",
             }
@@ -896,7 +906,7 @@ class TestSignalStop:
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.COMPLETED
-        assert updated.claude_session_id == "claude-uuid-daemon"
+        assert updated.claude_session_id == f"{short_id}-daemon-full-uuid"
 
         events = read_events(
             consumer="test-daemon-regress",
@@ -945,16 +955,16 @@ class TestSignalStop:
         a session that orphaned (Stop fires, no sentinel, bg_tasks empty)
         must NOT silently transition to COMPLETED.
         """
-        # Seed session started 31 minutes ago (past the 30-min budget).
+        # Seed session started 61 minutes ago (past the 60-min budget).
         import datetime as dt
 
-        from cw.cli import HEADLESS_TIMEOUT_SECONDS
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
+        from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
 
         started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
         assert (hook_time - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
 
         workspace = tmp_path / "workspace"
@@ -1002,7 +1012,7 @@ class TestSignalStop:
 
         hook_stdin = json.dumps(
             {
-                "session_id": "claude-uuid-timed-out",
+                "session_id": f"{short_id}-timed-out-full-uuid",
                 "cwd": str(worktree),
                 "hook_event_name": "Stop",
                 "last_assistant_message": "Waiting for review agents to complete...",
@@ -1015,7 +1025,7 @@ class TestSignalStop:
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.TIMED_OUT
-        assert updated.claude_session_id == "claude-uuid-timed-out"
+        assert updated.claude_session_id == f"{short_id}-timed-out-full-uuid"
 
         # SESSION_TIMED_OUT event emitted with expected payload fields.
         events = read_events(
@@ -1090,36 +1100,31 @@ class TestSignalStop:
         save_state(state)
         self._write_headless_context(worktree, session_id=session.id)
 
-        # Write a fake transcript with a valid sentinel block so the
-        # sentinel-detection helper finds it.
+        # Write a real Claude-shaped transcript JSONL with an assistant
+        # record carrying a parseable sentinel block. The parser walks the
+        # same shape signal_stop sees in production (issue #176 Layer 1).
         claude_session_id = "abc12345"
+        fake_home = tmp_path / "fake-home"
         encoded = str(worktree).replace("/", "-").replace(".", "-")
-        transcript_dir = tmp_path / "fake-claude-home" / "projects" / encoded
+        transcript_dir = fake_home / ".claude" / "projects" / encoded
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        sentinel_content = (
-            "<<<AUTO_DEV_RESULT\n"
-            '{"schema_version": 1, "status": "shipped"}\n'
-            "AUTO_DEV_RESULT>>>"
+        # Use the preserved #215 fixture — it parses to a valid AutoDevResult
+        # with status=plan_pending_approval and exercises every cross-field
+        # invariant in auto_dev_result.py.
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": _SENTINEL_215_PLAN_PENDING}],
+            },
+        }
+        (transcript_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
         )
-        (transcript_dir / f"{claude_session_id}.jsonl").write_text(sentinel_content)
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
-        # Patch Path.home() to return our fake home so the transcript path resolves.
-        fake_home = tmp_path / "fake-claude-home"
-
-        def _fake_sentinel(cwd: str, sid: str | None) -> bool:
-            from cw.auto_dev_result import extract_block
-
-            if not sid:
-                return False
-            enc = cwd.replace("/", "-").replace(".", "-")
-            tp = fake_home / "projects" / enc / f"{sid}.jsonl"
-            if not tp.is_file():
-                return False
-            return extract_block(tp.read_text()) is not None
-
-        monkeypatch.setattr("cw.cli._sentinel_present_in_transcript", _fake_sentinel)
 
         hook_stdin = json.dumps(
             {
@@ -1143,6 +1148,89 @@ class TestSignalStop:
         assert not any(
             e.payload.get("session_id") == session.id for e in timed_out_events
         )
+
+    def test_signal_stop_populates_last_result_on_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Headless session with a parseable sentinel → session.last_result set.
+
+        Regression for GitHub issue #225: signal_stop previously called
+        the bool sentinel-check helper and threw the parse away. Headless
+        DAEMON sessions completed with last_result=None even when the
+        agent emitted a valid AUTO_DEV_RESULT block. The orchestrator's
+        consume_completed_sessions then had nothing to route on.
+        """
+        import datetime as dt
+
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree-225"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="sess-225",
+            name="test-client/auto-dev/214",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        # Write a real transcript with the preserved #214 sentinel — the
+        # exact failure mode that motivated #225.
+        claude_session_id = "uuid-225"
+        fake_home = tmp_path / "fake-home"
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": _SENTINEL_214_BLOCKED}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.last_result is not None
+        assert updated.last_result["status"] == "blocked"
+        assert updated.last_result["ticket_id"] == "214"
+        assert updated.last_result["stage_reached"] == "stage1_plan"
 
     def test_signal_stop_defers_under_budget_no_sentinel(
         self,
@@ -1217,6 +1305,862 @@ class TestSignalStop:
 
         # daemon.stop must NOT have been called.
         assert daemon.stop_calls == []
+
+    def test_signal_stop_respects_per_ticket_timeout_override(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Per-ticket headless_timeout_override is honored on the Stop-hook path.
+
+        Session elapsed 4000s — past the 3600s global budget, but within the
+        7200s per-ticket override. The hook must defer (session stays ACTIVE).
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        # 4000s elapsed: past the default 3600s global budget, under 7200s override.
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 1, 6, 40, tzinfo=UTC)  # +4000s
+        assert (hook_time - started_at).total_seconds() == 4000
+
+        workspace = tmp_path / "ws-override"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "wt-override"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="sess-override",
+            name="test-client/auto-dev/GEN-override",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+
+        # Seed a RUNNING TicketTask with headless_timeout_override=7200.
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="GEN-override",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    headless_timeout_override=7200,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+
+        # Write headless context with our custom ticket_id.
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session.id,
+                    "session_name": session.name,
+                    "client": "test-client",
+                    "purpose": "impl",
+                    "ticket_id": "GEN-override",
+                    "headless": True,
+                }
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "claude-uuid-override",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        # 4000s elapsed < 7200s override → should NOT time out → still ACTIVE.
+        state_after = load_state()
+        sess_after = next(s for s in state_after.sessions if s.id == "sess-override")
+        assert sess_after.status == SessionStatus.ACTIVE, (
+            f"Expected ACTIVE but got {sess_after.status} — "
+            "per-ticket override not honored on Stop-hook path"
+        )
+
+        # TicketTask must remain RUNNING (not reverted to PENDING).
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-override")
+        assert task.status == QueueItemStatus.RUNNING
+
+        # daemon.stop must NOT have been called.
+        assert daemon.stop_calls == []
+
+    def _write_transcript(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        assistant_text: str,
+        home: Path,
+    ) -> None:
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+
+    def _setup_headless_session(
+        self,
+        tmp_path: Path,
+        session_id: str,
+        worktree_name: str,
+    ) -> tuple[Path, Session]:
+        """Seed state with a DAEMON ACTIVE session and return (worktree, session)."""
+        import datetime as dt
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / worktree_name
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id=session_id,
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        return worktree, session
+
+    def test_signal_stop_no_op_marks_task_completed_directly(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """no_op sentinel → task COMPLETED before session COMPLETED.
+
+        Regression for GitHub issue #251 Bug A: _apply_sentinel_to_task
+        must set the task to COMPLETED *before* save_state marks the
+        session COMPLETED, closing the race with revert_completed_silent_tasks.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-no-op", "worktree-251-no-op"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-no-op"
+        fake_home = tmp_path / "fake-home-no-op"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_signal_stop_premises_pending_v2_marks_task_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """premises_pending_verification at schema_version=2 → COMPLETED.
+
+        Regression for GitHub issue #316: schema_version<4 gate caused
+        validation_failed BlockedResult → retry loop. After fix, parses
+        as AutoDevResult → COMPLETED.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-316-premises", "worktree-316-premises"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-316-premises"
+        fake_home = tmp_path / "fake-home-316-premises"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_316_PREMISES_PENDING_V2, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_signal_stop_ambiguities_pending_v2_marks_task_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ambiguities_pending_resolution at schema_version=2 → COMPLETED.
+
+        Regression for GitHub issue #316.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-316-ambiguities", "worktree-316-ambiguities"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-316-ambiguities"
+        fake_home = tmp_path / "fake-home-316-ambiguities"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_316_AMBIGUITIES_PENDING_V2, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_signal_stop_validation_failed_reverts_to_pending_under_cap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """validation_failed sentinel with attempts < cap → task PENDING.
+
+        Regression for GitHub issue #251 Bug B: malformed sentinel with
+        reason='validation_failed' should revert to PENDING (retry) when
+        the task has not yet exceeded the hard cap.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-vf-under", "worktree-251-vf-under"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-vf-under"
+        fake_home = tmp_path / "fake-home-vf-under"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_signal_stop_validation_failed_marks_failed_at_cap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """validation_failed sentinel with attempts >= cap → task FAILED.
+
+        Regression for GitHub issue #251 Bug B: once a task hits the hard
+        cap (_VALIDATION_FAILED_MAX_ATTEMPTS=3) on validation_failed retries,
+        it must be marked FAILED to stop infinite re-dispatch.
+        """
+        import datetime as dt
+
+        from cw.cli import _VALIDATION_FAILED_MAX_ATTEMPTS
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-vf-cap", "worktree-251-vf-cap"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-vf-cap"
+        fake_home = tmp_path / "fake-home-vf-cap"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.FAILED
+
+    def test_signal_stop_blocked_retry_eligible_reverts_to_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked + retry_eligible=True → task PENDING + session_id cleared.
+
+        The orchestrator should re-dispatch the ticket on the next tick.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-blocked-retry", "worktree-251-blocked-retry"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-blocked-retry"
+        fake_home = tmp_path / "fake-home-blocked-retry"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_signal_stop_blocked_not_retry_eligible_marks_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked sentinel with retry_eligible=False → task COMPLETED (needs human).
+
+        A non-retryable blocker signals that human intervention is required;
+        the task must not re-enter the dispatch queue automatically.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-251-blocked-no-retry", "worktree-251-blocked-no-retry"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-251-blocked-no-retry"
+        fake_home = tmp_path / "fake-home-blocked-no-retry"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_251_BLOCKED_NO_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_signal_stop_stale_hook_guard_drops_mismatched_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stale stop hook whose claude_session_id doesn't match surface_ref is dropped.
+
+        Regression for GitHub issue #285. When dispatch rewrites cw-context.json
+        with session2's ID for a retry, a Stop hook fired by session1's still-live
+        Claude process carries session1's Claude UUID in its payload but reads
+        session2's CW session ID from context. The stale-hook guard must detect
+        the mismatch (payload UUID doesn't start with session2's surface_ref) and
+        return without modifying the task or session2's status.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        # Session2 is the current (retry) attempt; surface_ref="next0002".
+        worktree, session2 = self._setup_headless_session(
+            tmp_path, "sess-285-guard-s2", "worktree-285-guard"
+        )
+        state = load_state()
+        s2 = next(s for s in state.sessions if s.id == session2.id)
+        s2.surface_ref = "next0002"
+        save_state(state)
+
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session2.id,
+                    attempts=2,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        # cw-context.json points to session2 (dispatch overwrote it for retry).
+        self._write_headless_context(worktree, session_id=session2.id)
+
+        # Stale hook from session1: UUID starts with "prev0001", not "next0002".
+        stale_claude_id = "prev0001-old-session1-uuid"
+        fake_home = tmp_path / "fake-home-285-guard"
+        self._write_transcript(
+            worktree, stale_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": stale_claude_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        # Stale hook dropped — task still RUNNING for session2.
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.session_id == session2.id
+
+        # Session2 still ACTIVE — stale hook must not have completed it.
+        s2_after = next(s for s in load_state().sessions if s.id == session2.id)
+        assert s2_after.status == SessionStatus.ACTIVE
+
+    def test_signal_stop_blocked_retry_shipped_sequence_completes_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked→retry→shipped: task must end at COMPLETED, not PENDING.
+
+        Regression test for GitHub issue #285 (evidence from #139). The pre-fix
+        failure sequence:
+          1. Attempt 1 blocks (retry_eligible). signal_stop reverts task to
+             PENDING and calls native_daemon.stop(session1.surface_ref).
+          2. Dispatch re-claims: task RUNNING+session2.id. spawn_create_impl
+             overwrites cw-context.json with session2's CW ID.
+          3. Stale stop hook fires for session1 AFTER the overwrite. Hook
+             payload has session1's Claude UUID; cw-context reads session2's
+             CW ID. Without the guard: blocked sentinel applies to session2's
+             task → PENDING again; session2 marked COMPLETED prematurely.
+          4. Session2 ships but its real stop hook sees session2.status==COMPLETED
+             and returns early. Task stuck at PENDING.
+        With the stale-hook guard step 3 is a no-op, and session2's shipped
+        hook correctly transitions the task to COMPLETED.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        workspace = tmp_path / "workspace-285"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree-285-seq"
+        worktree.mkdir(parents=True, exist_ok=True)
+
+        # === Attempt 1: session1 runs, emits blocked+retry_eligible ===
+        session1 = Session(
+            id="sess-285-seq-s1",
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            surface_ref="aabb1100",
+            started_at=dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        state = load_state()
+        state.sessions.append(session1)
+        save_state(state)
+
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session1.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session1.id)
+
+        s1_claude_id = "aabb1100-session1-full-uuid"
+        fake_home = tmp_path / "fake-home-285-seq"
+        self._write_transcript(
+            worktree, s1_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        with freeze_time(dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
+            r1 = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": s1_claude_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert r1.exit_code == 0, r1.output
+
+        task_after_1 = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task_after_1.status == QueueItemStatus.PENDING
+        assert task_after_1.session_id is None
+
+        # === Dispatch re-claims: session2 spawned, cw-context.json overwritten ===
+        session2 = Session(
+            id="sess-285-seq-s2",
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            surface_ref="ccdd2200",
+            started_at=dt.datetime(2026, 1, 1, 0, 6, 0, tzinfo=UTC),
+        )
+        state2 = load_state()
+        state2.sessions.append(session2)
+        save_state(state2)
+
+        store2 = load_dev_queue()
+        task2 = next(t for t in store2.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        task2.status = QueueItemStatus.RUNNING
+        task2.session_id = session2.id
+        task2.attempts = 2
+        save_dev_queue(store2)
+
+        # spawn_create_impl overwrites cw-context.json with session2's CW ID.
+        self._write_headless_context(worktree, session_id=session2.id)
+
+        # === Stale hook fires for session1 after cw-context.json overwrite ===
+        # Hook payload still carries session1's Claude UUID ("aabb1100-…");
+        # cw-context.json now has session2's CW ID. Guard must drop this.
+        with freeze_time(dt.datetime(2026, 1, 1, 0, 6, 1, tzinfo=UTC)):
+            r_stale = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": s1_claude_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert r_stale.exit_code == 0, r_stale.output
+
+        task_after_stale = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task_after_stale.status == QueueItemStatus.RUNNING, (
+            "Stale hook must not have reverted the task to PENDING"
+        )
+        assert task_after_stale.session_id == session2.id
+        s2_mid = next(s for s in load_state().sessions if s.id == session2.id)
+        assert s2_mid.status == SessionStatus.ACTIVE, (
+            "Stale hook must not have completed session2 prematurely"
+        )
+
+        # === Attempt 2: session2 ships ===
+        s2_claude_id = "ccdd2200-session2-full-uuid"
+        self._write_transcript(worktree, s2_claude_id, _SENTINEL_285_SHIPPED, fake_home)
+
+        with freeze_time(dt.datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)):
+            r2 = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": s2_claude_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert r2.exit_code == 0, r2.output
+
+        task_final = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task_final.status == QueueItemStatus.COMPLETED, (
+            f"Expected COMPLETED but got {task_final.status} — "
+            "regression: stale stop hook left task PENDING after blocked→retry→shipped"
+        )
 
 
 class TestSentinelPresentInTranscript:
@@ -1405,6 +2349,463 @@ class TestSentinelPresentInTranscript:
         )
 
         assert _sentinel_present_in_transcript(str(worktree), "uuid-mixed")
+
+
+# Real sentinel payloads preserved from the 2026-05-24 dogfood wave (see #225).
+# Embedded inline so the regression tests survive worktree cleanup. Both blocks
+# parse cleanly under the current invariants; their presence as fixtures locks
+# in the round-trip through _parse_sentinel_from_transcript.
+_SENTINEL_214_BLOCKED = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 1,\n'
+    '  "ticket_id": "214",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "EXIT_FOR_HUMAN_REVIEW", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "stage1_plan", "reason": "agent_block", '
+    '"details": "cross-repo scope"},\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_215_PLAN_PENDING = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "215",\n'
+    '  "status": "plan_pending_approval",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "large", "files": 11, "lines_estimate": 626, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "generated",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": ["user_approve_plan"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# Sentinel fixtures for GitHub issue #251 tests.  Same structural shape as
+# the #214/#215 pairs above; ticket_id "137" matches TestSignalStop.SEED_TICKET_ID.
+_SENTINEL_251_NO_OP = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "no_op",\n'
+    '  "stage_reached": "stage1_pre_flight",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": ["close_issue_as_completed"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_251_VALIDATION_FAILED = (
+    # Valid JSON that fails Pydantic cross-field validation: status=shipped
+    # requires next_actions=["wait_for_ci"] but the list is empty.  Produces
+    # BlockedResult(reason="validation_failed") from parse_stdout §6 (5).
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "shipped",\n'
+    '  "stage_reached": "stage5_post_create",\n'
+    '  "scope": {"tier": "small", "files": 1, "lines_estimate": 10, '
+    '"lines_actual": 5, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": "auto-dev/137",\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": "abc123",\n'
+    '  "commits": ["def456"],\n'
+    '  "pr": {"number": 1, '
+    '"url": "https://github.com/foo/bar/pull/1", '
+    '"auto_merge": true, "base": "main"},\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_251_BLOCKED_RETRY = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage1_pre_flight",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "pre_flight", '
+    '"reason": "local_main_diverged_from_origin", '
+    '"details": "local_main=abc, origin_main=def, ahead=1, behind=0", '
+    '"retry_eligible": true, "retry_delay_seconds": null},\n'
+    '  "next_actions": ["sync_local_main"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_285_SHIPPED = (
+    # Valid shipped sentinel for ticket "137" used in issue #285 regression tests.
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "shipped",\n'
+    '  "stage_reached": "stage5_post_create",\n'
+    '  "scope": {"tier": "small", "files": 2, "lines_estimate": 30, '
+    '"lines_actual": 25, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": "auto-dev/137",\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": "abc285",\n'
+    '  "commits": ["def285"],\n'
+    '  "pr": {"number": 285, '
+    '"url": "https://github.com/foo/bar/pull/285", '
+    '"auto_merge": true, "base": "main"},\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": ["wait_for_ci"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+_SENTINEL_251_BLOCKED_NO_RETRY = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "EXIT_FOR_HUMAN_REVIEW", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "stage1_plan", "reason": "plan_unreviewable", '
+    '"details": "MUST_FIX persists after revision", '
+    '"retry_eligible": false, "retry_delay_seconds": null},\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# mirrors _premises_pending_payload in test_auto_dev_result.py at schema_version=2
+_SENTINEL_316_PREMISES_PENDING_V2 = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "premises_pending_verification",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 2, "lines_estimate": 40, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, '
+    '"fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "premises": [{"claim": "PR #198 codified a deliberate decision"}],\n'
+    '  "ambiguities": [],\n'
+    '  "next_actions": ["user_verify_premises"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# mirrors _ambiguities_pending_payload in test_auto_dev_result.py at schema_version=2
+_SENTINEL_316_AMBIGUITIES_PENDING_V2 = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "ambiguities_pending_resolution",\n'
+    '  "stage_reached": "stage1_plan",\n'
+    '  "scope": {"tier": "small", "files": 2, "lines_estimate": 40, '
+    '"lines_actual": null, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, '
+    '"fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "ambiguities": [{"question": "Should we retry on timeout?"}],\n'
+    '  "premises": [],\n'
+    '  "next_actions": ["user_resolve_ambiguities"]\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+
+class TestParseSentinelFromTranscript:
+    """Tests for _parse_sentinel_from_transcript (GitHub issue #225).
+
+    Headless DAEMON sessions complete via signal_stop, not the cw wrapper.
+    The wrapper's signal_completed is the only path that assigns
+    session.last_result today, so headless sessions emit valid sentinels
+    that the orchestrator never sees. This helper walks the same Claude
+    transcript JSONL the bool checker uses, but on a sentinel hit it
+    returns the parsed AutoDevResult (or BlockedResult for malformed
+    blocks) instead of throwing the parse away.
+    """
+
+    def _write_transcript(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        assistant_text: str,
+        home: Path,
+    ) -> None:
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+
+    def test_returns_auto_dev_result_on_clean_sentinel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Clean sentinel block → AutoDevResult instance, not bool or BlockedResult."""
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-215"
+        worktree.mkdir(parents=True)
+        self._write_transcript(
+            worktree, "uuid-215", _SENTINEL_215_PLAN_PENDING, fake_home
+        )
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-215")
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.status == "plan_pending_approval"
+        assert parsed.ticket_id == "215"
+
+    def test_returns_auto_dev_result_for_blocked_sentinel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression fixture: real #214 transcript shape parses cleanly."""
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-214"
+        worktree.mkdir(parents=True)
+        self._write_transcript(worktree, "uuid-214", _SENTINEL_214_BLOCKED, fake_home)
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-214")
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.status == "blocked"
+        assert parsed.ticket_id == "214"
+        assert parsed.blocker is not None
+        assert parsed.blocker.reason == "agent_block"
+
+    def test_returns_blocked_result_when_sentinel_json_invalid(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel framing present but inner JSON malformed → BlockedResult.
+
+        Mirrors parse_stdout's §6 (3) handling: the parser does not raise.
+        """
+        from cw.auto_dev_result import BlockedResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-bad"
+        worktree.mkdir(parents=True)
+        bad_sentinel = "<<<AUTO_DEV_RESULT\n{this is not valid JSON\nAUTO_DEV_RESULT>>>"
+        self._write_transcript(worktree, "uuid-bad", bad_sentinel, fake_home)
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-bad")
+        assert isinstance(parsed, BlockedResult)
+        assert parsed.status == "blocked"
+
+    def test_returns_none_when_no_sentinel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No sentinel in transcript → None (distinct from BlockedResult).
+
+        Callers (signal_stop) use None to mean "no result yet, defer or
+        time out per budget"; a non-None return means the agent emitted
+        something — even an invalid block — and we should capture it.
+        """
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-empty"
+        worktree.mkdir(parents=True)
+        self._write_transcript(
+            worktree, "uuid-empty", "Status update with no sentinel.", fake_home
+        )
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-empty") is None
+
+    def test_returns_none_when_transcript_missing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing transcript file → None (fail-open like the bool helper)."""
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-missing"
+        worktree.mkdir(parents=True)
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-missing") is None
+
+    def test_returns_none_when_session_id_is_none(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """No claude_session_id → None without touching the filesystem."""
+        from cw.cli import _parse_sentinel_from_transcript
+
+        assert _parse_sentinel_from_transcript(str(tmp_path), None) is None
+
+    def test_skips_non_assistant_records(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel inside a user message must not be captured.
+
+        Mirrors the bool helper's same-block scoping — only assistant text
+        emissions count as a real sentinel.
+        """
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-userblock"
+        worktree.mkdir(parents=True)
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True)
+        user_record = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _SENTINEL_215_PLAN_PENDING},
+                ],
+            },
+        }
+        (project_dir / "uuid-userblock.jsonl").write_text(
+            json.dumps(user_record) + "\n"
+        )
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-userblock") is None
 
 
 class TestCompletion:
@@ -1611,9 +3012,6 @@ class TestShowStatus:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from cw.cmux import FakeCmuxAdapter
-
-        monkeypatch.setattr("cw.cli.get_cmux_adapter", FakeCmuxAdapter)
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             "clients:\n"
@@ -1640,16 +3038,12 @@ class TestShowStatus:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """_check_and_mark_dead_sessions reaps sessions whose surface is gone."""
-        from cw.cmux import FakeCmuxAdapter
-
-        def _adapter_with_decoy() -> FakeCmuxAdapter:
-            # Non-empty live set prevents reconcile's outage guard from
-            # refusing to mutate state (see cw.reconcile._looks_like_backend_outage).
-            a = FakeCmuxAdapter()
-            a.spawn("decoy-ws", "echo")
-            return a
-
-        monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
+        # Non-empty live set prevents reconcile's outage guard from
+        # refusing to mutate state; "impl" ref still isn't live so phantom is reaped.
+        monkeypatch.setattr(
+            "cw.reconcile._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             f"clients:\n"
@@ -1667,6 +3061,10 @@ class TestShowStatus:
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                     surface_ref="impl",
+                    # started_at older than SPAWN_GRACE_SECONDS so reconcile
+                    # treats this session as eligible for phantom-reaping
+                    # (the grace window protects only freshly-spawned sessions).
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 )
             ]
         )
@@ -2021,7 +3419,6 @@ def test_display_status_reconciles_phantom_active_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`cw status` reports and reaps sessions with missing surfaces."""
-    from cw.cmux import FakeCmuxAdapter
     from cw.config import load_state, save_state
     from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
@@ -2036,6 +3433,9 @@ def test_display_status_reconciles_phantom_active_sessions(
                     status=SessionStatus.ACTIVE,
                     workspace_path=sample_client.workspace_path,
                     surface_ref="gone",
+                    # Older than SPAWN_GRACE_SECONDS so the spawn-grace
+                    # window doesn't protect this from phantom-reaping.
+                    started_at=datetime(2026, 4, 19, tzinfo=UTC),
                 ),
             ]
         )
@@ -2043,12 +3443,10 @@ def test_display_status_reconciles_phantom_active_sessions(
 
     # Non-empty live set prevents the outage guard from aborting reconcile;
     # the "gone" surface_ref still isn't in the set so phantom1 is reaped.
-    def _adapter_with_decoy() -> FakeCmuxAdapter:
-        a = FakeCmuxAdapter()
-        a.spawn("decoy-ws", "echo")
-        return a
-
-    monkeypatch.setattr("cw.cli.get_cmux_adapter", _adapter_with_decoy)
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
 
     runner = CliRunner()
     result = runner.invoke(main, ["status"])
@@ -2060,3 +3458,471 @@ def test_display_status_reconciles_phantom_active_sessions(
     reaped = reloaded.find_by_name_or_id("phantom1")
     assert reaped is not None
     assert reaped.status == SessionStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueRefreshAll
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueRefreshAll:
+    """Tests for `cw dev-queue refresh-all`."""
+
+    def _write_clients_yaml(
+        self,
+        tmp_config_dir: Path,
+        clients: list[tuple[str, str]],
+    ) -> None:
+        """Write a minimal clients.yaml with the given (name, workspace_path) tuples."""
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        lines = ["clients:\n"]
+        for name, ws in clients:
+            lines.append(f"  {name}:\n")
+            lines.append(f"    workspace_path: {ws}\n")
+        (config_dir / "clients.yaml").write_text("".join(lines))
+
+    def test_refresh_all_runs_fast_forward_for_each_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """fast_forward_main called once per configured client, exit 0."""
+        ws_a = tmp_path / "ws-a"
+        ws_a.mkdir()
+        ws_b = tmp_path / "ws-b"
+        ws_b.mkdir()
+        self._write_clients_yaml(
+            tmp_config_dir,
+            [("client-a", str(ws_a)), ("client-b", str(ws_b))],
+        )
+
+        called_clients: list[str] = []
+
+        def _mock_ff(client: object) -> tuple[str, str]:
+            from cw.models import ClientConfig
+
+            assert isinstance(client, ClientConfig)
+            called_clients.append(client.name)
+            return (
+                "sha1sha1sha1sha1sha1sha1sha1sha1sha1sha1",
+                "sha2sha2sha2sha2sha2sha2sha2sha2sha2sha2",
+            )
+
+        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0, result.output
+        assert set(called_clients) == {"client-a", "client-b"}
+
+    def test_refresh_all_prints_already_up_to_date_when_same_sha(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same before/after SHA → 'already up to date' in output."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+
+        monkeypatch.setattr(
+            "cw.cli.fast_forward_main",
+            lambda _c: (
+                "abc123def456abc123def456abc123def456abc1",
+                "abc123def456abc123def456abc123def456abc1",
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0
+        assert "already up to date" in result.output.lower()
+
+    def test_refresh_all_prints_updated_sha_when_changed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Different before/after SHA → output shows both SHAs."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+
+        monkeypatch.setattr(
+            "cw.cli.fast_forward_main",
+            lambda _c: (
+                "oldsha1oldsha1oldsha1oldsha1oldsha1oldsh",
+                "newsha2newsha2newsha2newsha2newsha2newsh",
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0
+        assert "oldsha1" in result.output
+        assert "newsha2" in result.output
+
+    def test_refresh_all_continues_on_one_client_failure(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """WorktreeError for one client → other client still called, exit non-zero."""
+        from cw.exceptions import WorktreeError
+
+        ws_a = tmp_path / "ws-a"
+        ws_a.mkdir()
+        ws_b = tmp_path / "ws-b"
+        ws_b.mkdir()
+        self._write_clients_yaml(
+            tmp_config_dir,
+            [("client-a", str(ws_a)), ("client-b", str(ws_b))],
+        )
+
+        called_clients: list[str] = []
+
+        def _mock_ff(client: object) -> tuple[str, str]:
+            from cw.models import ClientConfig
+
+            assert isinstance(client, ClientConfig)
+            called_clients.append(client.name)
+            if client.name == "client-a":
+                msg = "ff failed"
+                raise WorktreeError(msg)
+            return ("aaa", "bbb")
+
+        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 1
+        assert "client-b" in called_clients
+        assert "client-a" in called_clients
+
+    def test_refresh_all_emits_no_events(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """refresh-all does NOT emit ticket.needs_sync events."""
+        from cw.events import read_events as _read_events
+        from cw.models import OrchestratorEventType
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+
+        monkeypatch.setattr(
+            "cw.cli.fast_forward_main",
+            lambda _c: ("aaa", "bbb"),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0, result.output
+
+        events = _read_events(
+            consumer="test-refresh-no-events",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueAddTimeout (GitHub issue #265)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueAddTimeout:
+    """Tests for ``--timeout`` flag on ``cw dev-queue add``."""
+
+    def test_dev_queue_add_timeout_flag(self, tmp_config_dir: Path) -> None:
+        """--timeout sets headless_timeout_override on the created TicketTask."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "add",
+                "GEN-123",
+                "--client",
+                "client-a",
+                "--timeout",
+                "5400",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-123"), None)
+        assert task is not None
+        assert task.headless_timeout_override == 5400
+
+    def test_dev_queue_add_no_timeout(self, tmp_config_dir: Path) -> None:
+        """Without --timeout, headless_timeout_override is None."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "GEN-456", "--client", "client-b"],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-456"), None)
+        assert task is not None
+        assert task.headless_timeout_override is None
+
+
+# ---------------------------------------------------------------------------
+# TestOrchestratorStart (GitHub issue #295)
+# ---------------------------------------------------------------------------
+
+
+def _write_clients_yaml_for_test(
+    tmp_config_dir: Path,
+    clients: list[tuple[str, str]],
+) -> None:
+    """Write a minimal clients.yaml with the given (name, workspace_path) tuples."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["clients:\n"]
+    for name, ws in clients:
+        lines.append(f"  {name}:\n")
+        lines.append(f"    workspace_path: {ws}\n")
+    (config_dir / "clients.yaml").write_text("".join(lines))
+
+
+def _make_git_workspace_for_test(tmp_path: Path, name: str) -> Path:
+    """Create a minimal git repo suitable for spawn_create_impl's _validate_worktree."""
+    import os
+    import subprocess
+
+    repo = tmp_path / name
+    repo.mkdir(parents=True, exist_ok=True)
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            check=True,
+            env=clean_env,
+        )
+
+    _git("init", "-b", "main")
+    _git("config", "user.email", "t@t.com")
+    _git("config", "user.name", "t")
+    _git("commit", "--allow-empty", "-m", "init")
+    return repo
+
+
+class TestOrchestratorStart:
+    """Tests for ``cw orchestrator-start`` command."""
+
+    def test_orchestrator_start_with_explicit_client_spawns_session(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """cw orchestrator-start --client mytest spawns a session and prints its id."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        ws = _make_git_workspace_for_test(tmp_path, "ws-explicit")
+        _write_clients_yaml_for_test(tmp_config_dir, [("mytest", str(ws))])
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrator-start", "--client", "mytest"])
+
+        assert result.exit_code == 0, result.output
+        assert len(daemon.spawn_calls) == 1
+
+    def test_orchestrator_start_no_clients_raises_clickexception(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """When no clients are configured, command exits with error."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrator-start"])
+
+        assert result.exit_code != 0
+        assert "No clients configured" in result.output
+
+    def test_orchestrator_start_unknown_client_raises_clickexception(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--client unknown-name exits with error mentioning the unknown name."""
+        ws = tmp_path / "ws-unknown"
+        ws.mkdir()
+        _write_clients_yaml_for_test(tmp_config_dir, [("real-client", str(ws))])
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrator-start", "--client", "unknown-name"])
+
+        assert result.exit_code != 0
+        assert "unknown-name" in result.output
+
+    def test_orchestrator_start_defaults_to_first_client_when_omitted(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --client, command uses the first configured client."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        ws = _make_git_workspace_for_test(tmp_path, "ws-default")
+        _write_clients_yaml_for_test(tmp_config_dir, [("first-client", str(ws))])
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrator-start"])
+
+        assert result.exit_code == 0, result.output
+        assert len(daemon.spawn_calls) == 1
+        assert daemon.spawn_calls[0][0] == ws
+
+    def test_orchestrator_start_passes_correct_extra_args_to_spawn_create_impl(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """extra_args contain --agent and --dangerously-load-development-channels."""
+        from cw.cli import _ORCHESTRATOR_AGENT, _ORCHESTRATOR_CHANNEL
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        ws = _make_git_workspace_for_test(tmp_path, "ws-args")
+        _write_clients_yaml_for_test(tmp_config_dir, [("args-client", str(ws))])
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrator-start", "--client", "args-client"])
+
+        assert result.exit_code == 0, result.output
+        assert daemon.spawn_extra_args[0] is not None
+        extra = daemon.spawn_extra_args[0]
+        assert "--agent" in extra
+        assert _ORCHESTRATOR_AGENT in extra
+        assert "--dangerously-load-development-channels" in extra
+        assert _ORCHESTRATOR_CHANNEL in extra
+        assert daemon.spawn_permission_modes[0] == "acceptEdits"
+
+
+# ---------------------------------------------------------------------------
+# TestSpawnCloseTaskCancellation — issue #317
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnCloseTaskCancellation:
+    """_spawn_close_impl must atomically CANCEL the owning RUNNING TicketTask."""
+
+    def _make_daemon_session(
+        self, tmp_path: Path, sess_id: str = "close-sess-1"
+    ) -> Session:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        sess = Session(
+            id=sess_id,
+            name=f"test-client/auto-dev/{sess_id}",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            status=SessionStatus.ACTIVE,
+            surface_ref="fake-ref",
+        )
+        state = load_state()
+        state.sessions.append(sess)
+        save_state(state)
+        return sess
+
+    def test_spawn_close_cancels_running_task(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON session + RUNNING task with session_id → after close → CANCELLED."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        sess = self._make_daemon_session(tmp_path)
+        task = TicketTask(
+            ticket_id="CLOSE-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=sess.id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "CLOSE-1")
+        assert t.status == QueueItemStatus.CANCELLED
+        assert t.session_id is None
+
+    def test_spawn_close_user_origin_does_not_touch_task(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """USER-origin session close → RUNNING task is NOT cancelled."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        workspace = tmp_path / "workspace2"
+        workspace.mkdir(parents=True, exist_ok=True)
+        sess = Session(
+            id="user-close-sess",
+            name="test-client/auto-dev/user-close-sess",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.USER,
+            workspace_path=workspace,
+            status=SessionStatus.ACTIVE,
+            surface_ref=None,
+        )
+        state = load_state()
+        state.sessions.append(sess)
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="USER-CLOSE-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=sess.id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "USER-CLOSE-1")
+        assert t.status == QueueItemStatus.RUNNING
+
+    def test_spawn_close_no_task_for_session_is_ok(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON session with no matching task → close succeeds without error."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        sess = self._make_daemon_session(tmp_path, sess_id="no-task-sess")
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        daemon = FakeNativeDaemonClient()
+        # Should not raise.
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == sess.id)
+        assert updated.status == SessionStatus.COMPLETED

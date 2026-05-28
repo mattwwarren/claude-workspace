@@ -4,8 +4,7 @@ This module closes the loop on the orchestrator pipeline:
 
 * :func:`retire_merged_prs` consumes ``pr.merged`` events, removes the PR
   from review-monitor's persisted state, marks correlated sessions as
-  ``COMPLETED`` (reason ``HANDOFF``), closes their cmux surfaces, and
-  emits ``session.completed`` events.
+  ``COMPLETED`` (reason ``HANDOFF``), and emits ``session.completed`` events.
 
 * :func:`orchestrator_status` returns a snapshot of the orchestrator's
   current state -- pending dev-queue tickets, running sessions, monitored
@@ -31,7 +30,6 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from cw.cmux import get_cmux_adapter
 from cw.config import load_state, review_monitor_dir, save_state
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
@@ -53,8 +51,6 @@ from cw.pr_responder import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from cw.cmux import CmuxAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -143,21 +139,22 @@ def _sessions_for_pr(
 
 def _close_session(
     sess: Session,
-    adapter: CmuxAdapter,
     *,
     pr_number: int,
     repo: str,
 ) -> None:
-    """Close a session: mark COMPLETED, close surface, emit event."""
+    """Close a session: mark COMPLETED and emit event.
+
+    Multiplexer surface close is intentionally omitted: the native daemon
+    manages session lifetime.  Legacy ``surface_ref`` values on existing
+    records are logged and skipped rather than passed to a now-removed adapter.
+    """
     if sess.surface_ref is not None:
-        try:
-            adapter.close(sess.surface_ref)
-        except Exception:
-            logger.exception(
-                "Failed to close cmux surface %s for session %s",
-                sess.surface_ref,
-                sess.id,
-            )
+        logger.warning(
+            "Session %s has legacy surface_ref %r; skipping surface close",
+            sess.id,
+            sess.surface_ref,
+        )
 
     sess.status = SessionStatus.COMPLETED
     sess.completed_reason = CompletionReason.HANDOFF
@@ -175,7 +172,6 @@ def _close_session(
 
 
 def retire_merged_prs(
-    adapter: CmuxAdapter | None = None,
     *,
     runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
 ) -> list[str]:
@@ -186,8 +182,8 @@ def retire_merged_prs(
     1. Invoke ``review_monitor.py complete`` to remove the PR from
        monitoring state.
     2. Look up sessions correlated to the PR via :class:`PRDispatchRecord`.
-    3. Close each session's cmux surface, mark it ``COMPLETED`` with
-       reason ``HANDOFF``, and emit a ``session.completed`` event.
+    3. Mark each session ``COMPLETED`` with reason ``HANDOFF`` and emit a
+       ``session.completed`` event.
     4. Drop the dispatch record entries so subsequent ticks see no
        lingering correlation.
 
@@ -195,8 +191,6 @@ def retire_merged_prs(
     no new ``pr.merged`` events is a no-op.
 
     Args:
-        adapter: CmuxAdapter for surface close calls.  Defaults to
-            :func:`cw.cmux.get_cmux_adapter`.
         runner: Optional subprocess runner override (for tests).
 
     Returns:
@@ -212,10 +206,6 @@ def retire_merged_prs(
     state = load_state()
     dispatch_record = load_dispatch_record()
     retired: list[str] = []
-    # Resolve the adapter lazily — only when we actually have a session to
-    # close. On Linux, `get_cmux_adapter()` crashes at instantiation, so
-    # `retire_merged_prs` with no matching sessions must not trigger it.
-    resolved_adapter: CmuxAdapter | None = adapter
 
     for event in events:
         payload = event.payload
@@ -261,11 +251,8 @@ def retire_merged_prs(
                 dispatch_record.active.pop(dispatch_key, None)
                 continue
 
-            if resolved_adapter is None:
-                resolved_adapter = get_cmux_adapter()
             _close_session(
                 sess,
-                resolved_adapter,
                 pr_number=pr_number,
                 repo=repo,
             )
@@ -306,6 +293,7 @@ class SessionSummary(BaseModel):
     started_at: datetime
     surface_ref: str | None = None
     worktree_path: Path | None = None
+    last_stage: str | None = None
 
 
 class TicketSummary(BaseModel):
@@ -354,7 +342,11 @@ def _summarise_ticket(task: TicketTask) -> TicketSummary:
     )
 
 
-def _summarise_session(sess: Session) -> SessionSummary:
+def _summarise_session(
+    sess: Session,
+    *,
+    last_stage: str | None = None,
+) -> SessionSummary:
     return SessionSummary(
         id=sess.id,
         name=sess.name,
@@ -364,7 +356,29 @@ def _summarise_session(sess: Session) -> SessionSummary:
         started_at=sess.started_at,
         surface_ref=sess.surface_ref,
         worktree_path=sess.worktree_path,
+        last_stage=last_stage,
     )
+
+
+def _derive_last_stage_by_session(
+    events: list[OrchestratorEvent],
+) -> dict[str, str]:
+    """Map session_id -> most recent STAGE_ENTERED.stage.
+
+    Iterates events in chronological order; later events overwrite
+    earlier ones. STAGE_ERRORED events are deliberately ignored — they
+    remain visible in recent_events but do not redefine the "current
+    stage" of a session.
+    """
+    result: dict[str, str] = {}
+    for ev in events:
+        if ev.type is not OrchestratorEventType.STAGE_ENTERED:
+            continue
+        session_id = ev.payload.get("session_id")
+        stage = ev.payload.get("stage")
+        if isinstance(session_id, str) and isinstance(stage, str):
+            result[session_id] = stage
+    return result
 
 
 def _summarise_event(event: OrchestratorEvent) -> EventSummary:
@@ -428,17 +442,20 @@ def orchestrator_status() -> OrchestratorStatus:
         _summarise_ticket(t) for t in queue.tasks if t.status == QueueItemStatus.PENDING
     ]
 
+    # Read all events first so we can derive last_stage per session before
+    # summarising the running list.
+    all_events = read_events()
+    last_stage_by_session = _derive_last_stage_by_session(all_events)
+
     state = load_state()
     running = [
-        _summarise_session(s)
+        _summarise_session(s, last_stage=last_stage_by_session.get(s.id))
         for s in state.sessions
         if s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
     ]
 
     monitored = _load_monitored_prs()
 
-    # Read all events, then take the last N (chronological order from the inbox).
-    all_events = read_events()
     tail = all_events[-_RECENT_EVENTS_LIMIT:]
     recent = [_summarise_event(e) for e in tail]
 

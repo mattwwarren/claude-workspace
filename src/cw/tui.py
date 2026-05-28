@@ -110,6 +110,7 @@ def _sessions_table(
     table.add_column("ID", width=10, no_wrap=True)
     table.add_column("PURPOSE", width=8)
     table.add_column("WORKTREE", overflow="fold")
+    table.add_column("STAGE", width=28, no_wrap=True)
     if level is DetailLevel.VERBOSE:
         table.add_column("SURFACE", width=12, no_wrap=True)
     table.add_column("ELAPSED", width=8, justify="right", no_wrap=True)
@@ -118,6 +119,7 @@ def _sessions_table(
             sess.id,
             sess.purpose,
             _shorten_worktree(sess.worktree_path, home),
+            sess.last_stage or "—",
         ]
         if level is DetailLevel.VERBOSE:
             row.append(sess.surface_ref or "—")

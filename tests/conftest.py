@@ -66,6 +66,15 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         tmp_path / ".claude" / "daemon" / "roster.json",
     )
 
+    # Stub _claude_agents_json so tests don't invoke the real ``claude``
+    # binary. Tests that want specific liveness behaviour override this with
+    # their own monkeypatch.setattr call; pytest patches stack and the
+    # test-level patch wins.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        list,
+    )
+
     return tmp_path
 
 
@@ -152,26 +161,6 @@ def mock_cmux_adapter() -> FakeCmuxAdapter:
 def mock_native_daemon() -> FakeNativeDaemonClient:
     """A FakeNativeDaemonClient for testing daemon-origin spawn and reconcile."""
     return FakeNativeDaemonClient()
-
-
-@pytest.fixture
-def sample_handoff_file(tmp_path: Path) -> Path:
-    """Create a .handoffs/session-*.md with valid resumption prompt."""
-    handoffs_dir = tmp_path / "workspace" / "test-project" / ".handoffs"
-    handoffs_dir.mkdir(parents=True)
-    handoff = handoffs_dir / "session-test123.md"
-    handoff.write_text(
-        "# Session Handoff\n\n"
-        "## Summary\n\n"
-        "Did some work on the feature.\n\n"
-        "## Resumption Prompt\n\n"
-        "Use this to resume:\n\n"
-        "```\n"
-        "Continue working on the auth feature. The login endpoint is done,\n"
-        "but the signup endpoint still needs validation.\n"
-        "```\n"
-    )
-    return handoff
 
 
 @pytest.fixture

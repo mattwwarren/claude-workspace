@@ -6,6 +6,145 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.2] — 2026-05-28
+
+Patch release with two reliability fixes for the dev-queue dispatch path,
+surfaced during the 2026-05-28 dogfood wave.
+
+- **Code-fenced sentinel parsing** (#337 → PR #339): `parse_stdout` now
+  tolerates AUTO_DEV_RESULT JSON wrapped in a Markdown code fence (```` ```json ````)
+  when the explicit `<<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>>` markers are
+  absent. Previously the dispatcher treated such sessions as no-sentinel and
+  spawned wasteful att2/att3 retries on already-shipped work. Closes #336
+  (downstream consequence — silently_idle hangs after the parser returned None).
+- **Watchdog default bump** (#340 stopgap → PR #341): `IDLE_WATCHDOG_SECONDS`
+  raised from `300` → `900` (15 min), `idle_watchdog_by_tier['large']` from
+  `600` → `1800`. The previous 300s budget false-positively flagged active
+  small-tier workers (#337 itself took 14 min wall time and tripped the
+  watchdog at 5 min). The deeper fix — transcript-mtime liveness detection
+  — remains open under #340.
+
+## [0.11.1] — 2026-05-27
+
+Patch release covering #129's BLOCKED_ON_USER producer + watchdog and the
+SHOULD_FIX follow-up batch from PR #323's review, plus the new
+`cw-queue-peek` skill for in-flight session inspection.
+
+- **`BLOCKED_ON_USER` producer + watchdog** (#129/#322 → PR #323):
+  `QueueItemStatus.BLOCKED_ON_USER` + `OrchestratorEventType.SESSION_NEEDS_ATTENTION`
+  enum additions; `signal_needs_attention` path in `wrapper.py` for paused-for-input
+  sentinels; `flag_silently_idle_daemon_sessions` watchdog in `reconcile.py` for
+  silently-stalled DAEMON sessions; `notify.py` peon-ping + `notify-send` push
+  helper; `docs/headless-contract.md` updated with the BLOCKED_ON_USER section.
+- **Watchdog hardening** (#324/#332): reorder writes — `save_state` (session →
+  COMPLETED + `last_result`) fires before queue mutation; crash between
+  session-flip and queue-flip recovers cleanly on next reconcile tick.
+- **Per-ticket / per-tier IDLE_WATCHDOG_SECONDS override** (#326/#331): mirrors
+  the `HEADLESS_TIMEOUT_SECONDS` override pattern from #265.
+- **`notify.py` debug logging** (#327/#330): each fail-quiet exception path now
+  logs at debug level so `CW_LOG_LEVEL=DEBUG` surfaces misconfigured peon.sh.
+- **Test rigor** (#328/#333): `_is_paused_for_user_input` tests construct real
+  `AutoDevResult` instances instead of `MagicMock`, so future schema changes
+  fail loudly.
+- **`cw-queue-peek` skill + script** (PR #335): in-flight inspection of
+  RUNNING dev-queue sessions. Computes age, idle gap, last sentinel status,
+  and PR state per session; recommends WAIT / PEEK / STOP via a 10-rule
+  peek-stop ladder. Reports only — operator runs `cw spawn close <id>`
+  after reviewing. Closes the gap between `cw-session-watch` (post-mortem
+  exit status) and `cw-validate-result` (post-mortem sentinel inspection).
+
+## [0.11.0] — 2026-05-27
+
+Pre-1.0 substrate release covering multiplexer-removal Phase D, the PR
+event channel architecture, orchestrator subagent + `cw orchestrator-start`,
+dispatcher routing hardening, and freshness-gate guardrails.
+
+Major themes since 0.10.0:
+
+- **Multiplexer Phase D complete**: `MultiplexerAdapter` removed from
+  `reconcile`, `dispatch`, `doctor`, `orchestrate`, and `cli`. Liveness
+  checks switched to `claude agents --json` + `roster.json`. Net -252 lines
+  across the substrate. (#167/#269)
+- **PR event channel architecture**: new `cw_pr_events_server` MCP channel
+  pushes review-monitor deltas with durable persist-on-emit and cursor
+  replay (#138/#282, #139/#284, #114/#288). Daemon's pr-watcher loop
+  retired in favor of event-driven routing (#299). Stdio MCP channel
+  proxy added for capability declaration (#291). Channel server lazy-imports
+  starlette so the module loads without the `[mcp]` extra (#306); 307
+  redirect on bare `/sse` path fixed (#309).
+- **Orchestrator subagent + `cw orchestrator-start`**: new `cw-orchestrator`
+  subagent routes channel events (#115/#296/#301); new `cw orchestrator-start`
+  CLI command spawns the orchestrator session (#295/#302). Frees the
+  daemon from PR-response logic and centralizes routing.
+- **Dispatcher routing hardening**: v4 statuses (`ambiguities_pending_resolution`,
+  `premises_pending_verification`) now recognized as terminal at
+  `schema_version=2` and route to BLOCKED (no more retry-on-paused-sentinel
+  bug) (#316/#319, e538638). New `QueueItemStatus.CANCELLED` prevents the
+  dispatcher race when `cw spawn close` runs against an in-flight tick
+  (#317/#320). Short-form `stage_reached` aliases mapped to canonical
+  values (#292/#293). Code-fence wrapped sentinels parsed correctly
+  (#307). `dispatch_tick` guards against worktree == main checkout
+  (#300/#311). Permission_mode uses explicit None check (#298).
+- **Reconcile resilience**: 30s spawn grace window prevents same-tick
+  phantom reaping (#271/#272). Short-id `surface_ref` matches against
+  UUID-prefix `sessionId` (#273). Stale Stop hook dropped on worktree
+  reuse for retry (#285/#287).
+- **Freshness gate**: pre-dispatch `dispatch_tick` checks each client's
+  local `main` against `origin/main`; stale clients emit
+  `OrchestratorEventType.TICKET_NEEDS_SYNC` and skip the tick without
+  burning a dispatch slot (#215/#268). Misconfigured clients no longer
+  dump tracebacks (#278). New `cw dev-queue refresh-all` subcommand
+  fast-forwards every configured client.
+- **Headless config**: default `HEADLESS_TIMEOUT_SECONDS` bumped 30→60
+  minutes (#266). Per-ticket / per-`scope.tier` override (#265/#279)
+  allows large-scope work room to finish.
+- **CI scaffolding**: nightly integration workflow at
+  `.github/workflows/nightly-integration.yml` exercises real `claude --bg`
+  / `claude agents --json` / `claude stop` via `pytest -m integration`;
+  `workflow_dispatch`-only until API budget is allocated (#110/#318).
+  `[mcp]` extra installed in CI so pr-events tests + coverage run
+  (#283).
+- **Cleanup**: legacy `handoff.py` deleted (#246/#277); transcript handoff
+  is now covered by `claude --resume`.
+
+Full per-PR detail in the GitHub release notes (auto-generated by
+`release.yml`).
+
+## [0.10.0] — 2026-05-25
+
+Pre-1.0 substrate release covering native-daemon dispatch hardening,
+sentinel-capture observability, queue retry-cap, AUTO_DEV_RESULT
+schema v4, and ruff/lint discipline.
+
+Major themes since 0.9.0:
+
+- **Native-daemon path**: `cw start` / `cw resume` migrated to
+  `claude --bg + attach`; origin-aware Stop hook; settings.local.json
+  write hardened.
+- **Sentinel observability**: headless DAEMON sessions now persist
+  `last_result` via `signal_stop` parsing (#225/#226); contract-level
+  Blocker carries explicit retry policy (#193); `/cw-validate-result`
+  and `/cw-followup` skills surface sentinel-aware post-run actions.
+- **Queue resilience**: dedupe + remove + clear + reconcile-sweep
+  (#177/#221); validation_failed retry-cap + sentinel-to-task routing
+  in `signal_stop` (#251/#261); reconcile sweeps stalled headless
+  sessions to TIMED_OUT (#185/#260).
+- **AUTO_DEV_RESULT v4**: `ambiguities_pending_resolution` and
+  `premises_pending_verification` promoted to canonical statuses
+  with closed `next_actions` vocabulary (#191/#262).
+- **Pipeline guardrails**: `_validate_worktree` pre-flight gate (#186);
+  ANSI-strip on `claude --bg` stdout parsing (#203/#204); `cw doctor`
+  setup checks (#142/#219); diff-cover pre-push hook (#250).
+- **Cost guardrails**: per-client `worker_model` field pins spawned
+  workers to Sonnet by default (#248/#254).
+- **Ruff hardening**: rule selection expanded across exception
+  handling, logging, pathlib, async, and defensive bundles (#230 family
+  → #240, #241, #252, #253, #256, #258). Diff-cover gate mirrored
+  locally via pre-push hook (#250).
+
+Full per-PR detail in the GitHub release notes (auto-generated by
+`release.yml`).
+
 ## [0.8.3] — 2026-05-21
 
 Patch release — closes the wedged-`RUNNING` loop called out as a known

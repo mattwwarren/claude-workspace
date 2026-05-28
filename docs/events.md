@@ -39,6 +39,22 @@ A new ticket has been added to the work queue for an orchestrator client.
 }
 ```
 
+### `ticket.needs_sync`
+
+**Emitter:** `dispatch_tick`
+**Payload:** `{"ticket_id": "<str>", "client": "<str>"}`
+**Semantics:** Emitted once per PENDING task when the client's local
+`<default_branch>` is behind `origin/<default_branch>`. The task stays
+PENDING; the slot is skipped for this tick. Operator should run
+`cw dev-queue refresh-all` to fast-forward and unblock dispatch.
+
+```json
+{
+  "ticket_id": "CW-42",
+  "client": "my-client"
+}
+```
+
 ### `session.spawned`
 
 An orchestrator-managed session was started.
@@ -125,6 +141,46 @@ A monitored PR was merged.
   "merge_sha": "<str>"
 }
 ```
+
+### `stage.entered`
+
+The headless `/auto-dev` worker entered a new stage of its pipeline. Used
+by `cw orchestrate status` / `watch` to derive a per-session `last_stage`
+display. Producer contract is in
+[`headless-contract.md` §10](headless-contract.md#10-stage-event-taxonomy-producer-contract);
+the invariant that `STAGE_ERRORED` does not redefine `last_stage` is
+captured in [ADR-0004](adr/0004-stage-events-on-orchestrator-bus.md).
+
+```json
+{
+  "session_id": "<str>",
+  "ticket_id": "<str>",
+  "stage": "s2_impl_started",
+  "prev_stage": "s1_plan_reviewed",
+  "started_at": "2026-05-23T13:01:42Z"
+}
+```
+
+`stage` and `prev_stage` MUST match the closed enum in headless-contract
+§10.2 (`s0_intake` … `done`).
+
+### `stage.errored`
+
+The headless `/auto-dev` worker hit a transient error inside a stage. The
+worker may recover and continue. Visible in `cw event tail` and
+`recent_events`; deliberately does NOT update `last_stage` (per ADR-0004).
+
+```json
+{
+  "session_id": "<str>",
+  "ticket_id": "<str>",
+  "stage": "s2_impl_started",
+  "error_kind": "agent_block",
+  "started_at": "2026-05-23T13:04:11Z"
+}
+```
+
+`error_kind` is an open enum — consumers MUST tolerate unknown values.
 
 ## CLI
 

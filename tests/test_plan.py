@@ -20,7 +20,7 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.plan import run_planner
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -28,10 +28,14 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def planner_client(tmp_path: Path) -> ClientConfig:
-    """A ClientConfig usable as the planner host."""
-    workspace = tmp_path / "workspace" / "planner-client"
-    workspace.mkdir(parents=True)
+def planner_client(make_git_repo: Callable[[str], Path]) -> ClientConfig:
+    """A ClientConfig usable as the planner host.
+
+    Uses a real git repo so spawn_create_impl's _validate_worktree check
+    passes (plan.py passes workspace_path as the worktree, which in
+    production is always a real git checkout).
+    """
+    workspace = make_git_repo("workspace/planner-client")
     return ClientConfig(
         name="planner-client",
         workspace_path=workspace,
@@ -52,8 +56,20 @@ class _ScriptedDaemon(FakeNativeDaemonClient):
         super().__init__()
         self._payload = output_payload
 
-    def spawn_bg(self, *, cwd: Path, prompt: str) -> str:
-        short_id = super().spawn_bg(cwd=cwd, prompt=prompt)
+    def spawn_bg(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        extra_args: list[str] | None = None,
+        permission_mode: str | None = None,
+    ) -> str:
+        short_id = super().spawn_bg(
+            cwd=cwd,
+            prompt=prompt,
+            extra_args=extra_args,
+            permission_mode=permission_mode,
+        )
         from cw.config import DEV_PLAN_OUTPUT_DIR
 
         prompts = sorted(DEV_PLAN_OUTPUT_DIR.glob("prompt-*.txt"))

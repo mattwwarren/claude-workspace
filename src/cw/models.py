@@ -47,6 +47,8 @@ class QueueItemStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    BLOCKED_ON_USER = "blocked_on_user"
 
 
 # Schema versions for persisted state. Bump when making a breaking change
@@ -117,6 +119,10 @@ class OrchestratorEventType(StrEnum):
     SESSION_SPAWNED = "session.spawned"
     SESSION_COMPLETED = "session.completed"
     SESSION_TIMED_OUT = "session.timed_out"
+    SESSION_NEEDS_ATTENTION = "session.needs_attention"
+    TICKET_NEEDS_SYNC = "ticket.needs_sync"
+    STAGE_ENTERED = "stage.entered"
+    STAGE_ERRORED = "stage.errored"
     PR_REGISTERED = "pr.registered"
     PR_CI_FAILED = "pr.ci_failed"
     PR_REVIEW_RECEIVED = "pr.review_received"
@@ -153,6 +159,19 @@ class TicketTask(BaseModel):
     # persisted before this field existed — consumer falls back to
     # ticket_id-only matching in that case.
     session_id: str | None = None
+    # Incremented each time the task is claimed by _claim_next_pending. Used to
+    # apply a hard cap on validation_failed retries (see issue #251).
+    attempts: int = 0
+    # Per-ticket wall-clock budget override (seconds). When set, takes precedence
+    # over the per-tier default in OrchestratorConfig.headless_timeout_by_tier and
+    # the global HEADLESS_TIMEOUT_SECONDS fallback. Set via ``cw dev-queue add
+    # --timeout <s>``. None means "use tier or global default". See issue #265.
+    headless_timeout_override: int | None = None
+    # Per-ticket idle-watchdog budget override (seconds). When set, takes precedence
+    # over the per-tier default in OrchestratorConfig.idle_watchdog_by_tier and
+    # the global IDLE_WATCHDOG_SECONDS fallback. None means "use tier or global
+    # default". See GitHub issue #326.
+    idle_watchdog_override: int | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -176,6 +195,9 @@ class DevQueueStore(BaseModel):
 
     def completed(self) -> list[TicketTask]:
         return [t for t in self.tasks if t.status == QueueItemStatus.COMPLETED]
+
+    def cancelled(self) -> list[TicketTask]:
+        return [t for t in self.tasks if t.status == QueueItemStatus.CANCELLED]
 
     def by_client(self, client: str) -> list[TicketTask]:
         return [t for t in self.tasks if t.client == client]
@@ -205,6 +227,19 @@ class OrchestratorConfig(BaseModel):
     default_max_parallel: int = 1
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)
     backend: BackendName | None = None
+    # Per-tier wall-clock budgets (seconds) for headless DAEMON sessions.
+    # Keyed by scope.tier from the auto-dev sentinel; unknown tiers fall back
+    # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.
+    headless_timeout_by_tier: dict[str, int] = Field(
+        default_factory=lambda: {"small": 1800, "large": 5400}
+    )
+    # Per-tier idle-watchdog budgets (seconds). Keyed by TicketTask.scope_hint;
+    # unknown tiers fall back to IDLE_WATCHDOG_SECONDS (900s). Large-tier
+    # sessions can legitimately stall longer on slow tests/mypy before emitting
+    # any sentinel. See GitHub issues #326, #340.
+    idle_watchdog_by_tier: dict[str, int] = Field(
+        default_factory=lambda: {"large": 1800}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -255,6 +290,7 @@ class Session(BaseModel):
     worktree_path: Path | None = None
     branch: str | None = None
     surface_ref: str | None = None
+    # legacy: write-dead since #246, kept for state compat
     last_handoff_path: Path | None = None
     claude_session_id: str | None = None
     auto_backgrounded: bool = False
@@ -304,6 +340,13 @@ class ClientConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_AUTO_PURPOSES),
     )
     purpose_prompts: dict[str, str] = Field(default_factory=dict)
+    # When set, ``cw`` passes ``--model <worker_model>`` to ``claude --bg``
+    # for DAEMON-origin spawns (auto-dev workers, including resume re-spawns
+    # in :func:`cw.session.resume_session`). Opaque string — no validation;
+    # user is responsible for matching Anthropic's published model ids.
+    # Default ``None`` inherits the user's logged-in default model.
+    # See issue #248.
+    worker_model: str | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
     cmux_workspace: str | None = None

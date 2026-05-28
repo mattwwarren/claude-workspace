@@ -36,7 +36,7 @@ jobs:
         run: brew install tmux
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --extra mcp
 
       - name: Lint
         run: uv run ruff check src/ tests/
@@ -46,6 +46,16 @@ jobs:
 
       - name: Type check
         run: uv run mypy --strict src/
+
+      # Catches drift between .pre-commit-config.yaml hook pins and the
+      # dedicated lint/format/mypy steps above. Skips the local pytest
+      # hook (CI runs the full suite separately with coverage). The
+      # diff-cover hook is pre-push only and excluded automatically.
+      - name: Validate pre-commit hook config
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          SKIP: pytest
+        run: uv run pre-commit run --all-files --show-diff-on-failure
 
       - name: Test (unit) with coverage
         run: uv run pytest tests/ -v --tb=short -m 'not integration' --cov=cw --cov-report=term --cov-report=xml --cov-fail-under=88

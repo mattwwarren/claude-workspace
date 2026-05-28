@@ -1,9 +1,8 @@
 """cw doctor preflight — report environment health in one place.
 
-When a user's environment doesn't satisfy the chosen backend (no tmux,
-cmux daemon not running, state file corrupted), every cw command fails
-deep in an adapter with a cryptic error. `cw doctor` is the one place
-to find out *what* is wrong before you start a session.
+When the environment is missing required binaries or the state file is
+corrupted, every cw command fails with a cryptic error. `cw doctor` is
+the one place to find out *what* is wrong before starting a session.
 
 Returns structured results so the CLI can format them and tests can
 assert on specific checks.
@@ -11,13 +10,16 @@ assert on specific checks.
 
 from __future__ import annotations
 
-import shutil
-import sys
+import json
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+import yaml
+from pydantic import ValidationError
 
 from cw import __version__
-from cw.cmux import _resolve_backend_name, get_cmux_adapter
 from cw.config import (
     clients_file,
     load_clients,
@@ -27,8 +29,12 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
-from cw.models import BackendName, CwState, Session
+from cw.native_daemon import _ROSTER_PATH
 from cw.reconcile import reconcile
+from cw.worktree import _git_dir
+
+if TYPE_CHECKING:
+    from cw.models import CwState, Session
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,7 @@ class CheckResult:
     name: str
     ok: bool
     detail: str
+    warn: bool = False
 
 
 @dataclass
@@ -45,48 +52,26 @@ class DoctorReport:
     """Aggregated output from :func:`run_doctor`."""
 
     version: str
-    backend: BackendName
     checks: list[CheckResult] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return all(c.ok for c in self.checks)
 
+    @property
+    def clean(self) -> bool:
+        """True only when every check is both ok and not warned."""
+        return all(c.ok and not c.warn for c in self.checks)
 
-_CMUX_SOCKET_PATH = (
-    Path.home() / "Library" / "Application Support" / "cmux" / "cmux.sock"
-)
 
+# Path to Claude Code user settings — read for the disclaimer-acceptance flag.
+_CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
-def _check_backend_binary(backend: BackendName) -> CheckResult:
-    """Check whether the chosen backend's binary/daemon is reachable."""
-    if backend is BackendName.TMUX:
-        path = shutil.which("tmux")
-        if path:
-            return CheckResult("tmux on PATH", ok=True, detail=path)
-        return CheckResult(
-            "tmux on PATH",
-            ok=False,
-            detail="tmux not found; install via brew/apt or set CW_BACKEND=cmux",
-        )
-    if backend is BackendName.CMUX:
-        if sys.platform != "darwin":
-            return CheckResult(
-                "cmux daemon",
-                ok=False,
-                detail=f"cmux requires macOS; running on {sys.platform}",
-            )
-        if _CMUX_SOCKET_PATH.exists():
-            return CheckResult(
-                "cmux daemon socket", ok=True, detail=str(_CMUX_SOCKET_PATH)
-            )
-        return CheckResult(
-            "cmux daemon socket",
-            ok=False,
-            detail=f"not found at {_CMUX_SOCKET_PATH}; is cmux running?",
-        )
-    # fake backend needs no binary
-    return CheckResult("fake backend (no binary required)", ok=True, detail="")
+# Minimum supported Claude Code version for native-daemon dispatch.
+_MIN_CLAUDE_VERSION = (2, 1, 139)
+
+# Number of components (major.minor.patch) required in a version string.
+_VERSION_PARTS = 3
 
 
 def _check_config_file() -> CheckResult:
@@ -100,7 +85,7 @@ def _check_config_file() -> CheckResult:
         )
     try:
         load_clients()
-    except Exception as exc:
+    except (OSError, yaml.YAMLError, CwError, ValidationError) as exc:
         return CheckResult("clients.yaml", ok=False, detail=f"parse failed: {exc}")
     return CheckResult("clients.yaml", ok=True, detail=str(path))
 
@@ -128,7 +113,7 @@ def _check_state_file() -> tuple[CheckResult, CwState | None]:
     path = state_file()
     try:
         state = load_state()
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
         return (
             CheckResult("sessions.json", ok=False, detail=f"load failed: {exc}"),
             None,
@@ -139,7 +124,7 @@ def _check_state_file() -> tuple[CheckResult, CwState | None]:
 def _check_dev_queue() -> CheckResult:
     try:
         load_dev_queue()
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
         return CheckResult("dev_queue.json", ok=False, detail=f"load failed: {exc}")
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
 
@@ -239,15 +224,7 @@ def _check_linkage(state: CwState) -> list[CheckResult]:
 def _check_reconcile() -> CheckResult:
     """Run reconciliation and describe the outcome as a check result."""
     try:
-        adapter = get_cmux_adapter()
-    except CwError as exc:
-        return CheckResult(
-            "reconciliation",
-            ok=False,
-            detail=f"adapter unavailable: {exc}",
-        )
-    try:
-        reconcile_report = reconcile(adapter)
+        reconcile_report = reconcile()
     except CwError as exc:
         return CheckResult(
             "reconciliation",
@@ -268,20 +245,37 @@ def _check_reconcile() -> CheckResult:
     )
 
 
+def _check_workspace_paths() -> list[CheckResult]:
+    """Verify each client's effective git directory exists."""
+    try:
+        clients = load_clients()
+    except Exception:  # noqa: BLE001
+        return []  # _check_config_file() already surfaces parse errors
+    results = []
+    for name, client in clients.items():
+        git_dir = _git_dir(client)
+        if not git_dir.exists():
+            results.append(
+                CheckResult(
+                    f"workspace/{name}",
+                    ok=False,
+                    detail=f"path does not exist: {git_dir}",
+                )
+            )
+    return results
+
+
 def run_doctor(*, reap: bool = False) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
-    When *reap* is True, also run multiplexer/state reconciliation and
-    append a ``reconciliation`` check summarising the number of reaped
-    sessions and reverted tickets.
+    When *reap* is True, also run state reconciliation and append a
+    ``reconciliation`` check summarising the number of reaped sessions and
+    reverted tickets.
 
     Linkage drift checks (parent/worker reference integrity) are always run,
     independent of the *reap* flag.
     """
-    backend = _resolve_backend_name()
-    report = DoctorReport(version=__version__, backend=backend)
-    report.checks.append(CheckResult("resolved backend", ok=True, detail=backend.value))
-    report.checks.append(_check_backend_binary(backend))
+    report = DoctorReport(version=__version__)
     report.checks.append(_check_config_file())
     report.checks.append(_check_orchestrator_config())
     state_check, link_state = _check_state_file()
@@ -295,20 +289,169 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     if link_state is not None:
         report.checks.extend(_check_linkage(link_state))
 
+    report.checks.append(_check_bypass_disclaimer())
+    report.checks.append(_check_claude_version())
+    report.checks.append(_check_daemon_reachable())
+    report.checks.extend(_check_workspace_paths())
+
     if reap:
         report.checks.append(_check_reconcile())
     return report
+
+
+def _check_bypass_disclaimer() -> CheckResult:
+    """Check whether the user has accepted the bypass-permissions disclaimer."""
+    try:
+        raw = _CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CheckResult(
+            "bypass-disclaimer",
+            ok=True,
+            warn=True,
+            detail=f"settings.json not found at {_CLAUDE_SETTINGS_PATH}",
+        )
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "bypass-disclaimer",
+            ok=True,
+            warn=True,
+            detail=f"could not parse settings.json: {exc}",
+        )
+    if data.get("skipDangerousModePermissionPrompt"):
+        return CheckResult("bypass-disclaimer", ok=True, warn=False, detail="accepted")
+    return CheckResult(
+        "bypass-disclaimer",
+        ok=True,
+        warn=True,
+        detail=(
+            "skipDangerousModePermissionPrompt not set"
+            " — run `claude --dangerously-skip-permissions` once interactively"
+        ),
+    )
+
+
+def _check_claude_version() -> CheckResult:
+    """Check that the claude binary is reachable and return its version.
+
+    Returns ok=True, warn=True when the binary ran but exited non-zero, or when
+    the version string cannot be parsed, or when the version is below the floor
+    required for native-daemon dispatch.
+    """
+    try:
+        proc = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return CheckResult("claude-version", ok=False, detail="claude binary not found")
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "claude-version", ok=False, detail="claude --version timed out (10s)"
+        )
+
+    output = proc.stdout or proc.stderr or ""
+    version_line = output.splitlines()[0] if output else ""
+
+    if proc.returncode != 0:
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=f"claude --version exited {proc.returncode}: {version_line}",
+        )
+
+    # Parse the leading X.Y.Z token from the version line.
+    first_token = version_line.split()[0] if version_line else ""
+    parts = first_token.split(".")
+    if len(parts) < _VERSION_PARTS:
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=f"could not parse version: {version_line}",
+        )
+    try:
+        parsed = tuple(int(p) for p in parts[:3])
+    except (ValueError, AttributeError):
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=f"could not parse version: {version_line}",
+        )
+
+    if parsed < _MIN_CLAUDE_VERSION:
+        min_str = ".".join(str(x) for x in _MIN_CLAUDE_VERSION)
+        return CheckResult(
+            "claude-version",
+            ok=True,
+            warn=True,
+            detail=(
+                f"{version_line} — upgrade to >= {min_str} for native-daemon dispatch"
+            ),
+        )
+
+    return CheckResult("claude-version", ok=True, detail=version_line)
+
+
+def _check_daemon_reachable() -> CheckResult:
+    """Check whether the Claude native daemon's roster reports a running supervisor."""
+    try:
+        raw = _ROSTER_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CheckResult(
+            "daemon-reachable",
+            ok=True,
+            warn=True,
+            detail=f"roster.json not found at {_ROSTER_PATH} — daemon not started?",
+        )
+    try:
+        data: dict[str, object] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "daemon-reachable",
+            ok=True,
+            warn=True,
+            detail=f"could not parse roster.json: {exc}",
+        )
+    pid = data.get("supervisorPid", 0)
+    if isinstance(pid, int) and pid > 0:
+        return CheckResult(
+            "daemon-reachable", ok=True, warn=False, detail=f"supervisorPid={pid}"
+        )
+    return CheckResult(
+        "daemon-reachable",
+        ok=True,
+        warn=True,
+        detail="supervisorPid absent or zero — daemon may not be running",
+    )
 
 
 def format_report(report: DoctorReport) -> str:
     """Render a :class:`DoctorReport` as a human-readable block."""
     lines = [f"cw {report.version}"]
     for check in report.checks:
-        mark = "OK" if check.ok else "FAIL"
+        if check.warn:
+            mark = "WARN"
+        elif check.ok:
+            mark = "OK"
+        else:
+            mark = "FAIL"
         line = f"  [{mark}] {check.name}"
         if check.detail:
             line += f" — {check.detail}"
         lines.append(line)
     lines.append("")
-    lines.append("status: healthy" if report.ok else "status: problems detected")
+    if not report.ok:
+        footer = "status: problems detected"
+    elif report.clean:
+        footer = "status: healthy"
+    else:
+        footer = "status: healthy — advisory warnings"
+    lines.append(footer)
     return "\n".join(lines)

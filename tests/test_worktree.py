@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
+from cw.exceptions import WorktreeError
 from cw.models import ClientConfig
 from cw.worktree import (
+    _fetch_default_branch,
     _git_dir,
+    check_not_main_checkout,
     create_worktree,
+    fast_forward_main,
+    is_main_behind_origin,
     remove_worktree,
     resolve_worktree_base,
     slugify_branch,
@@ -19,7 +27,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 
 class TestSlugifyBranch:
@@ -247,6 +255,98 @@ class TestCreateWorktree:
         add_call = git_calls[-1]
         assert "-b" not in add_call
 
+    def test_create_worktree_rejects_path_equal_to_main_checkout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Guard against #300: create_worktree must refuse if wt_path == git_cwd.
+
+        When worktree_path_for degenerately returns the client's own git
+        directory, the guard must fire before any git operation to prevent
+        accidental overwrites of the main checkout.
+        """
+        repo = make_git_repo("main-checkout")
+        client = ClientConfig(
+            name="test",
+            workspace_path=repo,
+            worktree_base=tmp_path / "wt",
+        )
+
+        # Simulate the degenerate case: worktree_path_for returns the repo itself.
+        monkeypatch.setattr(
+            "cw.worktree.worktree_path_for", lambda _client, _branch: repo
+        )
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            create_worktree(client, "auto-dev-300")
+
+    def test_create_worktree_rejects_symlink_to_main_checkout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Guard catches symlinks: resolve() normalises a symlink to main checkout."""
+        repo = make_git_repo("main-checkout")
+        symlink_path = tmp_path / "link-to-main"
+        symlink_path.symlink_to(repo)
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=repo,
+            worktree_base=tmp_path / "wt",
+        )
+        monkeypatch.setattr(
+            "cw.worktree.worktree_path_for", lambda _client, _branch: symlink_path
+        )
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            create_worktree(client, "auto-dev-300")
+
+
+class TestCheckNotMainCheckout:
+    """Unit tests for check_not_main_checkout."""
+
+    def test_raises_when_paths_are_equal(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Raises WorktreeError when worktree_path resolves to main checkout."""
+        repo = make_git_repo("main-checkout")
+        client = ClientConfig(name="test", workspace_path=repo)
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            check_not_main_checkout(repo, client)
+
+    def test_raises_via_symlink(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Raises even when worktree_path is a symlink to main checkout."""
+        repo = make_git_repo("main-checkout")
+        symlink_path = tmp_path / "link-to-main"
+        symlink_path.symlink_to(repo)
+        client = ClientConfig(name="test", workspace_path=repo)
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            check_not_main_checkout(symlink_path, client)
+
+    def test_does_not_raise_for_distinct_path(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Does not raise when worktree_path is a genuinely separate directory."""
+        repo = make_git_repo("main-checkout")
+        other = make_git_repo("branch-worktree")
+        client = ClientConfig(name="test", workspace_path=repo)
+
+        check_not_main_checkout(other, client)
+
 
 class TestSubmoduleInit:
     def test_submodule_init_when_gitmodules_exists(
@@ -472,9 +572,359 @@ class TestRemoveWorktree:
                     " ".join(args),
                     stderr=msg,
                 )
-                raise WorktreeError("Git command failed") from err
+                wt_msg = "Git command failed"
+                raise WorktreeError(wt_msg) from err
             return MagicMock(returncode=0, stderr="")
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         with pytest.raises(WorktreeError):
             remove_worktree(client, "feat/dirty", force=False)
+
+
+class TestIsMainBehindOrigin:
+    """Tests for is_main_behind_origin."""
+
+    # ------------------------------------------------------------------
+    # Option A: real bare-repo tests
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
+        """Run a git command stripped of GIT_* env vars; return stdout."""
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(cwd) if cwd else None,
+            env=clean_env,
+        )
+        return result.stdout.strip()
+
+    def _make_bare_origin_and_clone(
+        self, tmp_path: Path
+    ) -> tuple[Path, Path, ClientConfig]:
+        """Create a bare origin repo, clone it, return (bare, clone, client)."""
+        bare = tmp_path / "bare.git"
+        bare.mkdir()
+        self._run_bare_git("init", "--bare", "-b", "main", str(bare))
+
+        clone = tmp_path / "clone"
+        self._run_bare_git("clone", str(bare), str(clone))
+        self._run_bare_git("config", "user.email", "test@example.com", cwd=clone)
+        self._run_bare_git("config", "user.name", "cw test", cwd=clone)
+        # Create an initial commit so main exists
+        (clone / "README.md").write_text("init\n")
+        self._run_bare_git("add", "README.md", cwd=clone)
+        self._run_bare_git("commit", "-m", "initial", cwd=clone)
+        self._run_bare_git("push", "origin", "main", cwd=clone)
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=clone,
+            default_branch="main",
+        )
+        return bare, clone, client
+
+    def test_fresh_main_returns_false(self, tmp_path: Path) -> None:
+        """When local main == origin/main, returns (False, sha, sha, 0)."""
+        _bare, _clone, client = self._make_bare_origin_and_clone(tmp_path)
+        stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
+        assert stale is False
+        assert local_sha == origin_sha
+        assert behind == 0
+        assert len(local_sha) == 40  # full SHA
+
+    def test_stale_main_returns_true_with_counts(self, tmp_path: Path) -> None:
+        """When origin has a new commit local doesn't have, returns (True, ...)."""
+        bare, _clone, client = self._make_bare_origin_and_clone(tmp_path)
+
+        # Create a second clone to push a new commit to the bare origin
+        clone2 = tmp_path / "clone2"
+        self._run_bare_git("clone", str(bare), str(clone2))
+        self._run_bare_git("config", "user.email", "test@example.com", cwd=clone2)
+        self._run_bare_git("config", "user.name", "cw test", cwd=clone2)
+        (clone2 / "extra.txt").write_text("extra\n")
+        self._run_bare_git("add", "extra.txt", cwd=clone2)
+        self._run_bare_git("commit", "-m", "second commit", cwd=clone2)
+        self._run_bare_git("push", "origin", "main", cwd=clone2)
+
+        # Now the original clone's local main is behind origin/main
+        stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
+        assert stale is True
+        assert local_sha != origin_sha
+        assert behind == 1
+
+    # ------------------------------------------------------------------
+    # Option B: patched _run_git tests
+    # ------------------------------------------------------------------
+
+    def test_no_remote_configured_returns_false(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Fetch rc=128 (no remote) → (False, "", "", 0) + WARNING."""
+        ws = tmp_path / "ws"
+        ws.mkdir()  # directory must exist so the missing-dir guard doesn't fire first
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 128
+            result.stdout = ""
+            result.stderr = "fatal: 'origin' does not appear to be a git repository"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
+
+        assert stale is False
+        assert local_sha == ""
+        assert origin_sha == ""
+        assert behind == 0
+        assert any("freshness_check_skip" in r.message for r in caplog.records)
+
+    def test_fetch_failure_raises_worktreeerror_returns_false(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """WorktreeError on fetch → (False, "", "", 0) + WARNING."""
+        ws = tmp_path / "ws"
+        ws.mkdir()  # directory must exist so the missing-dir guard doesn't fire first
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        call_count = 0
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if "fetch" in args:
+                msg = "fetch failed"
+                raise WorktreeError(msg)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "abc123\n"
+            result.stderr = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
+
+        assert call_count == 1  # fetch raised immediately; no further git calls
+        assert stale is False
+        assert local_sha == ""
+        assert origin_sha == ""
+        assert behind == 0
+        assert any("fetch failed" in r.message for r in caplog.records)
+
+    def test_rev_parse_failure_returns_false(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """WorktreeError on rev-parse → (False, "", "", 0) + WARNING."""
+        ws = tmp_path / "ws"
+        ws.mkdir()  # directory must exist so the missing-dir guard doesn't fire first
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            if "fetch" in args:
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = ""
+                result.stderr = ""
+                return result
+            if "rev-parse" in args:
+                msg = "rev-parse failed"
+                raise WorktreeError(msg)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "0\n"
+            result.stderr = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            stale, local_sha, origin_sha, behind = is_main_behind_origin(client)
+
+        assert stale is False
+        assert local_sha == ""
+        assert origin_sha == ""
+        assert behind == 0
+        assert any("rev-parse/rev-list failed" in r.message for r in caplog.records)
+
+    def test_legacy_client_uses_workspace_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """All _run_git calls use _git_dir(client) as cwd."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        captured_cwds: list[object] = []
+        call_index = 0
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            nonlocal call_index
+            captured_cwds.append(cwd)
+            result = MagicMock()
+            result.returncode = 0
+            if "fetch" in args:
+                result.stdout = ""
+                result.stderr = ""
+            elif "rev-list" in args:
+                result.stdout = "0\n"
+                result.stderr = ""
+            else:
+                # rev-parse calls
+                result.stdout = "deadbeef" * 5 + "\n"
+                result.stderr = ""
+            call_index += 1
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        is_main_behind_origin(client)
+
+        expected_cwd = _git_dir(client)
+        for cwd in captured_cwds:
+            assert cwd == expected_cwd
+
+
+class TestFastForwardMain:
+    """Tests for fast_forward_main."""
+
+    def test_already_up_to_date_returns_same_sha(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When already current, before_sha == after_sha."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "ws",
+            default_branch="main",
+        )
+        sha = "abc123def456abc123def456abc123def456abc1"
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.stdout = sha + "\n"
+            result.stderr = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        before, after = fast_forward_main(client)
+        assert before == sha
+        assert after == sha
+
+    def test_updated_returns_different_shas(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a fast-forward, before_sha != after_sha."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "ws",
+            default_branch="main",
+        )
+        old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        new_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        call_count = 0
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock()
+            result.stderr = ""
+            if "rev-parse" in args and call_count == 1:
+                result.stdout = old_sha + "\n"
+            elif "pull" in args:
+                result.stdout = ""
+            else:
+                result.stdout = new_sha + "\n"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        before, after = fast_forward_main(client)
+        assert before == old_sha
+        assert after == new_sha
+
+    def test_pull_failure_raises_worktreeerror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WorktreeError raised on pull failure (non-FF or network error)."""
+        from cw.exceptions import WorktreeError as _WorktreeError
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "ws",
+            default_branch="main",
+        )
+        old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        call_count = 0
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                result = MagicMock()
+                result.stdout = old_sha + "\n"
+                result.stderr = ""
+                return result
+            msg = "would clobber existing tag"
+            raise _WorktreeError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with pytest.raises(WorktreeError, match="would clobber"):
+            fast_forward_main(client)
+
+
+class TestFetchDefaultBranch:
+    def test_missing_dir_returns_false_no_raise(self, tmp_path: Path) -> None:
+        """_fetch_default_branch with missing git_dir returns False, no exception."""
+        missing = tmp_path / "does-not-exist"
+        result = _fetch_default_branch("test-client", "main", missing)
+        assert result is False

@@ -46,6 +46,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `auto_purposes` | list | `[idea, impl, debt]` | Session purposes to auto-start with `cw start` |
 | `purpose_prompts` | dict | `{}` | Custom prompts per session purpose |
 | `worktree_base` | path | *none* | Base directory for git worktree isolation |
+| `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
 
@@ -136,6 +137,66 @@ clients:
     repo_path: /home/user/projects/monorepo
     branch: feature-a
     worktree_base: /home/user/worktrees
+```
+
+### Cost Control — Pin Worker Model
+
+`worker_model` constrains the model used by autonomous workers (auto-dev,
+dispatch, planner) without affecting your interactive sessions:
+
+```yaml
+clients:
+  thrifty-project:
+    workspace_path: /home/user/projects/thrifty-project
+    default_branch: main
+    # Workers run on Sonnet (cheaper than Opus) for auto-dev tasks.
+    # Interactive `cw start thrifty-project` still uses your default model.
+    worker_model: claude-sonnet-4-6-20251015
+
+  exploratory-project:
+    workspace_path: /home/user/projects/exploratory-project
+    default_branch: main
+    # Workers pinned to Haiku — fast/cheap for simple debt tickets.
+    worker_model: claude-haiku-4-5-20251001
+```
+
+Scope: forwarded as `--model <id>` to `claude --bg` from both
+`spawn_create_impl` (initial DAEMON spawn) and `resume_session` (DAEMON-origin
+resume of a dead surface). USER-origin sessions ignore this field.
+
+## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
+
+Controls the autonomous dispatch loop. Created with defaults on first run.
+
+```yaml
+tick_interval_seconds: 30
+default_max_parallel: 2
+per_client_max_parallel: {}
+linear_prefix_map: {}
+
+# Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
+# known (from the auto-dev sentinel scope field) are budgeted by this map.
+# Sessions without a known tier fall back to the global HEADLESS_TIMEOUT_SECONDS.
+# Explicit per-ticket overrides (cw dev-queue add --timeout <s>) always win.
+headless_timeout_by_tier:
+  small: 1800   # 30 min — tight cap for small-scope tickets
+  large: 5400   # 90 min — room for 11-file, 600-line implementations
+
+# Per-tier idle-watchdog budgets (seconds). After this window of silence
+# (no terminal sentinel emitted), a DAEMON session is flagged as
+# BLOCKED_ON_USER and a push notification fires. Large-tier sessions can
+# legitimately stall on slow test runs or mypy before emitting any
+# sentinel. Sessions whose scope_hint is unknown fall back to the global
+# IDLE_WATCHDOG_SECONDS (900s). See GitHub issues #326, #340.
+idle_watchdog_by_tier:
+  large: 1800   # 30 min — large-tier sessions may stall on slow builds
+```
+
+Override a single ticket's budget at enqueue time:
+
+```bash
+cw dev-queue add GEN-123 --client my-project --timeout 7200
+cw dev-queue add GEN-456 --client my-project --idle-watchdog 600
 ```
 
 ## Managing Configuration

@@ -13,10 +13,15 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
+    DevQueueStore,
     OrchestratorConfig,
+    OrchestratorEvent,
+    OrchestratorEventType,
+    QueueItemStatus,
     Session,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
 
 
@@ -229,6 +234,28 @@ class TestClientConfig:
         assert c.is_worktree_client is True
         # Explicit workspace_path is preserved
         assert c.workspace_path == Path("/explicit/path")
+
+    def test_worker_model_defaults_to_none(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.worker_model is None
+
+    def test_worker_model_accepts_opaque_string(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        assert c.worker_model == "claude-sonnet-4-6-20251015"
+
+    def test_worker_model_round_trip(self) -> None:
+        original = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored.worker_model == "claude-haiku-4-5-20251001"
 
 
 class TestCwState:
@@ -483,3 +510,81 @@ class TestOrchestratorConfigLegacyDefault:
         """Default fallback is 1 when neither field is set."""
         config = OrchestratorConfig()
         assert config.default_max_parallel == 1
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "abc12345",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "prev_stage": "s1_plan_reviewed",
+                "started_at": "2026-05-23T13:01:42Z",
+            },
+        ),
+        (
+            OrchestratorEventType.STAGE_ERRORED,
+            {
+                "session_id": "abc12345",
+                "ticket_id": "173",
+                "stage": "s2_impl_started",
+                "started_at": "2026-05-23T13:01:42Z",
+                "error_kind": "agent_block",
+            },
+        ),
+    ],
+)
+def test_stage_event_types_round_trip(
+    event_type: OrchestratorEventType,
+    payload: dict[str, str],
+) -> None:
+    """STAGE_ENTERED / STAGE_ERRORED survive a Pydantic model round-trip."""
+    event = OrchestratorEvent(type=event_type, payload=payload)
+    restored = OrchestratorEvent.model_validate_json(event.model_dump_json())
+    assert restored.type is event_type
+    assert restored.payload == payload
+
+
+def test_orchestrator_event_type_includes_needs_sync() -> None:
+    """TICKET_NEEDS_SYNC event type has correct string value."""
+    assert OrchestratorEventType.TICKET_NEEDS_SYNC.value == "ticket.needs_sync"
+
+
+class TestQueueItemStatusBlockedOnUser:
+    def test_blocked_on_user_value(self) -> None:
+        assert QueueItemStatus.BLOCKED_ON_USER.value == "blocked_on_user"
+
+    def test_all_queue_statuses(self) -> None:
+        # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER
+        assert len(QueueItemStatus) == 6
+
+    def test_blocked_on_user_not_in_running(self) -> None:
+        store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-1",
+                    client="c",
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                ),
+                TicketTask(
+                    ticket_id="T-2",
+                    client="c",
+                    status=QueueItemStatus.RUNNING,
+                ),
+            ]
+        )
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].ticket_id == "T-2"
+        assert all(t.ticket_id != "T-1" for t in running)
+
+
+class TestOrchestratorEventTypeSessionNeedsAttention:
+    def test_session_needs_attention_value(self) -> None:
+        assert (
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION.value
+            == "session.needs_attention"
+        )

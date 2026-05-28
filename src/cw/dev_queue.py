@@ -17,7 +17,13 @@ from cw.config import (
     dev_queue_lock as _dev_queue_lock_file,
 )
 from cw.exceptions import CwError
-from cw.models import DevQueueStore, DispatchPlan, OrchestratorConfig, TicketTask
+from cw.models import (
+    DevQueueStore,
+    DispatchPlan,
+    OrchestratorConfig,
+    QueueItemStatus,
+    TicketTask,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -105,12 +111,124 @@ def save_dev_queue(store: DevQueueStore) -> None:
     atomic_write_text(path, store.model_dump_json(indent=2))
 
 
-def add_ticket(task: TicketTask) -> None:
-    """Enqueue a TicketTask, acquiring the file lock atomically."""
+def add_ticket(task: TicketTask) -> bool:
+    """Enqueue a TicketTask, acquiring the file lock atomically.
+
+    Returns True if the task was inserted, False if a task with the same
+    (client, ticket_id) is already PENDING or RUNNING (deduplication guard).
+    """
+    _active = {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
     with _lock():
         store = load_dev_queue()
+        for existing in store.tasks:
+            if (
+                existing.client == task.client
+                and existing.ticket_id == task.ticket_id
+                and existing.status in _active
+            ):
+                return False
         store.tasks.append(task)
         save_dev_queue(store)
+    return True
+
+
+def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> None:
+    """Remove one (or all) matching TicketTask(s) from the dev queue.
+
+    Raises CwError when no task matches.  Raises CwError when multiple tasks
+    match and *remove_all* is False.
+    """
+    with _lock():
+        store = load_dev_queue()
+        matches = [
+            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+        ]
+        n = len(matches)
+        if n == 0:
+            msg = (
+                f"No dev-queue task found for ticket '{ticket_id}'"
+                f" in client '{client}'."
+            )
+            raise CwError(msg)
+        if n > 1 and not remove_all:
+            msg = (
+                f"Multiple dev-queue tasks ({n}) match ticket '{ticket_id}' in"
+                f" client '{client}'; pass --all to remove all."
+            )
+            raise CwError(msg)
+        match_set = {id(m) for m in matches}
+        store.tasks = [t for t in store.tasks if id(t) not in match_set]
+        save_dev_queue(store)
+
+
+def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
+    """Mark a TicketTask as CANCELLED, clearing its session_id.
+
+    Returns the list of session_ids that were cleared (one per cancelled task).
+    Raises CwError when no task matches. Idempotent for already-CANCELLED tasks.
+    """
+    with _lock():
+        store = load_dev_queue()
+        matches = [
+            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+        ]
+        if not matches:
+            msg = (
+                f"No dev-queue task found for ticket '{ticket_id}'"
+                f" in client '{client}'."
+            )
+            raise CwError(msg)
+        cleared: list[str | None] = []
+        changed = False
+        for task in matches:
+            if task.status == QueueItemStatus.CANCELLED:
+                continue
+            cleared.append(task.session_id)
+            task.status = QueueItemStatus.CANCELLED
+            task.session_id = None
+            changed = True
+        if changed:
+            save_dev_queue(store)
+    return cleared
+
+
+def cancel_task_for_session(session_id: str) -> bool:
+    """Mark the RUNNING TicketTask that owns *session_id* as CANCELLED.
+
+    Returns True if a task was cancelled, False if none matched.
+    Used by _spawn_close_impl to atomically preempt the dispatcher before
+    the session is marked COMPLETED. See GitHub issue #317.
+    """
+    with _lock():
+        store = load_dev_queue()
+        for task in store.tasks:
+            if task.session_id == session_id and task.status == QueueItemStatus.RUNNING:
+                task.status = QueueItemStatus.CANCELLED
+                task.session_id = None
+                save_dev_queue(store)
+                return True
+    return False
+
+
+def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
+    """Remove all TicketTasks for *client*, optionally filtered by *status*.
+
+    Returns the number of tasks removed.
+    """
+    with _lock():
+        store = load_dev_queue()
+        if status is None:
+            kept = [t for t in store.tasks if t.client != client]
+        else:
+            kept = [
+                t
+                for t in store.tasks
+                if not (t.client == client and t.status == status)
+            ]
+        removed = len(store.tasks) - len(kept)
+        store.tasks = kept
+        save_dev_queue(store)
+    return removed
 
 
 def resolve_client(

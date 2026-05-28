@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
+import os
 import time
+import urllib.parse
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
@@ -21,7 +24,7 @@ from cw.config import (
 from cw.events import record_event
 from cw.models import OrchestratorEventType, SessionStatus
 from cw.orchestrate import retire_merged_prs
-from cw.pr_responder import clear_completed_pr_sessions, respond_to_pr_events
+from cw.pr_responder import clear_completed_pr_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +165,46 @@ def _all_threads_addressed(thread_status: dict[str, Any]) -> bool:
     )
 
 
+_DEFAULT_CHANNEL_URL = "http://127.0.0.1:8788/pr-event"
+
+
+def _post_to_channel(
+    event_type: str,
+    repo: str,
+    pr_number: int,
+    payload: dict[str, Any],
+) -> None:
+    """Post a PR event to the channel server. Best-effort: logs on failure."""
+    url = os.environ.get("CW_PR_EVENTS_URL", _DEFAULT_CHANNEL_URL)
+    body = json.dumps(
+        {
+            "repo": repo,
+            "pr_number": pr_number,
+            "event_type": event_type,
+            "payload": payload,
+        }
+    ).encode()
+    parsed = urllib.parse.urlparse(url)
+    conn = http.client.HTTPConnection(parsed.netloc, timeout=2)
+    try:
+        conn.request("POST", parsed.path, body, {"Content-Type": "application/json"})
+        conn.getresponse()
+    except Exception:  # noqa: BLE001
+        # Best-effort: channel server may not be running; never block PR watching.
+        # Justification: (1) failure modes are connection refused/timeout/HTTP error,
+        # (2) logged at debug with exc_info=True for traceability,
+        # (3) non-critical — PR watching must continue regardless,
+        # (4) tests verify resilience (test_channel_server_down_does_not_raise).
+        logger.debug(
+            "_post_to_channel failed url=%s event_type=%s",
+            url,
+            event_type,
+            exc_info=True,
+        )
+    finally:
+        conn.close()
+
+
 def watch_prs_for_client(
     client: ClientConfig,
     snapshot: WatcherSnapshot,
@@ -223,6 +266,9 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel(
+                    "merged", repo, pr_number, {"status": status, "role": role}
+                )
                 new_snapshot.pr_states[pr_key] = status
                 continue
 
@@ -247,6 +293,12 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel(
+                    "review_received",
+                    repo,
+                    pr_number,
+                    {"unresolved_threads": unresolved_now, "role": role},
+                )
                 new_snapshot.review_prs.add(pr_key)
 
             # --- PR_MERGEABLE: all threads addressed (and we've seen review before) ---
@@ -267,6 +319,7 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel("mergeable", repo, pr_number, {"role": role})
                 new_snapshot.mergeable_prs.add(pr_key)
 
             # --- PR_CI_FAILED: delta_findings mention CI failure ---
@@ -286,6 +339,12 @@ def watch_prs_for_client(
                     },
                 )
                 events.append(event)
+                _post_to_channel(
+                    "ci_failed",
+                    repo,
+                    pr_number,
+                    {"findings_count": len(delta_findings), "role": role},
+                )
                 new_snapshot.ci_fail_prs.add(pr_key)
 
     return events, new_snapshot
@@ -312,10 +371,14 @@ def run_watcher_tick(*, once: bool = False) -> None:
             _events, updated_snapshot = watch_prs_for_client(client, snapshot)
             _save_snapshot(client_name, updated_snapshot)
 
-        # Respond to queued PR events and clean up completed dispatch records
+        # As of 2026-05-26 the orchestrator skill
+        # (see .claude/agents/cw-orchestrator.md) replaces the in-daemon
+        # dispatch role of pr_responder.respond_to_pr_events().
+        # The watcher loop continues to detect PRs and post events into the
+        # cw-pr-events channel; the orchestrator session (spawn with
+        # `cw orchestrator-start`) consumes the channel and routes spawns.
         state = load_state()
         clear_completed_pr_sessions(state)
-        respond_to_pr_events()
 
         # Retire merged PRs: close sessions, drop dispatch entries, emit events.
         try:

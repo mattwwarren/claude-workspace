@@ -2,154 +2,59 @@
 
 from __future__ import annotations
 
-import shlex
-import time
+import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 import click
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cw.cmux import CmuxAdapter, _resolve_backend_name, get_cmux_adapter
 from cw.config import get_client, load_state, save_state
 from cw.exceptions import CwError
-from cw.handoff import extract_resumption_prompt, find_latest_handoff
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
-    ClientConfig,
     CompletionReason,
     CwState,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
 )
+from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
+from cw.spawn import _write_hook_context
 from cw.worktree import create_worktree, remove_worktree
 
 # Purposes that receive worktree cwd (impl works on the feature branch,
 # idea brainstorms within it; debt stays on the main workspace).
 WORKTREE_PURPOSES: frozenset[str] = frozenset({"impl", "idea"})
 
+# Hex characters used in Claude daemon short session ids.
+_HEX_CHARS: frozenset[str] = frozenset("0123456789abcdef")
+# Length of the Claude daemon short session id (8 hex chars).
+_SHORT_ID_LEN: int = 8
 
-def _build_env_prefix(client_name: str, purpose: str) -> str:
-    """Build ``CW_CLIENT=… CW_PURPOSE=…`` shell prefix for claude commands."""
-    return f"CW_CLIENT={client_name} CW_PURPOSE={purpose}"
+_DETACH_HINT = (
+    "Detach with Ctrl+Z. Do NOT use Ctrl+D"
+    " (terminates the daemon session in all attached terminals)."
+)
 
 
-CLAUDE_INIT_DELAY_S = 2
+def _is_native_surface_ref(ref: str) -> bool:
+    """Return True if *ref* looks like an 8-char hex daemon short id."""
+    return len(ref) == _SHORT_ID_LEN and all(c in _HEX_CHARS for c in ref)
 
 
-def _build_pane_args(
-    sessions: dict[str, Session],
-    client: ClientConfig | None = None,
-) -> dict[str, dict[str, str]]:
-    """Build pane data for each session including a claude command.
+def _attach_session(short_id: str) -> None:
+    """Attach the current terminal to ``claude attach <short_id>``.
 
-    Args:
-        sessions: Map of purpose name to Session.
-        client: Client config for resolving purpose prompts.
+    Blocks until the user exits (Ctrl+Z detaches without terminating the
+    session; Ctrl+D terminates the daemon session in all attached terminals).
     """
-    panes: dict[str, dict[str, str]] = {}
-    client_overrides = client.purpose_prompts if client else None
-    client_name = client.name if client else None
-    workspace_path = str(client.workspace_path) if client else None
-    for purpose, session in sessions.items():
-        # Build extra flags (e.g. --append-system-prompt)
-        extra = ""
-        prompt = get_purpose_prompt(
-            purpose,
-            client_overrides,
-            client_name=client_name,
-            workspace_path=workspace_path,
-        )
-        if prompt:
-            # Collapse newlines for single-line shell command
-            escaped_prompt = shlex.quote(prompt.replace("\n", " "))
-            extra = f" --append-system-prompt {escaped_prompt}"
-
-        # Two-mode launch: recovery uses --resume <uuid>, fresh uses --session-id <uuid>
-        if session.claude_session_id:
-            session_flag = f" --resume {session.claude_session_id}"
-        else:
-            new_id = str(uuid4())
-            session.claude_session_id = new_id
-            session_flag = f" --session-id {new_id}"
-
-        if client_name:
-            env_prefix = f"{_build_env_prefix(client_name, purpose)} "
-        else:
-            env_prefix = ""
-        cmd = f"{env_prefix}cw run-claude --{session_flag}{extra}"
-        pane_data: dict[str, str] = {"claude_cmd": cmd}
-        cwd = str(session.worktree_path or session.workspace_path)
-        pane_data["cwd"] = cwd
-        panes[purpose] = pane_data
-    return panes
-
-
-def _create_all_purpose_sessions(
-    client_name: str,
-    client: ClientConfig,
-    state: CwState,
-    *,
-    worktree_path: Path | None = None,
-    worktree_branch: str | None = None,
-    prior_sessions: dict[str, Session] | None = None,
-) -> dict[str, Session]:
-    """Create Session objects for all purposes.
-
-    worktree_path/branch apply to impl and idea purposes.
-    When *prior_sessions* is provided, carries forward ``claude_session_id``
-    from the matching purpose so recovery uses ``--resume <uuid>``.
-    """
-    sessions: dict[str, Session] = {}
-    for purpose_enum in client.auto_purposes:
-        purpose = purpose_enum.value
-        # Carry forward claude_session_id from prior session for recovery
-        prior_claude_id: str | None = None
-        if prior_sessions and purpose in prior_sessions:
-            prior_claude_id = prior_sessions[purpose].claude_session_id
-        session = Session(
-            name=f"{client_name}/{purpose}",
-            client=client_name,
-            purpose=purpose_enum,
-            workspace_path=client.workspace_path,
-            surface_ref=purpose,
-            claude_session_id=prior_claude_id,
-        )
-        # Apply worktree to impl and idea panes
-        if worktree_path and purpose in WORKTREE_PURPOSES:
-            session.worktree_path = worktree_path
-            session.branch = worktree_branch
-        sessions[purpose] = session
-        state.sessions.append(session)
-        record_event(
-            client_name,
-            HistoryEvent(
-                event_type=EventType.SESSION_STARTED,
-                client=client_name,
-                session_id=session.id,
-                session_name=session.name,
-                purpose=purpose,
-            ),
-        )
-    return sessions
-
-
-def _spawn_session_surface(
-    client: ClientConfig,
-    session: Session,
-    command: str,
-    adapter: CmuxAdapter,
-) -> None:
-    """Spawn a cmux surface for the session and store the surface_ref."""
-    workspace = client.cmux_workspace or client.name
-    surface_ref = adapter.spawn(workspace, command)
-    session.surface_ref = surface_ref
+    subprocess.run(["claude", "attach", short_id], check=False)
 
 
 def start_session(
@@ -158,7 +63,7 @@ def start_session(
     *,
     worktree: str | None = None,
     parent: str | None = None,
-    adapter: CmuxAdapter | None = None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> None:
     """Start or resume a Claude Code session for a client.
 
@@ -167,17 +72,16 @@ def start_session(
         purpose: Session purpose (impl, idea, debt, explore).
         worktree: Optional git branch for worktree isolation.
         parent: Optional parent session ID for bidirectional linkage.
-        adapter: CmuxAdapter instance. Defaults to get_cmux_adapter() (macOS only).
-                 Inject FakeCmuxAdapter for tests.
+        native_daemon: NativeDaemonClient instance. Defaults to
+                       get_native_daemon_client(). Inject FakeNativeDaemonClient
+                       for tests.
     """
-    if adapter is None:
-        adapter = get_cmux_adapter()
-
+    daemon = native_daemon or get_native_daemon_client()
     client = get_client(client_name)
     state = load_state()
 
     # Reap phantom sessions so we don't short-circuit on a dead "active" row.
-    reconcile(adapter)
+    reconcile()
     state = load_state()
 
     # Validate parent session FIRST so a bad ID always errors, even when
@@ -190,8 +94,6 @@ def start_session(
         if parent_session is None:
             msg = f"Parent session not found: {parent}"
             raise CwError(msg)
-        # --parent links the impl session to the parent. If the client
-        # config excludes 'impl' from auto_purposes there's nothing to link.
         if SessionPurpose.IMPL not in client.auto_purposes:
             msg = (
                 "--parent requires the client config to include 'impl' in auto_purposes"
@@ -209,7 +111,6 @@ def start_session(
         click.echo(f"Creating worktree for branch '{branch}'...")
         worktree_path = create_worktree(client, branch)
         worktree_branch = branch
-        # Patch workspace_path to the real worktree path
         client = client.model_copy(update={"workspace_path": worktree_path})
         click.echo(f"Worktree ready: {worktree_path}")
     elif worktree:
@@ -217,7 +118,7 @@ def start_session(
         worktree_path = create_worktree(client, worktree)
         click.echo(f"Worktree ready: {worktree_path}")
 
-    # Check for existing backgrounded session
+    # Check for existing backgrounded session — resume it rather than spawning.
     existing = state.find_session(client_name, purpose)
 
     if existing and existing.status == SessionStatus.BACKGROUNDED:
@@ -229,7 +130,7 @@ def start_session(
             )
             raise CwError(msg)
         click.echo(f"Found backgrounded session: {existing.name}")
-        resume_session(existing.name, adapter=adapter)
+        resume_session(existing.name, native_daemon=daemon)
         return
 
     if existing and existing.status == SessionStatus.ACTIVE:
@@ -242,38 +143,73 @@ def start_session(
         click.echo(f"Session already active: {existing.name}")
         return
 
-    # Create sessions for ALL purposes
-    all_sessions = _create_all_purpose_sessions(
-        client_name,
-        client,
-        state,
-        worktree_path=worktree_path,
-        worktree_branch=worktree_branch,
+    # Determine cwd: worktree-eligible purposes use worktree_path when available.
+    session_cwd: Path = (
+        worktree_path
+        if (worktree_path and purpose in WORKTREE_PURPOSES)
+        else client.workspace_path
     )
 
-    # Bidirectional linkage: only the impl session is a worker entry.
-    # One cw start call = one worker ID in parent.worker_session_ids.
+    # Build the new session object.
+    session = Session(
+        name=f"{client_name}/{purpose}",
+        client=client_name,
+        purpose=SessionPurpose(purpose),
+        workspace_path=client.workspace_path,
+        origin=SessionOrigin.USER,
+    )
+    if worktree_path and purpose in WORKTREE_PURPOSES:
+        session.worktree_path = worktree_path
+        session.branch = worktree_branch
+
     if parent_session is not None:
-        impl_session = all_sessions["impl"]
-        impl_session.parent_session_id = parent_session.id
-        parent_session.worker_session_ids.append(impl_session.id)
+        session.parent_session_id = parent_session.id
+        parent_session.worker_session_ids.append(session.id)
 
-    panes = _build_pane_args(all_sessions, client=client)
+    state.sessions.append(session)
 
-    for s in all_sessions.values():
-        click.echo(f"  {s.name}")
+    # Write Stop hook + correlation context before spawning. Raises
+    # HookContextConflictError if a USER-origin worktree already has
+    # settings.local.json (gate-behind-worktree strategy from #165).
+    _write_hook_context(
+        session_cwd,
+        session_id=session.id,
+        session_name=session.name,
+        client=client_name,
+        purpose=purpose,
+        ticket_id=None,
+        origin=SessionOrigin.USER,
+    )
 
-    # Spawn surfaces for all purposes
-    backend = _resolve_backend_name()
-    click.echo(f"Launching {backend.value} surfaces for {client_name}...")
-    for purpose_str, session in all_sessions.items():
-        pane_cmd = panes[purpose_str]["claude_cmd"]
-        _spawn_session_surface(client, session, pane_cmd, adapter)
+    # Build per-purpose system prompt for the session.
+    prompt = (
+        get_purpose_prompt(
+            purpose,
+            client.purpose_prompts,
+            client_name=client_name,
+            workspace_path=str(client.workspace_path),
+        )
+        or ""
+    )
 
-    # Single end-to-end persist: state hits disk only after every surface
-    # has been spawned. If any spawn raises, on-disk state is unchanged
-    # (no partial-success window where sessions exist without surface_ref).
+    click.echo(f"Spawning session {session.name}...")
+    short_id = daemon.spawn_bg(cwd=session_cwd, prompt=prompt)
+    session.surface_ref = short_id
+
     save_state(state)
+    record_event(
+        client_name,
+        HistoryEvent(
+            event_type=EventType.SESSION_STARTED,
+            client=client_name,
+            session_id=session.id,
+            session_name=session.name,
+            purpose=purpose,
+        ),
+    )
+    click.echo(f"Session {session.name} started (short-id: {short_id}).")
+    click.echo(_DETACH_HINT)
+    _attach_session(short_id)
 
 
 def _resolve_session(state: CwState, session_name: str | None) -> Session:
@@ -300,42 +236,11 @@ def _resolve_session(state: CwState, session_name: str | None) -> Session:
     raise CwError(msg)
 
 
-def _notify_sibling(
-    client_name: str,
-    source_purpose: str,
-    target_purpose: str,
-    adapter: CmuxAdapter,
-) -> None:
-    """Send a short notification to a sibling session after backgrounding."""
-    state = load_state()
-    target = state.find_session(client_name, target_purpose)
-    if target is None or target.status != SessionStatus.ACTIVE:
-        click.echo(
-            f"Warning: No active {target_purpose} session for {client_name} to notify."
-        )
-        return
-
-    message = (
-        f"\n[cw] {source_purpose} session has been backgrounded."
-        f" Handoff context is available."
-    )
-    if target.surface_ref:
-        try:
-            # Send via cmux surface if we have a reference
-            client = get_client(client_name)
-            workspace = client.cmux_workspace or client_name
-            adapter.spawn(workspace, message)
-        except CwError:
-            pass
-    click.echo(f"Notified {target.name}.")
-
-
 def background_session(
     session_name: str | None = None,
     *,
     notify: str | None = None,
     auto: bool = False,
-    adapter: CmuxAdapter | None = None,
 ) -> None:
     """Background a session by triggering /session-done and recording the handoff."""
     state = load_state()
@@ -347,18 +252,10 @@ def background_session(
 
     click.echo(f"Backgrounding session: {session.name}...")
 
-    if session.status == SessionStatus.IDLE:
-        # Claude already exited — no /session-done needed.
-        latest = find_latest_handoff(session.workspace_path)
-        if latest:
-            session.last_handoff_path = latest
-    else:
-        latest = find_latest_handoff(session.workspace_path)
-        if latest:
-            session.last_handoff_path = latest
+    if session.status == SessionStatus.ACTIVE:
         click.echo(
-            "Not inside cmux session."
-            " Marking as backgrounded without /session-done injection."
+            "Marking as backgrounded without /session-done injection"
+            " (not inside a cmux session)."
         )
 
     session.status = SessionStatus.BACKGROUNDED
@@ -379,9 +276,9 @@ def background_session(
     click.echo(f"Session {session.name} backgrounded.")
 
     if notify:
-        if adapter is None:
-            adapter = get_cmux_adapter()
-        _notify_sibling(session.client, session.purpose, notify, adapter)
+        click.echo(
+            f"Warning: --notify {notify!r} is not supported in native daemon mode."
+        )
 
 
 def background_all_sessions(
@@ -407,20 +304,19 @@ def background_all_sessions(
 def resume_session(
     session_name: str,
     *,
-    adapter: CmuxAdapter | None = None,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> None:
-    """Resume a backgrounded session with its handoff context.
+    """Resume a backgrounded session by attaching to its daemon session.
 
     Args:
         session_name: Session name or ID to resume.
-        adapter: CmuxAdapter instance. Defaults to get_cmux_adapter() (macOS only).
-                 Inject FakeCmuxAdapter for tests.
+        native_daemon: NativeDaemonClient instance. Defaults to
+                       get_native_daemon_client(). Inject FakeNativeDaemonClient
+                       for tests.
     """
-    if adapter is None:
-        adapter = get_cmux_adapter()
+    daemon = native_daemon or get_native_daemon_client()
 
     state = load_state()
-
     session = state.find_by_name_or_id(session_name)
     if session is None:
         msg = f"Session not found: {session_name}"
@@ -433,55 +329,76 @@ def resume_session(
         )
         raise CwError(msg)
 
-    # Extract resumption prompt from handoff
-    prompt = None
-    handoff_path = session.last_handoff_path
-    if handoff_path and handoff_path.exists():
-        prompt = extract_resumption_prompt(handoff_path)
-        if prompt:
-            click.echo(f"Loaded resumption context from: {handoff_path}")
-        else:
-            click.echo("Warning: Could not extract resumption prompt from handoff.")
-    else:
-        click.echo("No handoff file available. Starting fresh session.")
-
-    # Get client config
     client = get_client(session.client)
-
-    # Prepend client identity so resumed sessions know who they are
     context = build_session_context(
         session.client,
         str(client.workspace_path),
         session.purpose,
     )
-    full_prompt = f"{context}\n\n{prompt}" if prompt else context
+    full_prompt = context
 
-    # Spawn a new cmux surface for the resumed session
-    env_prefix = _build_env_prefix(session.client, session.purpose)
-    resume_cmd = f"{env_prefix} claude --resume"
-    _spawn_session_surface(client, session, resume_cmd, adapter)
+    surface = session.surface_ref
+    live_ids = daemon.list_live_session_short_ids()
 
-    session.status = SessionStatus.ACTIVE
-    session.resumed_at = datetime.now(UTC)
-    save_state(state)
-    record_event(
-        session.client,
-        HistoryEvent(
-            event_type=EventType.SESSION_RESUMED,
-            client=session.client,
-            session_id=session.id,
-            session_name=session.name,
-            purpose=session.purpose,
-        ),
-    )
+    if surface and _is_native_surface_ref(surface) and surface in live_ids:
+        # Happy path: session still alive in daemon — attach directly.
+        session.status = SessionStatus.ACTIVE
+        session.resumed_at = datetime.now(UTC)
+        save_state(state)
+        record_event(
+            session.client,
+            HistoryEvent(
+                event_type=EventType.SESSION_RESUMED,
+                client=session.client,
+                session_id=session.id,
+                session_name=session.name,
+                purpose=session.purpose,
+            ),
+        )
+        click.echo(f"Resuming session {session.name} (short-id: {surface}).")
+        click.echo(_DETACH_HINT)
+        _attach_session(surface)
+    else:
+        # Dead or missing surface: spawn a new daemon session using --resume
+        # to re-enter the Claude transcript.
+        session_cwd: Path = session.worktree_path or session.workspace_path
 
-    click.echo(f"Resumed session: {session.name}")
+        extra_args: list[str] = []
+        if session.claude_session_id:
+            extra_args = ["--resume", session.claude_session_id]
 
-    # Output prompt for injection (cmux surface has been spawned with the command)
-    if full_prompt:
-        time.sleep(CLAUDE_INIT_DELAY_S)  # Wait for Claude to initialize
-        click.echo("\nResumption prompt:")
-        click.echo(full_prompt)
+        # Forward client.worker_model for DAEMON-origin resume, mirroring the
+        # spawn_create_impl chokepoint. USER-origin sessions inherit the
+        # operator's default model (issue #248).
+        if session.origin == SessionOrigin.DAEMON and client.worker_model:
+            extra_args = [*extra_args, "--model", client.worker_model]
+
+        click.echo(
+            f"Session {session.name} not live in daemon;"
+            " spawning new background session..."
+        )
+        new_short_id = daemon.spawn_bg(
+            cwd=session_cwd,
+            prompt=full_prompt,
+            extra_args=extra_args or None,
+        )
+        session.surface_ref = new_short_id
+        session.status = SessionStatus.ACTIVE
+        session.resumed_at = datetime.now(UTC)
+        save_state(state)
+        record_event(
+            session.client,
+            HistoryEvent(
+                event_type=EventType.SESSION_RESUMED,
+                client=session.client,
+                session_id=session.id,
+                session_name=session.name,
+                purpose=session.purpose,
+            ),
+        )
+        click.echo(f"New daemon session started (short-id: {new_short_id}).")
+        click.echo(_DETACH_HINT)
+        _attach_session(new_short_id)
 
 
 def done_session(

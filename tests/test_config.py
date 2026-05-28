@@ -124,6 +124,35 @@ class TestLoadClients:
         result = load_clients()
         assert result["acme"].auto_purposes == DEFAULT_AUTO_PURPOSES
 
+    def test_load_clients_with_worker_model(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    worker_model: claude-sonnet-4-6-20251015\n"
+        )
+        result = load_clients()
+        assert result["acme"].worker_model == "claude-sonnet-4-6-20251015"
+
+    def test_default_worker_model_is_none_when_unset(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(f"clients:\n  acme:\n    workspace_path: {ws_dir}\n")
+        result = load_clients()
+        assert result["acme"].worker_model is None
+
 
 class TestLoadWorktreeClients:
     def test_worktree_client_from_yaml(

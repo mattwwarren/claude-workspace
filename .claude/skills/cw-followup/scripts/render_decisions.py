@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 _DECISIONS_HEADING = "## Decisions"
@@ -118,7 +119,7 @@ def render(payload: dict[str, Any], *, auto_accept: bool) -> str:
 
 def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
     if args.input:
-        with open(args.input, encoding="utf-8") as handle:
+        with Path(args.input).open(encoding="utf-8") as handle:
             data = json.load(handle)
     else:
         data = json.load(sys.stdin)
