@@ -11,8 +11,11 @@ assert on specific checks.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import subprocess as _sp
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,21 +23,31 @@ import yaml
 from pydantic import ValidationError
 
 from cw import __version__
+from cw.cmux import get_backend_adapter
 from cw.config import (
     clients_file,
     load_clients,
     load_state,
     orchestrator_config_file,
+    save_state,
     state_file,
 )
-from cw.dev_queue import load_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.events import record_event
 from cw.exceptions import CwError
+from cw.models import (
+    CompletionReason,
+    OrchestratorEventType,
+    QueueItemStatus,
+    SessionStatus,
+)
 from cw.native_daemon import _ROSTER_PATH
-from cw.reconcile import reconcile
+from cw.reconcile import SPAWN_GRACE_SECONDS, reconcile, ticket_id_for_session
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
-    from cw.models import CwState, Session
+    from cw.cmux import MultiplexerAdapter
+    from cw.models import CwState, DevQueueStore, Session
 
 
 @dataclass(frozen=True)
@@ -47,12 +60,24 @@ class CheckResult:
     warn: bool = False
 
 
+@dataclass(frozen=True)
+class WedgeFinding:
+    """A detected wedge condition with an actionable recipe."""
+
+    wedge_class: str
+    session_id: str | None
+    ticket_id: str | None
+    recipe: str
+    state_file: str
+
+
 @dataclass
 class DoctorReport:
     """Aggregated output from :func:`run_doctor`."""
 
     version: str
     checks: list[CheckResult] = field(default_factory=list)
+    wedge_findings: list[WedgeFinding] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -72,6 +97,13 @@ _MIN_CLAUDE_VERSION = (2, 1, 139)
 
 # Number of components (major.minor.patch) required in a version string.
 _VERSION_PARTS = 3
+
+# Seconds of worktree inactivity (no non-.git file modified) before a pane
+# showing an idle shell is considered wedged.
+WEDGE_IDLE_MTIME_SECONDS = 300
+
+# Shell command names that indicate a pane is idle (back at prompt).
+_SHELL_COMMANDS: frozenset[str] = frozenset({"bash", "zsh", "fish", "sh", "dash"})
 
 
 def _check_config_file() -> CheckResult:
@@ -265,12 +297,311 @@ def _check_workspace_paths() -> list[CheckResult]:
     return results
 
 
+# ---------------------------------------------------------------------------
+# Wedge detection helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_wedge_pane_idle(
+    state: CwState,
+    _queue: DevQueueStore,
+    adapter: MultiplexerAdapter,
+) -> list[WedgeFinding]:
+    """Detect panes showing idle shell with no recent worktree file activity.
+
+    Fail-open: if inspect_pane returns {}, skip — missing info must not
+    trigger false-positive findings.
+    """
+    findings: list[WedgeFinding] = []
+    live_statuses = {SessionStatus.ACTIVE, SessionStatus.IDLE}
+    for session in state.sessions:
+        if session.status not in live_statuses:
+            continue
+        if session.surface_ref is None:
+            continue
+        pane_info = adapter.inspect_pane(session.surface_ref)
+        if not pane_info:
+            continue
+        if pane_info.get("cmd") not in _SHELL_COMMANDS:
+            continue
+        worktree = session.worktree_path
+        if worktree is None or not worktree.is_dir():
+            continue
+        cutoff = datetime.now(UTC).timestamp() - WEDGE_IDLE_MTIME_SECONDS
+        recent = False
+        for dirpath, dirnames, filenames in os.walk(worktree):
+            # Exclude .git from mtime scan — git operations update files there
+            # even when no real work is happening.
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            for fname in filenames:
+                fpath = Path(dirpath) / fname
+                try:
+                    if fpath.stat().st_mtime > cutoff:
+                        recent = True
+                        break
+                except OSError:
+                    continue
+            if recent:
+                break
+        if recent:
+            continue
+        findings.append(
+            WedgeFinding(
+                wedge_class="wedge/pane-idle-but-active",
+                session_id=session.id,
+                ticket_id=ticket_id_for_session(session.name),
+                recipe=(
+                    "Session pane shows idle shell prompt with no recent worktree"
+                    " activity. Run: cw doctor --reap to synthesize completed event"
+                    " and revert queue task."
+                ),
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
+def _check_wedge_task_running_no_session(
+    state: CwState,
+    queue: DevQueueStore,
+) -> list[WedgeFinding]:
+    """Detect RUNNING queue tasks with no associated live session.
+
+    Skips tasks within SPAWN_GRACE_SECONDS of creation — newly spawned
+    tasks have not yet registered their session_id.
+    """
+    findings: list[WedgeFinding] = []
+    _live = {SessionStatus.ACTIVE, SessionStatus.IDLE}
+    live_session_ids = {s.id for s in state.sessions if s.status in _live}
+    now = datetime.now(UTC)
+    for task in queue.tasks:
+        if task.status != QueueItemStatus.RUNNING:
+            continue
+        if task.session_id is None:
+            created = task.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            if (now - created).total_seconds() < SPAWN_GRACE_SECONDS:
+                continue
+            findings.append(
+                WedgeFinding(
+                    wedge_class="wedge/task-running-no-session",
+                    session_id=None,
+                    ticket_id=task.ticket_id,
+                    recipe=(
+                        "Queue task RUNNING with no matching session. "
+                        "Run: cw doctor --reap to revert task to PENDING."
+                    ),
+                    state_file=str(state_file()),
+                )
+            )
+        elif task.session_id not in live_session_ids:
+            # session_id set but no live session — handled by
+            # _check_wedge_task_running_completed_session if COMPLETED
+            pass
+    return findings
+
+
+def _check_wedge_task_running_completed_session(
+    state: CwState,
+    queue: DevQueueStore,
+) -> list[WedgeFinding]:
+    """Detect RUNNING queue tasks whose session is already COMPLETED."""
+    findings: list[WedgeFinding] = []
+    session_by_id = {s.id: s for s in state.sessions}
+    for task in queue.tasks:
+        if task.status != QueueItemStatus.RUNNING or task.session_id is None:
+            continue
+        session = session_by_id.get(task.session_id)
+        if session is None or session.status != SessionStatus.COMPLETED:
+            continue
+        findings.append(
+            WedgeFinding(
+                wedge_class="wedge/task-running-completed-session",
+                session_id=task.session_id,
+                ticket_id=task.ticket_id,
+                recipe=(
+                    "Queue task RUNNING but its session is already COMPLETED. "
+                    "Run: cw doctor --reap to revert task to PENDING."
+                ),
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
+def _check_wedge_repo_ahead(
+    state: CwState,
+    queue: DevQueueStore,
+) -> list[WedgeFinding]:
+    """Detect RUNNING tasks whose branch is pushed to remote but queue not updated.
+
+    Uses ``git ls-remote`` to check if the branch exists on the remote and
+    ``gh pr list`` to determine whether a PR is open. Advisory only — no
+    automatic reap.
+    """
+    findings: list[WedgeFinding] = []
+    session_by_id = {s.id: s for s in state.sessions}
+    for task in queue.tasks:
+        if task.status != QueueItemStatus.RUNNING:
+            continue
+        if task.worktree_path is None:
+            continue
+        # Branch resolution: prefer session branch, fallback to auto-dev/<ticket>
+        branch: str | None = None
+        if task.session_id is not None:
+            session = session_by_id.get(task.session_id)
+            if session is not None:
+                branch = session.branch
+        if not branch:
+            branch = f"auto-dev/{task.ticket_id}"
+        # Get remote URL from worktree
+        try:
+            remote_result = _sp.run(
+                ["git", "-C", str(task.worktree_path), "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if remote_result.returncode != 0:
+                continue
+            remote_url = remote_result.stdout.strip()
+        except OSError:
+            continue
+        # Check if branch exists on remote
+        try:
+            ls_result = _sp.run(
+                ["git", "ls-remote", remote_url, f"refs/heads/{branch}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if ls_result.returncode != 0 or not ls_result.stdout.strip():
+                continue
+        except OSError:
+            continue
+        # Check PR status via gh CLI
+        recipe: str
+        try:
+            pr_result = _sp.run(
+                [
+                    "gh",
+                    "pr",
+                    "list",
+                    "--head",
+                    branch,
+                    "--json",
+                    "state",
+                    "--limit",
+                    "1",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            prs = json.loads(pr_result.stdout) if pr_result.returncode == 0 else []
+        except (OSError, ValueError):
+            prs = []
+        if not prs:
+            recipe = (
+                f"Branch {branch} is ahead of main with no open PR. "
+                f"Suggested: cw spawn-complete {task.ticket_id} or open PR manually."
+            )
+        else:
+            pr_state = prs[0].get("state", "OPEN")
+            recipe = (
+                f"Branch {branch} has {pr_state} PR but queue still RUNNING. "
+                f"Suggested: cw spawn-complete {task.ticket_id} --status shipped."
+            )
+        findings.append(
+            WedgeFinding(
+                wedge_class="wedge/repo-ahead-of-queue",
+                session_id=task.session_id,
+                ticket_id=task.ticket_id,
+                recipe=recipe,
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
+def _reap_wedge_findings(
+    findings: list[WedgeFinding],
+    state: CwState,
+    adapter: MultiplexerAdapter,
+) -> None:
+    """Apply mutations for actionable wedge classes.
+
+    Class-1 (pane-idle-but-active): mark session COMPLETED, close pane,
+    revert queue task to PENDING.
+    Class-2 (task-running-no-session): revert queue task to PENDING.
+    Class-3 (task-running-completed-session): revert queue task to PENDING.
+    Class-4 (repo-ahead-of-queue): advisory only — no mutations.
+    """
+    session_by_id = {s.id: s for s in state.sessions}
+    now = datetime.now(UTC)
+
+    # --- Class-1: pane-idle-but-active ---
+    class1_session_ids: set[str] = set()
+    for f in findings:
+        if f.wedge_class != "wedge/pane-idle-but-active" or f.session_id is None:
+            continue
+        session = session_by_id.get(f.session_id)
+        if session is None:
+            continue
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.CRASHED
+        session.completed_at = now
+        class1_session_ids.add(f.session_id)
+
+    if class1_session_ids:
+        save_state(state)
+        for sid in class1_session_ids:
+            session = session_by_id[sid]
+            record_event(
+                OrchestratorEventType.SESSION_COMPLETED,
+                {
+                    "session_id": session.id,
+                    "session_name": session.name,
+                    "client": session.client,
+                    "crashed": True,
+                    "ticket_id": ticket_id_for_session(session.name),
+                },
+            )
+            if session.surface_ref is not None:
+                adapter.close(session.surface_ref)
+
+    # --- Revert queue tasks for all actionable classes ---
+    # class-4 (repo-ahead-of-queue) is advisory — skip it.
+    revert_ticket_ids: set[str] = set()
+    for f in findings:
+        if f.wedge_class == "wedge/repo-ahead-of-queue":
+            continue
+        if f.ticket_id:
+            revert_ticket_ids.add(f.ticket_id)
+
+    if revert_ticket_ids:
+        with dev_queue_lock():
+            queue = load_dev_queue()
+            changed = False
+            for task in queue.tasks:
+                if (
+                    task.ticket_id in revert_ticket_ids
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    changed = True
+            if changed:
+                save_dev_queue(queue)
+
+
 def run_doctor(*, reap: bool = False) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
     When *reap* is True, also run state reconciliation and append a
     ``reconciliation`` check summarising the number of reaped sessions and
-    reverted tickets.
+    reverted tickets. Also runs wedge checks and applies reap recipes.
 
     Linkage drift checks (parent/worker reference integrity) are always run,
     independent of the *reap* flag.
@@ -293,6 +624,21 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_claude_version())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_workspace_paths())
+
+    if link_state is not None:
+        # Wedge checks: load queue once, run all four checks.
+        queue = load_dev_queue()
+        adapter = get_backend_adapter()
+        report.wedge_findings.extend(_check_wedge_pane_idle(link_state, queue, adapter))
+        report.wedge_findings.extend(
+            _check_wedge_task_running_no_session(link_state, queue)
+        )
+        report.wedge_findings.extend(
+            _check_wedge_task_running_completed_session(link_state, queue)
+        )
+        report.wedge_findings.extend(_check_wedge_repo_ahead(link_state, queue))
+        if reap and report.wedge_findings:
+            _reap_wedge_findings(report.wedge_findings, link_state, adapter)
 
     if reap:
         report.checks.append(_check_reconcile())
@@ -446,6 +792,12 @@ def format_report(report: DoctorReport) -> str:
         if check.detail:
             line += f" — {check.detail}"
         lines.append(line)
+    if report.wedge_findings:
+        lines.append("")
+        lines.append("wedge findings:")
+        for wf in report.wedge_findings:
+            lines.append(f"  [{wf.wedge_class}] ticket={wf.ticket_id}")
+            lines.append(f"    {wf.recipe}")
     lines.append("")
     if not report.ok:
         footer = "status: problems detected"
@@ -455,3 +807,29 @@ def format_report(report: DoctorReport) -> str:
         footer = "status: healthy — advisory warnings"
     lines.append(footer)
     return "\n".join(lines)
+
+
+def format_report_json(report: DoctorReport) -> str:
+    """Render a :class:`DoctorReport` as JSON."""
+    return json.dumps(
+        {
+            "version": 1,
+            "ok": report.ok,
+            "clean": report.clean,
+            "checks": [
+                {"name": c.name, "ok": c.ok, "warn": c.warn, "detail": c.detail}
+                for c in report.checks
+            ],
+            "wedge_findings": [
+                {
+                    "wedge_class": f.wedge_class,
+                    "session_id": f.session_id,
+                    "ticket_id": f.ticket_id,
+                    "recipe": f.recipe,
+                    "state_file": f.state_file,
+                }
+                for f in report.wedge_findings
+            ],
+        },
+        indent=2,
+    )
