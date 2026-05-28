@@ -48,7 +48,7 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
-from cw.doctor import format_report, run_doctor
+from cw.doctor import format_report, format_report_json, run_doctor
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, WorktreeError
 from cw.models import (
@@ -280,8 +280,15 @@ def config() -> None:
     is_flag=True,
     help="Also reconcile state with the live multiplexer and reap phantoms.",
 )
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Output report as JSON.",
+)
 @handle_errors
-def doctor(reap: bool) -> None:
+def doctor(reap: bool, as_json: bool) -> None:
     """Run environment preflight checks and print a health report.
 
     Reports the resolved backend, backend binary/daemon availability,
@@ -291,6 +298,9 @@ def doctor(reap: bool) -> None:
     tickets to PENDING. Exits non-zero if any check fails.
     """
     report = run_doctor(reap=reap)
+    if as_json:
+        click.echo(format_report_json(report))
+        sys.exit(0 if report.ok else 1)
     click.echo(format_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)

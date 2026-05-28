@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from click.testing import CliRunner
 
 from cw.cli import main
+from cw.cmux import FakeCmuxAdapter
 from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
 
 if TYPE_CHECKING:
@@ -790,7 +791,12 @@ def test_doctor_reap_reverts_completed_silent_dev_queue_task(
     result = runner.invoke(main, ["doctor", "--reap"])
     assert result.exit_code == 0, result.output
     assert "reconciliation" in result.output
-    assert "reverted 1 ticket(s)" in result.output
+    # Task may be reverted by the wedge reap (wedge/task-running-completed-session)
+    # before reconcile runs, or by reconcile's revert_completed_silent_tasks sweep.
+    # Either way the task must end up PENDING.
+    reverted_by_wedge = "task-running-completed-session" in result.output
+    reverted_by_reconcile = "reverted 1 ticket(s)" in result.output
+    assert reverted_by_wedge or reverted_by_reconcile, result.output
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "TKT-DR1")
@@ -1304,3 +1310,1113 @@ class TestCheckWorkspacePaths:
         workspace_checks = [c for c in report.checks if c.name.startswith("workspace/")]
         assert len(workspace_checks) == 1
         assert workspace_checks[0].ok is False
+
+
+# ---------------------------------------------------------------------------
+# Wedge detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestWedgeFindingDataclass:
+    """WedgeFinding dataclass structure and DoctorReport integration."""
+
+    def test_fields_exist(self) -> None:
+        from cw.doctor import WedgeFinding
+
+        wf = WedgeFinding(
+            wedge_class="wedge/pane-idle-but-active",
+            session_id="abc",
+            ticket_id="123",
+            recipe="run cw doctor --reap",
+            state_file="/tmp/x.json",
+        )
+        assert wf.wedge_class == "wedge/pane-idle-but-active"
+        assert wf.session_id == "abc"
+        assert wf.ticket_id == "123"
+        assert wf.recipe == "run cw doctor --reap"
+        assert wf.state_file == "/tmp/x.json"
+
+    def test_doctor_report_has_wedge_findings(self) -> None:
+        from cw.doctor import DoctorReport
+
+        report = DoctorReport(version="0.0.0", checks=[])
+        assert report.wedge_findings == []
+
+    def test_wedge_findings_do_not_affect_ok(self) -> None:
+        from cw.doctor import DoctorReport, WedgeFinding
+
+        wf = WedgeFinding(
+            wedge_class="wedge/pane-idle-but-active",
+            session_id="abc",
+            ticket_id="123",
+            recipe="fix it",
+            state_file="/tmp/x.json",
+        )
+        report = DoctorReport(
+            version="0.0.0",
+            checks=[CheckResult("check-a", ok=True, detail="")],
+            wedge_findings=[wf],
+        )
+        assert report.ok is True
+
+
+class TestWedgePaneIdleButActive:
+    """wedge/pane-idle-but-active detection logic."""
+
+    def _make_active_session(
+        self, tmp_path: Path, *, surface_ref: str | None = "s:0.1"
+    ) -> object:
+        from datetime import UTC, datetime
+
+        from cw.models import Session, SessionPurpose, SessionStatus
+
+        wt = tmp_path / "worktree"
+        wt.mkdir(parents=True, exist_ok=True)
+        return Session(
+            id="sess-active",
+            name="client-a/auto-dev/TST-1",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=tmp_path,
+            worktree_path=wt if surface_ref is not None else None,
+            surface_ref=surface_ref,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    def test_detected_when_shell_and_old_mtime(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        import time
+
+        from cw.cmux import FakeCmuxAdapter
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _check_wedge_pane_idle
+        from cw.models import CwState, DevQueueStore
+
+        session = self._make_active_session(tmp_path)
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        adapter = FakeCmuxAdapter()
+        old_time = time.time() - 700
+        adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
+
+        # Create a file with old mtime
+        test_file = tmp_path / "worktree" / "test.py"
+        test_file.write_text("code")
+        import os
+
+        os.utime(str(test_file), (old_time, old_time))
+
+        queue = DevQueueStore(tasks=[])
+        findings = _check_wedge_pane_idle(state, queue, adapter)
+        assert len(findings) == 1
+        assert findings[0].wedge_class == "wedge/pane-idle-but-active"
+        assert findings[0].session_id == "sess-active"
+
+    def test_not_detected_nonshell_cmd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        import time
+
+        from cw.cmux import FakeCmuxAdapter
+        from cw.doctor import _check_wedge_pane_idle
+        from cw.models import CwState, DevQueueStore
+
+        session = self._make_active_session(tmp_path)
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+
+        adapter = FakeCmuxAdapter()
+        adapter.set_pane_info("s:0.1", {"cmd": "claude", "last_activity": None})
+
+        old_time = time.time() - 700
+        test_file = tmp_path / "worktree" / "test.py"
+        test_file.write_text("code")
+        import os
+
+        os.utime(str(test_file), (old_time, old_time))
+
+        queue = DevQueueStore(tasks=[])
+        findings = _check_wedge_pane_idle(state, queue, adapter)
+        assert findings == []
+
+    def test_not_detected_recent_mtime(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.cmux import FakeCmuxAdapter
+        from cw.doctor import _check_wedge_pane_idle
+        from cw.models import CwState, DevQueueStore
+
+        session = self._make_active_session(tmp_path)
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+
+        adapter = FakeCmuxAdapter()
+        adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
+
+        # File with recent mtime (now)
+        test_file = tmp_path / "worktree" / "test.py"
+        test_file.write_text("fresh code")
+
+        queue = DevQueueStore(tasks=[])
+        findings = _check_wedge_pane_idle(state, queue, adapter)
+        assert findings == []
+
+    def test_not_detected_no_surface_ref(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.cmux import FakeCmuxAdapter
+        from cw.doctor import _check_wedge_pane_idle
+        from cw.models import CwState, DevQueueStore
+
+        session = self._make_active_session(tmp_path, surface_ref=None)
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+
+        adapter = FakeCmuxAdapter()
+        queue = DevQueueStore(tasks=[])
+        findings = _check_wedge_pane_idle(state, queue, adapter)
+        assert findings == []
+
+    def test_git_dir_excluded_from_mtime(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        import os
+        import time
+
+        from cw.cmux import FakeCmuxAdapter
+        from cw.doctor import _check_wedge_pane_idle
+        from cw.models import CwState, DevQueueStore
+
+        session = self._make_active_session(tmp_path)
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+
+        adapter = FakeCmuxAdapter()
+        adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
+
+        wt = tmp_path / "worktree"
+        old_time = time.time() - 700
+
+        # Create old non-.git file
+        old_file = wt / "old.py"
+        old_file.write_text("old code")
+        os.utime(str(old_file), (old_time, old_time))
+
+        # Create recent .git/FETCH_HEAD — must be excluded
+        git_dir = wt / ".git"
+        git_dir.mkdir()
+        fetch_head = git_dir / "FETCH_HEAD"
+        fetch_head.write_text("ref")
+        # leave fetch_head with current mtime (recent)
+
+        queue = DevQueueStore(tasks=[])
+        findings = _check_wedge_pane_idle(state, queue, adapter)
+        # .git/ excluded → old.py is only non-.git file → finding IS emitted
+        assert len(findings) == 1
+        assert findings[0].wedge_class == "wedge/pane-idle-but-active"
+
+    def test_inspect_pane_empty_skips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.cmux import FakeCmuxAdapter
+        from cw.doctor import _check_wedge_pane_idle
+        from cw.models import CwState, DevQueueStore
+
+        session = self._make_active_session(tmp_path)
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+
+        adapter = FakeCmuxAdapter()
+        # inspect_pane returns {} (default) — fail-open, skip
+
+        queue = DevQueueStore(tasks=[])
+        findings = _check_wedge_pane_idle(state, queue, adapter)
+        assert findings == []
+
+
+class TestWedgeTaskRunningNoSession:
+    """wedge/task-running-no-session detection logic."""
+
+    def test_orphan_detected_null_session_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import save_state
+        from cw.doctor import _check_wedge_task_running_no_session
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        # Task created long ago with session_id=None
+        old_time = datetime.now(UTC) - timedelta(seconds=120)
+        task = TicketTask(
+            ticket_id="TST-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
+            created_at=old_time,
+        )
+        state = CwState(sessions=[])
+        save_state(state)
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_no_session(state, queue)
+        assert len(findings) == 1
+        assert findings[0].wedge_class == "wedge/task-running-no-session"
+
+    def test_grace_window_skips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from cw.doctor import _check_wedge_task_running_no_session
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        # Task created 5 seconds ago
+        recent_time = datetime.now(UTC) - timedelta(seconds=5)
+        task = TicketTask(
+            ticket_id="TST-2",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
+            created_at=recent_time,
+        )
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_no_session(state, queue)
+        assert findings == []
+
+    def test_active_session_skips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from cw.doctor import _check_wedge_task_running_no_session
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            Session,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+
+        session = Session(
+            id="live-sess",
+            name="client-a/auto-dev/TST-3",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp"),
+        )
+        old_time = datetime.now(UTC) - timedelta(seconds=120)
+        task = TicketTask(
+            ticket_id="TST-3",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="live-sess",
+            created_at=old_time,
+        )
+        state = CwState(sessions=[session])
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_no_session(state, queue)
+        assert findings == []
+
+    def test_correct_fields(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from cw.doctor import _check_wedge_task_running_no_session
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        old_time = datetime.now(UTC) - timedelta(seconds=120)
+        task = TicketTask(
+            ticket_id="TST-99",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
+            created_at=old_time,
+        )
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_no_session(state, queue)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.ticket_id == "TST-99"
+        assert "PENDING" in f.recipe or "revert" in f.recipe.lower()
+
+
+class TestWedgeTaskRunningCompletedSession:
+    """wedge/task-running-completed-session detection logic."""
+
+    def _make_completed_session(self, tmp_path: Path, sid: str = "comp-sess") -> object:
+        from datetime import UTC, datetime
+
+        from cw.models import CompletionReason, Session, SessionPurpose, SessionStatus
+
+        return Session(
+            id=sid,
+            name="client-a/auto-dev/TST-C1",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.COMPLETED,
+            workspace_path=tmp_path,
+            completed_reason=CompletionReason.NORMAL,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    def test_detected_completed_session(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_task_running_completed_session
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        session = self._make_completed_session(tmp_path)
+        task = TicketTask(
+            ticket_id="TST-C1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="comp-sess",
+        )
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_completed_session(state, queue)
+        assert len(findings) == 1
+        assert findings[0].wedge_class == "wedge/task-running-completed-session"
+
+    def test_not_detected_active_session(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from cw.doctor import _check_wedge_task_running_completed_session
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            Session,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+
+        session = Session(
+            id="active-sess",
+            name="client-a/auto-dev/TST-C2",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=tmp_path,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        task = TicketTask(
+            ticket_id="TST-C2",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="active-sess",
+        )
+        state = CwState(sessions=[session])
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_completed_session(state, queue)
+        assert findings == []
+
+    def test_not_detected_null_session_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_task_running_completed_session
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="TST-C3",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
+        )
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_completed_session(state, queue)
+        assert findings == []
+
+    def test_correct_fields(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_task_running_completed_session
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        session = self._make_completed_session(tmp_path, sid="comp-sess-field")
+        task = TicketTask(
+            ticket_id="TST-CF",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="comp-sess-field",
+        )
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_completed_session(state, queue)
+        assert len(findings) == 1
+        f = findings[0]
+        assert "PENDING" in f.recipe
+
+
+class TestWedgeRepoAheadOfQueue:
+    """wedge/repo-ahead-of-queue detection logic."""
+
+    def _make_running_task(
+        self,
+        tmp_path: Path,
+        ticket_id: str = "TST-R1",
+        session_id: str | None = None,
+    ) -> object:
+        from cw.models import QueueItemStatus, TicketTask
+
+        return TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            worktree_path=tmp_path,
+        )
+
+    def test_ahead_no_pr_emits_warn_recipe(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-R1")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+
+        call_count = [0]
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            call_count[0] += 1
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                return _Proc(0, "abc123\trefs/heads/auto-dev/TST-R1\n")
+            if "pr" in args and "list" in args:
+                return _Proc(0, "[]\n")
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.wedge_class == "wedge/repo-ahead-of-queue"
+        assert "no open PR" in f.recipe or "cw spawn-complete" in f.recipe
+
+    def test_ahead_open_pr_emits_shipped_recipe(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-R2")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                return _Proc(0, "abc123\trefs/heads/auto-dev/TST-R2\n")
+            if "pr" in args and "list" in args:
+                return _Proc(0, json.dumps([{"state": "OPEN"}]))
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert len(findings) == 1
+        assert "cw spawn-complete" in findings[0].recipe
+
+    def test_not_ahead_no_finding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-R3")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                return _Proc(0, "")  # empty — not ahead
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert findings == []
+
+    def test_ls_remote_fail_no_finding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-R4")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                return _Proc(1, "")  # failure
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert findings == []
+
+    def test_worktree_path_none_skips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="TST-R5",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            worktree_path=None,
+        )
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert findings == []
+
+    def test_branch_resolution_uses_session_branch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            Session,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+
+        session = Session(
+            id="sess-branch",
+            name="client-a/auto-dev/TST-R6",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=tmp_path,
+            branch="my-branch",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        task = TicketTask(
+            ticket_id="TST-R6",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-branch",
+            worktree_path=tmp_path,
+        )
+        state = CwState(sessions=[session])
+        queue = DevQueueStore(tasks=[task])
+
+        ls_remote_args_seen: list[list[str]] = []
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                ls_remote_args_seen.append(list(args))
+                return _Proc(0, "abc123\trefs/heads/my-branch\n")
+            if "pr" in args and "list" in args:
+                return _Proc(0, "[]\n")
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        _check_wedge_repo_ahead(state, queue)
+        # The ls-remote call must reference my-branch, not auto-dev/TST-R6
+        assert any("my-branch" in str(a) for a in ls_remote_args_seen)
+
+
+class TestWedgeReapRecipes:
+    """_reap_wedge_findings applies correct mutations per wedge class."""
+
+    def _make_session(self, tmp_path: Path, sid: str = "reap-sess") -> object:
+        from datetime import UTC, datetime
+
+        from cw.models import Session, SessionPurpose, SessionStatus
+
+        return Session(
+            id=sid,
+            name="client-a/auto-dev/TST-REAP",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=tmp_path,
+            surface_ref="s:0.1",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    def test_class1_reap_mutates_session_and_queue(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionStatus,
+            TicketTask,
+        )
+
+        session = self._make_session(tmp_path)
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="TST-REAP",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="reap-sess",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from cw.config import state_file as _sf
+
+        finding = WedgeFinding(
+            wedge_class="wedge/pane-idle-but-active",
+            session_id="reap-sess",
+            ticket_id="TST-REAP",
+            recipe="fix",
+            state_file=str(_sf()),
+        )
+
+        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+
+        # session should be COMPLETED
+        reloaded = load_state()
+        sess = next(s for s in reloaded.sessions if s.id == "reap-sess")
+        assert sess.status == SessionStatus.COMPLETED
+
+        # queue task should be PENDING
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-REAP")
+        assert t.status == QueueItemStatus.PENDING
+
+        # adapter.close should have been called
+        assert len(mock_cmux_adapter.calls["close"]) == 1
+
+    def test_class2_reap_reverts_queue_only(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        state = CwState(sessions=[])
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="TST-C2",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from cw.config import state_file as _sf
+
+        finding = WedgeFinding(
+            wedge_class="wedge/task-running-no-session",
+            session_id=None,
+            ticket_id="TST-C2",
+            recipe="fix",
+            state_file=str(_sf()),
+        )
+
+        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-C2")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_class3_reap_reverts_queue_only(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        state = CwState(sessions=[])
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="TST-C3",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="some-completed-sess",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from cw.config import state_file as _sf
+
+        finding = WedgeFinding(
+            wedge_class="wedge/task-running-completed-session",
+            session_id="some-completed-sess",
+            ticket_id="TST-C3",
+            recipe="fix",
+            state_file=str(_sf()),
+        )
+
+        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-C3")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_class4_no_reap_action(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        state = CwState(sessions=[])
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="TST-C4",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from cw.config import state_file as _sf
+
+        finding = WedgeFinding(
+            wedge_class="wedge/repo-ahead-of-queue",
+            session_id=None,
+            ticket_id="TST-C4",
+            recipe="advisory",
+            state_file=str(_sf()),
+        )
+
+        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+
+        # advisory only — queue should remain RUNNING
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-C4")
+        assert t.status == QueueItemStatus.RUNNING
+
+    def test_adapter_close_only_for_class1(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        state = CwState(sessions=[])
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="TST-NCLOSE",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from cw.config import state_file as _sf
+
+        finding = WedgeFinding(
+            wedge_class="wedge/task-running-no-session",
+            session_id=None,
+            ticket_id="TST-NCLOSE",
+            recipe="fix",
+            state_file=str(_sf()),
+        )
+
+        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+
+        # adapter.close must NOT have been called for class-2
+        assert len(mock_cmux_adapter.calls["close"]) == 0
+
+    def test_reap_false_no_mutations(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        """run_doctor(reap=False) must not trigger _reap_wedge_findings."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        session = self._make_session(tmp_path, sid="no-reap-sess")
+        state = CwState(sessions=[session])  # type: ignore[list-item]
+        save_state(state)
+
+        task = TicketTask(
+            ticket_id="TST-NOREAP",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="no-reap-sess",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # Monkeypatch to prevent wedge check from modifying the report
+        monkeypatch.setattr(
+            "cw.doctor._check_wedge_pane_idle",
+            lambda *_a, **_kw: [],
+        )
+        monkeypatch.setattr(
+            "cw.doctor._check_wedge_task_running_no_session",
+            lambda *_a, **_kw: [],
+        )
+        monkeypatch.setattr(
+            "cw.doctor._check_wedge_task_running_completed_session",
+            lambda *_a, **_kw: [],
+        )
+        monkeypatch.setattr(
+            "cw.doctor._check_wedge_repo_ahead",
+            lambda *_a, **_kw: [],
+        )
+
+        # run_doctor without --reap, queue should remain RUNNING
+        from cw.doctor import run_doctor
+
+        _stub_claude_version_ok(monkeypatch)
+        run_doctor(reap=False)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-NOREAP")
+        assert t.status == QueueItemStatus.RUNNING
+
+
+class TestDoctorJsonMode:
+    """cw doctor --json produces parseable JSON with required structure."""
+
+    def test_output_is_valid_json(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        _stub_claude_version_ok(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--json"])
+        assert result.exit_code == 0, result.output
+        json.loads(result.output)  # must not raise
+
+    def test_json_has_required_keys(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        _stub_claude_version_ok(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--json"])
+        data = json.loads(result.output)
+        assert "version" in data
+        assert "ok" in data
+        assert "checks" in data
+        assert "wedge_findings" in data
+
+    def test_json_wedge_findings_structure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        from click.testing import CliRunner
+
+        from cw.cli import main
+        from cw.doctor import WedgeFinding
+
+        _stub_claude_version_ok(monkeypatch)
+
+        wf = WedgeFinding(
+            wedge_class="wedge/pane-idle-but-active",
+            session_id="abc",
+            ticket_id="123",
+            recipe="fix it",
+            state_file="/tmp/x.json",
+        )
+        monkeypatch.setattr(
+            "cw.cli.run_doctor",
+            lambda **_kw: __import__(
+                "cw.doctor", fromlist=["DoctorReport"]
+            ).DoctorReport(
+                version="0.0.0",
+                checks=[CheckResult("check-a", ok=True, detail="")],
+                wedge_findings=[wf],
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--json"])
+        data = json.loads(result.output)
+        assert len(data["wedge_findings"]) == 1
+        wfd = data["wedge_findings"][0]
+        assert "wedge_class" in wfd
+        assert "session_id" in wfd
+        assert "ticket_id" in wfd
+        assert "recipe" in wfd
+        assert "state_file" in wfd
+
+    def test_json_composes_with_reap(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        _stub_claude_version_ok(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--json", "--reap"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "ok" in data
+
+    def test_exit_0_when_healthy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        _stub_claude_version_ok(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--json"])
+        assert result.exit_code == 0
+
+    def test_exit_1_when_checks_fail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        monkeypatch.setattr(
+            "cw.cli.run_doctor",
+            lambda **_kw: __import__(
+                "cw.doctor", fromlist=["DoctorReport"]
+            ).DoctorReport(
+                version="0.0.0",
+                checks=[CheckResult("check-fail", ok=False, detail="broken")],
+            ),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--json"])
+        assert result.exit_code == 1
+
+
+class TestWedgeRegression:
+    """Regression tests: existing checks unaffected, excluded classes absent."""
+
+    def test_existing_linkage_checks_unaffected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.config import save_state
+        from cw.doctor import run_doctor
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        _stub_claude_version_ok(monkeypatch)
+        # Session with dangling worker — linkage/dangling-worker should fail
+        session = Session(
+            id="orch-reg",
+            name="client/impl",
+            client="client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=tmp_path,
+            worker_session_ids=["missing-worker-reg"],
+        )
+        save_state(CwState(sessions=[session]))
+        report = run_doctor()
+        dw = next(c for c in report.checks if c.name == "linkage/dangling-worker")
+        assert not dw.ok
+        # wedge_findings should be empty (no queue tasks RUNNING)
+        assert report.wedge_findings == []
+
+    def test_classes_5_6_not_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import run_doctor
+
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        excluded = {
+            "wedge/supervisor-says-done-cw-says-running",
+            "wedge/cw-says-done-supervisor-says-alive",
+        }
+        for wf in report.wedge_findings:
+            assert wf.wedge_class not in excluded

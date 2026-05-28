@@ -104,6 +104,10 @@ class MultiplexerAdapter(Protocol):
         """
         ...
 
+    def inspect_pane(self, surface_ref: str) -> dict[str, Any]:
+        """Return pane info best-effort; {} if unavailable."""
+        ...
+
     def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
         """Return last *lines* lines of worker output for *surface_ref*.
 
@@ -241,6 +245,10 @@ class RealCmuxAdapter:
         """
         return dict.fromkeys(self.list_surfaces(), "cmux-surface")
 
+    def inspect_pane(self, _surface_ref: str) -> dict[str, Any]:
+        """Return empty dict — cmux does not expose pane activity info."""
+        return {}
+
     def capture_surface(self, _surface_ref: str, _lines: int, _scrollback: int) -> str:
         """Raise CwError — cmux does not support output capture.
 
@@ -265,12 +273,14 @@ class FakeCmuxAdapter:
             "identify": [],
             "list_surfaces": [],
             "list_live_surface_commands": [],
+            "inspect_pane": [],
         }
         self.capture_calls: list[dict[str, object]] = []
         self._live: set[str] = set()
         self._live_commands: dict[str, str] = {}
         self._commands_fail: bool = False
         self._surface_content: dict[str, str] = {}
+        self._pane_info: dict[str, dict[str, Any]] = {}
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Record call and return a deterministic fake surface ref."""
@@ -340,6 +350,15 @@ class FakeCmuxAdapter:
     def set_surface_content(self, surface_ref: str, content: str) -> None:
         """Set the stored output content for a surface (test helper)."""
         self._surface_content[surface_ref] = content
+
+    def inspect_pane(self, surface_ref: str) -> dict[str, Any]:
+        """Return stored pane info for *surface_ref*, or {} if unknown."""
+        self.calls["inspect_pane"].append((surface_ref,))  # tuple, like all other calls
+        return dict(self._pane_info.get(surface_ref, {}))
+
+    def set_pane_info(self, surface_ref: str, data: dict[str, Any]) -> None:
+        """Configure the value returned by inspect_pane (test helper)."""
+        self._pane_info[surface_ref] = data
 
 
 def _resolve_backend_name() -> BackendName:

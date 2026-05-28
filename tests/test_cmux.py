@@ -853,3 +853,93 @@ class TestFakeCmuxAdapterCaptureSurface:
         adapter.set_surface_content(ref2, "session2-output")
         assert "session1" in adapter.capture_surface(ref1, lines=50, scrollback=200)
         assert "session2" in adapter.capture_surface(ref2, lines=50, scrollback=200)
+
+
+# ---------------------------------------------------------------------------
+# inspect_pane tests
+# ---------------------------------------------------------------------------
+
+
+class TestFakeCmuxAdapterInspectPane:
+    """Tests for FakeCmuxAdapter.inspect_pane and set_pane_info."""
+
+    def test_default_returns_empty_dict(self) -> None:
+        adapter = FakeCmuxAdapter()
+        assert adapter.inspect_pane("s:w.p") == {}
+
+    def test_set_pane_info_configures_return(self) -> None:
+        from datetime import UTC, datetime
+
+        adapter = FakeCmuxAdapter()
+        dt = datetime(2025, 5, 28, 12, 0, 0, tzinfo=UTC)
+        data: dict[str, Any] = {"cmd": "bash", "last_activity": dt}
+        adapter.set_pane_info("s:w.p", data)
+        assert adapter.inspect_pane("s:w.p") == data
+
+    def test_inspect_pane_call_recorded(self) -> None:
+        adapter = FakeCmuxAdapter()
+        adapter.inspect_pane("s:w.p")
+        assert adapter.calls["inspect_pane"] == [("s:w.p",)]
+
+    def test_unknown_ref_returns_empty(self) -> None:
+        adapter = FakeCmuxAdapter()
+        assert adapter.inspect_pane("unknown") == {}
+
+
+class TestTmuxAdapterInspectPane:
+    """Tests for TmuxAdapter.inspect_pane."""
+
+    def _make_adapter(self, monkeypatch: pytest.MonkeyPatch) -> TmuxAdapter:
+        monkeypatch.setattr("cw.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+        return TmuxAdapter()
+
+    def test_parses_valid_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from datetime import UTC, datetime
+
+        adapter = self._make_adapter(monkeypatch)
+
+        class _Proc:
+            returncode = 0
+            stdout = "s:0.1 bash 1748390400\n"
+
+        monkeypatch.setattr(
+            "cw.tmux.subprocess.run",
+            lambda *_a, **_kw: _Proc(),
+        )
+        result = adapter.inspect_pane("s:0.1")
+        assert result["cmd"] == "bash"
+        assert result["last_activity"] == datetime.fromtimestamp(1748390400, tz=UTC)
+
+    def test_nonzero_returncode_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._make_adapter(monkeypatch)
+
+        class _Proc:
+            returncode = 1
+            stdout = ""
+
+        monkeypatch.setattr("cw.tmux.subprocess.run", lambda *_a, **_kw: _Proc())
+        assert adapter.inspect_pane("s:0.1") == {}
+
+    def test_empty_output_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter = self._make_adapter(monkeypatch)
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+
+        monkeypatch.setattr("cw.tmux.subprocess.run", lambda *_a, **_kw: _Proc())
+        assert adapter.inspect_pane("s:0.1") == {}
+
+    def test_malformed_epoch_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._make_adapter(monkeypatch)
+
+        class _Proc:
+            returncode = 0
+            stdout = "s:0.1 bash notanumber\n"
+
+        monkeypatch.setattr("cw.tmux.subprocess.run", lambda *_a, **_kw: _Proc())
+        assert adapter.inspect_pane("s:0.1") == {}
