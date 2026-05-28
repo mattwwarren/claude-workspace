@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 from click.testing import CliRunner
 
+from cw.auto_dev_result import Status
 from cw.cli import main
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
@@ -20,6 +21,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 
@@ -48,6 +50,53 @@ def _make_prompt_file(tmp_path: Path, content: str = "Do the thing.") -> Path:
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text(content)
     return prompt_file
+
+
+def _seed_daemon_session(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    session_id: str = "test1234",
+    client: str = "test-client",
+    name: str | None = None,
+    surface_ref: str | None = "fake-pane-99",
+    status: SessionStatus = SessionStatus.ACTIVE,
+) -> Session:
+    """Create and save a daemon session in state."""
+    workspace = tmp_path / "workspace" / client
+    workspace.mkdir(parents=True, exist_ok=True)
+    sess = Session(
+        id=session_id,
+        name=name or f"{client}/auto-dev/GEN-42",
+        client=client,
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=status,
+        workspace_path=workspace,
+        surface_ref=surface_ref,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    return sess
+
+
+def _seed_running_task(
+    ticket_id: str = "GEN-42",
+    client: str = "test-client",
+    session_id: str = "test1234",
+) -> TicketTask:
+    """Create and save a RUNNING TicketTask in the dev queue."""
+    from cw.dev_queue import save_dev_queue
+    from cw.models import DevQueueStore, QueueItemStatus
+
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client=client,
+        status=QueueItemStatus.RUNNING,
+        session_id=session_id,
+    )
+    store = DevQueueStore(tasks=[task])
+    save_dev_queue(store)
+    return task
 
 
 # ---------------------------------------------------------------------------
@@ -848,21 +897,13 @@ class TestSpawnClose:
 
     def _seed_daemon_session(self, tmp_path: Path, tmp_config_dir: Path) -> Session:
         """Save a DAEMON session to state and return it."""
-        workspace = tmp_path / "workspace" / "test-client"
-        workspace.mkdir(parents=True)
-        sess = Session(
-            id="dead1234",
+        return _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="dead1234",
             name="test-client/my-task",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
-            status=SessionStatus.ACTIVE,
-            workspace_path=workspace,
             surface_ref="abc12345",
         )
-        state = CwState(sessions=[sess])
-        save_state(state)
-        return sess
 
     def test_happy_path_marks_completed(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -994,6 +1035,279 @@ class TestSpawnClose:
         closed = state.find_by_name_or_id("nosurf1")
         assert closed is not None
         assert closed.status == SessionStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# TestSpawnComplete
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnComplete:
+    """Tests for _spawn_complete_impl and cw spawn complete command."""
+
+    def test_happy_path_session_completed_with_reason_user(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Happy path: session COMPLETED with reason=USER, queue task COMPLETED."""
+        from cw.cli import _spawn_complete_impl
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=False,
+            native_daemon=daemon,
+        )
+
+        state = load_state()
+        updated = state.find_by_name_or_id(sess.id)
+        assert updated is not None
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.USER
+        assert updated.completed_at is not None
+
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-42"), None)
+        assert task is not None
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_happy_path_event_recorded_with_correct_payload(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Happy path: SESSION_COMPLETED event recorded with correct payload."""
+        from cw.cli import _spawn_complete_impl
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=False,
+            native_daemon=daemon,
+        )
+
+        events = read_events(
+            consumer="_test_consumer",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["session_id"] == sess.id
+        assert payload["client"] == "test-client"
+        assert payload["crashed"] is False
+        assert payload["status"] == "shipped"
+        assert payload["ticket_id"] == "GEN-42"
+
+    def test_ticket_id_inferred_from_session_name_when_omitted(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """ticket_id inferred from session name when not provided."""
+        from cw.cli import _spawn_complete_impl
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        # Name encodes ticket_id via AUTO_DEV_LABEL_PREFIX pattern
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, name="test-client/auto-dev/GEN-99"
+        )
+        _seed_running_task(ticket_id="GEN-99", client="test-client", session_id=sess.id)
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,  # omitted — must be inferred
+            force=False,
+            native_daemon=daemon,
+        )
+
+        events = read_events(
+            consumer="_test_consumer2",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(e.payload.get("ticket_id") == "GEN-99" for e in events)
+
+    def test_explicit_ticket_id_overrides_inferred(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Explicit --ticket-id overrides whatever the session name encodes."""
+        from cw.cli import _spawn_complete_impl
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        # Session name would infer GEN-42
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, name="test-client/auto-dev/GEN-42"
+        )
+        # But we seed the queue with a different ticket_id
+        _seed_running_task(
+            ticket_id="OVERRIDE-1", client="test-client", session_id=sess.id
+        )
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id="OVERRIDE-1",  # explicit override
+            force=False,
+            native_daemon=daemon,
+        )
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "OVERRIDE-1"), None)
+        assert task is not None
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_already_completed_session_raises_without_force(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Session already COMPLETED → CwError without --force."""
+        from cw.cli import _spawn_complete_impl
+
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, status=SessionStatus.COMPLETED
+        )
+        daemon = FakeNativeDaemonClient()
+
+        with pytest.raises(CwError, match="already completed"):
+            _spawn_complete_impl(
+                session_id=sess.id,
+                status="shipped",
+                ticket_id=None,
+                force=False,
+                native_daemon=daemon,
+            )
+
+    def test_already_completed_session_force_is_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Session already COMPLETED + --force → no-op, no extra events."""
+        from cw.cli import _spawn_complete_impl
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, status=SessionStatus.COMPLETED
+        )
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=True,  # --force
+            native_daemon=daemon,
+        )
+
+        events = read_events(
+            consumer="_test_consumer3",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 0
+
+    @pytest.mark.parametrize("status_value", list(get_args(Status)))
+    def test_status_routing_each_enum_value(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        status_value: str,
+    ) -> None:
+        """Each --status value is stored verbatim in the event payload."""
+        from cw.cli import _spawn_complete_impl
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id=f"status-{status_value[:8]}",
+            name=f"test-client/auto-dev/STATUS-{status_value[:8]}",
+        )
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status=status_value,
+            ticket_id=None,
+            force=False,
+            native_daemon=daemon,
+        )
+
+        events = read_events(
+            consumer=f"_test_status_{status_value}",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        matching = [e for e in events if e.payload.get("session_id") == sess.id]
+        assert len(matching) == 1
+        assert matching[0].payload["status"] == status_value
+
+    def test_already_completed_queue_task_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """COMPLETED queue task + ACTIVE session → CwError."""
+        from cw.cli import _spawn_complete_impl
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        # Seed a COMPLETED (not RUNNING) task
+        task = TicketTask(
+            ticket_id="GEN-42",
+            client="test-client",
+            status=QueueItemStatus.COMPLETED,
+            session_id=sess.id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        daemon = FakeNativeDaemonClient()
+
+        with pytest.raises(CwError):
+            _spawn_complete_impl(
+                session_id=sess.id,
+                status="shipped",
+                ticket_id=None,
+                force=False,
+                native_daemon=daemon,
+            )
+
+    def test_cli_spawn_complete_missing_session_exits_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """CLI: cw spawn complete nonexistent-id → non-zero exit, id in output."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["spawn", "complete", "nonexistent-id", "--status", "shipped"]
+        )
+        assert result.exit_code != 0
+        assert "nonexistent-id" in result.output
+
+    def test_regression_spawn_close_unaffected(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """spawn close still works unchanged after _seed_daemon_session extraction."""
+        from cw.cli import _spawn_close_impl
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        state = load_state()
+        closed = state.find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
 
 
 # ---------------------------------------------------------------------------

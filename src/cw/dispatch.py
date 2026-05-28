@@ -22,7 +22,12 @@ from cw.spawn import spawn_create_impl
 from cw.worktree import check_not_main_checkout, create_worktree, is_main_behind_origin
 
 if TYPE_CHECKING:
-    from cw.models import OrchestratorConfig, TicketTask
+    from cw.models import (
+        DevQueueStore,
+        OrchestratorConfig,
+        OrchestratorEvent,
+        TicketTask,
+    )
     from cw.native_daemon import NativeDaemonClient
 
 _DISPATCH_CONSUMER = "dispatch"
@@ -271,6 +276,67 @@ def dispatch_tick(
     return spawned
 
 
+def _apply_events_to_store(
+    store: DevQueueStore,
+    events: list[OrchestratorEvent],
+) -> int:
+    """Apply SESSION_COMPLETED events to an already-loaded DevQueueStore.
+
+    Caller must hold ``dev_queue_lock``. Saves the store when tasks were
+    transitioned; does NOT advance the event cursor — cursor advancement
+    is the caller's responsibility after the lock is released.
+
+    Returns the number of tasks transitioned to COMPLETED.
+    """
+    completed = 0
+    for event in events:
+        # Crashed events are emitted by reconcile only. For DAEMON
+        # sessions reconcile has already reverted the task
+        # RUNNING → PENDING; marking the task COMPLETED here would
+        # shadow that revert and (worse) match the next freshly-
+        # respawned RUNNING task for the same ticket_id, falsely
+        # retiring a still-running session. For non-DAEMON crashed
+        # sessions reconcile does not touch the queue, so a blanket
+        # skip is conservative-safe (no queue task is expected to
+        # match anyway). See GitHub issue #97.
+        if event.payload.get("crashed"):
+            continue
+        ticket_id = event.payload.get("ticket_id")
+        if not ticket_id:
+            # Fallback: recover ticket_id from the session_name for events
+            # produced before the reconciler emitted ticket_id explicitly.
+            # Drains historical RUNNING tasks whose completion events
+            # predate the producer-side fix.
+            session_name = event.payload.get("session_name")
+            if isinstance(session_name, str):
+                ticket_id = ticket_id_for_session(session_name)
+        if not ticket_id:
+            continue
+        event_session_id = event.payload.get("session_id")
+        for task in store.tasks:
+            if task.ticket_id != ticket_id:
+                continue
+            if task.status != QueueItemStatus.RUNNING:
+                continue
+            # Disambiguate stale events: when the event carries a
+            # session_id and the task has been stamped with one, they
+            # must agree. Either side missing a session_id falls back to
+            # ticket_id-only matching for backward compatibility with
+            # legacy tasks/events that predate the field.
+            if (
+                isinstance(event_session_id, str)
+                and task.session_id is not None
+                and task.session_id != event_session_id
+            ):
+                continue
+            task.status = QueueItemStatus.COMPLETED
+            completed += 1
+            break
+    if completed:
+        save_dev_queue(store)
+    return completed
+
+
 def consume_completed_sessions() -> int:
     """Process session.completed events and mark tasks COMPLETED in the queue.
 
@@ -291,54 +357,9 @@ def consume_completed_sessions() -> int:
     if not events:
         return 0
 
-    completed = 0
     with dev_queue_lock():
         store = load_dev_queue()
-        for event in events:
-            # Crashed events are emitted by reconcile only. For DAEMON
-            # sessions reconcile has already reverted the task
-            # RUNNING → PENDING; marking the task COMPLETED here would
-            # shadow that revert and (worse) match the next freshly-
-            # respawned RUNNING task for the same ticket_id, falsely
-            # retiring a still-running session. For non-DAEMON crashed
-            # sessions reconcile does not touch the queue, so a blanket
-            # skip is conservative-safe (no queue task is expected to
-            # match anyway). See GitHub issue #97.
-            if event.payload.get("crashed"):
-                continue
-            ticket_id = event.payload.get("ticket_id")
-            if not ticket_id:
-                # Fallback: recover ticket_id from the session_name for events
-                # produced before the reconciler emitted ticket_id explicitly.
-                # Drains historical RUNNING tasks whose completion events
-                # predate the producer-side fix.
-                session_name = event.payload.get("session_name")
-                if isinstance(session_name, str):
-                    ticket_id = ticket_id_for_session(session_name)
-            if not ticket_id:
-                continue
-            event_session_id = event.payload.get("session_id")
-            for task in store.tasks:
-                if task.ticket_id != ticket_id:
-                    continue
-                if task.status != QueueItemStatus.RUNNING:
-                    continue
-                # Disambiguate stale events: when the event carries a
-                # session_id and the task has been stamped with one, they
-                # must agree. Either side missing a session_id falls back to
-                # ticket_id-only matching for backward compatibility with
-                # legacy tasks/events that predate the field.
-                if (
-                    isinstance(event_session_id, str)
-                    and task.session_id is not None
-                    and task.session_id != event_session_id
-                ):
-                    continue
-                task.status = QueueItemStatus.COMPLETED
-                completed += 1
-                break
-        if completed:
-            save_dev_queue(store)
+        completed = _apply_events_to_store(store, events)
 
     # Persist sentinel-block summaries on Sessions whose completion event
     # carried captured stdout. Producer side (worker stdout capture) is

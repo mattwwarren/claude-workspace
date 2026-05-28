@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import cast, get_args
 
 import click
 from click.shell_completion import CompletionItem
@@ -20,6 +20,7 @@ from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
     AutoDevResult,
     BlockedResult,
+    Status,
     extract_block,
     parse_stdout,
 )
@@ -45,7 +46,7 @@ from cw.dev_queue import (
     resolve_client,
     save_dev_queue,
 )
-from cw.dispatch import run_dispatch_loop
+from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
 from cw.doctor import format_report, run_doctor
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, WorktreeError
@@ -83,7 +84,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
-from cw.reconcile import reconcile, resolve_headless_budget
+from cw.reconcile import reconcile, resolve_headless_budget, ticket_id_for_session
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -1975,6 +1976,135 @@ def spawn_close(session_id: str) -> None:
     """
     _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")
+
+
+def _spawn_complete_impl(
+    *,
+    session_id: str,
+    status: str,
+    ticket_id: str | None,
+    force: bool,
+    native_daemon: NativeDaemonClient | None = None,
+) -> None:
+    """Complete a daemon-spawned session atomically.
+
+    Performs three steps in sequence:
+    1. Records a session.completed event
+    2. Applies it to the dev queue inline (under dev_queue_lock)
+    3. Closes the session
+
+    Separated from the Click command so tests can inject the daemon client
+    directly.
+    """
+    state = load_state()
+    sess = state.find_by_name_or_id(session_id)
+    if sess is None:
+        msg = f"Session '{session_id}' not found."
+        raise CwError(msg)
+
+    if sess.status == SessionStatus.COMPLETED:
+        if not force:
+            msg = f"Session '{session_id}' is already completed. Use --force to no-op."
+            raise CwError(msg)
+        return
+
+    effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)
+
+    payload: dict[str, object] = {
+        "session_id": sess.id,
+        "client": sess.client,
+        "crashed": False,
+        "status": status,
+        **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
+    }
+
+    with dev_queue_lock():
+        store = load_dev_queue()
+
+        # Guard: queue task already COMPLETED (inside lock — authoritative)
+        if effective_ticket_id:
+            for task in store.tasks:
+                if (
+                    task.ticket_id == effective_ticket_id
+                    and task.status == QueueItemStatus.COMPLETED
+                ):
+                    already_done_task_msg = (
+                        f"Queue task for '{effective_ticket_id}' is already COMPLETED. "
+                        "Use 'cw spawn close' to close the session only."
+                    )
+                    raise CwError(already_done_task_msg)
+
+        # Step 1: Record event (record_event uses _inbox_lock — no deadlock risk)
+        event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+        # Step 2: Apply to queue
+        _apply_events_to_store(store, [event])
+
+        # Step 3: Close session state
+        sess.status = SessionStatus.COMPLETED
+        sess.completed_at = datetime.now(UTC)
+        if sess.completed_reason is None:
+            sess.completed_reason = CompletionReason.USER
+        save_state(state)
+
+    # Advance cursor after lock (advance_cursor uses inbox lock — safe)
+    advance_cursor(_DISPATCH_CONSUMER, event.id)
+
+    # daemon.stop outside lock — best-effort, slow (up to 10s timeout)
+    daemon = native_daemon or get_native_daemon_client()
+    if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
+        daemon.stop(sess.surface_ref)
+
+
+@spawn.command(name="complete")
+@click.argument("session_id")
+@click.option(
+    "--status",
+    "status",
+    required=True,
+    type=click.Choice(list(get_args(Status))),
+    help="Outcome status to record (every value in auto_dev_result.Status).",
+)
+@click.option(
+    "--ticket-id",
+    default=None,
+    help=(
+        "Ticket ID; inferred from session name via ticket_id_for_session() if omitted."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "If session is already COMPLETED, silently succeed (no-op) instead of erroring."
+    ),
+)
+@handle_errors
+def spawn_complete(
+    session_id: str,
+    status: str,
+    ticket_id: str | None,
+    force: bool,
+) -> None:
+    """Complete a daemon-spawned session, recording its outcome atomically.
+
+    Records a session.completed event, applies it to the dev queue, and
+    closes the session in one atomic operation. Replaces the three-command
+    manual recovery sequence used when sessions are stuck.
+
+    \b
+    Example:
+      cw spawn complete abc12345 --status shipped
+      cw spawn complete abc12345 --status blocked --ticket-id GEN-42
+    """
+    _spawn_complete_impl(
+        session_id=session_id,
+        status=status,
+        ticket_id=ticket_id,
+        force=force,
+    )
+    click.echo(f"Completed session: {session_id} (status={status})")
 
 
 _ORCHESTRATOR_AGENT = "cw-orchestrator"
