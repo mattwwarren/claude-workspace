@@ -31,6 +31,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _SILENTLY_IDLE_REASON,
     HEADLESS_TIMEOUT_SECONDS,
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
@@ -1299,7 +1300,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     assert sess.status == SessionStatus.COMPLETED
     assert sess.completed_reason == CompletionReason.NORMAL
     assert sess.completed_at == now
-    assert sess.last_result == {"paused_status": "silently_idle"}
+    assert sess.last_result == {"paused_status": _SILENTLY_IDLE_REASON}
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "SILENT-1")
@@ -1312,7 +1313,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     assert len(events) == 1
     payload = events[0].payload
     assert payload["session_id"] == "silent-1"
-    assert payload["paused_status"] == "silently_idle"
+    assert payload["paused_status"] == _SILENTLY_IDLE_REASON
     assert payload["crashed"] is False
 
 
@@ -1342,7 +1343,7 @@ def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
         ).workspace_path,
         surface_ref="live-ref",
         started_at=started_at,
-        last_result={"paused_status": "silently_idle"},
+        last_result={"paused_status": _SILENTLY_IDLE_REASON},
         completed_at=now,
         completed_reason=CompletionReason.NORMAL,
     )
