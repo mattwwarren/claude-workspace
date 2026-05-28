@@ -40,6 +40,7 @@ from cw.reconcile import (
     flag_silently_idle_daemon_sessions,
     reconcile,
     resolve_headless_budget,
+    resolve_idle_watchdog_budget,
     revert_completed_silent_tasks,
     revert_stalled_headless_sessions,
     revert_timed_out_tasks,
@@ -1292,7 +1293,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
 
     with patch("cw.reconcile.fire_push_notification") as mock_notify:
         blocked = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
         mock_notify.assert_called_once_with(sess.name, sess.client)
 
@@ -1396,7 +1397,7 @@ def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
     save_state(state)
 
     blocked = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
     assert blocked == []
@@ -1429,7 +1430,7 @@ def test_flag_silently_idle_daemon_sessions_skips_session_with_terminal_sentinel
     save_state(state)
 
     blocked = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
     assert blocked == []
@@ -1461,7 +1462,7 @@ def test_flag_silently_idle_daemon_sessions_skips_user_origin(
     save_state(state)
 
     blocked = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
     assert blocked == []
@@ -1517,3 +1518,133 @@ def test_reconcile_includes_silently_idle_in_report(
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "RCL-S")
     assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# resolve_idle_watchdog_budget + per-tier/per-ticket override tests (#326)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_idle_watchdog_budget_returns_global_default_with_no_task() -> None:
+    """No task → global IDLE_WATCHDOG_SECONDS fallback."""
+    config = OrchestratorConfig()
+    assert resolve_idle_watchdog_budget(None, config) == IDLE_WATCHDOG_SECONDS
+
+
+def test_resolve_idle_watchdog_budget_no_scope_hint_returns_global_default() -> None:
+    """Task with no scope_hint → global fallback."""
+    config = OrchestratorConfig()
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint=None)
+    assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
+
+
+def test_resolve_idle_watchdog_budget_respects_per_tier() -> None:
+    """scope_hint='large' → idle_watchdog_by_tier['large'] returned."""
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint="large")
+    assert resolve_idle_watchdog_budget(task, config) == 600
+
+
+def test_resolve_idle_watchdog_budget_per_ticket_overrides_tier() -> None:
+    """idle_watchdog_override beats per-tier dict."""
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(
+        ticket_id="T-1", client="c", scope_hint="large", idle_watchdog_override=900
+    )
+    assert resolve_idle_watchdog_budget(task, config) == 900
+
+
+def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Large-tier task at 400s: > default 300s but < tier 600s → not flagged."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 6, 40, tzinfo=UTC)  # 400 seconds elapsed
+    elapsed = (now - started_at).total_seconds()
+    assert elapsed > IDLE_WATCHDOG_SECONDS  # 400 > 300 — would flag without override
+    assert elapsed < 600  # but under the large-tier override
+
+    sess = Session(
+        id="tier-silent",
+        name="client-a/auto-dev/TIER-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="TIER-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="tier-silent",
+        scope_hint="large",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=config
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_resolve_idle_watchdog_budget_unknown_tier_falls_back_to_global() -> None:
+    """scope_hint not in idle_watchdog_by_tier → global IDLE_WATCHDOG_SECONDS."""
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint="unknown")
+    assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
+
+
+def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """idle_watchdog_override on task beats both tier and global defaults."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)  # 600s elapsed
+    elapsed = (now - started_at).total_seconds()
+    assert elapsed > IDLE_WATCHDOG_SECONDS  # 600 > 300 default
+    assert elapsed < 900  # under the per-ticket override
+
+    sess = Session(
+        id="ticket-silent",
+        name="client-a/auto-dev/TICK-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="TICK-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="ticket-silent",
+        idle_watchdog_override=900,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    config = OrchestratorConfig()
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=config
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
