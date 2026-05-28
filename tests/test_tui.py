@@ -329,11 +329,16 @@ def _render_watch(
     frozen_now: datetime,
     selected: int = 0,
     home: str = "",
+    notice: str = "",
 ) -> str:
     """Render the flat-watch table to a string for assertion."""
     buf = StringIO()
     con = Console(file=buf, width=120, force_terminal=False)
-    con.print(render_watch_table(status, now=frozen_now, selected=selected, home=home))
+    con.print(
+        render_watch_table(
+            status, now=frozen_now, selected=selected, home=home, notice=notice
+        )
+    )
     return buf.getvalue()
 
 
@@ -419,6 +424,13 @@ class TestRenderWatchTable:
         out0 = _render_watch(sample_status, frozen_now=frozen_now, selected=0)
         # Rich may render the selection differently; just confirm no crash
         assert out0
+
+    def test_render_watch_table_with_notice(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        """Non-empty notice appears in rendered output below the table."""
+        out = _render_watch(sample_status, frozen_now=frozen_now, notice="test notice")
+        assert "test notice" in out
 
 
 class TestWatchFlat:
@@ -773,21 +785,12 @@ class TestKeyListenerThread:
 
 
 class TestBuildWatchRows:
-    def test_running_ticket_merged_with_session(self, frozen_now: datetime) -> None:
-        """A 'running' ticket whose client matches a session gets merged."""
+    def test_session_row_generated(self, frozen_now: datetime) -> None:
+        """One running session produces one row via from_session."""
         from cw.tui import _build_watch_rows
 
         status = OrchestratorStatus(
             generated_at=frozen_now,
-            pending_tickets=[
-                TicketSummary(
-                    ticket_id="MW-200",
-                    client="personal",
-                    priority=1,
-                    status="running",
-                    created_at=frozen_now,
-                ),
-            ],
             running_sessions=[
                 SessionSummary(
                     id="sess-run",
@@ -800,39 +803,27 @@ class TestBuildWatchRows:
             ],
         )
         rows = _build_watch_rows(status, frozen_now)
-        # One merged row, not two separate rows
         assert len(rows) == 1
-        assert rows[0].ticket_id == "MW-200"
         assert rows[0].session_id == "sess-run"
+        assert rows[0].ticket_id == ""
 
-    def test_running_ticket_skipped_from_standalone_ticket_rows(
-        self, frozen_now: datetime
-    ) -> None:
-        """Running ticket that already has a session row is not duplicated."""
+    def test_pending_ticket_row_generated(self, frozen_now: datetime) -> None:
+        """One pending ticket produces one row via from_ticket."""
         from cw.tui import _build_watch_rows
 
         status = OrchestratorStatus(
             generated_at=frozen_now,
             pending_tickets=[
                 TicketSummary(
-                    ticket_id="MW-201",
+                    ticket_id="MW-200",
                     client="personal",
                     priority=1,
-                    status="running",
+                    status="pending",
                     created_at=frozen_now,
-                ),
-            ],
-            running_sessions=[
-                SessionSummary(
-                    id="sess-dup",
-                    name="personal/impl",
-                    client="personal",
-                    status="active",
-                    purpose="impl",
-                    started_at=frozen_now,
                 ),
             ],
         )
         rows = _build_watch_rows(status, frozen_now)
-        # Only one row (merged), not two
         assert len(rows) == 1
+        assert rows[0].ticket_id == "MW-200"
+        assert rows[0].session_id is None

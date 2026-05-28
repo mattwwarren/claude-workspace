@@ -468,30 +468,10 @@ def _build_watch_rows(
     now: datetime,
 ) -> list[WatchRow]:
     """Build a flat list of WatchRow from an OrchestratorStatus snapshot."""
-    rows: list[WatchRow] = []
-
-    # One row per running session
-    for sess in status.running_sessions:
-        # Try to find a matching running ticket for this session's client
-        matching_ticket: TicketSummary | None = None
-        for t in status.pending_tickets:
-            if t.client == sess.client and t.status == "running":
-                matching_ticket = t
-                break
-
-        if matching_ticket is not None:
-            rows.append(WatchRow.from_running_ticket(matching_ticket, sess, now=now))
-        else:
-            rows.append(WatchRow.from_session(sess, now=now))
-
-    # Pending tickets not already covered by a session row
-    session_clients_covered = {sess.client for sess in status.running_sessions}
-    for ticket in status.pending_tickets:
-        if ticket.status == "running" and ticket.client in session_clients_covered:
-            continue
-        if ticket.status != "running":
-            rows.append(WatchRow.from_ticket(ticket, now=now))
-
+    rows: list[WatchRow] = [
+        WatchRow.from_session(sess, now=now) for sess in status.running_sessions
+    ]
+    rows += [WatchRow.from_ticket(ticket, now=now) for ticket in status.pending_tickets]
     return rows
 
 
@@ -501,6 +481,7 @@ def render_watch_table(
     now: datetime,
     selected: int = 0,
     home: str = "",
+    notice: str = "",
 ) -> RenderableType:
     """Render a flat table of all active work (sessions + tickets).
 
@@ -509,6 +490,7 @@ def render_watch_table(
         now: Reference time for elapsed calculations.
         selected: Index of the currently selected row (highlighted).
         home: Home directory string for shortening worktree paths.
+        notice: Optional one-line notice shown below the table (dim yellow).
 
     Returns:
         A rich renderable (Table or Text).
@@ -550,6 +532,8 @@ def render_watch_table(
             style=style,
         )
 
+    if notice:
+        return Group(table, Text(f"  {notice}", style="dim yellow"))
     return table
 
 
@@ -676,10 +660,14 @@ def watch_flat(
     notice_q: queue.SimpleQueue[str] = queue.SimpleQueue()
     cursor = 0
     last_refresh = 0.0
+    current_notice: str = ""
+    notice_ts: float = 0.0
     status = provider()
 
     with Live(
-        render_watch_table(status, now=datetime.now(UTC), home=home, selected=cursor),
+        render_watch_table(
+            status, now=datetime.now(UTC), home=home, selected=cursor, notice=""
+        ),
         console=console,
         screen=True,
         refresh_per_second=4,
@@ -691,10 +679,12 @@ def watch_flat(
                 t_now = now.timestamp()
                 force_refresh = False
 
+                # Pre-compute rows once per tick (not per keypress).
+                current_rows = _build_watch_rows(status, now)
+
                 # Drain key queue.
                 while not kq.empty():
                     key = kq.get_nowait()
-                    current_rows = _build_watch_rows(status, now)
                     cursor, should_quit, did_force = _handle_key(
                         key, current_rows, cursor, notice_q
                     )
@@ -707,9 +697,14 @@ def watch_flat(
                     status = provider()
                     last_refresh = t_now
 
-                # Drain notices (discard — no inline status bar).
+                # Drain notices; keep the latest for display.
                 while not notice_q.empty():
-                    notice_q.get_nowait()
+                    current_notice = notice_q.get_nowait()
+                    notice_ts = t_now
+
+                # Clear notice after 3 seconds.
+                if current_notice and t_now - notice_ts > 3.0:
+                    current_notice = ""
 
                 live.update(
                     render_watch_table(
@@ -717,6 +712,7 @@ def watch_flat(
                         now=now,
                         home=home,
                         selected=cursor,
+                        notice=current_notice,
                     )
                 )
         except KeyboardInterrupt:
