@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-05-27
+
+Patch release covering #129's BLOCKED_ON_USER producer + watchdog and the
+SHOULD_FIX follow-up batch from PR #323's review, plus the new
+`cw-queue-peek` skill for in-flight session inspection.
+
+- **`BLOCKED_ON_USER` producer + watchdog** (#129/#322 → PR #323):
+  `QueueItemStatus.BLOCKED_ON_USER` + `OrchestratorEventType.SESSION_NEEDS_ATTENTION`
+  enum additions; `signal_needs_attention` path in `wrapper.py` for paused-for-input
+  sentinels; `flag_silently_idle_daemon_sessions` watchdog in `reconcile.py` for
+  silently-stalled DAEMON sessions; `notify.py` peon-ping + `notify-send` push
+  helper; `docs/headless-contract.md` updated with the BLOCKED_ON_USER section.
+- **Watchdog hardening** (#324/#332): reorder writes — `save_state` (session →
+  COMPLETED + `last_result`) fires before queue mutation; crash between
+  session-flip and queue-flip recovers cleanly on next reconcile tick.
+- **Per-ticket / per-tier IDLE_WATCHDOG_SECONDS override** (#326/#331): mirrors
+  the `HEADLESS_TIMEOUT_SECONDS` override pattern from #265.
+- **`notify.py` debug logging** (#327/#330): each fail-quiet exception path now
+  logs at debug level so `CW_LOG_LEVEL=DEBUG` surfaces misconfigured peon.sh.
+- **Test rigor** (#328/#333): `_is_paused_for_user_input` tests construct real
+  `AutoDevResult` instances instead of `MagicMock`, so future schema changes
+  fail loudly.
+- **`cw-queue-peek` skill + script** (PR #335): in-flight inspection of
+  RUNNING dev-queue sessions. Computes age, idle gap, last sentinel status,
+  and PR state per session; recommends WAIT / PEEK / STOP via a 10-rule
+  peek-stop ladder. Reports only — operator runs `cw spawn close <id>`
+  after reviewing. Closes the gap between `cw-session-watch` (post-mortem
+  exit status) and `cw-validate-result` (post-mortem sentinel inspection).
+
 ## [0.11.0] — 2026-05-27
 
 Pre-1.0 substrate release covering multiplexer-removal Phase D, the PR
