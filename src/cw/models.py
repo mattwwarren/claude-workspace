@@ -167,6 +167,11 @@ class TicketTask(BaseModel):
     # the global HEADLESS_TIMEOUT_SECONDS fallback. Set via ``cw dev-queue add
     # --timeout <s>``. None means "use tier or global default". See issue #265.
     headless_timeout_override: int | None = None
+    # Per-ticket idle-watchdog budget override (seconds). When set, takes precedence
+    # over the per-tier default in OrchestratorConfig.idle_watchdog_by_tier and
+    # the global IDLE_WATCHDOG_SECONDS fallback. None means "use tier or global
+    # default". See GitHub issue #326.
+    idle_watchdog_override: int | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -227,6 +232,13 @@ class OrchestratorConfig(BaseModel):
     # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.
     headless_timeout_by_tier: dict[str, int] = Field(
         default_factory=lambda: {"small": 1800, "large": 5400}
+    )
+    # Per-tier idle-watchdog budgets (seconds). Keyed by TicketTask.scope_hint;
+    # unknown tiers fall back to IDLE_WATCHDOG_SECONDS (300s). Large-tier
+    # sessions can legitimately stall >5min on slow tests/mypy before emitting
+    # any sentinel. See GitHub issue #326.
+    idle_watchdog_by_tier: dict[str, int] = Field(
+        default_factory=lambda: {"large": 600}
     )
 
     @model_validator(mode="before")
