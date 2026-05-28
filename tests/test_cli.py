@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 
     import pytest
 
+    from cw.cmux import FakeCmuxAdapter
+
 
 class TestCli:
     def test_version(self) -> None:
@@ -3926,3 +3928,172 @@ class TestSpawnCloseTaskCancellation:
         state = load_state()
         updated = next(s for s in state.sessions if s.id == sess.id)
         assert updated.status == SessionStatus.COMPLETED
+
+
+class TestPeek:
+    """Tests for `cw peek` — read-only session output snapshot."""
+
+    def _make_session(
+        self,
+        tmp_path: Path,
+        *,
+        status: SessionStatus = SessionStatus.ACTIVE,
+        surface_ref: str | None = "ws:0.1",
+        sess_id: str = "peeksess",
+        name: str = "test-client/impl",
+    ) -> Session:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        session = Session(
+            id=sess_id,
+            name=name,
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=status,
+            workspace_path=workspace,
+            surface_ref=surface_ref,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        return session
+
+    def test_peek_happy_path(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+
+        session = self._make_session(tmp_path, surface_ref="ws:0.1")
+        mock_cmux_adapter._live.add("ws:0.1")
+        mock_cmux_adapter.set_surface_content("ws:0.1", "hello world\n")
+
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            result = runner.invoke(main, ["peek", session.name])
+        assert result.exit_code == 0, result.output
+        assert "hello world" in result.output
+
+    def test_peek_by_session_id(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        session = self._make_session(tmp_path, surface_ref="ws:0.1", sess_id="abc12345")
+        mock_cmux_adapter._live.add("ws:0.1")
+        mock_cmux_adapter.set_surface_content("ws:0.1", "output via id\n")
+
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            result = runner.invoke(main, ["peek", session.id])
+        assert result.exit_code == 0, result.output
+        assert "output via id" in result.output
+
+    def test_peek_unknown_session_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["peek", "no-such-session"])
+        assert result.exit_code == 1
+        assert "not found" in result.output
+
+    def test_peek_completed_session_exits_1(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        session = self._make_session(
+            tmp_path, status=SessionStatus.COMPLETED, surface_ref="ws:0.1"
+        )
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            result = runner.invoke(main, ["peek", session.name])
+        assert result.exit_code == 1
+        assert "completed" in result.output
+
+    def test_peek_surface_gone_exits_1_with_suggestion(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        # Session is ACTIVE but surface_ref not in list_surfaces()
+        session = self._make_session(
+            tmp_path, status=SessionStatus.ACTIVE, surface_ref="ws:0.1"
+        )
+        # Don't add surface ref to _live, so list_surfaces() won't find it.
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            result = runner.invoke(main, ["peek", session.name])
+        assert result.exit_code == 1
+        assert "post-mortem" in result.output
+
+    def test_peek_default_lines(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        session = self._make_session(tmp_path, surface_ref="ws:0.1")
+        mock_cmux_adapter._live.add("ws:0.1")
+        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
+
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            runner.invoke(main, ["peek", session.name])
+        assert len(mock_cmux_adapter.calls["capture_surface"]) == 1
+        assert mock_cmux_adapter.calls["capture_surface"][0]["lines"] == 50
+
+    def test_peek_custom_lines(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        session = self._make_session(tmp_path, surface_ref="ws:0.1")
+        mock_cmux_adapter._live.add("ws:0.1")
+        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
+
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            runner.invoke(main, ["peek", "--lines", "10", session.name])
+        assert mock_cmux_adapter.calls["capture_surface"][0]["lines"] == 10
+
+    def test_peek_default_scrollback(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        session = self._make_session(tmp_path, surface_ref="ws:0.1")
+        mock_cmux_adapter._live.add("ws:0.1")
+        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
+
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            runner.invoke(main, ["peek", session.name])
+        assert mock_cmux_adapter.calls["capture_surface"][0]["scrollback"] == 200
+
+    def test_peek_custom_scrollback(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        session = self._make_session(tmp_path, surface_ref="ws:0.1")
+        mock_cmux_adapter._live.add("ws:0.1")
+        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
+
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            runner.invoke(main, ["peek", "--scrollback", "500", session.name])
+        assert mock_cmux_adapter.calls["capture_surface"][0]["scrollback"] == 500
+
+    def test_peek_warns_when_fewer_lines_available(
+        self,
+        tmp_path: Path,
+        mock_cmux_adapter: FakeCmuxAdapter,
+    ) -> None:
+        session = self._make_session(tmp_path, surface_ref="ws:0.1")
+        mock_cmux_adapter._live.add("ws:0.1")
+        # Only 3 lines of content but we request 50
+        mock_cmux_adapter.set_surface_content("ws:0.1", "line1\nline2\nline3")
+
+        runner = CliRunner()
+        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+            result = runner.invoke(main, ["peek", "--lines", "50", session.name])
+        assert result.exit_code == 0
+        assert "fewer than" in result.stderr
