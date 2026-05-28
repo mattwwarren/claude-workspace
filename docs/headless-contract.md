@@ -358,6 +358,39 @@ When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lock
 
 ---
 
+## BLOCKED_ON_USER Queue Task Status
+
+`QueueItemStatus.BLOCKED_ON_USER` marks a ticket task that paused for operator input rather than completing or failing. It differs from `PENDING` (retry-eligible) — BLOCKED_ON_USER tasks should never be auto-retried.
+
+**Three trigger conditions:**
+
+1. **Paused sentinel** — `wrapper.py` receives an `AutoDevResult` with `status` in `{ambiguities_pending_resolution, premises_pending_verification}`, or `status=blocked` with `next_actions` containing a `user_resolve_*/user_decide_*/user_verify_*` item. `signal_needs_attention` fires.
+
+2. **Silent exit** — `wrapper.py` receives headless exit code 0 but no AUTO_DEV_RESULT sentinel in stdout (the child self-backgrounded a subagent and exited early). `signal_needs_attention` fires.
+
+3. **Watchdog** — `reconcile()` finds a DAEMON RUNNING session with no `last_result`, surface still live in the native daemon, and `(now - started_at) > IDLE_WATCHDOG_SECONDS` (300s). `flag_silently_idle_daemon_sessions` fires.
+
+### SESSION_NEEDS_ATTENTION Event
+
+Emitted on every BLOCKED_ON_USER transition.
+
+```json
+{
+  "session_id": "<string>",
+  "session_name": "<string>",
+  "client": "<string>",
+  "ticket_id": "<string | null>",
+  "claude_session_id": "<string | null>",
+  "paused_status": "<string | null>",
+  "breadcrumbs": "<string>",
+  "crashed": false
+}
+```
+
+**Re-dispatch rule:** never auto-retry BLOCKED_ON_USER tasks. Human must review the Linear/GitHub issue for the posted ambiguities/premises, resolve them, and then re-dispatch manually.
+
+---
+
 ## 9. Cross-References
 
 - **Producer source (canonical for behavior):** `commands/auto-dev.md` in `mattwwarren/global-claude`. Sections "Headless Mode", "Health Check Protocol", "Appendix: Structured Output". Where this doc duplicates a producer value (e.g. the §2 fix-loop hard-cap, the §5 "every agent emits Health Check" requirement), the producer wins on disputes — open an issue to reconcile.

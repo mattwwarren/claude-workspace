@@ -13,12 +13,15 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
+    DevQueueStore,
     OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
+    QueueItemStatus,
     Session,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
 
 
@@ -548,3 +551,40 @@ def test_stage_event_types_round_trip(
 def test_orchestrator_event_type_includes_needs_sync() -> None:
     """TICKET_NEEDS_SYNC event type has correct string value."""
     assert OrchestratorEventType.TICKET_NEEDS_SYNC.value == "ticket.needs_sync"
+
+
+class TestQueueItemStatusBlockedOnUser:
+    def test_blocked_on_user_value(self) -> None:
+        assert QueueItemStatus.BLOCKED_ON_USER.value == "blocked_on_user"
+
+    def test_all_queue_statuses(self) -> None:
+        # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER
+        assert len(QueueItemStatus) == 6
+
+    def test_blocked_on_user_not_in_running(self) -> None:
+        store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-1",
+                    client="c",
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                ),
+                TicketTask(
+                    ticket_id="T-2",
+                    client="c",
+                    status=QueueItemStatus.RUNNING,
+                ),
+            ]
+        )
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].ticket_id == "T-2"
+        assert all(t.ticket_id != "T-1" for t in running)
+
+
+class TestOrchestratorEventTypeSessionNeedsAttention:
+    def test_session_needs_attention_value(self) -> None:
+        assert (
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION.value
+            == "session.needs_attention"
+        )
