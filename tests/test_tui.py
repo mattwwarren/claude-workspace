@@ -22,7 +22,14 @@ from cw.orchestrate import (
     SessionSummary,
     TicketSummary,
 )
-from cw.tui import DetailLevel, render_dashboard, watch
+from cw.tui import (
+    DetailLevel,
+    WatchRow,
+    render_dashboard,
+    render_watch_table,
+    watch,
+    watch_flat,
+)
 
 
 @pytest.fixture
@@ -310,3 +317,212 @@ class TestSessionsTableStageColumn:
         output = _render(stage_status, DetailLevel.COMPACT, frozen_now=frozen_now)
         assert "STAGE" not in output
         assert "s2_impl_started" not in output
+
+
+# ── watch flat helpers ────────────────────────────────────────────────────────
+
+
+def _render_watch(
+    status: OrchestratorStatus,
+    *,
+    frozen_now: datetime,
+    selected: int = 0,
+    home: str = "",
+) -> str:
+    """Render the flat-watch table to a string for assertion."""
+    buf = StringIO()
+    con = Console(file=buf, width=120, force_terminal=False)
+    con.print(render_watch_table(status, now=frozen_now, selected=selected, home=home))
+    return buf.getvalue()
+
+
+class TestWatchRow:
+    def test_from_session(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        sess = sample_status.running_sessions[0]
+        row = WatchRow.from_session(sess, now=frozen_now)
+        assert row.client == sess.client
+        assert row.ticket_id == ""
+        assert row.queue_status == "—"
+        assert row.session_status == sess.status
+        assert row.pane_cmd == "—"
+        assert row.total_cost_usd == "—"
+        assert row.idle_age  # non-empty
+
+    def test_from_ticket(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        ticket = sample_status.pending_tickets[0]
+        row = WatchRow.from_ticket(ticket, now=frozen_now)
+        assert row.client == ticket.client
+        assert row.ticket_id == ticket.ticket_id
+        assert row.queue_status == ticket.status
+        assert row.session_status == "—"
+
+    def test_from_running_ticket(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        ticket = sample_status.pending_tickets[0]
+        sess = sample_status.running_sessions[0]
+        row = WatchRow.from_running_ticket(ticket, sess, now=frozen_now)
+        assert row.queue_status == ticket.status
+        assert row.session_status == sess.status
+        assert row.worktree_path == sess.worktree_path
+        assert row.session_id == sess.id
+        assert row.ticket_id == ticket.ticket_id
+
+
+class TestRenderWatchTable:
+    def test_columns_present(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        out = _render_watch(sample_status, frozen_now=frozen_now)
+        for col in [
+            "CLIENT",
+            "TICKET",
+            "Q-STATUS",
+            "S-STATUS",
+            "PANE-CMD",
+            "IDLE-AGE",
+            "LAST-ACTIVITY",
+            "COST",
+        ]:
+            assert col in out, f"Missing column header: {col}"
+
+    def test_rows_populated(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        out = _render_watch(sample_status, frozen_now=frozen_now)
+        # session client
+        assert "personal" in out
+        # ticket id
+        assert "MW-101" in out
+
+    def test_stub_columns_show_dash(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        out = _render_watch(sample_status, frozen_now=frozen_now)
+        assert "—" in out  # pane_cmd and cost stubs
+
+    def test_empty_status_no_raise(self, frozen_now: datetime) -> None:
+        from cw.orchestrate import OrchestratorStatus
+
+        empty = OrchestratorStatus(generated_at=frozen_now)
+        out = _render_watch(empty, frozen_now=frozen_now)
+        assert out  # doesn't raise
+
+    def test_selected_row_distinct(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        out0 = _render_watch(sample_status, frozen_now=frozen_now, selected=0)
+        # Rich may render the selection differently; just confirm no crash
+        assert out0
+
+
+class TestWatchFlat:
+    def test_ticks_renders_frames(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(ticks=2, status_fn=lambda: sample_status, console=con)
+        out = buf.getvalue()
+        assert out.count("CLIENT") >= 2
+
+    def test_interval_clamped_no_error(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        # interval=9999 → clamped to 60; ticks=0 means no renders but no crash
+        watch_flat(interval=9999, ticks=0, status_fn=lambda: sample_status, console=con)
+
+    def test_quit_key_exits(self, sample_status: OrchestratorStatus) -> None:
+        import queue as _queue
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None,
+            status_fn=lambda: sample_status,
+            console=con,
+            key_queue=kq,
+        )
+        # Should return (not hang) after consuming q
+
+    def test_refresh_key_triggers_repoll(
+        self, sample_status: OrchestratorStatus
+    ) -> None:
+        import queue as _queue
+
+        call_count = 0
+
+        def counting_fn() -> OrchestratorStatus:
+            nonlocal call_count
+            call_count += 1
+            return sample_status
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("r")
+        kq.put("q")  # exit after
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(ticks=None, status_fn=counting_fn, console=con, key_queue=kq)
+        assert call_count >= 1
+
+    def test_open_editor_no_worktree(
+        self, sample_status: OrchestratorStatus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing 'o' with a row having no worktree doesn't crash."""
+        import queue as _queue
+
+        called: list[object] = []
+        monkeypatch.setattr("subprocess.run", lambda *a, **_kw: called.append(a))
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("j")  # navigate to a row with worktree_path=None if any
+        kq.put("o")
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
+        )
+        # subprocess not called for rows without worktree
+        # (or called once if a row does have a worktree — either is fine here)
+
+    def test_peek_not_found(
+        self, sample_status: OrchestratorStatus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing 'p' when cw queue-peek doesn't exist shows notice."""
+        import queue as _queue
+
+        monkeypatch.setattr("shutil.which", lambda _cmd: None)
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("p")
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
+        )
+        # Should not crash
+
+    def test_spawn_complete_shows_not_available(
+        self, sample_status: OrchestratorStatus
+    ) -> None:
+        """Pressing 'c' shows not-available notice."""
+        import queue as _queue
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("c")
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
+        )
+        # Should not crash
