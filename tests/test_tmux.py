@@ -266,6 +266,82 @@ def test_list_live_surface_commands_skips_malformed_lines(
     assert result == {"cw-client-a:0.0": "cw", "cw-client-b:1.0": "bash"}
 
 
+class TestTmuxAdapterCaptureSurface:
+    def _make_adapter(self, monkeypatch: pytest.MonkeyPatch) -> TmuxAdapter:
+        monkeypatch.setattr("cw.tmux.shutil.which", lambda _name: "/usr/bin/tmux")
+        return TmuxAdapter()
+
+    def test_capture_surface_server_down(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter = self._make_adapter(monkeypatch)
+
+        def fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="", stderr="no server running\n"
+            )
+
+        monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+        with pytest.raises(CwError, match="not found or tmux server"):
+            adapter.capture_surface("ws:0.1", lines=50, scrollback=200)
+
+    def test_capture_surface_calls_capture_pane(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._make_adapter(monkeypatch)
+        calls: list[list[str]] = []
+
+        def fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="hello\nworld\n", stderr=""
+            )
+
+        monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+        result = adapter.capture_surface("ws:0.1", lines=50, scrollback=200)
+        assert any("capture-pane" in c for c in calls)
+        assert "ws:0.1" in calls[0]
+        assert "hello" in result
+
+    def test_capture_surface_returns_last_n_lines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._make_adapter(monkeypatch)
+        content = "\n".join(f"line{i}" for i in range(10)) + "\n"
+
+        def fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=content, stderr=""
+            )
+
+        monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+        result = adapter.capture_surface("ws:0.1", lines=3, scrollback=200)
+        result_lines = result.splitlines()
+        assert result_lines == ["line7", "line8", "line9"]
+
+    def test_capture_surface_passes_scrollback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = self._make_adapter(monkeypatch)
+        captured_args: list[list[str]] = []
+
+        def fake_run(
+            args: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured_args.append(list(args))
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="data\n", stderr=""
+            )
+
+        monkeypatch.setattr("cw.tmux.subprocess.run", fake_run)
+        adapter.capture_surface("ws:0.1", lines=50, scrollback=500)
+        assert "-500" in captured_args[0]
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 class TestTmuxIntegration:

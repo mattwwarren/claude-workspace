@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from typing import Any
 
+from cw._util import _tail_lines
 from cw.exceptions import CwError
 
 # Pane reference format returned by ``tmux split-window -P -F ...``.
@@ -130,6 +131,23 @@ class TmuxAdapter:
         if result.returncode != 0 or not result.stdout:
             return set()
         return {line for line in result.stdout.strip().splitlines() if line}
+
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Return last *lines* lines of worker output for *surface_ref*.
+
+        Uses ``tmux capture-pane`` looking back at most *scrollback* lines.
+        Raises :exc:`cw.exceptions.CwError` when the pane is not found or
+        the tmux server is not running.
+        """
+        result = self._run(
+            ["capture-pane", "-t", surface_ref, "-p", "-S", f"-{scrollback}"],
+            check=False,
+        )
+        if result.returncode != 0:
+            msg = f"Surface '{surface_ref}' not found or tmux server is not running."
+            raise CwError(msg)
+        content = result.stdout
+        return _tail_lines(content, lines)
 
     def list_live_surface_commands(self) -> dict[str, str]:
         """Return mapping of pane ref to foreground command name.

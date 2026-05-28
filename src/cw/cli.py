@@ -24,6 +24,7 @@ from cw.auto_dev_result import (
     extract_block,
     parse_stdout,
 )
+from cw.cmux import MultiplexerAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
     init_client,
@@ -2157,6 +2158,81 @@ def orchestrator_start(
         native_daemon=native_daemon,
     )
     click.echo(f"Spawned orchestrator session: {session_id}")
+
+
+_PEEK_DEFAULT_LINES = 50
+_PEEK_DEFAULT_SCROLLBACK = 200
+
+
+def _peek_session(
+    session_name: str,
+    *,
+    lines: int,
+    scrollback: int,
+    adapter: MultiplexerAdapter | None = None,
+) -> None:
+    """Emit the last *lines* lines of worker output for *session_name*.
+
+    Raises :exc:`cw.exceptions.CwError` when the session is not found,
+    is already completed, or its surface is no longer live.
+    """
+    state = load_state()
+    session = state.find_by_name_or_id(session_name)
+    if session is None:
+        msg = f"Session '{session_name}' not found."
+        raise CwError(msg)
+    if session.status == SessionStatus.COMPLETED:
+        msg = (
+            f"Session '{session_name}' is completed (status: completed)."
+            " Its surface is no longer available."
+        )
+        raise CwError(msg)
+    if session.surface_ref is None:
+        msg = f"Session '{session_name}' has no surface reference recorded."
+        raise CwError(msg)
+    _adapter = adapter or get_cmux_adapter()
+    live = _adapter.list_surfaces()
+    if session.surface_ref not in live:
+        msg = (
+            f"Surface '{session.surface_ref}' for session '{session_name}' is gone."
+            f" Run 'cw post-mortem {session.id}' for the full transcript"
+            " once that command is available."
+        )
+        raise CwError(msg)
+    content = _adapter.capture_surface(
+        session.surface_ref, lines=lines, scrollback=scrollback
+    )
+    stripped = content.strip()
+    actual_lines = len(content.splitlines()) if stripped else 0
+    if actual_lines < lines and stripped:
+        click.echo(
+            f"Warning: fewer than {lines} lines available in scrollback"
+            f" (got {actual_lines}).",
+            err=True,
+        )
+    click.echo(content, nl=False)
+
+
+@main.command()
+@click.argument("session_name", shell_complete=_complete_session)
+@click.option(
+    "--lines",
+    "-n",
+    default=_PEEK_DEFAULT_LINES,
+    show_default=True,
+    help="Number of lines to emit from the end of worker output.",
+)
+@click.option(
+    "--scrollback",
+    "-s",
+    default=_PEEK_DEFAULT_SCROLLBACK,
+    show_default=True,
+    help="Maximum scrollback depth to search (lines).",
+)
+@handle_errors
+def peek(session_name: str, lines: int, scrollback: int) -> None:
+    """Emit the last N lines of worker output for a session."""
+    _peek_session(session_name, lines=lines, scrollback=scrollback)
 
 
 @main.group(name="pr-channel")

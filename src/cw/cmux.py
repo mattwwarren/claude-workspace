@@ -19,6 +19,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 import yaml
 from pydantic import ValidationError
 
+from cw._util import _tail_lines
 from cw.config import load_orchestrator_config
 from cw.exceptions import CwError
 from cw.models import BackendName
@@ -100,6 +101,13 @@ class MultiplexerAdapter(Protocol):
         For backends where command introspection is unsupported (cmux),
         return every live surface mapped to a non-shell sentinel so the
         zombie filter is a transparent no-op for those surfaces.
+        """
+        ...
+
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Return last *lines* lines of worker output for *surface_ref*.
+
+        Looks back at most *scrollback* lines. Raises CwError when unavailable.
         """
         ...
 
@@ -233,6 +241,18 @@ class RealCmuxAdapter:
         """
         return dict.fromkeys(self.list_surfaces(), "cmux-surface")
 
+    def capture_surface(self, _surface_ref: str, _lines: int, _scrollback: int) -> str:
+        """Raise CwError — cmux does not support output capture.
+
+        Switch to the tmux backend (``CW_BACKEND=tmux``) or use
+        ``cw post-mortem`` once that command is available.
+        """
+        msg = (
+            "capture_surface is not supported by the cmux backend;"
+            " switch to tmux (CW_BACKEND=tmux) or use cw post-mortem."
+        )
+        raise CwError(msg)
+
 
 class FakeCmuxAdapter:
     """In-memory adapter for testing. Records all calls; no real I/O."""
@@ -246,9 +266,11 @@ class FakeCmuxAdapter:
             "list_surfaces": [],
             "list_live_surface_commands": [],
         }
+        self.capture_calls: list[dict[str, object]] = []
         self._live: set[str] = set()
         self._live_commands: dict[str, str] = {}
         self._commands_fail: bool = False
+        self._surface_content: dict[str, str] = {}
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Record call and return a deterministic fake surface ref."""
@@ -299,6 +321,25 @@ class FakeCmuxAdapter:
         flexible for exercising edge-case scenarios.
         """
         self._live_commands[surface_ref] = command
+
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Return last *lines* lines of stored content for *surface_ref*.
+
+        Records the call in ``calls["capture_surface"]``. Raises CwError
+        when the ref is not in the live set.
+        """
+        self.capture_calls.append(
+            {"surface_ref": surface_ref, "lines": lines, "scrollback": scrollback}
+        )
+        if surface_ref not in self._live:
+            msg = f"Surface '{surface_ref}' is not active."
+            raise CwError(msg)
+        content = self._surface_content.get(surface_ref, "")
+        return _tail_lines(content, lines)
+
+    def set_surface_content(self, surface_ref: str, content: str) -> None:
+        """Set the stored output content for a surface (test helper)."""
+        self._surface_content[surface_ref] = content
 
 
 def _resolve_backend_name() -> BackendName:

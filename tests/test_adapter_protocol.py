@@ -66,6 +66,15 @@ class TestProtocolConformance:
         # self only
         assert params == ["self"]
 
+    def test_capture_surface_signature(
+        self, adapter_cls: type[MultiplexerAdapter]
+    ) -> None:
+        sig = inspect.signature(adapter_cls.capture_surface)
+        # Strip leading underscore to allow raise-only stubs to use _param naming
+        params = [p.lstrip("_") for p in sig.parameters]
+        # self, surface_ref, lines, scrollback
+        assert params[1:] == ["surface_ref", "lines", "scrollback"]
+
 
 class TestSpawnReturnTypesMatch:
     """The callable adapters (Fake, Tmux) must both return a string ref.
