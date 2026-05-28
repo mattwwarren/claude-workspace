@@ -329,6 +329,7 @@ class OrchestratorStatus(BaseModel):
     running_sessions: list[SessionSummary] = Field(default_factory=list)
     monitored_prs: list[MonitoredPR] = Field(default_factory=list)
     recent_events: list[EventSummary] = Field(default_factory=list)
+    total_cost_by_client: dict[str, float] = Field(default_factory=dict)
 
 
 def _summarise_ticket(task: TicketTask) -> TicketSummary:
@@ -459,12 +460,19 @@ def orchestrator_status() -> OrchestratorStatus:
     tail = all_events[-_RECENT_EVENTS_LIMIT:]
     recent = [_summarise_event(e) for e in tail]
 
+    total_cost: dict[str, float] = {}
+    for task in queue.tasks:
+        if task.status == QueueItemStatus.COMPLETED and task.total_cost_usd is not None:
+            prior = total_cost.get(task.client, 0.0)
+            total_cost[task.client] = prior + task.total_cost_usd
+
     return OrchestratorStatus(
         generated_at=datetime.now(UTC),
         pending_tickets=pending,
         running_sessions=running,
         monitored_prs=monitored,
         recent_events=recent,
+        total_cost_by_client=total_cost,
     )
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cw.atomic import atomic_write_text
 from cw.config import (
@@ -18,6 +18,7 @@ from cw.config import (
 )
 from cw.exceptions import CwError
 from cw.models import (
+    DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
     OrchestratorConfig,
@@ -95,13 +96,30 @@ def load_plan() -> DispatchPlan | None:
         return None
 
 
+def _fill_task_cost_default(task_raw: dict[str, Any]) -> None:
+    """Fill total_cost_usd introduced in dev-queue schema v2."""
+    if "total_cost_usd" not in task_raw:
+        task_raw["total_cost_usd"] = None
+
+
+def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalise a raw dev_queue.json payload into a currently-valid shape."""
+    tasks = raw.get("tasks")
+    if isinstance(tasks, list):
+        for task_raw in tasks:
+            if isinstance(task_raw, dict):
+                _fill_task_cost_default(task_raw)
+    raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
+    return raw
+
+
 def load_dev_queue() -> DevQueueStore:
     """Load the dev queue from disk, returning an empty store if missing."""
     path = dev_queue_file()
     if not path.exists():
         return DevQueueStore()
     raw = json.loads(path.read_text())
-    return DevQueueStore.model_validate(raw)
+    return DevQueueStore.model_validate(migrate_dev_queue(raw))
 
 
 def save_dev_queue(store: DevQueueStore) -> None:

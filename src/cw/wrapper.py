@@ -397,6 +397,8 @@ def signal_completed(
     session.completed_at = now
     session.completed_reason = CompletionReason.NORMAL
     session.last_result = result.model_dump(mode="json")
+    if result.cost_usd is not None:
+        session.cost_usd = result.cost_usd
     if claude_session_id:
         session.claude_session_id = claude_session_id
     save_state(state)

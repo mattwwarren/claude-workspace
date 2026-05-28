@@ -209,6 +209,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _coerce_session_origin(session_raw)
             _fill_linkage_field_defaults(session_raw)
             _fill_last_result_default(session_raw)
+            _fill_cost_fields_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -270,6 +271,17 @@ def _fill_last_result_default(session_raw: dict[str, Any]) -> None:
     """
     if "last_result" not in session_raw:
         session_raw["last_result"] = None
+
+
+def _fill_cost_fields_default(session_raw: dict[str, Any]) -> None:
+    """Fill cost_usd and cost_breakdown introduced in schema v4.
+
+    Idempotent: existing values are preserved.
+    """
+    if "cost_usd" not in session_raw:
+        session_raw["cost_usd"] = None
+    if "cost_breakdown" not in session_raw:
+        session_raw["cost_breakdown"] = None
 
 
 def save_state(state: CwState) -> None:

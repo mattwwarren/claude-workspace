@@ -316,6 +316,18 @@ class AutoDevResult(BaseModel):
     # all keys optional, tolerate producer-side key-name drift.
     ambiguities: list[dict[str, Any]] = Field(default_factory=list)
     premises: list[dict[str, Any]] = Field(default_factory=list)
+    # Total USD cost for this auto-dev run. Optional — producers that don't
+    # track cost omit this field; consumers treat None as "cost unknown".
+    # Must be non-negative when present. See GitHub issue #124.
+    cost_usd: float | None = None
+
+    @field_validator("cost_usd")
+    @classmethod
+    def _validate_cost_usd(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            msg = "cost_usd must be non-negative"
+            raise ValueError(msg)
+        return v
 
     @field_validator("stage_reached", mode="before")
     @classmethod
