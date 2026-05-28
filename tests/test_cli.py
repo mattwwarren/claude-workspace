@@ -3969,7 +3969,7 @@ class TestPeek:
         mock_cmux_adapter.set_surface_content("ws:0.1", "hello world\n")
 
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 0, result.output
         assert "hello world" in result.output
@@ -3984,7 +3984,7 @@ class TestPeek:
         mock_cmux_adapter.set_surface_content("ws:0.1", "output via id\n")
 
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             result = runner.invoke(main, ["peek", session.id])
         assert result.exit_code == 0, result.output
         assert "output via id" in result.output
@@ -4004,7 +4004,7 @@ class TestPeek:
             tmp_path, status=SessionStatus.COMPLETED, surface_ref="ws:0.1"
         )
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 1
         assert "completed" in result.output
@@ -4020,7 +4020,7 @@ class TestPeek:
         )
         # Don't add surface ref to _live, so list_surfaces() won't find it.
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 1
         assert "post-mortem" in result.output
@@ -4035,7 +4035,7 @@ class TestPeek:
         mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
 
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", session.name])
         assert len(mock_cmux_adapter.capture_calls) == 1
         assert mock_cmux_adapter.capture_calls[0]["lines"] == 50
@@ -4050,7 +4050,7 @@ class TestPeek:
         mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
 
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", "--lines", "10", session.name])
         assert mock_cmux_adapter.capture_calls[0]["lines"] == 10
 
@@ -4064,7 +4064,7 @@ class TestPeek:
         mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
 
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", session.name])
         assert mock_cmux_adapter.capture_calls[0]["scrollback"] == 200
 
@@ -4078,7 +4078,7 @@ class TestPeek:
         mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
 
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", "--scrollback", "500", session.name])
         assert mock_cmux_adapter.capture_calls[0]["scrollback"] == 500
 
@@ -4093,7 +4093,7 @@ class TestPeek:
         mock_cmux_adapter.set_surface_content("ws:0.1", "line1\nline2\nline3")
 
         runner = CliRunner()
-        with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
+        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
             result = runner.invoke(main, ["peek", "--lines", "50", session.name])
         assert result.exit_code == 0
         assert "fewer than" in result.stderr

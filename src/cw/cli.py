@@ -23,7 +23,7 @@ from cw.auto_dev_result import (
     extract_block,
     parse_stdout,
 )
-from cw.cmux import MultiplexerAdapter, get_backend_adapter
+from cw.cmux import MultiplexerAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
     init_client,
@@ -2060,7 +2060,7 @@ def _peek_session(
     if session.surface_ref is None:
         msg = f"Session '{session_name}' has no surface reference recorded."
         raise CwError(msg)
-    _adapter = adapter or get_backend_adapter()
+    _adapter = adapter or get_cmux_adapter()
     live = _adapter.list_surfaces()
     if session.surface_ref not in live:
         msg = (
