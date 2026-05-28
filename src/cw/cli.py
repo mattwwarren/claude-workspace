@@ -16,7 +16,13 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
+from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
+    AutoDevResult,
+    BlockedResult,
+    extract_block,
+    parse_stdout,
+)
 from cw.config import (
     get_client,
     init_client,
@@ -829,18 +835,19 @@ _VALIDATION_FAILED_MAX_ATTEMPTS = 3
 # event — causing no_op and similar outcomes to trigger infinite re-dispatch.
 # Also covers ambiguities_pending_resolution and premises_pending_verification
 # (issue #316): these are terminal-pending-user, not retry candidates.
-_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = frozenset(
-    {
-        "shipped",
-        "no_op",
-        "plan_pending_approval",
-        "review_pending_approval",
-        "merge_gate_blocked",
-        "scope_exceeded",
-        "forbidden_area",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
-    }
+_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = (
+    frozenset(
+        {
+            "shipped",
+            "no_op",
+            "plan_pending_approval",
+            "review_pending_approval",
+            "merge_gate_blocked",
+            "scope_exceeded",
+            "forbidden_area",
+        }
+    )
+    | PAUSED_FOR_USER_INPUT_STATUSES
 )
 
 

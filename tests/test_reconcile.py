@@ -6,6 +6,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import freezegun
 
@@ -31,9 +32,11 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     HEADLESS_TIMEOUT_SECONDS,
+    IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
     _claude_agents_json,
     compute_drift,
+    flag_silently_idle_daemon_sessions,
     reconcile,
     resolve_headless_budget,
     revert_completed_silent_tasks,
@@ -1246,3 +1249,216 @@ def test_revert_completed_silent_tasks_skips_cancelled_task(
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "TKT-CANCEL")
     assert t.status == QueueItemStatus.CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# flag_silently_idle_daemon_sessions tests (GitHub issue #129)
+# ---------------------------------------------------------------------------
+
+
+def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """DAEMON ACTIVE + no last_result + started >IDLE_WATCHDOG → BLOCKED_ON_USER."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="silent-1",
+        name="client-a/auto-dev/SILENT-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="SILENT-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="silent-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}
+        )
+        mock_notify.assert_called_once_with(sess.name, sess.client)
+
+    assert "SILENT-1" in blocked
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.completed_reason == CompletionReason.NORMAL
+    assert sess.completed_at == now
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "SILENT-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    events = read_events(
+        consumer="test-silent-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["session_id"] == "silent-1"
+    assert payload["paused_status"] == "silently_idle"
+    assert payload["crashed"] is False
+
+
+def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session started <5min ago → not flagged."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() < IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="under-silent",
+        name="client-a/auto-dev/UNDER-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_flag_silently_idle_daemon_sessions_skips_session_with_terminal_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session with last_result (terminal sentinel already stored) → not touched."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="has-sentinel",
+        name="client-a/auto-dev/HAS-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        last_result={"status": "shipped", "ticket_id": "HAS-S"},
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_flag_silently_idle_daemon_sessions_skips_user_origin(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """USER-origin session → not touched by watchdog."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="user-silent",
+        name="client-a/user-silent",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_reconcile_includes_silently_idle_in_report(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reconcile() calls watchdog and includes BLOCKED_ON_USER ticket in report."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    # The daemon returns this session as live (surface still registered).
+    live_short_id = "abcd1234"
+    full_uuid = f"{live_short_id}-1111-2222-3333-000000000000"
+
+    sess = Session(
+        id="rcl-silent",
+        name="client-a/auto-dev/RCL-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=live_short_id,
+        started_at=started_at,
+    )
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="RCL-S",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="rcl-silent",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": full_uuid}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert "RCL-S" in report.reverted_ticket_ids
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "RCL-S")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
