@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from typing import Any
 
+from cw._util import _tail_lines
 from cw.exceptions import CwError
 
 # Pane reference format returned by ``tmux split-window -P -F ...``.
@@ -146,10 +147,7 @@ class TmuxAdapter:
             msg = f"Surface '{surface_ref}' not found or tmux server is not running."
             raise CwError(msg)
         content = result.stdout
-        all_lines = content.splitlines()
-        if len(all_lines) > lines:
-            return "\n".join(all_lines[-lines:])
-        return content.rstrip("\n")
+        return _tail_lines(content, lines)
 
     def list_live_surface_commands(self) -> dict[str, str]:
         """Return mapping of pane ref to foreground command name.

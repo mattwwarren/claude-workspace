@@ -19,6 +19,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 import yaml
 from pydantic import ValidationError
 
+from cw._util import _tail_lines
 from cw.config import load_orchestrator_config
 from cw.exceptions import CwError
 from cw.models import BackendName
@@ -334,8 +335,7 @@ class FakeCmuxAdapter:
             msg = f"Surface '{surface_ref}' is not active."
             raise CwError(msg)
         content = self._surface_content.get(surface_ref, "")
-        all_lines = content.splitlines()
-        return "\n".join(all_lines[-lines:]) if len(all_lines) > lines else content
+        return _tail_lines(content, lines)
 
     def set_surface_content(self, surface_ref: str, content: str) -> None:
         """Set the stored output content for a surface (test helper)."""
