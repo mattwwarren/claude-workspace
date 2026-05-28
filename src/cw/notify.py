@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
+import logging
 import subprocess
 import threading
 from functools import lru_cache
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _PEON_TIMEOUT = 5  # seconds
 _HOOK_EVENT_NAME = "Notification"
@@ -36,7 +38,7 @@ def _fire_push_notification_sync(session_name: str, client: str, cwd: str = "") 
     )
     peon = _peon_sh_path()
     if peon is not None:
-        with contextlib.suppress(*_SUBPROCESS_ERRORS):
+        try:
             subprocess.run(
                 ["bash", str(peon)],
                 input=payload,
@@ -45,8 +47,10 @@ def _fire_push_notification_sync(session_name: str, client: str, cwd: str = "") 
                 capture_output=True,
                 check=False,
             )
+        except _SUBPROCESS_ERRORS as e:
+            _log.debug("notify peon-ping failed (acceptable): %s", e)
 
-    with contextlib.suppress(*_SUBPROCESS_ERRORS):
+    try:
         subprocess.run(
             [
                 "notify-send",
@@ -57,6 +61,8 @@ def _fire_push_notification_sync(session_name: str, client: str, cwd: str = "") 
             capture_output=True,
             check=False,
         )
+    except _SUBPROCESS_ERRORS as e:
+        _log.debug("notify notify-send failed (acceptable): %s", e)
 
 
 def fire_push_notification(session_name: str, client: str, *, cwd: str = "") -> None:
