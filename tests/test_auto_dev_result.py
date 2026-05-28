@@ -1443,3 +1443,185 @@ class TestStageReachedAliases:
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.stage_reached == "stage5_post_create"
+
+
+# ---------------------------------------------------------------------------
+# Phase C — Agent health aggregation (#174)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseC:
+    def test_old_payload_without_agent_health_summary_parses(self) -> None:
+        """Back-compat: payloads without agent_health_summary parse cleanly."""
+        p = _shipped_payload()
+        assert "agent_health_summary" not in p["health"]
+        result = AutoDevResult.model_validate(p)
+        assert result.health.agent_health_summary == []
+
+    def test_agent_health_summary_round_trip(self) -> None:
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH", "scope": "small"},
+            {"agent_id": "impl-agent-abc", "confidence": "MEDIUM", "scope": "large"},
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.health.agent_health_summary) == 2
+        assert result.health.agent_health_summary[0].agent_id == "plan-reviewer-xyz"
+        assert result.health.agent_health_summary[0].confidence == "HIGH"
+        assert result.health.agent_health_summary[0].scope == "small"
+        assert result.health.agent_health_summary[1].agent_id == "impl-agent-abc"
+        assert result.health.agent_health_summary[1].confidence == "MEDIUM"
+        assert result.health.agent_health_summary[1].scope == "large"
+
+    def test_agent_health_entry_scope_optional(self) -> None:
+        """scope is optional — agents without a scope concept omit it."""
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH"},
+        ]
+        result = AutoDevResult.model_validate(p)
+        entry = result.health.agent_health_summary[0]
+        assert entry.scope is None
+
+    def test_agent_health_entry_scope_accepts_unknown_string(self) -> None:
+        """scope is a free-form string; unknown values are tolerated."""
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH", "scope": "medium"},
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert result.health.agent_health_summary[0].scope == "medium"
+
+    def test_phase_c_on_v3_shipped_block(self) -> None:
+        """Full round-trip through parse_stdout with v3 agent_health_summary."""
+        p = _shipped_payload()
+        p["schema_version"] = 3
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "impl-agent-abc", "confidence": "LOW", "scope": "small"},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.health.agent_health_summary[0].confidence == "LOW"
+        assert result.health.agent_health_summary[0].agent_id == "impl-agent-abc"
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Pre-merge PR visibility (#174)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseD:
+    def test_shipped_without_pr_created_still_valid(self) -> None:
+        """Back-compat: pr_created absent on payloads from older producers."""
+        p = _shipped_payload()
+        assert "pr_created" not in p
+        result = AutoDevResult.model_validate(p)
+        assert result.pr_created is None
+
+    def test_pr_created_round_trip(self) -> None:
+        p = _shipped_payload()
+        p["pr_created"] = {
+            "number": 171,
+            "url": "https://github.com/mattwwarren/claude-workspace/pull/171",
+            "ci_status_at_creation": "pending",
+            "auto_merge_enabled": True,
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.pr_created is not None
+        assert result.pr_created.number == 171
+        assert "171" in result.pr_created.url
+        assert result.pr_created.ci_status_at_creation == "pending"
+        assert result.pr_created.auto_merge_enabled is True
+
+    def test_pr_created_ci_status_at_creation_is_open_enum(self) -> None:
+        """ci_status_at_creation accepts unknown strings — open-ish enum."""
+        p = _shipped_payload()
+        p["pr_created"] = {
+            "number": 172,
+            "url": "https://github.com/x/y/pull/172",
+            "ci_status_at_creation": "action_required",
+            "auto_merge_enabled": False,
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.pr_created is not None
+        assert result.pr_created.ci_status_at_creation == "action_required"
+
+    def test_phase_d_on_v3_shipped_block_via_parse_stdout(self) -> None:
+        p = _shipped_payload()
+        p["schema_version"] = 3
+        p["pr_created"] = {
+            "number": 42,
+            "url": "https://github.com/foo/bar/pull/42",
+            "ci_status_at_creation": "passing",
+            "auto_merge_enabled": True,
+        }
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.pr_created is not None
+        assert result.pr_created.number == 42
+        assert result.pr_created.ci_status_at_creation == "passing"
+
+
+# ---------------------------------------------------------------------------
+# Combined Phase B + E + C + D — all four phases together (issue #174)
+# ---------------------------------------------------------------------------
+
+
+class TestAllPhasesBECDCombined:
+    def test_all_phases_on_shipped_v3_block(self) -> None:
+        """Fixture exercising all four #174 phases in a single payload."""
+        p = _shipped_payload()
+        p["schema_version"] = 3
+        # Phase C: agent health summary
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-abc", "confidence": "HIGH", "scope": "small"},
+            {"agent_id": "impl-agent-def", "confidence": "MEDIUM", "scope": "small"},
+        ]
+        # Phase D: pre-merge PR snapshot
+        p["pr_created"] = {
+            "number": 99,
+            "url": "https://github.com/mattwwarren/claude-workspace/pull/99",
+            "ci_status_at_creation": "pending",
+            "auto_merge_enabled": True,
+        }
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+        # Phase C assertions
+        assert len(result.health.agent_health_summary) == 2
+        assert result.health.agent_health_summary[1].confidence == "MEDIUM"
+        # Phase D assertions
+        assert result.pr_created is not None
+        assert result.pr_created.number == 99
+        assert result.pr_created.ci_status_at_creation == "pending"
+
+    def test_all_phases_on_blocked_v3_block(self) -> None:
+        """Phase B+E on a blocked payload; Phase C on the health struct."""
+        p = _blocked_payload()
+        p["schema_version"] = 3
+        # Phase B + E on the blocker
+        p["blocker"].update(
+            {
+                "reason": "ci_timeout",
+                "exception_type": "CITimeoutError",
+                "message": "CI did not complete within 30 minutes",
+                "recovery_hint": "Re-dispatch with a 2-minute delay",
+                "retry_eligible": True,
+                "retry_delay_seconds": 120,
+            },
+        )
+        # Phase C on the health struct
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "impl-agent-ghi", "confidence": "LOW"},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        # Phase B+E
+        assert result.blocker is not None
+        assert result.blocker.exception_type == "CITimeoutError"
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds == 120
+        # Phase C
+        assert result.health.agent_health_summary[0].confidence == "LOW"
+        assert result.health.agent_health_summary[0].scope is None

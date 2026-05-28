@@ -153,10 +153,48 @@ class PrInfo(BaseModel):
     base: str
 
 
+class PrCreated(BaseModel):
+    """Phase D — pre-merge PR snapshot captured at PR-creation time (issue #174).
+
+    Distinct from :class:`PrInfo` (the ``pr`` field, representing the final
+    shipped state). ``PrCreated`` is emitted *before* auto-merge is triggered so
+    the orchestrator can attach CI watchers or make merge decisions based on the
+    CI state at the moment the PR was opened, not after the merge completes.
+
+    ``ci_status_at_creation`` is a free-form string (open-ish enum). Observed
+    producer values: ``"pending"``, ``"passing"``, ``"failing"``. Consumers
+    MUST treat unknown values as opaque strings and surface verbatim.
+    """
+
+    number: int
+    url: str
+    ci_status_at_creation: str
+    auto_merge_enabled: bool
+
+
 class Review(BaseModel):
     must_fix_initial: int
     should_fix: int
     fix_cycles_used: int
+
+
+class AgentHealthEntry(BaseModel):
+    """Phase C — per-agent health snapshot for orchestrator retry targeting (#174).
+
+    Collected across all agents that ran during a pipeline (plan, impl,
+    reviewers, fix-loop cycles, prep-pr) so the orchestrator can identify
+    *which* agent caused a downgrade rather than just knowing that a downgrade
+    occurred.
+
+    ``scope`` mirrors the tier the agent was operating on; may be ``None`` for
+    agents that don't have a scope concept (e.g. plan-reviewer). Free-form
+    string rather than a closed ``ScopeTier`` enum — tolerate producer-side
+    values outside ``{"small", "large"}`` rather than failing validation.
+    """
+
+    agent_id: str
+    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    scope: str | None = None
 
 
 class Health(BaseModel):
@@ -166,6 +204,10 @@ class Health(BaseModel):
     recommendation: Literal["PROCEED", "EXIT_FOR_HUMAN_REVIEW"]
     downgrade_applied: bool = False
     fix_loop_escalated: bool = False
+    # Phase C — per-agent breakdown so the orchestrator can target retries at
+    # the specific agent that caused a downgrade (issue #174). Optional: absent
+    # on payloads from older producers; defaults to empty list.
+    agent_health_summary: list[AgentHealthEntry] = Field(default_factory=list)
 
 
 class Blocker(BaseModel):
@@ -260,6 +302,10 @@ class AutoDevResult(BaseModel):
     fork_point_sha: str | None = None
     commits: list[str] = Field(default_factory=list)
     pr: PrInfo | None = None
+    # Phase D — pre-merge PR snapshot emitted before auto-merge is triggered
+    # (issue #174). Optional: absent on payloads from older producers. Non-null
+    # when a PR was created during this pipeline run (i.e. status=shipped).
+    pr_created: PrCreated | None = None
     review: Review
     health: Health
     friction_highlights: list[str] = Field(default_factory=list)
