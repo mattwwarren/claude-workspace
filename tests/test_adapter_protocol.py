@@ -70,7 +70,8 @@ class TestProtocolConformance:
         self, adapter_cls: type[MultiplexerAdapter]
     ) -> None:
         sig = inspect.signature(adapter_cls.capture_surface)
-        params = list(sig.parameters.keys())
+        # Strip leading underscore to allow raise-only stubs to use _param naming
+        params = [p.lstrip("_") for p in sig.parameters]
         # self, surface_ref, lines, scrollback
         assert params[1:] == ["surface_ref", "lines", "scrollback"]
 

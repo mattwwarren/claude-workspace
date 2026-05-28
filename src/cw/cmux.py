@@ -241,7 +241,7 @@ class RealCmuxAdapter:
         """
         return dict.fromkeys(self.list_surfaces(), "cmux-surface")
 
-    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+    def capture_surface(self, _surface_ref: str, _lines: int, _scrollback: int) -> str:
         """Raise CwError — cmux does not support output capture.
 
         Switch to the tmux backend (``CW_BACKEND=tmux``) or use

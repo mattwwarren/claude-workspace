@@ -124,7 +124,6 @@ ignore = [
 ]
 "src/cw/cmux.py" = [
     "S108",   # Unix socket paths in /tmp are part of the cmux protocol spec
-    "ARG002", # RealCmuxAdapter.capture_surface must match protocol signature but always raises
 ]
 "tests/**" = [
     "S101",     # assert is fine in tests
