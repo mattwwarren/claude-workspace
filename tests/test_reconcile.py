@@ -1298,9 +1298,13 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
         mock_notify.assert_called_once_with(sess.name, sess.client)
 
     assert "SILENT-1" in blocked
-    assert sess.status == SessionStatus.COMPLETED
-    assert sess.completed_reason == CompletionReason.NORMAL
-    assert sess.completed_at == now
+    # #348: flag-only — session stays ACTIVE so daemon worker can keep running.
+    # Operators disposition flagged sessions via `cw spawn complete` /
+    # `cw doctor --reap`. last_result.paused_status still set to prevent
+    # double-firing via _has_terminal_sentinel on subsequent ticks (#324).
+    assert sess.status == SessionStatus.ACTIVE
+    assert sess.completed_at is None
+    assert sess.completed_reason is None
     assert sess.last_result == {"paused_status": _SILENTLY_IDLE_REASON}
 
     store = load_dev_queue()
@@ -1316,6 +1320,64 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     assert payload["session_id"] == "silent-1"
     assert payload["paused_status"] == _SILENTLY_IDLE_REASON
     assert payload["crashed"] is False
+
+
+def test_flag_silently_idle_watchdog_does_not_call_native_daemon_stop(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Flag-only: watchdog must not invoke native_daemon stop() (#348).
+
+    The Track C wave-2 case study (2026-05-28) showed three workers that had
+    actually shipped work being silenced mid-stream by the watchdog. The fix
+    is flag-only: the queue task transitions to BLOCKED_ON_USER and the
+    operator dispositions the session via `cw spawn complete` or
+    `cw doctor --reap`. The session itself stays alive on the daemon.
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="alive-after-flag",
+        name="client-a/auto-dev/ALIVE-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="ALIVE-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="alive-after-flag",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with (
+        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.get_native_daemon_client") as mock_daemon,
+    ):
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    # The daemon client must not be touched — flag-only means the worker on
+    # the native daemon keeps running, even though the queue is BLOCKED_ON_USER.
+    mock_daemon.assert_not_called()
+
+    # Reload from disk and confirm session is still ACTIVE.
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "alive-after-flag")
+    assert s.status == SessionStatus.ACTIVE
 
 
 def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(

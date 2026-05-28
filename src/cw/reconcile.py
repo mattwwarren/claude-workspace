@@ -424,9 +424,11 @@ def flag_silently_idle_daemon_sessions(
         return []
 
     for session, _ in candidates:
-        session.status = SessionStatus.COMPLETED
-        session.completed_at = now
-        session.completed_reason = CompletionReason.NORMAL
+        # Flag-only: do not mark session COMPLETED. The worker on the daemon
+        # is still alive; operators disposition flagged sessions via
+        # `cw spawn complete` or `cw doctor --reap`. Setting last_result with
+        # paused_status still makes _has_terminal_sentinel return True so the
+        # watchdog skips this session on subsequent ticks (GitHub #324, #348).
         session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
 
     # Write session to disk BEFORE queue mutation so a crash between the two
