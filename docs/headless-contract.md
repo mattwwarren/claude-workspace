@@ -309,12 +309,28 @@ A degraded agent is one that returned ANY of:
 
 The skill can fail to emit a complete sentinel block. cw must handle:
 
-1. **No `<<<AUTO_DEV_RESULT` sentinel anywhere** — skill crashed before the emit step, or the run was not headless. Treat as `blocked` with synthetic blocker `{stage: "unknown", reason: "no_result_emitted", details: <last-N-lines-of-stdout>}`.
-2. **Opening sentinel present, closing sentinel missing** — skill crashed mid-emit. Same handling as (1).
+1. **No `<<<AUTO_DEV_RESULT` sentinel anywhere** — skill crashed before the emit step, or the run was not headless. The parser first attempts the **loose fallback** (see below); if that also fails, treat as `blocked` with synthetic blocker `{stage: "unknown", reason: "no_result_emitted", details: <last-N-lines-of-stdout>}`.
+2. **Opening sentinel present, closing sentinel missing** — skill crashed mid-emit. Same handling as (1), but the loose fallback does NOT apply (the open sentinel takes precedence).
 3. **Block present but JSON does not parse** — skill bug. Same handling as (1); include the raw block in `details`.
 4. **`schema_version` higher than parser supports** — skill upgraded ahead of cw. Surface verbatim and refuse to act on `next_actions`; do not auto-merge or auto-route.
 5. **Unknown `status` value** — same as (4). The closed enum in §4.1 covers all recognized values including `ambiguities_pending_resolution` and `premises_pending_verification` (promoted to canonical status in v4 via #191). Any value outside this set routes through `reason=status_unknown`.
 6. **Multiple complete sentinel blocks in one invocation's stdout** — skill bug (the contract is exactly one per invocation; see §3.1). Same handling as (1), with `reason: "multiple_result_blocks"` and `details` containing the count and the LAST block's raw payload.
+
+### Loose fallback (GitHub #337)
+
+The skill occasionally emits the payload in a plain code fence without the `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` markers:
+
+```
+All done. Emitting the headless sentinel:
+
+```json
+{"schema_version": 2, "status": "shipped", ...}
+```
+```
+
+The parser tolerates this format. When no sentinel markers are found and the opening sentinel is absent, the parser scans for the **last** `` ```json `` or `` ``` `` fenced block whose inner JSON parses as a dict containing both `schema_version` and `status`. If found, it is treated identically to a normally-framed block. A warning is logged.
+
+**The markers are still required in the skill contract.** The loose fallback is a consumer-side safeguard, not an invitation to omit markers. Skill implementations must emit `<<<AUTO_DEV_RESULT\n{...}\nAUTO_DEV_RESULT>>>`.
 
 Parser must NEVER act on a partial parse — if any of the above fire, treat the run as blocked and require human attention.
 

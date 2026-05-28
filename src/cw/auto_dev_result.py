@@ -46,6 +46,12 @@ _BLOCK_RE = re.compile(
     r"<<<AUTO_DEV_RESULT\s*\n(.*?)\nAUTO_DEV_RESULT>>>",
     re.DOTALL,
 )
+# Fallback locator for sentinels emitted as bare code-fenced JSON without
+# AUTO_DEV_RESULT markers (GitHub #337). Matches ```json or ``` fenced blocks.
+_LOOSE_FENCE_RE = re.compile(
+    r"```(?:json)?\n(.*?)\n```",
+    re.DOTALL,
+)
 
 # Keep the last-N-lines payload bounded so synthetic blocker details don't
 # bloat the persisted state file. 40 lines is enough to capture a typical
@@ -474,6 +480,26 @@ def _strip_code_fence(raw: str) -> str:
     return raw
 
 
+def _extract_loose_sentinel_json(text: str) -> str | None:
+    """Scan for the last code-fenced block that parses as an auto-dev payload.
+
+    Used as a fallback when ``parse_stdout`` finds no AUTO_DEV_RESULT markers
+    (GitHub #337 — producer occasionally emits the payload in a code fence
+    without the sentinel framing). Accepts only blocks whose inner JSON is a
+    dict containing both ``schema_version`` and ``status`` keys, distinguishing
+    an auto-dev result from unrelated code blocks in the output.
+    """
+    for m in reversed(list(_LOOSE_FENCE_RE.finditer(text))):
+        candidate = m.group(1).strip()
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "schema_version" in obj and "status" in obj:
+            return candidate
+    return None
+
+
 def extract_block(text: str) -> str | None:
     """Return the JSON text inside the LAST complete sentinel pair, or None.
 
@@ -508,20 +534,37 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         )
 
     if not matches:
-        # §6 (1) no sentinel, or §6 (2) opening without close. We don't
-        # distinguish — both indicate the skill failed before/during the
-        # emit step.
         if _OPEN_SENTINEL in text:
-            reason = "no_result_emitted"
-            details = f"opening sentinel present, close missing; tail:\n{_tail(text)}"
-        else:
-            reason = "no_result_emitted"
-            details = f"no sentinel block in stdout; tail:\n{_tail(text)}"
-        return BlockedResult(
-            blocker=Blocker(stage="unknown", reason=reason, details=details),
+            # §6 (2) opening sentinel present, close missing — skill crashed mid-emit
+            return BlockedResult(
+                blocker=Blocker(
+                    stage="unknown",
+                    reason="no_result_emitted",
+                    details=(
+                        f"opening sentinel present, close missing; tail:\n{_tail(text)}"
+                    ),
+                ),
+            )
+        # §6 (1) No AUTO_DEV_RESULT markers. Tolerate bare code-fenced JSON:
+        # the producer occasionally emits the payload in a ``` block without
+        # sentinel framing (GitHub #337). Accept iff the last fenced block
+        # parses as a JSON object with both schema_version and status.
+        loose_json = _extract_loose_sentinel_json(text)
+        if loose_json is None:
+            return BlockedResult(
+                blocker=Blocker(
+                    stage="unknown",
+                    reason="no_result_emitted",
+                    details=f"no sentinel block in stdout; tail:\n{_tail(text)}",
+                ),
+            )
+        _log.warning(
+            "auto-dev: sentinel emitted as bare code-fenced JSON without "
+            "AUTO_DEV_RESULT markers; using loose fallback (GitHub #337)"
         )
-
-    raw_block = _strip_code_fence(matches[0].group(1))
+        raw_block = loose_json
+    else:
+        raw_block = _strip_code_fence(matches[0].group(1))
 
     # §6 (3) JSON does not parse.
     try:

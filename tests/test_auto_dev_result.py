@@ -570,6 +570,73 @@ class TestCodeFenceStripping:
 
 
 # ---------------------------------------------------------------------------
+# Loose fallback: code-fenced JSON without AUTO_DEV_RESULT markers (GH #337)
+# ---------------------------------------------------------------------------
+
+
+class TestLooseFallback:
+    """parse_stdout must recover a valid payload from bare code-fenced JSON."""
+
+    def test_json_fence_without_markers_parses(self) -> None:
+        """```json\\n{...}\\n``` without markers is accepted as a loose fallback."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_plain_fence_without_markers_parses(self) -> None:
+        """```\\n{...}\\n``` (no language tag) is also accepted."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"All done:\n\n```\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_last_fence_wins_when_multiple(self) -> None:
+        """When multiple code fences exist, the last auto-dev-shaped one is used."""
+        shipped = _shipped_payload()
+        plan = _plan_pending_payload()
+        shipped_body = json.dumps(shipped)
+        plan_body = json.dumps(plan)
+        text = f"```json\n{shipped_body}\n```\nmore\n```json\n{plan_body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "plan_pending_approval"
+
+    def test_non_auto_dev_fence_not_accepted(self) -> None:
+        """A code fence without schema_version+status is not treated as a sentinel."""
+        text = '```json\n{"foo": "bar"}\n```\n'
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "no_result_emitted"
+
+    def test_opening_sentinel_present_takes_precedence(self) -> None:
+        """If the opening sentinel IS present (but close is missing), the
+        crash-mid-emit path fires — loose fallback does NOT apply."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        # Has the opening marker but no close; also has a bare code fence.
+        text = f"<<<AUTO_DEV_RESULT\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert "opening sentinel present" in result.blocker.details
+
+    def test_loose_fallback_preserves_all_fields(self) -> None:
+        """Loose-parsed result round-trips all required fields correctly."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"worker output:\n\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.ticket_id == payload["ticket_id"]
+        assert result.pr is not None
+        assert result.pr.number == payload["pr"]["number"]
+
+
+# ---------------------------------------------------------------------------
 # Cross-field invariants (per the owner's comment + §3-§5)
 # ---------------------------------------------------------------------------
 
