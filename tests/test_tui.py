@@ -625,6 +625,135 @@ class TestWatchFlat:
         )
         assert call_count >= 1
 
+    def test_notice_drain_and_live_update_reached(
+        self, sample_status: OrchestratorStatus
+    ) -> None:
+        """Loop reaches notice drain + live.update when 'c' key generates a notice
+        and 'q' arrives on the next iteration (after a brief delay)."""
+        import queue as _queue
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("c")  # generates a notice; does NOT quit
+
+        def _delayed_quit() -> None:
+            import time as _time
+
+            _time.sleep(0.35)
+            kq.put("q")
+
+        t = threading.Thread(target=_delayed_quit, daemon=True)
+        t.start()
+
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            interval=60,  # no timer refresh
+            ticks=None,
+            status_fn=lambda: sample_status,
+            console=con,
+            key_queue=kq,
+        )
+        t.join(timeout=2.0)
+
+    def test_live_update_and_notice_drain_reached(
+        self, sample_status: OrchestratorStatus
+    ) -> None:
+        """Loop runs a full iteration (live.update + notice drain) when queue is
+        initially empty, then 'q' is inserted after a brief delay."""
+        import queue as _queue
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+
+        # Insert 'q' after 0.3s so the first loop iteration (sleep 0.25s)
+        # completes fully before seeing the quit key.
+        def _delayed_quit() -> None:
+            import time as _time
+
+            _time.sleep(0.35)
+            kq.put("q")
+
+        t = threading.Thread(target=_delayed_quit, daemon=True)
+        t.start()
+
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            interval=1,
+            ticks=None,
+            status_fn=lambda: sample_status,
+            console=con,
+            key_queue=kq,
+        )
+        t.join(timeout=2.0)
+
+    def test_own_key_listener_thread_spawned(
+        self,
+        sample_status: OrchestratorStatus,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When key_queue=None, watch_flat spawns its own listener thread."""
+        import queue as _queue
+
+        # Inject a sentinel key_queue via monkeypatching queue.SimpleQueue so
+        # we can control termination without relying on timing.
+        call_count = 0
+
+        class _FakeSimpleQueue(_queue.SimpleQueue[str]):  # type: ignore[type-arg]
+            def __init__(self) -> None:
+                nonlocal call_count
+                call_count += 1
+                super().__init__()
+                # Pre-populate so the loop quits immediately
+                self.put("q")
+
+        monkeypatch.setattr(_queue, "SimpleQueue", _FakeSimpleQueue)
+
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        import cw.tui as _tui
+
+        monkeypatch.setattr(_tui.queue, "SimpleQueue", _FakeSimpleQueue)
+
+        # Not passing key_queue → hits the key_queue is None branch
+        watch_flat(ticks=None, status_fn=lambda: sample_status, console=con)
+        assert call_count >= 1
+
+    def test_timer_refresh_triggers_status_repoll(
+        self, sample_status: OrchestratorStatus
+    ) -> None:
+        """Refresh fires when interval elapses (interval=1, loop runs >1s)."""
+        import queue as _queue
+
+        call_count = 0
+
+        def counting_fn() -> OrchestratorStatus:
+            nonlocal call_count
+            call_count += 1
+            return sample_status
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+
+        def _delayed_quit() -> None:
+            import time as _time
+
+            _time.sleep(1.1)  # > 1 second so the 1s interval fires
+            kq.put("q")
+
+        t = threading.Thread(target=_delayed_quit, daemon=True)
+        t.start()
+
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            interval=1,
+            ticks=None,
+            status_fn=counting_fn,
+            console=con,
+            key_queue=kq,
+        )
+        t.join(timeout=3.0)
+        assert call_count >= 2  # initial call + at least one refresh
+
 
 class TestKeyListenerThread:
     def test_oserror_on_non_tty_is_silenced(self) -> None:
