@@ -10,10 +10,12 @@ Reports-only inspection of in-flight dev-queue sessions. Surfaces stalls and
 stuck sessions before they hit the 60-min hard timeout, so the operator can
 stop wasteful work early and re-dispatch productively.
 
-This skill is the **in-flight** counterpart to `cw-session-watch` (which
-determines exit status after a session ends) and `cw-validate-result` (which
-inspects what a finished session produced). Use `cw-queue-peek` *during* a
-wave to decide what to do with long-running sessions.
+This skill is the **in-flight** counterpart to the orchestrator event bus
+(`cw event tail --type session.needs_attention --type session.timed_out`,
+which surfaces a session's exit/attention state after it ends) and
+`cw-validate-result` (which inspects what a finished session produced). Use
+`cw-queue-peek` *during* a wave to decide what to do with long-running
+sessions.
 
 ## When to use
 
@@ -25,7 +27,10 @@ wave to decide what to do with long-running sessions.
 
 Do **not** use this skill for:
 
-- Post-mortem on a session that already ended — use `cw-session-watch` or `cw-validate-result`
+- Post-mortem on a session that already ended — tail the event bus
+  (`cw event tail --type session.needs_attention --type session.timed_out`)
+  for its exit/attention state, or use `cw-validate-result` for the sentinel
+  content
 - Deciding what to do with the sentinel result — use `cw-followup`
 - Interactive (USER-origin) sessions started via `cw start` — they don't go through dev-queue
 
@@ -145,7 +150,10 @@ between the remove and the close).
 
 ## Related skills
 
-- `cw-session-watch` — exit-status lookup for finished sessions
+- `cw event tail --type session.needs_attention --type session.timed_out` —
+  durable exit/attention state for finished or stalled sessions. The bus is
+  emitted automatically by the wrapper (on exit) and reconcile (idle/timeout
+  watchdog), so it supersedes a dedicated session-watch skill.
 - `cw-validate-result` — post-mortem sentinel + PR inspection
 - `cw-followup` — react to a finished session's sentinel result
 - `cw-smoke-test` — end-to-end dogfood validation

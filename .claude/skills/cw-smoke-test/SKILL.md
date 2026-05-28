@@ -31,7 +31,7 @@ Optional flags:
 Run the bundled checker:
 
 ```bash
-uv run --project /home/matthew/workspace/personal/claude-workspace python \
+uv run --project "$(git rev-parse --show-toplevel)" python \
   .claude/skills/cw-smoke-test/scripts/preflight.py \
   --ticket-id <NUMBER>
 ```
@@ -95,7 +95,7 @@ That skill resolves the transcript, parses the sentinel via `cw-followup/scripts
 | Outcome | Smoke-test verdict |
 |---|---|
 | `valid` | PASS — the pipeline produced a usable result. Print the `effective_status` and the PR / branch / worktree as applicable. |
-| `producer_status_unknown` | PASS-WITH-WARNING — the run finished and emitted a structured payload, but the producer used a status not yet in the parser's enum. File against `#190` / `#191` patterns if this is new. |
+| `producer_status_unknown` | PASS-WITH-WARNING — the run finished and emitted a structured payload, but the producer used a status the parser has never heard of. (Note: `premises_pending_verification` / `ambiguities_pending_resolution` became canonical in v4 (#191) and now report `valid` — this outcome is reserved for genuinely new statuses.) File a parser ticket if it is new. |
 | `invalid_sentinel` | FAIL — schema validation failed. This is producer/consumer drift; surface the validation error verbatim and recommend filing a parser bug. |
 | `no_sentinel` | FAIL — the run exited without emitting a sentinel at all. Walk the user through `references/no-sentinel-patterns.md` (in the validator skill's references). |
 
@@ -108,7 +108,7 @@ smoke-test: #<TICKET> → <effective_status>; ready to <suggested action>
   /cw-followup --session-id <WORKER_SHORT_ID>
 ```
 
-On FAIL, do NOT suggest `/cw-followup` — surface the failure and let the user decide whether to file a producer or parser ticket. If the failure looks like a known drift case (e.g. status not yet in enum, plan_source not yet in enum), point at the relevant open ticket (`#190`, `#191`) so the user can subscribe rather than re-file.
+On FAIL, do NOT suggest `/cw-followup` — surface the failure and let the user decide whether to file a producer or parser ticket. The historical drift cases (`#190` plan_source, `#191` v4 statuses) are resolved in the current parser; if a *new* unknown status or plan_source surfaces, file a fresh parser ticket rather than re-opening those.
 
 ## Output shape
 
@@ -116,7 +116,7 @@ Print exactly one summary line at the end, caveman-tight:
 
 ```
 smoke-test: #171 → valid (status=shipped, PR #234) — ready for review
-smoke-test: #185 → producer_status_unknown (status=premises_pending_verification) — disposition via /cw-followup
+smoke-test: #185 → valid (status=premises_pending_verification) — disposition via /cw-followup
 smoke-test: #999 → no_sentinel — worker session 4f44d145 exited without emitting; transcript at <path>
 ```
 
@@ -130,7 +130,7 @@ smoke-test: #999 → no_sentinel — worker session 4f44d145 exited without emit
 ## Out of scope
 
 - Continuous-loop dispatching (use `cw dev-queue run` without `--once`).
-- Multi-ticket batch dispatch (use `cw spawn --headless` per ticket; or build `/cw-fanout` (#187) for parallel N-way).
+- Multi-ticket batch dispatch — use `/cw-fanout` for parallel N-way (pre-flight + enqueue + dispatch loop + monitoring handoff).
 - Phase A stage-transition events. This skill works without them; with them, monitoring becomes more informative.
 - Re-dispatching after a failure. The user owns the dispatch trigger; the smoke test is one-shot.
 
@@ -139,6 +139,6 @@ smoke-test: #999 → no_sentinel — worker session 4f44d145 exited without emit
 - `#172` / PR #192 — `/cw-validate-result` (the diagnostic step this skill delegates to).
 - `#188` / PR #189 — `/cw-followup` (the action step suggested on PASS).
 - `#187` — `/cw-fanout` (multi-ticket parallel dispatch; companion of this skill).
-- `#190` — `plan_source` enum drift surfaced via dogfood.
-- `#191` — Status enum drift (`premises_pending_verification` / `ambiguities_pending_resolution`) surfaced via dogfood.
+- `#190` — `plan_source` enum drift surfaced via dogfood (resolved: `github_issue_existing` now accepted).
+- `#191` — Status enum drift (`premises_pending_verification` / `ambiguities_pending_resolution`) surfaced via dogfood (resolved: promoted to canonical v4 statuses).
 - `#185` — Layer 1 backstop edge case (no Stop hook ⇒ no timeout fire). This skill's 30-minute timeout matches the Layer 1 cap.
