@@ -79,6 +79,11 @@ IDLE_WATCHDOG_SECONDS = 300  # 5 minutes
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
 _SILENTLY_IDLE_REASON = "silently_idle"
 
+# Annotation dict written to session.last_result when the watchdog flags a
+# silently-idle session. Plain dict, not an AutoDevResult — typed dict[str, Any].
+_WATCHDOG_LAST_RESULT_STATUS = "silent_stall_detected"
+_WATCHDOG_LAST_RESULT_ACTION = "user_inspect_session"
+
 
 # Grace window for a newly-spawned session to register with the daemon
 # (`claude agents --json`). `claude --bg` spawn → daemon roster registration
@@ -387,10 +392,10 @@ def flag_silently_idle_daemon_sessions(
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
         session.last_result = {
-            "status": "silent_stall_detected",
+            "status": _WATCHDOG_LAST_RESULT_STATUS,
             "stage_reached": None,
             "blocker": None,
-            "next_actions": ["user_inspect_session"],
+            "next_actions": [_WATCHDOG_LAST_RESULT_ACTION],
             "watchdog_idle_seconds": (now - session.started_at).total_seconds(),
             "watchdog_fired_at": now.isoformat(),
         }

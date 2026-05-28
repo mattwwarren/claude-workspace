@@ -31,6 +31,8 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _WATCHDOG_LAST_RESULT_ACTION,
+    _WATCHDOG_LAST_RESULT_STATUS,
     HEADLESS_TIMEOUT_SECONDS,
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
@@ -1419,10 +1421,10 @@ def test_flag_silently_idle_daemon_sessions_sets_last_result(
         flag_silently_idle_daemon_sessions(state, now=now, native_live={"live-ref"})
 
     assert sess.last_result is not None
-    assert sess.last_result["status"] == "silent_stall_detected"
+    assert sess.last_result["status"] == _WATCHDOG_LAST_RESULT_STATUS
     assert sess.last_result["stage_reached"] is None
     assert sess.last_result["blocker"] is None
-    assert sess.last_result["next_actions"] == ["user_inspect_session"]
+    assert sess.last_result["next_actions"] == [_WATCHDOG_LAST_RESULT_ACTION]
     assert isinstance(sess.last_result["watchdog_idle_seconds"], float)
     assert sess.last_result["watchdog_idle_seconds"] > 0
     assert isinstance(sess.last_result["watchdog_fired_at"], str)
