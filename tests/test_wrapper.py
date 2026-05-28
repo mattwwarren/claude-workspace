@@ -122,6 +122,40 @@ def _make_result(
     return AutoDevResult.model_validate(payload)
 
 
+def _make_blocked_result(next_actions: list[str]) -> AutoDevResult:
+    """Build a minimal blocked AutoDevResult with user-directed next_actions."""
+    payload: dict[str, Any] = {
+        "schema_version": 4,
+        "ticket_id": "T-X",
+        "status": "blocked",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 5,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": "auto-dev/T-X",
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "recommendation": "PROCEED",
+        },
+        "next_actions": next_actions,
+        "blocker": {
+            "stage": "stage2_impl",
+            "reason": "awaiting_user_input",
+            "details": "blocked pending user action",
+        },
+    }
+    return AutoDevResult.model_validate(payload)
+
+
 def _sentinel_stdout(result: AutoDevResult, *, prefix: str = "log line\n") -> str:
     """Wrap a result payload in the AUTO_DEV_RESULT sentinel block."""
     body = result.model_dump_json()
@@ -758,35 +792,18 @@ class TestIsPausedForUserInput:
         assert _is_paused_for_user_input(result) is False
 
     def test_blocked_with_user_resolve_returns_true(self) -> None:
-        """blocked + user_resolve_ next_action → paused for input.
-
-        AutoDevResult currently rejects blocked + non-empty next_actions for
-        non-pre-flight stages (forward-compatible code path). Use a mock to
-        exercise the branch directly.
-        """
-        from unittest.mock import MagicMock
-
-        result = MagicMock()
-        result.status = "blocked"
-        result.next_actions = ["user_resolve_ambiguities"]
+        """blocked + user_resolve_ next_action → paused for input."""
+        result = _make_blocked_result(["user_resolve_ambiguities"])
         assert _is_paused_for_user_input(result) is True
 
     def test_blocked_with_user_decide_returns_true(self) -> None:
         """blocked + user_decide_ next_action → paused for input."""
-        from unittest.mock import MagicMock
-
-        result = MagicMock()
-        result.status = "blocked"
-        result.next_actions = ["user_decide_approach"]
+        result = _make_blocked_result(["user_decide_approach"])
         assert _is_paused_for_user_input(result) is True
 
     def test_blocked_with_user_verify_returns_true(self) -> None:
         """blocked + user_verify_ next_action → paused for input."""
-        from unittest.mock import MagicMock
-
-        result = MagicMock()
-        result.status = "blocked"
-        result.next_actions = ["user_verify_something"]
+        result = _make_blocked_result(["user_verify_something"])
         assert _is_paused_for_user_input(result) is True
 
     def test_blocked_without_user_prefix_returns_false(self) -> None:

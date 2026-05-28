@@ -229,6 +229,15 @@ _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
 _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
     {"sync_local_main", "manual_intervention"},
 )
+# next_actions prefixes that indicate a blocked session is paused for human
+# input (issue #328). A blocked result carrying only these prefixes is not a
+# terminal-reject shape — it will be re-dispatched once the human acts.
+# Public so wrapper.py can import and reuse the same list without duplicating.
+USER_DIRECTED_PREFIXES: tuple[str, ...] = (
+    "user_resolve_",
+    "user_decide_",
+    "user_verify_",
+)
 
 
 class AutoDevResult(BaseModel):
@@ -388,12 +397,23 @@ class AutoDevResult(BaseModel):
                 )
                 raise ValueError(msg)
 
+        # blocked + all-user-directed next_actions = paused for human input
+        # (issue #328). Not a terminal-reject shape — will be re-dispatched.
+        user_directed_blocked = (
+            self.status == "blocked"
+            and bool(self.next_actions)
+            and all(a.startswith(USER_DIRECTED_PREFIXES) for a in self.next_actions)
+        )
+
         # §4.3 terminal-reject statuses have empty next_actions, EXCEPT for
-        # the pre-flight + blocked retry shape covered above.
+        # the pre-flight + blocked retry shape covered above, and the
+        # user-directed blocked shape where all actions start with a user_*
+        # prefix (issue #328).
         if (
             self.status in _TERMINAL_REJECT_STATUSES
             and self.next_actions
             and not pre_flight_blocked
+            and not user_directed_blocked
         ):
             msg = (
                 f"next_actions must be empty for terminal-reject status "
