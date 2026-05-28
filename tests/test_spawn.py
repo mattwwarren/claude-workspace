@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 from click.testing import CliRunner
 
+from cw.auto_dev_result import Status
 from cw.cli import main
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
@@ -1216,19 +1217,7 @@ class TestSpawnComplete:
         )
         assert len(events) == 0
 
-    @pytest.mark.parametrize(
-        "status_value",
-        [
-            "shipped",
-            "no_op",
-            "plan_pending_approval",
-            "review_pending_approval",
-            "merge_gate_blocked",
-            "scope_exceeded",
-            "forbidden_area",
-            "blocked",
-        ],
-    )
+    @pytest.mark.parametrize("status_value", list(get_args(Status)))
     def test_status_routing_each_enum_value(
         self,
         tmp_config_dir: Path,

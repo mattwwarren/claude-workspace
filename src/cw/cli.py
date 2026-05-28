@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import cast, get_args
 
 import click
 from click.shell_completion import CompletionItem
@@ -20,6 +20,7 @@ from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
     AutoDevResult,
     BlockedResult,
+    Status,
     extract_block,
     parse_stdout,
 )
@@ -45,7 +46,7 @@ from cw.dev_queue import (
     resolve_client,
     save_dev_queue,
 )
-from cw.dispatch import _apply_events_to_store, run_dispatch_loop
+from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
 from cw.doctor import format_report, run_doctor
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, WorktreeError
@@ -1977,9 +1978,6 @@ def spawn_close(session_id: str) -> None:
     click.echo(f"Closed session: {session_id}")
 
 
-_DISPATCH_CONSUMER = "dispatch"
-
-
 def _spawn_complete_impl(
     *,
     session_id: str,
@@ -2012,19 +2010,6 @@ def _spawn_complete_impl(
 
     effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)
 
-    if effective_ticket_id:
-        store = load_dev_queue()
-        for task in store.tasks:
-            if (
-                task.ticket_id == effective_ticket_id
-                and task.status == QueueItemStatus.COMPLETED
-            ):
-                already_done_task_msg = (
-                    f"Queue task for '{effective_ticket_id}' is already COMPLETED. "
-                    "Use 'cw spawn close' to close the session only."
-                )
-                raise CwError(already_done_task_msg)
-
     payload: dict[str, object] = {
         "session_id": sess.id,
         "client": sess.client,
@@ -2032,23 +2017,43 @@ def _spawn_complete_impl(
         "status": status,
         **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
     }
-    event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
     with dev_queue_lock():
         store = load_dev_queue()
+
+        # Guard: queue task already COMPLETED (inside lock — authoritative)
+        if effective_ticket_id:
+            for task in store.tasks:
+                if (
+                    task.ticket_id == effective_ticket_id
+                    and task.status == QueueItemStatus.COMPLETED
+                ):
+                    already_done_task_msg = (
+                        f"Queue task for '{effective_ticket_id}' is already COMPLETED. "
+                        "Use 'cw spawn close' to close the session only."
+                    )
+                    raise CwError(already_done_task_msg)
+
+        # Step 1: Record event (record_event uses _inbox_lock — no deadlock risk)
+        event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+        # Step 2: Apply to queue
         _apply_events_to_store(store, [event])
 
+        # Step 3: Close session state
+        sess.status = SessionStatus.COMPLETED
+        sess.completed_at = datetime.now(UTC)
+        if sess.completed_reason is None:
+            sess.completed_reason = CompletionReason.USER
+        save_state(state)
+
+    # Advance cursor after lock (advance_cursor uses inbox lock — safe)
     advance_cursor(_DISPATCH_CONSUMER, event.id)
 
+    # daemon.stop outside lock — best-effort, slow (up to 10s timeout)
     daemon = native_daemon or get_native_daemon_client()
     if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
         daemon.stop(sess.surface_ref)
-
-    sess.status = SessionStatus.COMPLETED
-    sess.completed_at = datetime.now(UTC)
-    if sess.completed_reason is None:
-        sess.completed_reason = CompletionReason.USER
-    save_state(state)
 
 
 @spawn.command(name="complete")
@@ -2057,18 +2062,7 @@ def _spawn_complete_impl(
     "--status",
     "status",
     required=True,
-    type=click.Choice(
-        [
-            "shipped",
-            "no_op",
-            "plan_pending_approval",
-            "review_pending_approval",
-            "merge_gate_blocked",
-            "scope_exceeded",
-            "forbidden_area",
-            "blocked",
-        ]
-    ),
+    type=click.Choice(list(get_args(Status))),
     help="Outcome status to record (every value in auto_dev_result.Status).",
 )
 @click.option(
