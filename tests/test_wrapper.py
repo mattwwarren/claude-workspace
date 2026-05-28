@@ -638,6 +638,51 @@ class TestHeadlessWrapper:
             "needs_attention": True,
         }
 
+    def test_print_bare_code_fence_routes_to_completed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        tmp_state_dir: Path,
+    ) -> None:
+        """--print + code-fenced JSON without markers → SESSION_COMPLETED (GH #337).
+
+        The worker sometimes emits the sentinel payload wrapped in a code fence
+        without the AUTO_DEV_RESULT delimiters.  The loose fallback in
+        parse_stdout must recover the payload so the dispatcher routes the task
+        to COMPLETED rather than re-dispatching via needs_attention.
+        """
+        monkeypatch.setenv("CW_CLIENT", "c")
+        monkeypatch.setenv("CW_PURPOSE", "impl")
+        monkeypatch.setenv("CW_SESSION_ID", "h-fence")
+
+        sess = Session(
+            id="h-fence",
+            name="c/auto-dev/T-fence",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        result = _make_result(status="shipped", ticket_id="T-fence")
+        body = result.model_dump_json()
+        # Bare code fence — no <<<AUTO_DEV_RESULT markers.
+        captured = f"All done. Emitting sentinel:\n\n```json\n{body}\n```\n"
+
+        with patch(
+            "cw.wrapper._run_claude_streaming",
+            return_value=(0, captured),
+        ):
+            run_claude_wrapper(("--print", "/auto-dev T-fence --headless"))
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.COMPLETED
+        assert updated.sessions[0].completed_reason == CompletionReason.NORMAL
+        # last_result must carry the parsed sentinel, not the needs_attention fallback.
+        assert updated.sessions[0].last_result is not None
+        assert updated.sessions[0].last_result.get("status") == "shipped"
+
     def test_print_nonzero_exit_skips_completed(
         self,
         monkeypatch: pytest.MonkeyPatch,
