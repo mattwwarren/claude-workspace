@@ -93,7 +93,7 @@ from cw.session import (
     start_session,
 )
 from cw.spawn import spawn_create_impl
-from cw.tui import DetailLevel
+from cw.tui import DetailLevel, watch_flat
 from cw.tui import watch as tui_watch
 from cw.worktree import fast_forward_main
 from cw.wrapper import run_claude_wrapper, signal_idle
@@ -232,6 +232,23 @@ def list_sessions() -> None:
 def status() -> None:
     """Show status dashboard across all clients."""
     _display_status()
+
+
+@main.command()
+@click.option(
+    "--interval",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Seconds between data refreshes (1-60).",
+)
+@handle_errors
+def watch(interval: int) -> None:
+    """Live flat-table work board (sessions + dev-queue tickets).
+
+    Keybindings: j/k navigate  p=peek  c=spawn-complete  o=open  r=refresh  q=quit
+    """
+    watch_flat(interval=interval, home=str(Path.home()))
 
 
 @main.command()
