@@ -438,6 +438,12 @@ def flag_silently_idle_daemon_sessions(
             "watchdog_fired_at": now.isoformat(),
         }
 
+    # Write session to disk BEFORE queue mutation so a crash between the two
+    # leaves session.last_result set on disk — _has_terminal_sentinel returns
+    # True on the next reconcile tick and the watchdog skips the session,
+    # preventing a duplicate SESSION_NEEDS_ATTENTION. (GitHub #324)
+    save_state(state)
+
     blocked: list[str] = []
     ticket_ids_to_block = [tid for _, tid in candidates if tid]
     if ticket_ids_to_block:
@@ -453,8 +459,6 @@ def flag_silently_idle_daemon_sessions(
                     blocked.append(task.ticket_id)
             if blocked:
                 save_dev_queue(store)
-
-    save_state(state)
 
     for session, ticket_id in candidates:
         payload: dict[str, object] = {
