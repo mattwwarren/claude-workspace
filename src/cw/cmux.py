@@ -259,14 +259,14 @@ class FakeCmuxAdapter:
 
     def __init__(self) -> None:
         self._counter = 0
-        self.calls: dict[str, list[object]] = {
+        self.calls: dict[str, list[tuple[object, ...]]] = {
             "spawn": [],
             "close": [],
             "identify": [],
             "list_surfaces": [],
             "list_live_surface_commands": [],
-            "capture_surface": [],
         }
+        self.capture_calls: list[dict[str, object]] = []
         self._live: set[str] = set()
         self._live_commands: dict[str, str] = {}
         self._commands_fail: bool = False
@@ -328,7 +328,7 @@ class FakeCmuxAdapter:
         Records the call in ``calls["capture_surface"]``. Raises CwError
         when the ref is not in the live set.
         """
-        self.calls["capture_surface"].append(
+        self.capture_calls.append(
             {"surface_ref": surface_ref, "lines": lines, "scrollback": scrollback}
         )
         if surface_ref not in self._live:

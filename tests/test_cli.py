@@ -4037,8 +4037,8 @@ class TestPeek:
         runner = CliRunner()
         with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", session.name])
-        assert len(mock_cmux_adapter.calls["capture_surface"]) == 1
-        assert mock_cmux_adapter.calls["capture_surface"][0]["lines"] == 50
+        assert len(mock_cmux_adapter.capture_calls) == 1
+        assert mock_cmux_adapter.capture_calls[0]["lines"] == 50
 
     def test_peek_custom_lines(
         self,
@@ -4052,7 +4052,7 @@ class TestPeek:
         runner = CliRunner()
         with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", "--lines", "10", session.name])
-        assert mock_cmux_adapter.calls["capture_surface"][0]["lines"] == 10
+        assert mock_cmux_adapter.capture_calls[0]["lines"] == 10
 
     def test_peek_default_scrollback(
         self,
@@ -4066,7 +4066,7 @@ class TestPeek:
         runner = CliRunner()
         with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", session.name])
-        assert mock_cmux_adapter.calls["capture_surface"][0]["scrollback"] == 200
+        assert mock_cmux_adapter.capture_calls[0]["scrollback"] == 200
 
     def test_peek_custom_scrollback(
         self,
@@ -4080,7 +4080,7 @@ class TestPeek:
         runner = CliRunner()
         with patch("cw.cli.get_backend_adapter", return_value=mock_cmux_adapter):
             runner.invoke(main, ["peek", "--scrollback", "500", session.name])
-        assert mock_cmux_adapter.calls["capture_surface"][0]["scrollback"] == 500
+        assert mock_cmux_adapter.capture_calls[0]["scrollback"] == 500
 
     def test_peek_warns_when_fewer_lines_available(
         self,

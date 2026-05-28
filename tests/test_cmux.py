@@ -831,8 +831,8 @@ class TestFakeCmuxAdapterCaptureSurface:
         adapter = FakeCmuxAdapter()
         ref = adapter.spawn("ws", "claude")
         adapter.capture_surface(ref, lines=10, scrollback=100)
-        assert len(adapter.calls["capture_surface"]) == 1
-        recorded = adapter.calls["capture_surface"][0]
+        assert len(adapter.capture_calls) == 1
+        recorded = adapter.capture_calls[0]
         assert recorded["surface_ref"] == ref
         assert recorded["lines"] == 10
         assert recorded["scrollback"] == 100
