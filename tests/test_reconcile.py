@@ -1543,6 +1543,13 @@ def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
     assert sess.status == SessionStatus.ACTIVE
 
 
+def test_resolve_idle_watchdog_budget_unknown_tier_falls_back_to_global() -> None:
+    """scope_hint not in idle_watchdog_by_tier → global IDLE_WATCHDOG_SECONDS."""
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint="unknown")
+    assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
+
+
 def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
     tmp_config_dir: Path,
     tmp_path: Path,

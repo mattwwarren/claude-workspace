@@ -253,7 +253,11 @@ def _is_headless(session: Session) -> bool:
 
 
 def revert_stalled_headless_sessions(
-    state: CwState, *, now: datetime, config: OrchestratorConfig
+    state: CwState,
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask] | None = None,
 ) -> list[str]:
     """Transition stalled headless DAEMON sessions past budget to TIMED_OUT.
 
@@ -279,8 +283,10 @@ def revert_stalled_headless_sessions(
     See GitHub issue #185, #265.
     """
     # Read-only dev-queue load for budget lookups — no lock needed here.
-    store_ro = load_dev_queue()
-    task_by_ticket: dict[str, TicketTask] = {t.ticket_id: t for t in store_ro.tasks}
+    # Use the caller-supplied index when available (avoids a second filesystem
+    # read when reconcile() shares one load across the stalled + idle sweeps).
+    if task_by_ticket is None:
+        task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
     pending: list[tuple[Session, str | None]] = []
     for session in state.sessions:
@@ -356,9 +362,11 @@ def resolve_idle_watchdog_budget(
     2. task.scope_hint — look up per-tier default in config.
     3. IDLE_WATCHDOG_SECONDS — global fallback.
     """
-    if task is not None and task.idle_watchdog_override is not None:
+    if task is None:
+        return IDLE_WATCHDOG_SECONDS
+    if task.idle_watchdog_override is not None:
         return task.idle_watchdog_override
-    if task is not None and task.scope_hint is not None:
+    if task.scope_hint is not None:
         tier_budget = config.idle_watchdog_by_tier.get(task.scope_hint)
         if tier_budget is not None:
             return tier_budget
@@ -366,7 +374,12 @@ def resolve_idle_watchdog_budget(
 
 
 def flag_silently_idle_daemon_sessions(
-    state: CwState, *, now: datetime, native_live: set[str], config: OrchestratorConfig
+    state: CwState,
+    *,
+    now: datetime,
+    native_live: set[str],
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask] | None = None,
 ) -> list[str]:
     """Flag DAEMON RUNNING sessions idle past the watchdog budget with no sentinel.
 
@@ -381,8 +394,8 @@ def flag_silently_idle_daemon_sessions(
 
     Returns list of ticket IDs whose queue task was set to BLOCKED_ON_USER.
     """
-    store_ro = load_dev_queue()
-    task_by_ticket: dict[str, TicketTask] = {t.ticket_id: t for t in store_ro.tasks}
+    if task_by_ticket is None:
+        task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
     candidates: list[tuple[Session, str | None]] = []
     for session in state.sessions:
@@ -400,7 +413,7 @@ def flag_silently_idle_daemon_sessions(
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
         budget = resolve_idle_watchdog_budget(task, config)
-        if elapsed <= budget:
+        if elapsed < budget:
             continue
         candidates.append((session, ticket_id))
 
@@ -476,8 +489,11 @@ def reconcile() -> ReconcileReport:
     # the outage guard so a daemon hiccup does not delay budget enforcement.
     # See GitHub issue #185.
     orchestrator_config = load_orchestrator_config()
+    # Load dev queue once here; pass to both sweeps to avoid a duplicate
+    # filesystem read within the same reconcile tick. See GitHub issue #326.
+    shared_task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     stalled_reverted = revert_stalled_headless_sessions(
-        state, now=now, config=orchestrator_config
+        state, now=now, config=orchestrator_config, task_by_ticket=shared_task_by_ticket
     )
 
     try:
@@ -500,7 +516,11 @@ def reconcile() -> ReconcileReport:
         return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
     silently_idle_ticket_ids = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live=native_live, config=orchestrator_config
+        state,
+        now=now,
+        native_live=native_live,
+        config=orchestrator_config,
+        task_by_ticket=shared_task_by_ticket,
     )
 
     drift = compute_drift(state, native_live, now=now)
