@@ -1360,7 +1360,7 @@ def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     blocked = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
     assert blocked == []
