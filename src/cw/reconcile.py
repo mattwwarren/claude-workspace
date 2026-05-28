@@ -68,12 +68,15 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 # override mechanism tracked in #265.
 HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 
-# Watchdog budget for DAEMON RUNNING sessions that emit no sentinel at all.
-# These are sessions whose wrapper process exited before any AUTO_DEV_RESULT
-# block was written — typically because the child self-backgrounded a subagent
-# and exited early (GitHub #105, #121). After this window, reconcile flags
-# them as BLOCKED_ON_USER and fires a push notification.
-IDLE_WATCHDOG_SECONDS = 300  # 5 minutes
+# Watchdog budget for DAEMON RUNNING sessions that have not yet emitted any
+# AUTO_DEV_RESULT sentinel. Fires on time elapsed alone — no liveness signal
+# is read from the worker's transcript (GitHub #340 tracks the deeper fix).
+# Set generous enough to cover legitimate small-tier work (parser change +
+# tests + skill doc routinely takes 10-20 min wall time). Per-tier overrides
+# in OrchestratorConfig.idle_watchdog_by_tier take precedence; per-ticket
+# TicketTask.idle_watchdog_override beats both. After this window, reconcile
+# flags the session as BLOCKED_ON_USER and fires a push notification.
+IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
 
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).

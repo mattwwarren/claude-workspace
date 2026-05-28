@@ -234,11 +234,11 @@ class OrchestratorConfig(BaseModel):
         default_factory=lambda: {"small": 1800, "large": 5400}
     )
     # Per-tier idle-watchdog budgets (seconds). Keyed by TicketTask.scope_hint;
-    # unknown tiers fall back to IDLE_WATCHDOG_SECONDS (300s). Large-tier
-    # sessions can legitimately stall >5min on slow tests/mypy before emitting
-    # any sentinel. See GitHub issue #326.
+    # unknown tiers fall back to IDLE_WATCHDOG_SECONDS (900s). Large-tier
+    # sessions can legitimately stall longer on slow tests/mypy before emitting
+    # any sentinel. See GitHub issues #326, #340.
     idle_watchdog_by_tier: dict[str, int] = Field(
-        default_factory=lambda: {"large": 600}
+        default_factory=lambda: {"large": 1800}
     )
 
     @model_validator(mode="before")
