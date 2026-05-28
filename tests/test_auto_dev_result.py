@@ -979,15 +979,107 @@ class TestStage1PreFlightBlocked:
         assert result.stage_reached == "stage1_pre_flight"
 
     def test_blocked_at_later_stage_still_requires_empty_next_actions(self) -> None:
-        """Regression guard: widening for pre-flight must NOT widen mid-pipeline.
+        """Regression: non-user-directed next_actions still rejected at stage2_impl.
 
-        A `blocked` exit at stage2_impl is the generic terminal-reject shape
-        — §4.3 still requires empty next_actions there.
+        A `blocked` exit at stage2_impl with `sync_local_main` (a pre-flight
+        recovery verb, not a user-directed prefix) must still fail — widening
+        for pre-flight and for user-directed actions must NOT carry over here.
         """
         p = _blocked_payload()  # blocked at stage2_impl
         p["next_actions"] = ["sync_local_main"]
         with pytest.raises(ValidationError, match="next_actions"):
             AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# blocked + user-directed next_actions (issue #328 — schema must accept
+# `status=blocked` payloads whose next_actions all start with a user_*
+# prefix, so _is_paused_for_user_input can be tested against real instances).
+# ---------------------------------------------------------------------------
+
+
+def _user_directed_blocked_payload(next_actions: list[str]) -> dict[str, Any]:
+    """blocked at stage2_impl with user-directed next_actions."""
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-user-blocked",
+        "status": "blocked",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 5,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": "auto-dev/GEN-user-blocked",
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage2_impl",
+            "reason": "awaiting_user_input",
+            "details": "blocked pending user action",
+        },
+        "next_actions": next_actions,
+    }
+
+
+class TestBlockedWithUserDirectedNextActions:
+    """Schema must accept blocked payloads whose next_actions are all user_*-prefixed.
+
+    These payloads signal that the session is paused for human input rather
+    than being a terminal-reject — _is_paused_for_user_input reads them at
+    runtime. See issue #328.
+    """
+
+    def test_user_resolve_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_resolve_ambiguities"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_resolve_ambiguities"]
+
+    def test_user_decide_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_decide_approach"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_decide_approach"]
+
+    def test_user_verify_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_verify_something"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_verify_something"]
+
+    def test_mixed_user_directed_prefixes_allowed(self) -> None:
+        """Multiple user_* entries in next_actions are all valid."""
+        p = _user_directed_blocked_payload(
+            ["user_resolve_ambiguities", "user_verify_premises"]
+        )
+        result = AutoDevResult.model_validate(p)
+        assert len(result.next_actions) == 2
+
+    def test_non_user_prefix_still_rejected(self) -> None:
+        """A non-user-directed action mixed with user_* must still fail."""
+        p = _user_directed_blocked_payload(
+            ["user_resolve_ambiguities", "sync_local_main"]
+        )
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_next_actions_still_valid_for_blocked(self) -> None:
+        """Generic terminal-reject blocked shape (empty next_actions) unchanged."""
+        p = _user_directed_blocked_payload([])
+        p["next_actions"] = []
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == []
 
 
 # ---------------------------------------------------------------------------
