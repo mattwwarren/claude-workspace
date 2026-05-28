@@ -130,7 +130,7 @@ smoke-test: #999 → no_sentinel — worker session 4f44d145 exited without emit
 ## Out of scope
 
 - Continuous-loop dispatching (use `cw dev-queue run` without `--once`).
-- Multi-ticket batch dispatch (use `cw spawn --headless` per ticket; or build `/cw-fanout` (#187) for parallel N-way).
+- Multi-ticket batch dispatch — use `/cw-fanout` for parallel N-way (pre-flight + enqueue + dispatch loop + monitoring handoff).
 - Phase A stage-transition events. This skill works without them; with them, monitoring becomes more informative.
 - Re-dispatching after a failure. The user owns the dispatch trigger; the smoke test is one-shot.
 
