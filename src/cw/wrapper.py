@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
+    USER_DIRECTED_PREFIXES,
     AutoDevResult,
     parse_stdout,
 )
@@ -150,8 +151,9 @@ def _is_paused_for_user_input(result: AutoDevResult) -> bool:
     if result.status in PAUSED_FOR_USER_INPUT_STATUSES:
         return True
     if result.status == "blocked":
-        user_prefixes = ("user_resolve_", "user_decide_", "user_verify_")
-        return any(action.startswith(user_prefixes) for action in result.next_actions)
+        return any(
+            action.startswith(USER_DIRECTED_PREFIXES) for action in result.next_actions
+        )
     return False
 
 

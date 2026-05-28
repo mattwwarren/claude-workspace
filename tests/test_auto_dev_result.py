@@ -1077,7 +1077,6 @@ class TestBlockedWithUserDirectedNextActions:
     def test_empty_next_actions_still_valid_for_blocked(self) -> None:
         """Generic terminal-reject blocked shape (empty next_actions) unchanged."""
         p = _user_directed_blocked_payload([])
-        p["next_actions"] = []
         result = AutoDevResult.model_validate(p)
         assert result.next_actions == []
 

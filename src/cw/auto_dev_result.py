@@ -232,7 +232,8 @@ _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
 # next_actions prefixes that indicate a blocked session is paused for human
 # input (issue #328). A blocked result carrying only these prefixes is not a
 # terminal-reject shape — it will be re-dispatched once the human acts.
-_USER_DIRECTED_PREFIXES: tuple[str, ...] = (
+# Public so wrapper.py can import and reuse the same list without duplicating.
+USER_DIRECTED_PREFIXES: tuple[str, ...] = (
     "user_resolve_",
     "user_decide_",
     "user_verify_",
@@ -401,7 +402,7 @@ class AutoDevResult(BaseModel):
         user_directed_blocked = (
             self.status == "blocked"
             and bool(self.next_actions)
-            and all(a.startswith(_USER_DIRECTED_PREFIXES) for a in self.next_actions)
+            and all(a.startswith(USER_DIRECTED_PREFIXES) for a in self.next_actions)
         )
 
         # §4.3 terminal-reject statuses have empty next_actions, EXCEPT for
