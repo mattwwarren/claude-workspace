@@ -41,7 +41,7 @@ Optional flags from the user:
 Run the bundled parser to resolve the session and pull the parsed sentinel plus the raw payload:
 
 ```bash
-uv run --project /home/matthew/workspace/personal/claude-workspace python \
+uv run --project "$(git rev-parse --show-toplevel)" python \
   .claude/skills/cw-followup/scripts/parse_sentinel.py \
   --ticket-id <NUMBER>
 # or --session-id <SHORT> or --transcript-path <PATH>
@@ -53,7 +53,7 @@ If `sentinel_found` is false, stop and surface the transcript path + the session
 
 ### Step 2 — branch on the effective status
 
-The parser's `Status` enum is closed, so producer-emitted statuses like `premises_pending_verification` and `ambiguities_pending_resolution` route through a `BlockedResult` with `reason=status_unknown`. The skill reads the **raw payload** to recover the producer-emitted status, while preferring the validated `result.status` when the kind is `AutoDevResult`.
+As of schema v4 (issue #191), `premises_pending_verification` and `ambiguities_pending_resolution` are canonical `Status` members — they now parse as a normal `AutoDevResult`, not a `BlockedResult`. Only a status the parser has *never* heard of still routes through `BlockedResult` with `reason=status_unknown`. The skill prefers the **raw payload**'s `status` (it survives even that unknown-status case) and falls back to the validated `result.status`.
 
 ```text
 effective_status =
@@ -121,7 +121,7 @@ gh pr create --base main --head "$BRANCH"  # body derived from the review summar
 Render a Decisions section and append it to the ticket body. Pipe the parser output through `render_decisions.py`:
 
 ```bash
-echo "$RESULT" | uv run --project /home/matthew/workspace/personal/claude-workspace \
+echo "$RESULT" | uv run --project "$(git rev-parse --show-toplevel)" \
   python .claude/skills/cw-followup/scripts/render_decisions.py \
   --auto-accept-defaults  # only when the user opted in
 ```
@@ -150,7 +150,7 @@ jq '.result.blocker' <<<"$RESULT"
 
 When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Recommend `cw spawn --headless ...` with a 2-3 minute pause for the auto-mode classifier to settle.
 
-When `blocker.reason` is anything else: surface to user, do not auto-route. Ticket #174's Blocker expansion (Phase E) will eventually add `retry_eligible` and `recovery_hint`; until that lands, treat anything non-`tool_denied` as human-escalation.
+When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, recommend re-dispatch after `retry_delay_seconds` (surfacing `recovery_hint`); when it is false or absent, treat as human-escalation and surface verbatim.
 
 #### `plan_pending_approval`
 
