@@ -131,6 +131,26 @@ class TmuxAdapter:
             return set()
         return {line for line in result.stdout.strip().splitlines() if line}
 
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Return last *lines* lines of worker output for *surface_ref*.
+
+        Uses ``tmux capture-pane`` looking back at most *scrollback* lines.
+        Raises :exc:`cw.exceptions.CwError` when the pane is not found or
+        the tmux server is not running.
+        """
+        result = self._run(
+            ["capture-pane", "-t", surface_ref, "-p", "-S", f"-{scrollback}"],
+            check=False,
+        )
+        if result.returncode != 0:
+            msg = f"Surface '{surface_ref}' not found or tmux server is not running."
+            raise CwError(msg)
+        content = result.stdout
+        all_lines = content.splitlines()
+        if len(all_lines) > lines:
+            return "\n".join(all_lines[-lines:])
+        return content.rstrip("\n")
+
     def list_live_surface_commands(self) -> dict[str, str]:
         """Return mapping of pane ref to foreground command name.
 

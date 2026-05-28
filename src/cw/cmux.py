@@ -103,6 +103,13 @@ class MultiplexerAdapter(Protocol):
         """
         ...
 
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Return last *lines* lines of worker output for *surface_ref*.
+
+        Looks back at most *scrollback* lines. Raises CwError when unavailable.
+        """
+        ...
+
 
 # Legacy alias. Keep for one release so downstream type hints that read
 # `from cw.cmux import CmuxAdapter` don't break mid-upgrade.
@@ -233,22 +240,36 @@ class RealCmuxAdapter:
         """
         return dict.fromkeys(self.list_surfaces(), "cmux-surface")
 
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Raise CwError — cmux does not support output capture.
+
+        Switch to the tmux backend (``CW_BACKEND=tmux``) or use
+        ``cw post-mortem`` once that command is available.
+        """
+        msg = (
+            "capture_surface is not supported by the cmux backend;"
+            " switch to tmux (CW_BACKEND=tmux) or use cw post-mortem."
+        )
+        raise CwError(msg)
+
 
 class FakeCmuxAdapter:
     """In-memory adapter for testing. Records all calls; no real I/O."""
 
     def __init__(self) -> None:
         self._counter = 0
-        self.calls: dict[str, list[tuple[object, ...]]] = {
+        self.calls: dict[str, list[object]] = {
             "spawn": [],
             "close": [],
             "identify": [],
             "list_surfaces": [],
             "list_live_surface_commands": [],
+            "capture_surface": [],
         }
         self._live: set[str] = set()
         self._live_commands: dict[str, str] = {}
         self._commands_fail: bool = False
+        self._surface_content: dict[str, str] = {}
 
     def spawn(self, workspace: str, command: str, surface: str = "right") -> str:
         """Record call and return a deterministic fake surface ref."""
@@ -299,6 +320,26 @@ class FakeCmuxAdapter:
         flexible for exercising edge-case scenarios.
         """
         self._live_commands[surface_ref] = command
+
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Return last *lines* lines of stored content for *surface_ref*.
+
+        Records the call in ``calls["capture_surface"]``. Raises CwError
+        when the ref is not in the live set.
+        """
+        self.calls["capture_surface"].append(
+            {"surface_ref": surface_ref, "lines": lines, "scrollback": scrollback}
+        )
+        if surface_ref not in self._live:
+            msg = f"Surface '{surface_ref}' is not active."
+            raise CwError(msg)
+        content = self._surface_content.get(surface_ref, "")
+        all_lines = content.splitlines()
+        return "\n".join(all_lines[-lines:]) if len(all_lines) > lines else content
+
+    def set_surface_content(self, surface_ref: str, content: str) -> None:
+        """Set the stored output content for a surface (test helper)."""
+        self._surface_content[surface_ref] = content
 
 
 def _resolve_backend_name() -> BackendName:
