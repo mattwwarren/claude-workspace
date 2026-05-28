@@ -1419,7 +1419,9 @@ def test_flag_silently_idle_daemon_sessions_sets_last_result(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with patch("cw.reconcile.fire_push_notification"):
-        flag_silently_idle_daemon_sessions(state, now=now, native_live={"live-ref"})
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
 
     assert sess.last_result is not None
     assert sess.last_result["status"] == _WATCHDOG_LAST_RESULT_STATUS
@@ -1471,7 +1473,9 @@ def test_flag_silently_idle_daemon_sessions_enables_has_terminal_sentinel(
     assert _has_terminal_sentinel(sess) is False
 
     with patch("cw.reconcile.fire_push_notification"):
-        flag_silently_idle_daemon_sessions(state, now=now, native_live={"live-ref"})
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
 
     assert _has_terminal_sentinel(sess) is True
 
@@ -1514,7 +1518,7 @@ def test_flag_silently_idle_daemon_sessions_idempotent_on_second_call(
 
     with patch("cw.reconcile.fire_push_notification"):
         first = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
     assert "IDEM-1" in first
 
@@ -1522,7 +1526,7 @@ def test_flag_silently_idle_daemon_sessions_idempotent_on_second_call(
 
     with patch("cw.reconcile.fire_push_notification"):
         second = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
     assert second == []
     assert sess.last_result is captured_last_result  # same object, not overwritten
