@@ -624,6 +624,16 @@ class TestLooseFallback:
         assert isinstance(result, BlockedResult)
         assert "opening sentinel present" in result.blocker.details
 
+    def test_invalid_json_fence_skipped_valid_later_one_used(self) -> None:
+        """An invalid-JSON code fence is skipped; the last valid one is used."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        # First fence has invalid JSON (not parseable); second has the real payload.
+        text = f"```json\nnot parseable at all\n```\n\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
     def test_loose_fallback_preserves_all_fields(self) -> None:
         """Loose-parsed result round-trips all required fields correctly."""
         payload = _shipped_payload()
