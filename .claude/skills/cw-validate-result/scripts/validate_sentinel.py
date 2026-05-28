@@ -177,6 +177,30 @@ def _build_checks(parser_output: dict[str, Any], outcome: str) -> list[dict[str,
         ),
     )
 
+    # Phase C (issue #174) — agent_health_summary advisory check.
+    # Optional field; absent on payloads from older producers. Always passes;
+    # surfaces entry count for human inspection.
+    agent_health_summary = health.get("agent_health_summary")
+    summary_detail = (
+        f"entries={len(agent_health_summary)}"
+        if isinstance(agent_health_summary, list)
+        else "absent"
+    )
+    checks.append(_check("agent_health_summary_present", True, summary_detail))
+
+    # Phase D (issue #174) — pr_created advisory check.
+    # Optional field; absent on payloads from older producers. Always passes;
+    # surfaces ci_status_at_creation for human inspection when present.
+    pr_created = raw.get("pr_created")
+    if isinstance(pr_created, dict):
+        created_detail = (
+            f"present, ci_status_at_creation="
+            f"{pr_created.get('ci_status_at_creation')!r}"
+        )
+    else:
+        created_detail = "absent"
+    checks.append(_check("pr_created_present", True, created_detail))
+
     return checks
 
 
