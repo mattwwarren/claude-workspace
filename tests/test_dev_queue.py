@@ -19,6 +19,7 @@ from cw.dev_queue import (
     list_tickets,
     load_dev_queue,
     load_plan,
+    migrate_dev_queue,
     plan_path,
     remove_ticket,
     resolve_client,
@@ -27,6 +28,7 @@ from cw.dev_queue import (
 )
 from cw.exceptions import CwError
 from cw.models import (
+    DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
     OrchestratorConfig,
@@ -1067,3 +1069,68 @@ class TestCLIDevQueueCancel:
         )
         assert result.exit_code != 0
         assert "No dev-queue task found" in result.output
+
+
+class TestMigrateDevQueue:
+    def test_v1_to_v2_fills_total_cost_usd(self) -> None:
+        """migrate_dev_queue fills total_cost_usd on tasks missing it."""
+        raw = {
+            "schema_version": 1,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-1",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["total_cost_usd"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_v2_total_cost_preserved_idempotently(self) -> None:
+        """Existing total_cost_usd values survive a second migration pass."""
+        raw = {
+            "schema_version": 2,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": 2.5,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["total_cost_usd"] == 2.5
+
+    def test_load_dev_queue_migrates_v1_file(self, tmp_config_dir: Path) -> None:
+        """load_dev_queue applies migration when loading a v1 file from disk."""
+        import json
+
+        from cw.config import dev_queue_file
+
+        v1_data = {
+            "schema_version": 1,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-3",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        dev_queue_file().write_text(json.dumps(v1_data))
+        store = load_dev_queue()
+        assert store.tasks[0].total_cost_usd is None
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_migrate_dev_queue_no_tasks(self) -> None:
+        """migrate_dev_queue handles missing tasks key without crashing."""
+        raw: dict[str, object] = {"schema_version": 1}
+        migrated = migrate_dev_queue(raw)
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION

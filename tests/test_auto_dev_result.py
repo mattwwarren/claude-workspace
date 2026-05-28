@@ -1625,3 +1625,68 @@ class TestAllPhasesBECDCombined:
         # Phase C
         assert result.health.agent_health_summary[0].confidence == "LOW"
         assert result.health.agent_health_summary[0].scope is None
+
+
+class TestCostUsdField:
+    def _make_shipped_payload(self, **extra: object) -> dict[str, object]:
+        """Minimal valid shipped payload for building test AutoDevResults."""
+        base: dict[str, object] = {
+            "schema_version": 2,
+            "ticket_id": "T-1",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 1,
+                "lines_estimate": 5,
+                "lines_actual": 5,
+                "forbidden_touched": False,
+            },
+            "plan_source": "linear_existing",
+            "branch": "dev/t-1",
+            "worktree_path": "/tmp/wt",
+            "fork_point_sha": "abc",
+            "commits": ["c1"],
+            "pr": {
+                "number": 1,
+                "url": "https://example.com",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+        base.update(extra)
+        return base
+
+    def test_cost_usd_defaults_to_none(self) -> None:
+        payload = self._make_shipped_payload()
+        result = AutoDevResult.model_validate(payload)
+        assert result.cost_usd is None
+
+    def test_cost_usd_accepts_float(self) -> None:
+        payload = self._make_shipped_payload(cost_usd=1.23)
+        result = AutoDevResult.model_validate(payload)
+        assert result.cost_usd == 1.23
+
+    def test_cost_usd_must_be_non_negative(self) -> None:
+        payload = self._make_shipped_payload(cost_usd=-0.01)
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(payload)
+
+    def test_cost_usd_round_trip(self) -> None:
+        payload = self._make_shipped_payload(cost_usd=2.5)
+        result = AutoDevResult.model_validate(payload)
+        dumped = result.model_dump(mode="json")
+        restored = AutoDevResult.model_validate(dumped)
+        assert restored.cost_usd == 2.5

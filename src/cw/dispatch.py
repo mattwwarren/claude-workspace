@@ -276,6 +276,33 @@ def dispatch_tick(
     return spawned
 
 
+def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
+    """Add the session's cost_usd to task.total_cost_usd, if available.
+
+    Reads cost via two-source fallback:
+      1. session.cost_usd (populated by signal_completed — normal headless path)
+      2. session.last_result.get('cost_usd') (populated by persist_last_result —
+         event-replay path where signal_completed did not run first)
+
+    When both sources are absent, total_cost_usd is left unchanged.
+    Called inside dev_queue_lock so the mutation is covered by the same
+    save_dev_queue call that persists the COMPLETED status.
+    """
+    if not session_id:
+        return
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == session_id), None)
+    if session is None:
+        return
+    cost: float | None = session.cost_usd
+    if cost is None and isinstance(session.last_result, dict):
+        raw_cost = session.last_result.get("cost_usd")
+        if isinstance(raw_cost, (int, float)):
+            cost = float(raw_cost)
+    if cost is not None:
+        task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
+
+
 def _apply_events_to_store(
     store: DevQueueStore,
     events: list[OrchestratorEvent],
@@ -330,6 +357,8 @@ def _apply_events_to_store(
             ):
                 continue
             task.status = QueueItemStatus.COMPLETED
+            sid = event_session_id if isinstance(event_session_id, str) else None
+            _accumulate_task_cost(task, sid)
             completed += 1
             break
     if completed:

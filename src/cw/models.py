@@ -54,8 +54,8 @@ class QueueItemStatus(StrEnum):
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
-CW_STATE_SCHEMA_VERSION = 3
-DEV_QUEUE_SCHEMA_VERSION = 1
+CW_STATE_SCHEMA_VERSION = 4
+DEV_QUEUE_SCHEMA_VERSION = 2
 
 
 class TaskSpec(BaseModel):
@@ -172,6 +172,10 @@ class TicketTask(BaseModel):
     # the global IDLE_WATCHDOG_SECONDS fallback. None means "use tier or global
     # default". See GitHub issue #326.
     idle_watchdog_override: int | None = None
+    # Cumulative USD cost across all auto-dev attempts for this ticket.
+    # Populated by _accumulate_task_cost in consume_completed_sessions.
+    # None when no cost data has been recorded yet. See GitHub issue #124.
+    total_cost_usd: float | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -309,6 +313,13 @@ class Session(BaseModel):
     # readable when the result schema bumps independently of cw's CW_STATE
     # schema. See ``cw.auto_dev_result`` for the parser.
     last_result: dict[str, Any] | None = None
+    # Total USD cost for this session's auto-dev run. Populated by
+    # signal_completed from AutoDevResult.cost_usd. None when cost data
+    # was not emitted by the producer. See GitHub issue #124.
+    cost_usd: float | None = None
+    # Per-model cost breakdown for this session. Populated via the SDK
+    # orchestrator path (post-#116). None when not available.
+    cost_breakdown: dict[str, float] | None = None
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [

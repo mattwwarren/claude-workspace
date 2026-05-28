@@ -588,3 +588,39 @@ class TestOrchestratorEventTypeSessionNeedsAttention:
             OrchestratorEventType.SESSION_NEEDS_ATTENTION.value
             == "session.needs_attention"
         )
+
+
+class TestCostFields:
+    def test_cost_fields_default_none(self) -> None:
+        sess = Session(
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+        )
+        assert sess.cost_usd is None
+        assert sess.cost_breakdown is None
+
+    def test_cost_fields_round_trip(self) -> None:
+        sess = Session(
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/dev/null"),
+            cost_usd=1.5,
+            cost_breakdown={"model-a": 1.5},
+        )
+        dumped = sess.model_dump(mode="json")
+        restored = Session.model_validate(dumped)
+        assert restored.cost_usd == 1.5
+        assert restored.cost_breakdown == {"model-a": 1.5}
+
+    def test_ticket_task_total_cost_usd_defaults_none(self) -> None:
+        task = TicketTask(ticket_id="T-1", client="c")
+        assert task.total_cost_usd is None
+
+    def test_ticket_task_total_cost_round_trip(self) -> None:
+        task = TicketTask(ticket_id="T-1", client="c", total_cost_usd=3.14)
+        dumped = task.model_dump(mode="json")
+        restored = TicketTask.model_validate(dumped)
+        assert restored.total_cost_usd == pytest.approx(3.14)

@@ -44,6 +44,7 @@ def _make_result(
     status: str = "shipped",
     ticket_id: str = "T-1",
     next_actions: list[str] | None = None,
+    cost_usd: float | None = None,
 ) -> AutoDevResult:
     """Build a minimal AutoDevResult that satisfies §3-§5 invariants."""
     _base_health: dict[str, Any] = {
@@ -84,6 +85,7 @@ def _make_result(
         "review": _base_review,
         "health": _base_health,
         "next_actions": next_actions if next_actions is not None else [],
+        "cost_usd": cost_usd,
     }
 
     if pre_branch:
@@ -557,6 +559,154 @@ class TestSignalCompleted:
         sess_b = next(s for s in updated.sessions if s.id == "bbb")
         assert sess_a.status == SessionStatus.ACTIVE
         assert sess_b.status == SessionStatus.COMPLETED
+
+    def test_writes_cost_usd_to_session_when_present(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_completed writes cost_usd to session when result has cost_usd."""
+        self._seed_active_session("w_cost1")
+        result = _make_result(status="shipped", ticket_id="T-cost", cost_usd=2.5)
+
+        signal_completed("c", "impl", result=result, session_id="w_cost1")
+
+        updated = load_state()
+        sess = next(s for s in updated.sessions if s.id == "w_cost1")
+        assert sess.cost_usd == 2.5
+
+    def test_cost_usd_none_when_result_has_no_cost(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """signal_completed leaves cost_usd None when result has no cost_usd."""
+        self._seed_active_session("w_cost2")
+        result = _make_result(status="shipped", ticket_id="T-cost2")  # no cost_usd
+
+        signal_completed("c", "impl", result=result, session_id="w_cost2")
+
+        updated = load_state()
+        sess = next(s for s in updated.sessions if s.id == "w_cost2")
+        assert sess.cost_usd is None
+
+    def test_accumulates_total_cost_usd_on_ticket_task(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """Total cost accumulates across multiple completions for the same ticket."""
+        from cw.dispatch import consume_completed_sessions
+        from cw.events import record_event
+
+        # Seed task with existing total
+        task = TicketTask(
+            ticket_id="T-acc",
+            client="c",
+            status=QueueItemStatus.RUNNING,
+            session_id="w_acc1",
+            total_cost_usd=1.0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # Session with cost_usd=0.75
+        sess = Session(
+            id="w_acc1",
+            name="c/auto-dev/T-acc",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        result = _make_result(status="shipped", ticket_id="T-acc", cost_usd=0.75)
+        signal_completed("c", "impl", result=result, session_id="w_acc1")
+
+        # Now consume to trigger accumulation
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "T-acc", "session_id": "w_acc1", "client": "c"},
+        )
+        consume_completed_sessions()
+
+        updated_queue = load_dev_queue()
+        updated_task = next(t for t in updated_queue.tasks if t.ticket_id == "T-acc")
+        assert updated_task.total_cost_usd == pytest.approx(1.75)
+
+    def test_total_cost_usd_starts_at_zero_for_first_attempt(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """When total_cost_usd is None, first completion sets it to cost_usd."""
+        from cw.dispatch import consume_completed_sessions
+        from cw.events import record_event
+
+        task = TicketTask(
+            ticket_id="T-first",
+            client="c",
+            status=QueueItemStatus.RUNNING,
+            session_id="w_first",
+            total_cost_usd=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sess = Session(
+            id="w_first",
+            name="c/auto-dev/T-first",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        result = _make_result(status="shipped", ticket_id="T-first", cost_usd=2.0)
+        signal_completed("c", "impl", result=result, session_id="w_first")
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "T-first", "session_id": "w_first", "client": "c"},
+        )
+        consume_completed_sessions()
+
+        updated_queue = load_dev_queue()
+        updated_task = next(t for t in updated_queue.tasks if t.ticket_id == "T-first")
+        assert updated_task.total_cost_usd == pytest.approx(2.0)
+
+    def test_total_cost_usd_unchanged_when_no_cost_in_result(
+        self, tmp_config_dir: Path, tmp_state_dir: Path
+    ) -> None:
+        """When result has no cost_usd, total_cost_usd is not modified."""
+        from cw.dispatch import consume_completed_sessions
+        from cw.events import record_event
+
+        task = TicketTask(
+            ticket_id="T-nochange",
+            client="c",
+            status=QueueItemStatus.RUNNING,
+            session_id="w_nochange",
+            total_cost_usd=3.0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sess = Session(
+            id="w_nochange",
+            name="c/auto-dev/T-nochange",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        result = _make_result(status="shipped", ticket_id="T-nochange")  # no cost_usd
+        signal_completed("c", "impl", result=result, session_id="w_nochange")
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "T-nochange", "session_id": "w_nochange", "client": "c"},
+        )
+        consume_completed_sessions()
+
+        updated_queue = load_dev_queue()
+        updated_task = next(
+            t for t in updated_queue.tasks if t.ticket_id == "T-nochange"
+        )
+        assert updated_task.total_cost_usd == pytest.approx(3.0)
 
 
 class TestHeadlessWrapper:
