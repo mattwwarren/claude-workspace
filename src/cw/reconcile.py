@@ -386,6 +386,14 @@ def flag_silently_idle_daemon_sessions(
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
+        session.last_result = {
+            "status": "silent_stall_detected",
+            "stage_reached": None,
+            "blocker": None,
+            "next_actions": ["user_inspect_session"],
+            "watchdog_idle_seconds": (now - session.started_at).total_seconds(),
+            "watchdog_fired_at": now.isoformat(),
+        }
 
     blocked: list[str] = []
     ticket_ids_to_block = [tid for _, tid in candidates if tid]

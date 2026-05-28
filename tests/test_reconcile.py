@@ -35,6 +35,7 @@ from cw.reconcile import (
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
     _claude_agents_json,
+    _has_terminal_sentinel,
     compute_drift,
     flag_silently_idle_daemon_sessions,
     reconcile,
@@ -1379,6 +1380,149 @@ def test_flag_silently_idle_daemon_sessions_skips_session_with_terminal_sentinel
 
     assert blocked == []
     assert sess.status == SessionStatus.ACTIVE
+
+
+def test_flag_silently_idle_daemon_sessions_sets_last_result(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Watchdog sets session.last_result to a non-None annotation dict before save."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="last-result-1",
+        name="client-a/auto-dev/LR-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="LR-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="last-result-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with patch("cw.reconcile.fire_push_notification"):
+        flag_silently_idle_daemon_sessions(state, now=now, native_live={"live-ref"})
+
+    assert sess.last_result is not None
+    assert sess.last_result["status"] == "silent_stall_detected"
+    assert sess.last_result["stage_reached"] is None
+    assert sess.last_result["blocker"] is None
+    assert sess.last_result["next_actions"] == ["user_inspect_session"]
+    assert isinstance(sess.last_result["watchdog_idle_seconds"], float)
+    assert sess.last_result["watchdog_idle_seconds"] > 0
+    assert isinstance(sess.last_result["watchdog_fired_at"], str)
+    assert sess.last_result["watchdog_fired_at"] != ""
+
+
+def test_flag_silently_idle_daemon_sessions_enables_has_terminal_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """After the watchdog fires, _has_terminal_sentinel returns True."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="sentinel-check-1",
+        name="client-a/auto-dev/SC-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="SC-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="sentinel-check-1",
+                )
+            ]
+        )
+    )
+
+    assert _has_terminal_sentinel(sess) is False
+
+    with patch("cw.reconcile.fire_push_notification"):
+        flag_silently_idle_daemon_sessions(state, now=now, native_live={"live-ref"})
+
+    assert _has_terminal_sentinel(sess) is True
+
+
+def test_flag_silently_idle_daemon_sessions_idempotent_on_second_call(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Second call does not re-fire: session is COMPLETED, not in _LIVE_STATUSES."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="idem-1",
+        name="client-a/auto-dev/IDEM-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="IDEM-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idem-1",
+                )
+            ]
+        )
+    )
+
+    with patch("cw.reconcile.fire_push_notification"):
+        first = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}
+        )
+    assert "IDEM-1" in first
+
+    captured_last_result = sess.last_result
+
+    with patch("cw.reconcile.fire_push_notification"):
+        second = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}
+        )
+    assert second == []
+    assert sess.last_result is captured_last_result  # same object, not overwritten
 
 
 def test_flag_silently_idle_daemon_sessions_skips_user_origin(
