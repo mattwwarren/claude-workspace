@@ -185,11 +185,11 @@ headless_timeout_by_tier:
 # Per-tier idle-watchdog budgets (seconds). After this window of silence
 # (no terminal sentinel emitted), a DAEMON session is flagged as
 # BLOCKED_ON_USER and a push notification fires. Large-tier sessions can
-# legitimately stall >5min on slow test runs or mypy before emitting any
+# legitimately stall on slow test runs or mypy before emitting any
 # sentinel. Sessions whose scope_hint is unknown fall back to the global
-# IDLE_WATCHDOG_SECONDS (300s). See GitHub issue #326.
+# IDLE_WATCHDOG_SECONDS (900s). See GitHub issues #326, #340.
 idle_watchdog_by_tier:
-  large: 600    # 10 min — large-tier sessions may stall on slow builds
+  large: 1800   # 30 min — large-tier sessions may stall on slow builds
 ```
 
 Override a single ticket's budget at enqueue time:

@@ -1264,7 +1264,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
 ) -> None:
     """DAEMON ACTIVE + no last_result + started >IDLE_WATCHDOG → BLOCKED_ON_USER."""
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
 
     sess = Session(
@@ -1375,7 +1375,7 @@ def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
     tmp_config_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """Session started <5min ago → not flagged."""
+    """Session started under the watchdog budget → not flagged."""
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() < IDLE_WATCHDOG_SECONDS
@@ -1476,7 +1476,7 @@ def test_reconcile_includes_silently_idle_in_report(
 ) -> None:
     """reconcile() calls watchdog and includes BLOCKED_ON_USER ticket in report."""
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
 
     # The daemon returns this session as live (surface still registered).
@@ -1557,12 +1557,12 @@ def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
     tmp_config_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """Large-tier task at 400s: > default 300s but < tier 600s → not flagged."""
+    """Large-tier task at 1200s: > default 900s but < tier 1800s → not flagged."""
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 0, 6, 40, tzinfo=UTC)  # 400 seconds elapsed
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)  # 1200 seconds elapsed
     elapsed = (now - started_at).total_seconds()
-    assert elapsed > IDLE_WATCHDOG_SECONDS  # 400 > 300 — would flag without override
-    assert elapsed < 600  # but under the large-tier override
+    assert elapsed > IDLE_WATCHDOG_SECONDS  # 1200 > 900 — would flag without override
+    assert elapsed < 1800  # but under the large-tier override
 
     sess = Session(
         id="tier-silent",
@@ -1589,7 +1589,7 @@ def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 1800})
     blocked = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=config
     )
@@ -1611,10 +1611,10 @@ def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
 ) -> None:
     """idle_watchdog_override on task beats both tier and global defaults."""
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)  # 600s elapsed
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)  # 1200s elapsed
     elapsed = (now - started_at).total_seconds()
-    assert elapsed > IDLE_WATCHDOG_SECONDS  # 600 > 300 default
-    assert elapsed < 900  # under the per-ticket override
+    assert elapsed > IDLE_WATCHDOG_SECONDS  # 1200 > 900 default
+    assert elapsed < 1500  # under the per-ticket override
 
     sess = Session(
         id="ticket-silent",
@@ -1637,7 +1637,7 @@ def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
         client="client-a",
         status=QueueItemStatus.RUNNING,
         session_id="ticket-silent",
-        idle_watchdog_override=900,
+        idle_watchdog_override=1500,
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
