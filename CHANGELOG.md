@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.2] — 2026-05-28
+
+Patch release with two reliability fixes for the dev-queue dispatch path,
+surfaced during the 2026-05-28 dogfood wave.
+
+- **Code-fenced sentinel parsing** (#337 → PR #339): `parse_stdout` now
+  tolerates AUTO_DEV_RESULT JSON wrapped in a Markdown code fence (```` ```json ````)
+  when the explicit `<<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>>` markers are
+  absent. Previously the dispatcher treated such sessions as no-sentinel and
+  spawned wasteful att2/att3 retries on already-shipped work. Closes #336
+  (downstream consequence — silently_idle hangs after the parser returned None).
+- **Watchdog default bump** (#340 stopgap → PR #341): `IDLE_WATCHDOG_SECONDS`
+  raised from `300` → `900` (15 min), `idle_watchdog_by_tier['large']` from
+  `600` → `1800`. The previous 300s budget false-positively flagged active
+  small-tier workers (#337 itself took 14 min wall time and tripped the
+  watchdog at 5 min). The deeper fix — transcript-mtime liveness detection
+  — remains open under #340.
+
 ## [0.11.1] — 2026-05-27
 
 Patch release covering #129's BLOCKED_ON_USER producer + watchdog and the
