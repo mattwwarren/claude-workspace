@@ -2072,8 +2072,9 @@ def _peek_session(
     content = _adapter.capture_surface(
         session.surface_ref, lines=lines, scrollback=scrollback
     )
-    actual_lines = len(content.splitlines()) if content.strip() else 0
-    if actual_lines < lines and content.strip():
+    stripped = content.strip()
+    actual_lines = len(content.splitlines()) if stripped else 0
+    if actual_lines < lines and stripped:
         click.echo(
             f"Warning: fewer than {lines} lines available in scrollback"
             f" (got {actual_lines}).",
