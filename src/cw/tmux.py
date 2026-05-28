@@ -215,4 +215,3 @@ class TmuxAdapter:
             return {}
         else:
             return {"cmd": cmd, "last_activity": dt}
-        return {}

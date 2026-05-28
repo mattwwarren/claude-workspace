@@ -267,7 +267,7 @@ class FakeCmuxAdapter:
 
     def __init__(self) -> None:
         self._counter = 0
-        self.calls: dict[str, list[tuple[object, ...] | str]] = {
+        self.calls: dict[str, list[tuple[object, ...]]] = {
             "spawn": [],
             "close": [],
             "identify": [],
@@ -353,7 +353,7 @@ class FakeCmuxAdapter:
 
     def inspect_pane(self, surface_ref: str) -> dict[str, Any]:
         """Return stored pane info for *surface_ref*, or {} if unknown."""
-        self.calls["inspect_pane"].append(surface_ref)
+        self.calls["inspect_pane"].append((surface_ref,))  # tuple, like all other calls
         return dict(self._pane_info.get(surface_ref, {}))
 
     def set_pane_info(self, surface_ref: str, data: dict[str, Any]) -> None:

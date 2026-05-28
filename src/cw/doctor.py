@@ -396,9 +396,25 @@ def _check_wedge_task_running_no_session(
                 )
             )
         elif task.session_id not in live_session_ids:
-            # session_id set but no live session — handled by
-            # _check_wedge_task_running_completed_session if COMPLETED
-            pass
+            # session_id set but points to a non-live session (missing from
+            # state, TIMED_OUT, BACKGROUNDED, etc.).
+            # _check_wedge_task_running_completed_session handles COMPLETED
+            # specifically; everything else falls here.
+            session_by_id_local = {s.id: s for s in state.sessions}
+            sess = session_by_id_local.get(task.session_id)
+            if sess is None or sess.status != SessionStatus.COMPLETED:
+                findings.append(
+                    WedgeFinding(
+                        wedge_class="wedge/task-running-no-session",
+                        session_id=task.session_id,
+                        ticket_id=task.ticket_id,
+                        recipe=(
+                            "Queue task RUNNING with no matching session. "
+                            "Run: cw doctor --reap to revert task to PENDING."
+                        ),
+                        state_file=str(state_file()),
+                    )
+                )
     return findings
 
 
@@ -541,7 +557,7 @@ def _reap_wedge_findings(
     session_by_id = {s.id: s for s in state.sessions}
     now = datetime.now(UTC)
 
-    # --- Class-1: pane-idle-but-active ---
+    # --- Class-1: in-memory mutations only (not yet persisted) ---
     class1_session_ids: set[str] = set()
     for f in findings:
         if f.wedge_class != "wedge/pane-idle-but-active" or f.session_id is None:
@@ -550,29 +566,11 @@ def _reap_wedge_findings(
         if session is None:
             continue
         session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.CRASHED
+        session.completed_reason = CompletionReason.NORMAL
         session.completed_at = now
         class1_session_ids.add(f.session_id)
 
-    if class1_session_ids:
-        save_state(state)
-        for sid in class1_session_ids:
-            session = session_by_id[sid]
-            record_event(
-                OrchestratorEventType.SESSION_COMPLETED,
-                {
-                    "session_id": session.id,
-                    "session_name": session.name,
-                    "client": session.client,
-                    "crashed": True,
-                    "ticket_id": ticket_id_for_session(session.name),
-                },
-            )
-            if session.surface_ref is not None:
-                adapter.close(session.surface_ref)
-
-    # --- Revert queue tasks for all actionable classes ---
-    # class-4 (repo-ahead-of-queue) is advisory — skip it.
+    # Collect ticket IDs for queue revert (classes 1-3, not class-4).
     revert_ticket_ids: set[str] = set()
     for f in findings:
         if f.wedge_class == "wedge/repo-ahead-of-queue":
@@ -580,20 +578,42 @@ def _reap_wedge_findings(
         if f.ticket_id:
             revert_ticket_ids.add(f.ticket_id)
 
-    if revert_ticket_ids:
+    # FIX 5: Hold queue lock across BOTH state writes to prevent torn state
+    # window where dispatch observes sessions.json=COMPLETED but
+    # dev_queue.json=RUNNING and triggers a spurious re-spawn.
+    if class1_session_ids or revert_ticket_ids:
         with dev_queue_lock():
-            queue = load_dev_queue()
-            changed = False
-            for task in queue.tasks:
-                if (
-                    task.ticket_id in revert_ticket_ids
-                    and task.status == QueueItemStatus.RUNNING
-                ):
-                    task.status = QueueItemStatus.PENDING
-                    task.session_id = None
-                    changed = True
-            if changed:
-                save_dev_queue(queue)
+            if class1_session_ids:
+                save_state(state)  # session mutations persisted inside lock
+            if revert_ticket_ids:
+                queue = load_dev_queue()
+                changed = False
+                for task in queue.tasks:
+                    if (
+                        task.ticket_id in revert_ticket_ids
+                        and task.status == QueueItemStatus.RUNNING
+                    ):
+                        task.status = QueueItemStatus.PENDING
+                        task.session_id = None
+                        changed = True
+                if changed:
+                    save_dev_queue(queue)
+
+    # Side effects AFTER both writes succeed.
+    for sid in class1_session_ids:
+        session = session_by_id[sid]
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "crashed": False,  # FIX 4: not a crash
+                "ticket_id": ticket_id_for_session(session.name),
+            },
+        )
+        if session.surface_ref is not None:
+            adapter.close(session.surface_ref)
 
 
 def run_doctor(*, reap: bool = False) -> DoctorReport:

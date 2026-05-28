@@ -879,7 +879,7 @@ class TestFakeCmuxAdapterInspectPane:
     def test_inspect_pane_call_recorded(self) -> None:
         adapter = FakeCmuxAdapter()
         adapter.inspect_pane("s:w.p")
-        assert adapter.calls["inspect_pane"] == ["s:w.p"]
+        assert adapter.calls["inspect_pane"] == [("s:w.p",)]
 
     def test_unknown_ref_returns_empty(self) -> None:
         adapter = FakeCmuxAdapter()
