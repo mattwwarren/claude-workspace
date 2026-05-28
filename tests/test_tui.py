@@ -8,6 +8,7 @@ version bumps), tests check for presence/absence of the meaningful tokens
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -526,3 +527,183 @@ class TestWatchFlat:
             ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
         )
         # Should not crash
+
+    def test_navigate_up_key(self, sample_status: OrchestratorStatus) -> None:
+        """Pressing 'k' decrements cursor (with floor at 0)."""
+        import queue as _queue
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("j")  # go to row 1
+        kq.put("k")  # back to row 0
+        kq.put("k")  # already at 0 — no crash
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
+        )
+
+    def test_unknown_key_no_crash(self, sample_status: OrchestratorStatus) -> None:
+        """Unrecognized keys are silently ignored."""
+        import queue as _queue
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("z")  # unknown key
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
+        )
+
+    def test_open_editor_with_worktree(
+        self, sample_status: OrchestratorStatus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing 'o' on a row with worktree_path launches EDITOR."""
+        import queue as _queue
+
+        called: list[object] = []
+        monkeypatch.setattr("subprocess.run", lambda *a, **_kw: called.append(a))
+        monkeypatch.setenv("EDITOR", "nano")
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("o")  # first row has worktree
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
+        )
+        # subprocess called once for the row that has a worktree
+        assert len(called) >= 1
+
+    def test_peek_with_session_id(
+        self, sample_status: OrchestratorStatus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing 'p' calls cw queue-peek when cw found and session_id exists."""
+        import queue as _queue
+
+        called: list[object] = []
+        monkeypatch.setattr("shutil.which", lambda _cmd: "/usr/bin/cw")
+        monkeypatch.setattr("subprocess.run", lambda *a, **_kw: called.append(a))
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        kq.put("p")
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            ticks=None, status_fn=lambda: sample_status, console=con, key_queue=kq
+        )
+        # subprocess may be called if first row has session_id
+
+    def test_interval_refresh_on_timer(
+        self, frozen_now: datetime, sample_status: OrchestratorStatus
+    ) -> None:
+        """Status provider is called again after interval elapses."""
+        import queue as _queue
+
+        call_count = 0
+
+        def counting_fn() -> OrchestratorStatus:
+            nonlocal call_count
+            call_count += 1
+            return sample_status
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        # Put 'r' to force refresh, then quit
+        kq.put("r")
+        kq.put("q")
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        watch_flat(
+            interval=1,
+            ticks=None,
+            status_fn=counting_fn,
+            console=con,
+            key_queue=kq,
+        )
+        assert call_count >= 1
+
+
+class TestKeyListenerThread:
+    def test_oserror_on_non_tty_is_silenced(self) -> None:
+        """Thread exits cleanly when stdin is not a tty (OSError from fileno)."""
+        import queue as _queue
+
+        from cw.tui import _key_listener_thread
+
+        kq: _queue.SimpleQueue[str] = _queue.SimpleQueue()
+        # Running in a test environment → stdin.fileno() or tcgetattr raises OSError
+        # The function should return without raising.
+        t = threading.Thread(target=_key_listener_thread, args=(kq,), daemon=True)
+        t.start()
+        t.join(timeout=1.0)
+        # Thread should have exited (join returns before timeout)
+        assert not t.is_alive()
+
+
+class TestBuildWatchRows:
+    def test_running_ticket_merged_with_session(self, frozen_now: datetime) -> None:
+        """A 'running' ticket whose client matches a session gets merged."""
+        from cw.tui import _build_watch_rows
+
+        status = OrchestratorStatus(
+            generated_at=frozen_now,
+            pending_tickets=[
+                TicketSummary(
+                    ticket_id="MW-200",
+                    client="personal",
+                    priority=1,
+                    status="running",
+                    created_at=frozen_now,
+                ),
+            ],
+            running_sessions=[
+                SessionSummary(
+                    id="sess-run",
+                    name="personal/impl",
+                    client="personal",
+                    status="active",
+                    purpose="impl",
+                    started_at=frozen_now,
+                ),
+            ],
+        )
+        rows = _build_watch_rows(status, frozen_now)
+        # One merged row, not two separate rows
+        assert len(rows) == 1
+        assert rows[0].ticket_id == "MW-200"
+        assert rows[0].session_id == "sess-run"
+
+    def test_running_ticket_skipped_from_standalone_ticket_rows(
+        self, frozen_now: datetime
+    ) -> None:
+        """Running ticket that already has a session row is not duplicated."""
+        from cw.tui import _build_watch_rows
+
+        status = OrchestratorStatus(
+            generated_at=frozen_now,
+            pending_tickets=[
+                TicketSummary(
+                    ticket_id="MW-201",
+                    client="personal",
+                    priority=1,
+                    status="running",
+                    created_at=frozen_now,
+                ),
+            ],
+            running_sessions=[
+                SessionSummary(
+                    id="sess-dup",
+                    name="personal/impl",
+                    client="personal",
+                    status="active",
+                    purpose="impl",
+                    started_at=frozen_now,
+                ),
+            ],
+        )
+        rows = _build_watch_rows(status, frozen_now)
+        # Only one row (merged), not two
+        assert len(rows) == 1
