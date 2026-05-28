@@ -122,6 +122,9 @@ ignore = [
 "src/cw/models.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
 ]
+"src/cw/tui.py" = [
+    "TCH003",  # WatchRow Pydantic model needs runtime access to Path
+]
 "src/cw/cmux.py" = [
     "S108",   # Unix socket paths in /tmp are part of the cmux protocol spec
 ]

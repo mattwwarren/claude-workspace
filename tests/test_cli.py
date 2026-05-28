@@ -4097,3 +4097,28 @@ class TestPeek:
             result = runner.invoke(main, ["peek", "--lines", "50", session.name])
         assert result.exit_code == 0
         assert "fewer than" in result.stderr
+
+
+class TestWatchCommand:
+    def test_watch_help(self) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["watch", "--help"])
+        assert result.exit_code == 0
+        assert "--interval" in result.output
+
+    def test_watch_invokes_watch_flat(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from click.testing import CliRunner
+
+        from cw import cli
+        from cw.cli import main
+
+        called: list[object] = []
+        monkeypatch.setattr(cli, "watch_flat", lambda **kwargs: called.append(kwargs))
+        runner = CliRunner()
+        result = runner.invoke(main, ["watch"])
+        assert result.exit_code == 0
+        assert called
