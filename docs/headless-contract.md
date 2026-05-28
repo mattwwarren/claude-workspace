@@ -142,6 +142,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
 | `commits` | string[] | Commit SHAs created during this run. |
 | `pr` | object \| null | Non-null **only** when `status = shipped`. All other statuses — including `review_pending_approval` (whether reached via the large-scope path or the §5.1 downgrade), `merge_gate_blocked`, `plan_pending_approval`, the rejects, and `blocked` — leave `pr` as `null`. `branch` may still be non-null on these (see `branch` row). |
+| `pr_created` | object \| null | **Phase D** — pre-merge PR snapshot emitted before auto-merge is triggered (§3.4). Optional; absent on payloads from older producers. When present, expected only on `status=shipped` runs. |
 | `review.must_fix_initial` | int | MUST_FIX count from first review pass. |
 | `review.should_fix` | int | SHOULD_FIX count carried out of the loop. |
 | `review.fix_cycles_used` | int | 0 when first pass was clean. |
@@ -149,6 +150,30 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
 | `blocker` | object \| null | See §4.2. Populated when `status = "blocked"`. |
 | `next_actions` | string[] | Advisory list cw can act on without prose-parsing. See §4.3. |
+
+### 3.4 `pr_created` — Phase D pre-merge PR snapshot (issue #174)
+
+**Gap addressed:** Small-scope tickets reach S4 (PR creation) and immediately enable auto-merge. The sentinel block previously landed after the merge completes, so the orchestrator had no window to observe the PR number or CI state at PR-creation time — only the merged state in `pr`.
+
+**`pr_created`** captures the PR state *before* auto-merge is triggered, giving the orchestrator a hook to attach CI watchers or make merge decisions:
+
+```json
+"pr_created": {
+  "number": 171,
+  "url": "https://github.com/mattwwarren/claude-workspace/pull/171",
+  "ci_status_at_creation": "pending",
+  "auto_merge_enabled": true
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `number` | int | PR number on the hosting platform. |
+| `url` | string | Full URL to the PR. |
+| `ci_status_at_creation` | string | CI state at the moment the PR was opened — before any merge. Open-ish enum; observed values: `"pending"`, `"passing"`, `"failing"`. Consumers MUST treat unknown values as opaque strings and surface verbatim. |
+| `auto_merge_enabled` | bool | Whether the skill successfully enabled auto-merge on the PR. |
+
+**Advisory optional field.** Absent on payloads from producers that predate Phase D. No schema version bump required (§8: "purely advisory optional field"). When present, expected only for `status=shipped` runs.
 
 ---
 
@@ -300,8 +325,40 @@ A degraded agent is one that returned ANY of:
 | `recommendation` | `PROCEED` if all agents recommended PROCEED; otherwise `EXIT_FOR_HUMAN_REVIEW`. |
 | `downgrade_applied` | `true` only when the §5.1 rule actually downgraded `shipped` → `review_pending_approval`. |
 | `fix_loop_escalated` | `true` when the fix loop tripped cycle 3+ or scope-grew at any cycle (see gate row in §2). Independent from `downgrade_applied`. |
+| `agent_health_summary` | **Phase C** — per-agent breakdown. See §5.3. Optional; defaults to empty list. |
 
 `downgrade_applied` and `fix_loop_escalated` are distinct signals — a run can have either, both, or neither.
+
+### 5.3 `health.agent_health_summary` — Phase C per-agent breakdown (issue #174)
+
+**Gap addressed:** When the §5.1 health aggregation rule downgrades to `review_pending_approval`, the orchestrator sees `health.downgrade_applied=true` and `health.lowest_agent_confidence=LOW` but cannot tell *which* agent caused the degradation — a retry targeting the specific agent is not possible without that detail.
+
+**`agent_health_summary`** is an array of per-agent snapshots collected across all agents that ran during the pipeline (plan, impl, reviewers, fix-loop cycles, prep-pr):
+
+```json
+"health": {
+  "lowest_agent_confidence": "MEDIUM",
+  "any_incomplete_risk": false,
+  "shortcuts": [],
+  "recommendation": "PROCEED",
+  "downgrade_applied": false,
+  "fix_loop_escalated": false,
+  "agent_health_summary": [
+    {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH", "scope": "small"},
+    {"agent_id": "impl-agent-abc", "confidence": "MEDIUM", "scope": "large"}
+  ]
+}
+```
+
+Each entry:
+
+| Field | Type | Notes |
+|---|---|---|
+| `agent_id` | string | Producer-assigned identifier for the agent. Free-form; consumers surface verbatim. |
+| `confidence` | `"HIGH"` \| `"MEDIUM"` \| `"LOW"` | The agent's self-reported `On-spec confidence` from its Health Check block. |
+| `scope` | string \| null | Scope tier the agent was operating under. Expected values `"small"` / `"large"`; free-form string to tolerate producer-side drift. `null` for agents without a scope concept (e.g. plan-reviewer). |
+
+**Advisory optional field.** Absent (empty list) on payloads from producers that predate Phase C. No schema version bump required (§8). Consumer use case: filter entries with `confidence=LOW` or `scope=large` to target retries.
 
 ---
 
