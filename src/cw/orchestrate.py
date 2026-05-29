@@ -30,7 +30,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from cw.config import load_state, review_monitor_dir, save_state
+from cw.atomic import atomic_write_text
+from cw.config import load_state, review_monitor_dir, save_state, state_dir
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
@@ -43,20 +44,64 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
-from cw.pr_responder import (
-    PRDispatchRecord,
-    load_dispatch_record,
-    save_dispatch_record,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.models import CwState
 
 logger = logging.getLogger(__name__)
 
 _RETIREMENT_CONSUMER = "orchestrate_retire"
 _RECENT_EVENTS_LIMIT = 20
 _REVIEW_MONITOR_SCRIPT = Path.home() / ".claude" / "scripts" / "review_monitor.py"
+
+
+# ---------------------------------------------------------------------------
+# PR dispatch record (migrated from pr_responder)
+# ---------------------------------------------------------------------------
+
+_DISPATCH_FILE_NAME = "pr_dispatch.json"
+
+
+class PRDispatchRecord(BaseModel):
+    """Tracks in-flight PR response sessions."""
+
+    # key: "repo#pr_number|role"  (role = "fix-ci" or "address-review")
+    active: dict[str, str] = Field(default_factory=dict)
+
+
+def load_dispatch_record() -> PRDispatchRecord:
+    """Load PRDispatchRecord from the state directory, or return an empty one."""
+    path = state_dir() / _DISPATCH_FILE_NAME
+    if not path.exists():
+        return PRDispatchRecord()
+    return PRDispatchRecord.model_validate_json(path.read_text())
+
+
+def save_dispatch_record(record: PRDispatchRecord) -> None:
+    """Persist PRDispatchRecord to the state directory atomically."""
+    state_dir().mkdir(parents=True, exist_ok=True)
+    path = state_dir() / _DISPATCH_FILE_NAME
+    atomic_write_text(path, record.model_dump_json(indent=2))
+
+
+def clear_completed_pr_sessions(state: CwState) -> None:
+    """Remove PRDispatchRecord entries whose sessions are completed.
+
+    Args:
+        state: Current CwState used to determine completed session IDs.
+    """
+    dispatch_record = load_dispatch_record()
+    completed_ids = {
+        s.id for s in state.sessions if s.status == SessionStatus.COMPLETED
+    }
+    dispatch_record.active = {
+        key: sid
+        for key, sid in dispatch_record.active.items()
+        if sid not in completed_ids
+    }
+    save_dispatch_record(dispatch_record)
 
 
 def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
