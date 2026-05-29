@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,7 @@ from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
 if TYPE_CHECKING:
     import pytest
 
-    from cw.models import ClientConfig, Session
+    from cw.models import ClientConfig, Session, TicketTask
 
 
 def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1076,15 +1077,12 @@ class TestFormatReportFooter:
 class TestCheckClaudeVersion:
     """Direct tests for _check_claude_version via monkeypatched subprocess.run."""
 
-    def _mk_proc(self, stdout: str = "", returncode: int = 0) -> object:
-        class _Proc:
-            pass
-
-        p = _Proc()
-        p.stdout = stdout  # type: ignore[attr-defined]
-        p.stderr = ""  # type: ignore[attr-defined]
-        p.returncode = returncode  # type: ignore[attr-defined]
-        return p
+    def _mk_proc(
+        self, stdout: str = "", returncode: int = 0
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=""
+        )
 
     def test_version_above_floor_ok_no_warn(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1365,7 +1363,7 @@ class TestWedgePaneIdleButActive:
 
     def _make_active_session(
         self, tmp_path: Path, *, surface_ref: str | None = "s:0.1"
-    ) -> object:
+    ) -> Session:
         from datetime import UTC, datetime
 
         from cw.models import Session, SessionPurpose, SessionStatus
@@ -1396,7 +1394,7 @@ class TestWedgePaneIdleButActive:
         from cw.models import CwState, DevQueueStore
 
         session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
         save_state(state)
         save_dev_queue(DevQueueStore(tasks=[]))
 
@@ -1427,7 +1425,7 @@ class TestWedgePaneIdleButActive:
         from cw.models import CwState, DevQueueStore
 
         session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
 
         adapter = FakeCmuxAdapter()
         adapter.set_pane_info("s:0.1", {"cmd": "claude", "last_activity": None})
@@ -1451,7 +1449,7 @@ class TestWedgePaneIdleButActive:
         from cw.models import CwState, DevQueueStore
 
         session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
 
         adapter = FakeCmuxAdapter()
         adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
@@ -1472,7 +1470,7 @@ class TestWedgePaneIdleButActive:
         from cw.models import CwState, DevQueueStore
 
         session = self._make_active_session(tmp_path, surface_ref=None)
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
 
         adapter = FakeCmuxAdapter()
         queue = DevQueueStore(tasks=[])
@@ -1490,7 +1488,7 @@ class TestWedgePaneIdleButActive:
         from cw.models import CwState, DevQueueStore
 
         session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
 
         adapter = FakeCmuxAdapter()
         adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
@@ -1524,7 +1522,7 @@ class TestWedgePaneIdleButActive:
         from cw.models import CwState, DevQueueStore
 
         session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
 
         adapter = FakeCmuxAdapter()
         # inspect_pane returns {} (default) — fail-open, skip
@@ -1649,7 +1647,9 @@ class TestWedgeTaskRunningNoSession:
 class TestWedgeTaskRunningCompletedSession:
     """wedge/task-running-completed-session detection logic."""
 
-    def _make_completed_session(self, tmp_path: Path, sid: str = "comp-sess") -> object:
+    def _make_completed_session(
+        self, tmp_path: Path, sid: str = "comp-sess"
+    ) -> Session:
         from datetime import UTC, datetime
 
         from cw.models import CompletionReason, Session, SessionPurpose, SessionStatus
@@ -1678,7 +1678,7 @@ class TestWedgeTaskRunningCompletedSession:
             status=QueueItemStatus.RUNNING,
             session_id="comp-sess",
         )
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
         queue = DevQueueStore(tasks=[task])
         findings = _check_wedge_task_running_completed_session(state, queue)
         assert len(findings) == 1
@@ -1750,7 +1750,7 @@ class TestWedgeTaskRunningCompletedSession:
             status=QueueItemStatus.RUNNING,
             session_id="comp-sess-field",
         )
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
         queue = DevQueueStore(tasks=[task])
         findings = _check_wedge_task_running_completed_session(state, queue)
         assert len(findings) == 1
@@ -1766,7 +1766,7 @@ class TestWedgeRepoAheadOfQueue:
         tmp_path: Path,
         ticket_id: str = "TST-R1",
         session_id: str | None = None,
-    ) -> object:
+    ) -> TicketTask:
         from cw.models import QueueItemStatus, TicketTask
 
         return TicketTask(
@@ -1786,7 +1786,7 @@ class TestWedgeRepoAheadOfQueue:
 
         task = self._make_running_task(tmp_path, ticket_id="TST-R1")
         state = CwState(sessions=[])
-        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+        queue = DevQueueStore(tasks=[task])
 
         call_count = [0]
 
@@ -1822,7 +1822,7 @@ class TestWedgeRepoAheadOfQueue:
 
         task = self._make_running_task(tmp_path, ticket_id="TST-R2")
         state = CwState(sessions=[])
-        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+        queue = DevQueueStore(tasks=[task])
 
         class _Proc:
             def __init__(self, rc: int, out: str) -> None:
@@ -1851,7 +1851,7 @@ class TestWedgeRepoAheadOfQueue:
 
         task = self._make_running_task(tmp_path, ticket_id="TST-R3")
         state = CwState(sessions=[])
-        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+        queue = DevQueueStore(tasks=[task])
 
         class _Proc:
             def __init__(self, rc: int, out: str) -> None:
@@ -1877,7 +1877,7 @@ class TestWedgeRepoAheadOfQueue:
 
         task = self._make_running_task(tmp_path, ticket_id="TST-R4")
         state = CwState(sessions=[])
-        queue = DevQueueStore(tasks=[task])  # type: ignore[list-item]
+        queue = DevQueueStore(tasks=[task])
 
         class _Proc:
             def __init__(self, rc: int, out: str) -> None:
@@ -1974,7 +1974,7 @@ class TestWedgeRepoAheadOfQueue:
 class TestWedgeReapRecipes:
     """_reap_wedge_findings applies correct mutations per wedge class."""
 
-    def _make_session(self, tmp_path: Path, sid: str = "reap-sess") -> object:
+    def _make_session(self, tmp_path: Path, sid: str = "reap-sess") -> Session:
         from datetime import UTC, datetime
 
         from cw.models import Session, SessionPurpose, SessionStatus
@@ -2009,7 +2009,7 @@ class TestWedgeReapRecipes:
         )
 
         session = self._make_session(tmp_path)
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
         save_state(state)
 
         task = TicketTask(
@@ -2213,7 +2213,7 @@ class TestWedgeReapRecipes:
         from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
 
         session = self._make_session(tmp_path, sid="no-reap-sess")
-        state = CwState(sessions=[session])  # type: ignore[list-item]
+        state = CwState(sessions=[session])
         save_state(state)
 
         task = TicketTask(
