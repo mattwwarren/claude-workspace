@@ -297,6 +297,41 @@ def _check_workspace_paths() -> list[CheckResult]:
     return results
 
 
+def _check_worktree_paths_sessions(
+    state: CwState | None = None,
+) -> list[CheckResult]:
+    """Verify each session's worktree_path exists. Read-only, warn-only."""
+    if state is None:
+        return []
+    wt_paths: list[tuple[str, Path]] = [
+        (s.id, s.worktree_path) for s in state.sessions if s.worktree_path is not None
+    ]
+    total_checked = len(wt_paths)
+    results: list[CheckResult] = []
+    for session_id, wt in wt_paths:
+        if not wt.exists():
+            results.append(
+                CheckResult(
+                    f"worktree/{session_id}",
+                    ok=True,
+                    warn=True,
+                    detail=f"path does not exist: {wt}",
+                )
+            )
+    missing_count = len(results)
+    results.append(
+        CheckResult(
+            "worktree/summary",
+            ok=True,
+            warn=False,
+            detail=(
+                f"{total_checked} sessions checked, {missing_count} missing worktrees"
+            ),
+        )
+    )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Wedge detection helpers
 # ---------------------------------------------------------------------------
@@ -644,6 +679,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_claude_version())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_workspace_paths())
+    report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:
         # Wedge checks: load queue once, run all four checks.
