@@ -79,43 +79,21 @@ def load_claude_session_id(session_id: str | None) -> str | None:
     return None
 
 
-def find_transcript_for_ticket(
-    ticket_id: str, session_id: str | None = None
-) -> Path | None:
-    """Locate the main /auto-dev transcript jsonl for a ticket.
-
-    A worker's project directory can contain multiple jsonls across multiple
-    dispatch attempts. Candidate selection works in two steps:
-
-    1. If session_id is provided, resolve it to a claude_session_id via
-       sessions.json and return the matching jsonl directly (exact match).
-    2. Fallback heuristic: prefer jsonls whose first user message references
-       "/auto-dev <ticket>" (score 0), then within that group pick the most
-       recent run by first_user_ts (latest first). This prevents a reused
-       worktree from returning stale transcripts from an earlier dispatch.
-    """
+def _matching_project_dirs(ticket_id: str) -> list[Path]:
+    """Return project dirs whose name contains 'auto-dev-{ticket_id}'."""
     if not CLAUDE_PROJECTS.exists():
-        return None
+        return []
+    return [
+        p
+        for p in CLAUDE_PROJECTS.iterdir()
+        if p.is_dir() and f"auto-dev-{ticket_id}" in p.name
+    ]
 
-    # Primary path: exact session match via sessions.json
-    claude_id = load_claude_session_id(session_id)
-    if claude_id:
-        for proj in CLAUDE_PROJECTS.iterdir():
-            if not proj.is_dir():
-                continue
-            if f"auto-dev-{ticket_id}" not in proj.name:
-                continue
-            candidate = proj / f"{claude_id}.jsonl"
-            if candidate.exists():
-                return candidate
 
-    # Fallback heuristic
+def _find_transcript_heuristic(ticket_id: str) -> Path | None:
+    """Heuristic fallback: score by /auto-dev prefix, pick the most recent run."""
     candidates: list[tuple[Path, int, str]] = []  # (path, score, first_user_ts)
-    for proj in CLAUDE_PROJECTS.iterdir():
-        if not proj.is_dir():
-            continue
-        if f"auto-dev-{ticket_id}" not in proj.name:
-            continue
+    for proj in _matching_project_dirs(ticket_id):
         for jsonl in proj.glob("*.jsonl"):
             first_user_ts = ""
             first_user_text = ""
@@ -139,16 +117,33 @@ def find_transcript_for_ticket(
                     break
             score = 0 if f"/auto-dev {ticket_id}" in first_user_text else 1
             candidates.append((jsonl, score, first_user_ts))
-
     if not candidates:
         return None
-
     # Two-pass stable sort: latest timestamp first, then score ascending.
     # Result: score=0 (main session) beats score=1 (subagents); among score=0
     # candidates across multiple runs, the most recent run's transcript wins.
     candidates.sort(key=lambda c: c[2], reverse=True)  # latest timestamp first
     candidates.sort(key=lambda c: c[1])  # score 0 before 1 (stable)
     return candidates[0][0]
+
+
+def find_transcript_for_ticket(
+    ticket_id: str, session_id: str | None = None
+) -> Path | None:
+    """Locate the main /auto-dev transcript jsonl for a ticket.
+
+    If session_id is provided, resolves it to a claude_session_id via
+    sessions.json and returns the matching jsonl directly (exact match).
+    Falls back to a heuristic that prefers the most recent main-session
+    transcript when no exact match is found.
+    """
+    claude_id = load_claude_session_id(session_id)
+    if claude_id:
+        for proj in _matching_project_dirs(ticket_id):
+            candidate = proj / f"{claude_id}.jsonl"
+            if candidate.exists():
+                return candidate
+    return _find_transcript_heuristic(ticket_id)
 
 
 def parse_transcript(path: Path) -> dict[str, Any]:
