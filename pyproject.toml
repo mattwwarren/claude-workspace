@@ -128,6 +128,19 @@ ignore = [
 "src/cw/cmux.py" = [
     "S108",   # Unix socket paths in /tmp are part of the cmux protocol spec
 ]
+# Channel/server modules defer mcp/starlette/uvicorn/anyio imports by design so
+# the core CLI does not hard-require the optional [mcp] extra. Inline imports
+# (PLC0415) are the sanctioned mechanism here, not a workaround.
+"src/cw/cw_pr_events_server.py" = ["PLC0415"]
+"src/cw/cw_queue_events_server.py" = ["PLC0415"]
+"src/cw/cw_pr_events_channel.py" = ["PLC0415"]
+"src/cw/cw_queue_events_channel.py" = ["PLC0415"]
+# Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
+# so module-level imports legitimately follow executable code (E402).
+"tests/test_cw_pr_events_channel.py" = ["E402"]
+"tests/test_cw_pr_events_server.py" = ["E402"]
+"tests/test_cw_queue_events_channel.py" = ["E402"]
+"tests/test_channels_queue_events.py" = ["E402"]
 "tests/**" = [
     "S101",     # assert is fine in tests
     "ARG001",   # unused function args common in fixtures/mocks

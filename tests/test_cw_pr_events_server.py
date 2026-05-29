@@ -16,10 +16,10 @@ starlette = pytest.importorskip(
     "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
 )
 
-from starlette.testclient import TestClient  # noqa: E402
+from starlette.testclient import TestClient
 
-import cw.cw_pr_events_server as _server_mod  # noqa: E402
-from cw.cw_pr_events_server import (  # noqa: E402
+import cw.cw_pr_events_server as _server_mod
+from cw.cw_pr_events_server import (
     _NOTIFICATION_TYPE,
     PREventRequest,
     _build_notification,

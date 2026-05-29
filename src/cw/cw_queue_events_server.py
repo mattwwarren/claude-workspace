@@ -316,8 +316,8 @@ def _check_wedge() -> dict[str, Any] | None:
 
 def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]:
     """Load current state, compute deltas, return new snapshot + events."""
-    from cw.config import load_state  # noqa: PLC0415
-    from cw.dev_queue import load_dev_queue  # noqa: PLC0415
+    from cw.config import load_state
+    from cw.dev_queue import load_dev_queue
 
     store = load_dev_queue()
     state = load_state()
@@ -341,7 +341,7 @@ def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]
 
 def _run_poller() -> None:
     """Background polling thread. Runs as daemon."""
-    import time  # noqa: PLC0415
+    import time
 
     snapshot = _load_snapshot()
     while True:
@@ -378,7 +378,7 @@ def _start_poller() -> None:
 
 async def handle_post_ack(request: Request) -> Response:
     """Handle POST /ack: advance per-subscriber cursor."""
-    from starlette.responses import JSONResponse  # noqa: PLC0415
+    from starlette.responses import JSONResponse
 
     try:
         body = await request.json()
@@ -417,16 +417,16 @@ class _SSESlashMiddleware:
 def make_app() -> Starlette:
     """Build and return the Starlette ASGI app with MCP SSE + /ack route."""
     try:
-        from starlette.applications import Starlette  # noqa: PLC0415
-        from starlette.middleware import Middleware  # noqa: PLC0415
-        from starlette.routing import Mount, Route  # noqa: PLC0415
+        from starlette.applications import Starlette
+        from starlette.middleware import Middleware
+        from starlette.routing import Mount, Route
     except ImportError as exc:
         raise ImportError(_MCP_EXTRA_MSG) from exc
-    import anyio  # noqa: PLC0415
-    from mcp.server import Server  # noqa: PLC0415
-    from mcp.server.sse import SseServerTransport  # noqa: PLC0415
-    from mcp.shared.message import SessionMessage  # noqa: PLC0415
-    from mcp.types import JSONRPCMessage, JSONRPCNotification  # noqa: PLC0415
+    import anyio
+    from mcp.server import Server
+    from mcp.server.sse import SseServerTransport
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCMessage, JSONRPCNotification
 
     mcp_server: Server[None, Any] = Server("cw-queue-events")
     sse = SseServerTransport("/messages")
@@ -492,7 +492,7 @@ def make_app() -> Starlette:
 
 def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     """Start the server. Blocks until interrupted."""
-    import uvicorn  # noqa: PLC0415
+    import uvicorn
 
     uvicorn.run(make_app(), host=host, port=port)
 

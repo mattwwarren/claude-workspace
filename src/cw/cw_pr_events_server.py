@@ -198,7 +198,7 @@ def _build_notification(event: PREventRequest) -> dict[str, Any]:
 
 async def handle_post_pr_event(request: Request) -> Response:
     """Handle POST /pr-event: validate JSON body and broadcast MCP notification."""
-    from starlette.responses import JSONResponse  # noqa: PLC0415
+    from starlette.responses import JSONResponse
 
     try:
         body = await request.json()
@@ -213,7 +213,7 @@ async def handle_post_pr_event(request: Request) -> Response:
 
 async def handle_post_ack(request: Request) -> Response:
     """Handle POST /ack: advance per-subscriber cursor."""
-    from starlette.responses import JSONResponse  # noqa: PLC0415
+    from starlette.responses import JSONResponse
 
     try:
         body = await request.json()
@@ -252,16 +252,16 @@ class _SSESlashMiddleware:
 def make_app() -> Starlette:
     """Build and return the Starlette ASGI app with MCP SSE + /pr-event route."""
     try:
-        from starlette.applications import Starlette  # noqa: PLC0415
-        from starlette.middleware import Middleware  # noqa: PLC0415
-        from starlette.routing import Mount, Route  # noqa: PLC0415
+        from starlette.applications import Starlette
+        from starlette.middleware import Middleware
+        from starlette.routing import Mount, Route
     except ImportError as exc:
         raise ImportError(_MCP_EXTRA_MSG) from exc
-    import anyio  # noqa: PLC0415
-    from mcp.server import Server  # noqa: PLC0415
-    from mcp.server.sse import SseServerTransport  # noqa: PLC0415
-    from mcp.shared.message import SessionMessage  # noqa: PLC0415
-    from mcp.types import JSONRPCMessage, JSONRPCNotification  # noqa: PLC0415
+    import anyio
+    from mcp.server import Server
+    from mcp.server.sse import SseServerTransport
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCMessage, JSONRPCNotification
 
     mcp_server: Server[None, Any] = Server("cw-pr-events")
     sse = SseServerTransport("/messages")
@@ -326,7 +326,7 @@ def make_app() -> Starlette:
 
 def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     """Start the server. Blocks until interrupted."""
-    import uvicorn  # noqa: PLC0415
+    import uvicorn
 
     uvicorn.run(make_app(), host=host, port=port)
 

@@ -124,7 +124,9 @@ def _run_claude_streaming(
         stdout=subprocess.PIPE,
         bufsize=0,
     )
-    assert proc.stdout is not None  # noqa: S101 - guaranteed by PIPE above
+    if proc.stdout is None:  # guaranteed by PIPE above; narrow for the type checker
+        msg = "subprocess stdout pipe was not created"
+        raise RuntimeError(msg)
     try:
         while True:
             chunk = proc.stdout.read(4096)

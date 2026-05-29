@@ -12,7 +12,10 @@ Universal best practices for writing clean, maintainable Python code in CLI tool
 
 **Always fix the root cause of linter/type warnings.** Suppressions hide problems.
 
-**Only exception:** Security test fixtures with intentional violations need justification:
+**Narrow exceptions** exist for a few intentional, well-justified patterns —
+security test fixtures, sanctioned blind-except blocks, and deferred
+optional-extra imports. See [Suppression Strategy](#suppression-strategy) for the
+full list and the inline-vs-`per-file-ignores` rule. Example:
 ```python
 test_paths = ["/etc/passwd"]  # noqa: S108 - intentional for security test
 ```
@@ -371,6 +374,34 @@ Only add suppressions when ALL these conditions are met:
 - Clear justification comment explaining WHY
 - Tests verify the behavior being suppressed
 - No way to fix the root cause
+
+### Sanctioned patterns
+
+These are the only suppression categories accepted in this codebase. Anything
+outside this list needs explicit user approval (see CLAUDE.md → Quality Gates):
+
+1. **Security test fixtures** — intentional `S10x` violations in tests (hardcoded
+   paths/passwords used to exercise validators). Inline `# noqa: S108 - ...`.
+2. **Sanctioned blind-except** — `# noqa: BLE001` on non-critical best-effort
+   paths. Requires the 4-part justification (see "When Bare Exception Catches
+   Are Acceptable"): why the broad catch is needed, `exc_info=True` logging,
+   non-critical operation, and a paired resilience test.
+3. **Deferred optional-extra imports** — modules that defer importing an optional
+   dependency (e.g. the `[mcp]` extra: `mcp`/`starlette`/`uvicorn`/`anyio`) so the
+   core CLI stays import-light trip `PLC0415` (import-outside-top-level). Test
+   files that import a module under test after `pytest.importorskip(...)` trip
+   `E402` (import-not-at-top).
+
+### Inline `noqa` vs. `per-file-ignores`
+
+- **One-off, line-specific** suppressions → inline `# noqa: RULE - reason`.
+- **Systematic / whole-file** patterns (a module that is *entirely* about the
+  deferred-import or importorskip pattern) → a scoped entry in
+  `[tool.ruff.lint.per-file-ignores]` in `pyproject.toml` with a single rationale
+  comment. Do NOT sprinkle the same inline `noqa` across dozens of lines — it is
+  noise that drifts. Keep `per-file-ignores` entries as narrow as possible (name
+  the specific files, never a broad glob) so accidental violations elsewhere are
+  still caught.
 
 ---
 

@@ -351,7 +351,7 @@ class TestTmuxIntegration:
     session the developer has attached interactively.
     """
 
-    def test_spawn_close_cycle(self) -> None:
+    def test_spawn_close_cycle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         socket_name = f"cw-test-{uuid.uuid4().hex[:8]}"
         ws = f"cw-test-{uuid.uuid4().hex[:8]}"
         try:
@@ -366,11 +366,13 @@ class TestTmuxIntegration:
             original = adapter._run
 
             def socketed_run(
-                args: list[str], **kwargs: object
+                args: list[str], *, check: bool = True, capture: bool = True
             ) -> subprocess.CompletedProcess[str]:
-                return original(["-L", socket_name, *args], **kwargs)  # type: ignore[arg-type]
+                return original(
+                    ["-L", socket_name, *args], check=check, capture=capture
+                )
 
-            adapter._run = socketed_run  # type: ignore[method-assign]
+            monkeypatch.setattr(adapter, "_run", socketed_run)
 
             ref = adapter.spawn(ws, "true", "right")
             assert ref.startswith(f"{ws}:")

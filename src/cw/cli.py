@@ -7,10 +7,9 @@ import json
 import logging
 import subprocess
 import sys
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 import click
 from click.shell_completion import CompletionItem
@@ -99,18 +98,21 @@ from cw.tui import watch as tui_watch
 from cw.worktree import fast_forward_main
 from cw.wrapper import run_claude_wrapper, signal_idle
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def handle_errors[F: Callable[..., object]](fn: F) -> F:
+
+def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     """Convert CwError exceptions to click.ClickException at the CLI boundary."""
 
     @functools.wraps(fn)
-    def wrapper(*args: object, **kwargs: object) -> object:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return fn(*args, **kwargs)
         except CwError as e:
             raise click.ClickException(str(e)) from e
 
-    return wrapper  # type: ignore[return-value]
+    return wrapper
 
 
 def _complete_client(

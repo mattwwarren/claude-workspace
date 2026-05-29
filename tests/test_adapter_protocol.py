@@ -21,18 +21,20 @@ if TYPE_CHECKING:
     pass
 
 
-def _instantiate(cls: type, monkeypatch: pytest.MonkeyPatch) -> MultiplexerAdapter:
+def _instantiate[A: MultiplexerAdapter](
+    cls: type[A], monkeypatch: pytest.MonkeyPatch
+) -> A:
     """Return a usable instance without requiring a live backend."""
     if cls is FakeCmuxAdapter:
-        return cls()  # type: ignore[no-any-return]
+        return cls()
     if cls is TmuxAdapter:
         monkeypatch.setattr("cw.tmux.shutil.which", lambda _name: "/usr/bin/tmux")
-        return cls()  # type: ignore[no-any-return]
+        return cls()
     if cls is RealCmuxAdapter:
         # Skip the macOS guard by stubbing sys.platform before __init__
         # reads it; we're only inspecting signatures, not running spawn.
         monkeypatch.setattr("cw.cmux.sys.platform", "darwin")
-        return cls()  # type: ignore[no-any-return]
+        return cls()
     msg = f"unhandled adapter class: {cls.__name__}"
     raise AssertionError(msg)
 
@@ -43,7 +45,7 @@ ADAPTER_CLASSES = [FakeCmuxAdapter, TmuxAdapter, RealCmuxAdapter]
 @pytest.mark.parametrize("adapter_cls", ADAPTER_CLASSES)
 class TestProtocolConformance:
     def test_satisfies_runtime_protocol(
-        self, adapter_cls: type, monkeypatch: pytest.MonkeyPatch
+        self, adapter_cls: type[MultiplexerAdapter], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         adapter = _instantiate(adapter_cls, monkeypatch)
         assert isinstance(adapter, MultiplexerAdapter)
