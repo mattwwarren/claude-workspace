@@ -904,6 +904,49 @@ class TestPreFlightNoOp:
         assert result.plan_source == "none"
         assert result.schema_version == 2
 
+    def test_no_op_with_stray_pr_coerced_to_clean_no_op(self) -> None:
+        """parse_stdout coerces no_op+non-null pr to a clean no_op (issue #367).
+
+        A producer bug emitted status=no_op alongside a non-null pr field,
+        causing the §3.3 invariant to reject it as validation_failed/blocked.
+        The strict AutoDevResult.model_validate still rejects the shape
+        (see test_no_op_rejects_pr); leniency applies only at the parse boundary.
+        """
+        p = _no_op_payload()
+        p["pr"] = {
+            "number": 42,
+            "url": "https://github.com/x/y/pull/42",
+            "auto_merge": True,
+            "base": "main",
+        }
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.pr is None
+        assert result.next_actions == ["close_issue_as_completed"]
+
+    def test_no_op_with_stray_branch_and_commits_coerced(self) -> None:
+        """parse_stdout strips stray branch/commits from no_op sentinels."""
+        p = _no_op_payload()
+        p["branch"] = "dev/gen-327-no-op"
+        p["commits"] = ["abc1234", "def5678"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.branch is None
+        assert result.commits == []
+
+    def test_shipped_with_null_pr_still_fails_loudly(self) -> None:
+        """Coerce logic does NOT apply to shipped; shipped+null pr still rejects."""
+        p = _no_op_payload()
+        p["status"] = "shipped"
+        p["pr"] = None
+        p["stage_reached"] = "stage5_post_create"
+        p["scope"]["lines_actual"] = 10
+        p["next_actions"] = ["wait_for_ci"]
+        with pytest.raises(ValidationError, match="pr must be non-null"):
+            AutoDevResult.model_validate(p)
+
     def test_stage1_pre_flight_rejects_incompatible_status(self) -> None:
         """Pre-flight exit only allows {no_op, blocked} — shipped et al are rejected.
 

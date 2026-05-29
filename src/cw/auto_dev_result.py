@@ -693,6 +693,34 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
             ),
         )
 
+    # Pre-validation normalization for no_op + stray pr/branch/commits (issue
+    # #367). The producer sometimes emits status=no_op alongside a non-null pr
+    # or branch when the pipeline ran far enough to create a branch/PR before
+    # determining no work was needed. AutoDevResult._check_invariants (§3.3)
+    # correctly rejects this shape; leniency here applies only at the stdout-
+    # parse boundary where producer drift is expected. Does NOT apply to
+    # shipped or blocked — those contradictions are genuinely ambiguous and
+    # should still fail loudly.
+    if raw_status == "no_op":
+        stray: list[str] = []
+        if payload.get("pr") is not None:
+            stray.append("pr")
+            payload["pr"] = None
+        if payload.get("branch") is not None:
+            stray.append("branch")
+            payload["branch"] = None
+        if payload.get("commits"):
+            stray.append("commits")
+            payload["commits"] = []
+        if stray:
+            _log.warning(
+                "auto-dev: no_op sentinel carried non-null %s; coercing to clean "
+                "no_op (ticket=%s, schema_version=%s)",
+                stray,
+                payload.get("ticket_id", "unknown"),
+                payload.get("schema_version"),
+            )
+
     try:
         return AutoDevResult.model_validate(payload)
     except ValidationError as exc:
