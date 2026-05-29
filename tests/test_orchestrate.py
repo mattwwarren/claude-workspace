@@ -28,13 +28,14 @@ from cw.models import (
 from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
+    PRDispatchRecord,
     WorkerEntry,
     orchestrator_parent,
     orchestrator_status,
     orchestrator_workers,
     retire_merged_prs,
+    save_dispatch_record,
 )
-from cw.pr_responder import PRDispatchRecord, save_dispatch_record
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -252,7 +253,7 @@ class TestRetireMergedPRs:
         _calls, runner = fake_runner
         retire_merged_prs(runner=runner)  # type: ignore[arg-type]
 
-        from cw.pr_responder import load_dispatch_record
+        from cw.orchestrate import load_dispatch_record
 
         record = load_dispatch_record()
         assert record.active == {}
@@ -289,7 +290,7 @@ class TestRetireMergedPRs:
 
         assert retired == []
 
-        from cw.pr_responder import load_dispatch_record
+        from cw.orchestrate import load_dispatch_record
 
         assert load_dispatch_record().active == {}
 
