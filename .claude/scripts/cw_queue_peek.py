@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 DEV_QUEUE = Path.home() / ".local/share/cw/dev_queue.json"
+CW_STATE = Path.home() / ".local/share/cw/sessions.json"
 CLAUDE_PROJECTS = Path.home() / ".claude/projects"
 NOW = dt.datetime.now(dt.UTC)
 
@@ -63,17 +64,53 @@ def load_running_tasks(client: str | None) -> list[dict[str, Any]]:
     return out
 
 
-def find_transcript_for_ticket(ticket_id: str) -> Path | None:
+def load_claude_session_id(session_id: str | None) -> str | None:
+    """Map TicketTask.session_id (8-char) to claude_session_id (full UUID)."""
+    if not session_id or not CW_STATE.exists():
+        return None
+    try:
+        data = json.loads(CW_STATE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    for sess in data.get("sessions", []):
+        if sess.get("id") == session_id:
+            raw = sess.get("claude_session_id")
+            return str(raw) if raw is not None else None
+    return None
+
+
+def find_transcript_for_ticket(
+    ticket_id: str, session_id: str | None = None
+) -> Path | None:
     """Locate the main /auto-dev transcript jsonl for a ticket.
 
-    A worker's project directory can contain multiple jsonls — the main
-    /auto-dev session plus one jsonl per fork-session subagent. The main
-    session has the earliest first user message (it spawned the others)
-    and its first user message references "/auto-dev <ticket>".
+    A worker's project directory can contain multiple jsonls across multiple
+    dispatch attempts. Candidate selection works in two steps:
+
+    1. If session_id is provided, resolve it to a claude_session_id via
+       sessions.json and return the matching jsonl directly (exact match).
+    2. Fallback heuristic: prefer jsonls whose first user message references
+       "/auto-dev <ticket>" (score 0), then within that group pick the most
+       recent run by first_user_ts (latest first). This prevents a reused
+       worktree from returning stale transcripts from an earlier dispatch.
     """
     if not CLAUDE_PROJECTS.exists():
         return None
-    candidates: list[tuple[Path, str]] = []  # (path, first_user_ts)
+
+    # Primary path: exact session match via sessions.json
+    claude_id = load_claude_session_id(session_id)
+    if claude_id:
+        for proj in CLAUDE_PROJECTS.iterdir():
+            if not proj.is_dir():
+                continue
+            if f"auto-dev-{ticket_id}" not in proj.name:
+                continue
+            candidate = proj / f"{claude_id}.jsonl"
+            if candidate.exists():
+                return candidate
+
+    # Fallback heuristic
+    candidates: list[tuple[Path, int, str]] = []  # (path, score, first_user_ts)
     for proj in CLAUDE_PROJECTS.iterdir():
         if not proj.is_dir():
             continue
@@ -100,13 +137,17 @@ def find_transcript_for_ticket(ticket_id: str) -> Path | None:
                             if isinstance(c, dict) and c.get("type") == "text":
                                 first_user_text += c.get("text", "")
                     break
-            # Prefer jsonls whose first user message references /auto-dev
             score = 0 if f"/auto-dev {ticket_id}" in first_user_text else 1
-            candidates.append((jsonl, f"{score}-{first_user_ts}"))
+            candidates.append((jsonl, score, first_user_ts))
+
     if not candidates:
         return None
-    # Sort: prefer /auto-dev-prefixed (score 0), then earliest first_user_ts
-    candidates.sort(key=lambda c: c[1])
+
+    # Two-pass stable sort: latest timestamp first, then score ascending.
+    # Result: score=0 (main session) beats score=1 (subagents); among score=0
+    # candidates across multiple runs, the most recent run's transcript wins.
+    candidates.sort(key=lambda c: c[2], reverse=True)  # latest timestamp first
+    candidates.sort(key=lambda c: c[1])  # score 0 before 1 (stable)
     return candidates[0][0]
 
 
@@ -190,7 +231,7 @@ def gh_pr_state(pr_number: int) -> str:
         if result.returncode != 0:
             return "UNKNOWN"
         data = json.loads(result.stdout)
-        return data.get("state", "UNKNOWN")
+        return str(data.get("state", "UNKNOWN"))
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
         return "UNKNOWN"
 
@@ -334,7 +375,7 @@ def main() -> int:
     rows = []
     for t in tasks:
         ticket = t.get("ticket_id")
-        transcript = find_transcript_for_ticket(str(ticket))
+        transcript = find_transcript_for_ticket(str(ticket), t.get("session_id"))
         info = parse_transcript(transcript) if transcript else {}
         rows.append(format_row(t, info))
 
