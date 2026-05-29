@@ -71,14 +71,17 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 
 # Watchdog budget for DAEMON RUNNING sessions that have not yet emitted any
-# AUTO_DEV_RESULT sentinel. Fires on time elapsed alone — no liveness signal
-# is read from the worker's transcript (GitHub #340 tracks the deeper fix).
-# Set generous enough to cover legitimate small-tier work (parser change +
-# tests + skill doc routinely takes 10-20 min wall time). Per-tier overrides
-# in OrchestratorConfig.idle_watchdog_by_tier take precedence; per-ticket
+# AUTO_DEV_RESULT sentinel. Per-tier overrides in
+# OrchestratorConfig.idle_watchdog_by_tier take precedence; per-ticket
 # TicketTask.idle_watchdog_override beats both. After this window, reconcile
 # flags the session as BLOCKED_ON_USER and fires a push notification.
 IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
+
+# How recently a session's transcript must have been modified to be considered
+# actively making progress. If the newest .jsonl under the session's project
+# dir was written within this window, the watchdog skips the session (GitHub
+# #340). Conservative default: 2 min = well below the 15-min budget.
+TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 120
 
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
@@ -345,6 +348,52 @@ def _salvage_terminal_result(
     return None
 
 
+def _transcript_recently_active(
+    session: Session,
+    now: datetime,
+    *,
+    window_seconds: int = TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+) -> bool:
+    """Return True if the session's transcript was written within *window_seconds* ago.
+
+    Reuses the project-dir layout from :func:`_salvage_terminal_result`.
+    Returns False — permitting the watchdog to proceed — when no transcript
+    is found (either the session is pre-first-write or path unavailable).
+    See GitHub #340.
+    """
+    worktree = session.worktree_path
+    if worktree is None:
+        return False
+    encoded = str(worktree).replace("/", "-")
+    project_dir = Path.home() / ".claude" / "projects" / encoded
+    if not project_dir.is_dir():
+        return False
+
+    try:
+        if session.claude_session_id is not None:
+            transcript = project_dir / f"{session.claude_session_id}.jsonl"
+            if not transcript.is_file():
+                return False
+            mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
+            return (now - mtime).total_seconds() < window_seconds
+
+        # claude_session_id not yet recorded — scan for the newest post-spawn .jsonl
+        candidates = sorted(
+            project_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            return False
+        newest = candidates[0]
+        if datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC) <= session.started_at:
+            return False
+        mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
+        return (now - mtime).total_seconds() < window_seconds
+    except OSError:
+        return False
+
+
 def _apply_salvaged_completion(
     session: Session,
     result: AutoDevResult,
@@ -557,6 +606,10 @@ def flag_silently_idle_daemon_sessions(
         task = task_by_ticket.get(ticket_id) if ticket_id else None
         budget = resolve_idle_watchdog_budget(task, config)
         if elapsed < budget:
+            continue
+        # Liveness check: if the worker's transcript was modified recently the
+        # process is still actively making progress — skip this tick (#340).
+        if _transcript_recently_active(session, now):
             continue
         candidates.append((session, ticket_id))
 
