@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "0.10.0"
+version = "0.12.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -59,8 +59,9 @@ packages = ["src/cw"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = ["-m", "not integration"]
 markers = [
-    "integration: end-to-end tests that shell out to external tools (tmux, cmux)",
+    "integration: end-to-end tests that shell out to external tools (tmux, cmux, claude --bg)",
     "cmux: requires a live cmux daemon (macOS only); run nightly via .github/workflows/nightly.yml",
 ]
 
@@ -121,9 +122,25 @@ ignore = [
 "src/cw/models.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
 ]
-"src/cw/cmux.py" = [
-    "S108",  # Unix socket paths in /tmp are part of the cmux protocol spec
+"src/cw/tui.py" = [
+    "TCH003",  # WatchRow Pydantic model needs runtime access to Path
 ]
+"src/cw/cmux.py" = [
+    "S108",   # Unix socket paths in /tmp are part of the cmux protocol spec
+]
+# Channel/server modules defer mcp/starlette/uvicorn/anyio imports by design so
+# the core CLI does not hard-require the optional [mcp] extra. Inline imports
+# (PLC0415) are the sanctioned mechanism here, not a workaround.
+"src/cw/cw_pr_events_server.py" = ["PLC0415"]
+"src/cw/cw_queue_events_server.py" = ["PLC0415"]
+"src/cw/cw_pr_events_channel.py" = ["PLC0415"]
+"src/cw/cw_queue_events_channel.py" = ["PLC0415"]
+# Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
+# so module-level imports legitimately follow executable code (E402).
+"tests/test_cw_pr_events_channel.py" = ["E402"]
+"tests/test_cw_pr_events_server.py" = ["E402"]
+"tests/test_cw_queue_events_channel.py" = ["E402"]
+"tests/test_channels_queue_events.py" = ["E402"]
 "tests/**" = [
     "S101",     # assert is fine in tests
     "ARG001",   # unused function args common in fixtures/mocks

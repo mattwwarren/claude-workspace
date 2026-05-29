@@ -142,6 +142,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
 | `commits` | string[] | Commit SHAs created during this run. |
 | `pr` | object \| null | Non-null **only** when `status = shipped`. All other statuses — including `review_pending_approval` (whether reached via the large-scope path or the §5.1 downgrade), `merge_gate_blocked`, `plan_pending_approval`, the rejects, and `blocked` — leave `pr` as `null`. `branch` may still be non-null on these (see `branch` row). |
+| `pr_created` | object \| null | **Phase D** — pre-merge PR snapshot emitted before auto-merge is triggered (§3.4). Optional; absent on payloads from older producers. When present, expected only on `status=shipped` runs. |
 | `review.must_fix_initial` | int | MUST_FIX count from first review pass. |
 | `review.should_fix` | int | SHOULD_FIX count carried out of the loop. |
 | `review.fix_cycles_used` | int | 0 when first pass was clean. |
@@ -149,6 +150,30 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
 | `blocker` | object \| null | See §4.2. Populated when `status = "blocked"`. |
 | `next_actions` | string[] | Advisory list cw can act on without prose-parsing. See §4.3. |
+
+### 3.4 `pr_created` — Phase D pre-merge PR snapshot (issue #174)
+
+**Gap addressed:** Small-scope tickets reach S4 (PR creation) and immediately enable auto-merge. The sentinel block previously landed after the merge completes, so the orchestrator had no window to observe the PR number or CI state at PR-creation time — only the merged state in `pr`.
+
+**`pr_created`** captures the PR state *before* auto-merge is triggered, giving the orchestrator a hook to attach CI watchers or make merge decisions:
+
+```json
+"pr_created": {
+  "number": 171,
+  "url": "https://github.com/mattwwarren/claude-workspace/pull/171",
+  "ci_status_at_creation": "pending",
+  "auto_merge_enabled": true
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `number` | int | PR number on the hosting platform. |
+| `url` | string | Full URL to the PR. |
+| `ci_status_at_creation` | string | CI state at the moment the PR was opened — before any merge. Open-ish enum; observed values: `"pending"`, `"passing"`, `"failing"`. Consumers MUST treat unknown values as opaque strings and surface verbatim. |
+| `auto_merge_enabled` | bool | Whether the skill successfully enabled auto-merge on the PR. |
+
+**Advisory optional field.** Absent on payloads from producers that predate Phase D. No schema version bump required (§8: "purely advisory optional field"). When present, expected only for `status=shipped` runs.
 
 ---
 
@@ -300,8 +325,40 @@ A degraded agent is one that returned ANY of:
 | `recommendation` | `PROCEED` if all agents recommended PROCEED; otherwise `EXIT_FOR_HUMAN_REVIEW`. |
 | `downgrade_applied` | `true` only when the §5.1 rule actually downgraded `shipped` → `review_pending_approval`. |
 | `fix_loop_escalated` | `true` when the fix loop tripped cycle 3+ or scope-grew at any cycle (see gate row in §2). Independent from `downgrade_applied`. |
+| `agent_health_summary` | **Phase C** — per-agent breakdown. See §5.3. Optional; defaults to empty list. |
 
 `downgrade_applied` and `fix_loop_escalated` are distinct signals — a run can have either, both, or neither.
+
+### 5.3 `health.agent_health_summary` — Phase C per-agent breakdown (issue #174)
+
+**Gap addressed:** When the §5.1 health aggregation rule downgrades to `review_pending_approval`, the orchestrator sees `health.downgrade_applied=true` and `health.lowest_agent_confidence=LOW` but cannot tell *which* agent caused the degradation — a retry targeting the specific agent is not possible without that detail.
+
+**`agent_health_summary`** is an array of per-agent snapshots collected across all agents that ran during the pipeline (plan, impl, reviewers, fix-loop cycles, prep-pr):
+
+```json
+"health": {
+  "lowest_agent_confidence": "MEDIUM",
+  "any_incomplete_risk": false,
+  "shortcuts": [],
+  "recommendation": "PROCEED",
+  "downgrade_applied": false,
+  "fix_loop_escalated": false,
+  "agent_health_summary": [
+    {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH", "scope": "small"},
+    {"agent_id": "impl-agent-abc", "confidence": "MEDIUM", "scope": "large"}
+  ]
+}
+```
+
+Each entry:
+
+| Field | Type | Notes |
+|---|---|---|
+| `agent_id` | string | Producer-assigned identifier for the agent. Free-form; consumers surface verbatim. |
+| `confidence` | `"HIGH"` \| `"MEDIUM"` \| `"LOW"` | The agent's self-reported `On-spec confidence` from its Health Check block. |
+| `scope` | string \| null | Scope tier the agent was operating under. Expected values `"small"` / `"large"`; free-form string to tolerate producer-side drift. `null` for agents without a scope concept (e.g. plan-reviewer). |
+
+**Advisory optional field.** Absent (empty list) on payloads from producers that predate Phase C. No schema version bump required (§8). Consumer use case: filter entries with `confidence=LOW` or `scope=large` to target retries.
 
 ---
 
@@ -309,12 +366,28 @@ A degraded agent is one that returned ANY of:
 
 The skill can fail to emit a complete sentinel block. cw must handle:
 
-1. **No `<<<AUTO_DEV_RESULT` sentinel anywhere** — skill crashed before the emit step, or the run was not headless. Treat as `blocked` with synthetic blocker `{stage: "unknown", reason: "no_result_emitted", details: <last-N-lines-of-stdout>}`.
-2. **Opening sentinel present, closing sentinel missing** — skill crashed mid-emit. Same handling as (1).
+1. **No `<<<AUTO_DEV_RESULT` sentinel anywhere** — skill crashed before the emit step, or the run was not headless. The parser first attempts the **loose fallback** (see below); if that also fails, treat as `blocked` with synthetic blocker `{stage: "unknown", reason: "no_result_emitted", details: <last-N-lines-of-stdout>}`.
+2. **Opening sentinel present, closing sentinel missing** — skill crashed mid-emit. Same handling as (1), but the loose fallback does NOT apply (the open sentinel takes precedence).
 3. **Block present but JSON does not parse** — skill bug. Same handling as (1); include the raw block in `details`.
 4. **`schema_version` higher than parser supports** — skill upgraded ahead of cw. Surface verbatim and refuse to act on `next_actions`; do not auto-merge or auto-route.
 5. **Unknown `status` value** — same as (4). The closed enum in §4.1 covers all recognized values including `ambiguities_pending_resolution` and `premises_pending_verification` (promoted to canonical status in v4 via #191). Any value outside this set routes through `reason=status_unknown`.
 6. **Multiple complete sentinel blocks in one invocation's stdout** — skill bug (the contract is exactly one per invocation; see §3.1). Same handling as (1), with `reason: "multiple_result_blocks"` and `details` containing the count and the LAST block's raw payload.
+
+### Loose fallback (GitHub #337)
+
+The skill occasionally emits the payload in a plain code fence without the `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` markers:
+
+```
+All done. Emitting the headless sentinel:
+
+```json
+{"schema_version": 2, "status": "shipped", ...}
+```
+```
+
+The parser tolerates this format. When no sentinel markers are found and the opening sentinel is absent, the parser scans for the **last** `` ```json `` or `` ``` `` fenced block whose inner JSON parses as a dict containing both `schema_version` and `status`. If found, it is treated identically to a normally-framed block. A warning is logged.
+
+**The markers are still required in the skill contract.** The loose fallback is a consumer-side safeguard, not an invitation to omit markers. Skill implementations must emit `<<<AUTO_DEV_RESULT\n{...}\nAUTO_DEV_RESULT>>>`.
 
 Parser must NEVER act on a partial parse — if any of the above fire, treat the run as blocked and require human attention.
 
@@ -355,6 +428,42 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 **Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'`, `plan_source='none'`, and `plan_source='github_issue_existing'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness.
 
 When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. **Order matters:** the parser must accept the new version BEFORE the skill emits it, otherwise in-flight emissions land in deployed parsers that don't recognize them. Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
+
+---
+
+## BLOCKED_ON_USER Queue Task Status
+
+`QueueItemStatus.BLOCKED_ON_USER` marks a ticket task that paused for operator input rather than completing or failing. It differs from `PENDING` (retry-eligible) — BLOCKED_ON_USER tasks should never be auto-retried.
+
+**Three trigger conditions:**
+
+1. **Paused sentinel** — `wrapper.py` receives an `AutoDevResult` with `status` in `{ambiguities_pending_resolution, premises_pending_verification}`, or `status=blocked` with `next_actions` containing a `user_resolve_*/user_decide_*/user_verify_*` item. `signal_needs_attention` fires.
+
+2. **Silent exit** — `wrapper.py` receives headless exit code 0 but no AUTO_DEV_RESULT sentinel in stdout (the child self-backgrounded a subagent and exited early). `signal_needs_attention` fires.
+
+3. **Watchdog** — `reconcile()` finds a DAEMON RUNNING session with no `last_result`, surface still live in the native daemon, and `(now - started_at) > budget`. `flag_silently_idle_daemon_sessions` fires. The budget follows a three-level lookup via `resolve_idle_watchdog_budget`:
+   - **Per-ticket** (`TicketTask.idle_watchdog_override`) — explicit escape hatch; beats everything.
+   - **Per-tier** (`OrchestratorConfig.idle_watchdog_by_tier[task.scope_hint]`) — keyed by `TicketTask.scope_hint` (e.g., `"large": 1800`). Default config ships `{"large": 1800}` so large-tier sessions, which can legitimately stall on slow tests/mypy, get a 30-minute window.
+   - **Global fallback** (`IDLE_WATCHDOG_SECONDS = 900`) — used when no task is found or scope_hint is unset. NB: on first dispatch attempt `scope_hint` is always `None` (only retries inherit it from the prior sentinel), so attempt 1 always uses this fallback.
+
+### SESSION_NEEDS_ATTENTION Event
+
+Emitted on every BLOCKED_ON_USER transition.
+
+```json
+{
+  "session_id": "<string>",
+  "session_name": "<string>",
+  "client": "<string>",
+  "ticket_id": "<string | null>",
+  "claude_session_id": "<string | null>",
+  "paused_status": "<string | null>",
+  "breadcrumbs": "<string>",
+  "crashed": false
+}
+```
+
+**Re-dispatch rule:** never auto-retry BLOCKED_ON_USER tasks. Human must review the Linear/GitHub issue for the posted ambiguities/premises, resolve them, and then re-dispatch manually.
 
 ---
 

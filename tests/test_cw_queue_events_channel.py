@@ -1,4 +1,4 @@
-"""Tests for cw_pr_events_channel: payload extraction, notification building, relay."""
+"""Tests for cw_queue_events_channel: payload extraction, notification building."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ starlette = pytest.importorskip(
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse
 
-from cw.cw_pr_events_channel import (
+from cw.cw_queue_events_channel import (
     _DEFAULT_BASE_URL,
     _NOTIFICATION_TYPE,
     _build_meta,
@@ -31,51 +31,45 @@ from cw.cw_pr_events_channel import (
 # ---------------------------------------------------------------------------
 
 
-def _make_session_message(
-    repo: str,
-    pr_number: int,
+def _make_queue_session_message(
+    ticket_id: str,
+    client: str,
     event_type: str,
     payload: dict[str, Any] | None = None,
 ) -> SessionMessage:
-    """Build a SessionMessage matching the server's _build_notification + SSE format."""
-    inner = json.dumps(
-        {
-            "repo": repo,
-            "pr_number": pr_number,
-            "event_type": event_type,
-            "payload": payload or {},
-        }
+    """Build a server-shaped SessionMessage for testing the proxy."""
+    extra: dict[str, Any] = payload or {}
+    data = {
+        "notification_type": "cw-queue-event",
+        "message": json.dumps(
+            {"event": event_type, "ticket_id": ticket_id, "client": client, **extra}
+        ),
+        "title": f"{ticket_id}: queue {event_type}",
+    }
+    return SessionMessage(
+        message=JSONRPCMessage(
+            JSONRPCNotification(
+                jsonrpc="2.0",
+                method="notifications/message",
+                params={"level": "info", "logger": "cw-queue-events", "data": data},
+            )
+        )
     )
-    notif = JSONRPCNotification(
-        jsonrpc="2.0",
-        method="notifications/message",
-        params={
-            "level": "info",
-            "logger": "cw-pr-events",
-            "data": {
-                "notification_type": _NOTIFICATION_TYPE,
-                "message": inner,
-                "title": f"PR #{pr_number}: {event_type}",
-            },
-        },
-    )
-    return SessionMessage(message=JSONRPCMessage(notif))
 
 
 # ---------------------------------------------------------------------------
-# _extract_payload
+# TestExtractPayload
 # ---------------------------------------------------------------------------
 
 
 class TestExtractPayload:
-    def test_valid_cw_pr_event(self) -> None:
-        msg = _make_session_message("owner/repo", 42, "ci_failed", {"key": "val"})
+    def test_valid_cw_queue_event(self) -> None:
+        msg = _make_queue_session_message("T-1", "acme", "queue.ticket_enqueued")
         result = _extract_payload(msg)
         assert result is not None
-        assert result["repo"] == "owner/repo"
-        assert result["pr_number"] == 42
-        assert result["event_type"] == "ci_failed"
-        assert result["payload"] == {"key": "val"}
+        assert result["event"] == "queue.ticket_enqueued"
+        assert result["ticket_id"] == "T-1"
+        assert result["client"] == "acme"
 
     def test_non_notification_root(self) -> None:
         response = JSONRPCResponse(jsonrpc="2.0", id=1, result={})
@@ -88,10 +82,10 @@ class TestExtractPayload:
             method="notifications/message",
             params={
                 "level": "info",
-                "logger": "cw-pr-events",
+                "logger": "cw-queue-events",
                 "data": {
-                    "notification_type": "not-a-pr-event",
-                    "message": json.dumps({"repo": "x", "pr_number": 1}),
+                    "notification_type": "not-a-queue-event",
+                    "message": json.dumps({"event": "queue.ticket_enqueued"}),
                 },
             },
         )
@@ -113,7 +107,7 @@ class TestExtractPayload:
             method="notifications/message",
             params={
                 "level": "info",
-                "logger": "cw-pr-events",
+                "logger": "cw-queue-events",
                 "data": {
                     "notification_type": _NOTIFICATION_TYPE,
                     "message": "not-json",
@@ -139,71 +133,57 @@ class TestExtractPayload:
 
 
 # ---------------------------------------------------------------------------
-# _build_meta
+# TestBuildMeta
 # ---------------------------------------------------------------------------
 
 
 class TestBuildMeta:
     def test_basic_fields(self) -> None:
-        data = {"repo": "owner/repo", "pr_number": 42, "event_type": "ci_failed"}
+        data = {"event": "queue.ticket_enqueued", "ticket_id": "T-1", "client": "acme"}
         meta = _build_meta(data)
-        assert meta["repo"] == "owner/repo"
-        assert meta["pr_number"] == "42"
-        assert meta["event_type"] == "ci_failed"
-
-    def test_empty_values_omitted(self) -> None:
-        # Empty string values must be filtered out; missing keys produce empty strings.
-        data = {
-            "repo": "",
-            "event_type": "merged",
-        }  # pr_number absent → str("") omitted
-        meta = _build_meta(data)
-        assert "repo" not in meta
-        assert "pr_number" not in meta
-        assert meta["event_type"] == "merged"
-
-    def test_pr_number_as_string(self) -> None:
-        data = {"repo": "r/r", "pr_number": 99, "event_type": "opened"}
-        meta = _build_meta(data)
-        assert isinstance(meta["pr_number"], str)
-        assert meta["pr_number"] == "99"
-
-    def test_role_from_payload(self) -> None:
-        data = {
-            "repo": "r/r",
-            "pr_number": 1,
-            "event_type": "review",
-            "payload": {"role": "author"},
-        }
-        meta = _build_meta(data)
-        assert meta["role"] == "author"
-
-    def test_client_from_payload(self) -> None:
-        data = {
-            "repo": "r/r",
-            "pr_number": 1,
-            "event_type": "review",
-            "payload": {"client": "acme"},
-        }
-        meta = _build_meta(data)
+        assert meta["event_type"] == "queue.ticket_enqueued"
+        assert meta["ticket_id"] == "T-1"
         assert meta["client"] == "acme"
 
-    def test_missing_payload(self) -> None:
-        data = {"repo": "r/r", "pr_number": 5, "event_type": "merged"}
+    def test_empty_values_omitted(self) -> None:
+        data = {"event": "queue.session_idled", "ticket_id": "", "client": ""}
         meta = _build_meta(data)
-        assert "role" not in meta
+        assert "ticket_id" not in meta
         assert "client" not in meta
-        assert meta["repo"] == "r/r"
+        assert meta["event_type"] == "queue.session_idled"
+
+    def test_uses_event_key_not_event_type_key(self) -> None:
+        """event_type in meta comes from data["event"], not data["event_type"]."""
+        data = {
+            "event": "queue.ticket_claimed",
+            "event_type": "should-be-ignored",
+            "ticket_id": "T-2",
+            "client": "acme",
+        }
+        meta = _build_meta(data)
+        assert meta["event_type"] == "queue.ticket_claimed"
+
+    def test_missing_optional_keys_omitted(self) -> None:
+        data = {"event": "queue.session_idled"}
+        meta = _build_meta(data)
+        assert meta["event_type"] == "queue.session_idled"
+        assert "ticket_id" not in meta
+        assert "client" not in meta
 
 
 # ---------------------------------------------------------------------------
-# _build_outbound_notification
+# TestBuildOutboundNotification
 # ---------------------------------------------------------------------------
 
 
 class TestBuildOutboundNotification:
     def _data(self) -> dict[str, Any]:
-        return {"repo": "owner/repo", "pr_number": 5, "event_type": "merged"}
+        return {
+            "event": "queue.ticket_claimed",
+            "ticket_id": "T-5",
+            "client": "acme",
+            "session_id": "sess-abc",
+        }
 
     def test_returns_session_message(self) -> None:
         result = _build_outbound_notification(self._data())
@@ -225,7 +205,7 @@ class TestBuildOutboundNotification:
 
 
 # ---------------------------------------------------------------------------
-# _relay_upstream
+# TestRelayUpstream
 # ---------------------------------------------------------------------------
 
 
@@ -233,7 +213,7 @@ class TestRelayUpstream:
     def test_valid_message_forwarded(self) -> None:
         import anyio
 
-        msg = _make_session_message("owner/repo", 10, "review_received")
+        msg = _make_queue_session_message("T-10", "acme", "queue.ticket_enqueued")
 
         async def _run() -> SessionMessage | None:
             send_in, recv_in = anyio.create_memory_object_stream[Any](max_buffer_size=5)
@@ -258,7 +238,7 @@ class TestRelayUpstream:
         assert isinstance(root, JSONRPCNotification)
         assert root.method == "notifications/claude/channel"
         params = root.params or {}
-        assert json.loads(params["content"])["repo"] == "owner/repo"
+        assert json.loads(params["content"])["ticket_id"] == "T-10"
 
     def test_exception_skipped(self) -> None:
         import anyio
@@ -284,7 +264,7 @@ class TestRelayUpstream:
         count = anyio.run(_run)
         assert count == 0
 
-    def test_non_pr_event_skipped(self) -> None:
+    def test_non_queue_event_skipped(self) -> None:
         import anyio
 
         notif = JSONRPCNotification(
@@ -315,10 +295,7 @@ class TestRelayUpstream:
 
 
 # ---------------------------------------------------------------------------
-# run_proxy: env var / URL construction
-#
-# Strategy: patch anyio.run to call a real async runner that intercepts
-# sse_client at the mcp.client.sse module level before the deferred import.
+# TestRunProxyEnvVars
 # ---------------------------------------------------------------------------
 
 
@@ -334,7 +311,7 @@ class TestRunProxyEnvVars:
 
         import mcp.client.sse as _sse_mod
 
-        from cw.cw_pr_events_channel import run_proxy
+        from cw.cw_queue_events_channel import run_proxy
 
         captured: list[str] = []
 
@@ -355,24 +332,24 @@ class TestRunProxyEnvVars:
         return captured[0] if captured else ""
 
     def test_default_base_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
-        monkeypatch.delenv("CW_PR_EVENTS_CLIENT_ID", raising=False)
+        monkeypatch.delenv("CW_QUEUE_EVENTS_BASE_URL", raising=False)
+        monkeypatch.delenv("CW_QUEUE_EVENTS_CLIENT_ID", raising=False)
         url = self._invoke_proxy_capture_url(monkeypatch)
         parsed = urllib.parse.urlparse(url)
         assert parsed.scheme + "://" + parsed.netloc == _DEFAULT_BASE_URL
         assert parsed.path == "/sse/"
 
     def test_custom_base_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CW_PR_EVENTS_BASE_URL", "http://example.com:9999")
-        monkeypatch.delenv("CW_PR_EVENTS_CLIENT_ID", raising=False)
+        monkeypatch.setenv("CW_QUEUE_EVENTS_BASE_URL", "http://example.com:9999")
+        monkeypatch.delenv("CW_QUEUE_EVENTS_CLIENT_ID", raising=False)
         url = self._invoke_proxy_capture_url(monkeypatch)
         parsed = urllib.parse.urlparse(url)
         assert parsed.netloc == "example.com:9999"
         assert parsed.path == "/sse/"
 
     def test_custom_client_id_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
-        monkeypatch.setenv("CW_PR_EVENTS_CLIENT_ID", "my-custom-id")
+        monkeypatch.delenv("CW_QUEUE_EVENTS_BASE_URL", raising=False)
+        monkeypatch.setenv("CW_QUEUE_EVENTS_CLIENT_ID", "my-custom-id")
         url = self._invoke_proxy_capture_url(monkeypatch)
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)
@@ -381,8 +358,8 @@ class TestRunProxyEnvVars:
     def test_client_id_param_overrides_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
-        monkeypatch.setenv("CW_PR_EVENTS_CLIENT_ID", "env-id")
+        monkeypatch.delenv("CW_QUEUE_EVENTS_BASE_URL", raising=False)
+        monkeypatch.setenv("CW_QUEUE_EVENTS_CLIENT_ID", "env-id")
         url = self._invoke_proxy_capture_url(monkeypatch, client_id="explicit-id")
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)
@@ -391,8 +368,8 @@ class TestRunProxyEnvVars:
     def test_default_client_id_is_hostname(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
-        monkeypatch.delenv("CW_PR_EVENTS_CLIENT_ID", raising=False)
+        monkeypatch.delenv("CW_QUEUE_EVENTS_BASE_URL", raising=False)
+        monkeypatch.delenv("CW_QUEUE_EVENTS_CLIENT_ID", raising=False)
         url = self._invoke_proxy_capture_url(monkeypatch)
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)
@@ -400,22 +377,103 @@ class TestRunProxyEnvVars:
 
     def test_sse_url_uses_trailing_slash(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SSE URL must use /sse/ to connect directly, not /sse which redirects."""
-        monkeypatch.delenv("CW_PR_EVENTS_BASE_URL", raising=False)
-        monkeypatch.delenv("CW_PR_EVENTS_CLIENT_ID", raising=False)
+        monkeypatch.delenv("CW_QUEUE_EVENTS_BASE_URL", raising=False)
+        monkeypatch.delenv("CW_QUEUE_EVENTS_CLIENT_ID", raising=False)
         url = self._invoke_proxy_capture_url(monkeypatch)
         parsed = urllib.parse.urlparse(url)
         assert parsed.path == "/sse/", f"Expected /sse/ path, got {parsed.path!r}"
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# TestCLI
 # ---------------------------------------------------------------------------
 
 
 class TestCLI:
-    def test_pr_channel_proxy_help(self) -> None:
+    def test_queue_channel_proxy_help(self) -> None:
         from cw.cli import main
 
-        result = CliRunner().invoke(main, ["pr-channel", "proxy", "--help"])
+        result = CliRunner().invoke(main, ["queue-channel", "proxy", "--help"])
         assert result.exit_code == 0
         assert "--client-id" in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestClientIdFilter
+# ---------------------------------------------------------------------------
+
+
+class TestClientIdFilter:
+    def test_matching_client_id_relayed(self) -> None:
+        import anyio
+
+        msg = _make_queue_session_message("T-20", "acme", "queue.ticket_enqueued")
+
+        async def _run() -> int:
+            send_in, recv_in = anyio.create_memory_object_stream[Any](max_buffer_size=5)
+            send_out, recv_out = anyio.create_memory_object_stream[Any](
+                max_buffer_size=5
+            )
+            await send_in.send(msg)
+            await send_in.aclose()
+
+            await _relay_upstream(recv_in, send_out, client_id="acme")
+            await send_out.aclose()
+
+            count = 0
+            async for _ in recv_out:
+                count += 1
+            return count
+
+        count = anyio.run(_run)
+        assert count == 1
+
+    def test_non_matching_client_id_suppressed(self) -> None:
+        import anyio
+
+        msg = _make_queue_session_message("T-21", "acme", "queue.ticket_enqueued")
+
+        async def _run() -> int:
+            send_in, recv_in = anyio.create_memory_object_stream[Any](max_buffer_size=5)
+            send_out, recv_out = anyio.create_memory_object_stream[Any](
+                max_buffer_size=5
+            )
+            await send_in.send(msg)
+            await send_in.aclose()
+
+            await _relay_upstream(recv_in, send_out, client_id="other-client")
+            await send_out.aclose()
+
+            count = 0
+            async for _ in recv_out:
+                count += 1
+            return count
+
+        count = anyio.run(_run)
+        assert count == 0
+
+    def test_no_client_id_relays_all(self) -> None:
+        import anyio
+
+        msg1 = _make_queue_session_message("T-22", "acme", "queue.ticket_enqueued")
+        msg2 = _make_queue_session_message("T-23", "other", "queue.ticket_claimed")
+
+        async def _run() -> int:
+            send_in, recv_in = anyio.create_memory_object_stream[Any](max_buffer_size=5)
+            send_out, recv_out = anyio.create_memory_object_stream[Any](
+                max_buffer_size=5
+            )
+            await send_in.send(msg1)
+            await send_in.send(msg2)
+            await send_in.aclose()
+
+            await _relay_upstream(recv_in, send_out, client_id=None)
+            await send_out.aclose()
+
+            count = 0
+            async for _ in recv_out:
+                count += 1
+            return count
+
+        count = anyio.run(_run)
+        assert count == 2

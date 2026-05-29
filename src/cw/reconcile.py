@@ -46,6 +46,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.notify import fire_push_notification
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session
@@ -66,6 +67,20 @@ AUTO_DEV_LABEL_PREFIX = "auto-dev/"
 # 626 lines) hit the 30-min cap mid-implementation. Per-ticket / per-tier
 # override mechanism tracked in #265.
 HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
+
+# Watchdog budget for DAEMON RUNNING sessions that have not yet emitted any
+# AUTO_DEV_RESULT sentinel. Fires on time elapsed alone — no liveness signal
+# is read from the worker's transcript (GitHub #340 tracks the deeper fix).
+# Set generous enough to cover legitimate small-tier work (parser change +
+# tests + skill doc routinely takes 10-20 min wall time). Per-tier overrides
+# in OrchestratorConfig.idle_watchdog_by_tier take precedence; per-ticket
+# TicketTask.idle_watchdog_override beats both. After this window, reconcile
+# flags the session as BLOCKED_ON_USER and fires a push notification.
+IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
+
+# Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
+# the watchdog flags (no sentinel ever emitted, daemon surface still live).
+_SILENTLY_IDLE_REASON = "silently_idle"
 
 
 # Grace window for a newly-spawned session to register with the daemon
@@ -241,7 +256,11 @@ def _is_headless(session: Session) -> bool:
 
 
 def revert_stalled_headless_sessions(
-    state: CwState, *, now: datetime, config: OrchestratorConfig
+    state: CwState,
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask] | None = None,
 ) -> list[str]:
     """Transition stalled headless DAEMON sessions past budget to TIMED_OUT.
 
@@ -267,8 +286,10 @@ def revert_stalled_headless_sessions(
     See GitHub issue #185, #265.
     """
     # Read-only dev-queue load for budget lookups — no lock needed here.
-    store_ro = load_dev_queue()
-    task_by_ticket: dict[str, TicketTask] = {t.ticket_id: t for t in store_ro.tasks}
+    # Use the caller-supplied index when available (avoids a second filesystem
+    # read when reconcile() shares one load across the stalled + idle sweeps).
+    if task_by_ticket is None:
+        task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
     pending: list[tuple[Session, str | None]] = []
     for session in state.sessions:
@@ -328,6 +349,127 @@ def revert_stalled_headless_sessions(
     return reverted
 
 
+def _has_terminal_sentinel(session: Session) -> bool:
+    """True when the session has already emitted a terminal sentinel."""
+    return session.last_result is not None
+
+
+def resolve_idle_watchdog_budget(
+    task: TicketTask | None,
+    config: OrchestratorConfig,
+) -> int:
+    """Return the idle-watchdog budget (seconds) for a session's ticket.
+
+    Precedence (highest first):
+    1. task.idle_watchdog_override — explicit per-ticket escape hatch.
+    2. task.scope_hint — look up per-tier default in config.
+    3. IDLE_WATCHDOG_SECONDS — global fallback.
+    """
+    if task is None:
+        return IDLE_WATCHDOG_SECONDS
+    if task.idle_watchdog_override is not None:
+        return task.idle_watchdog_override
+    if task.scope_hint is not None:
+        tier_budget = config.idle_watchdog_by_tier.get(task.scope_hint)
+        if tier_budget is not None:
+            return tier_budget
+    return IDLE_WATCHDOG_SECONDS
+
+
+def flag_silently_idle_daemon_sessions(
+    state: CwState,
+    *,
+    now: datetime,
+    native_live: set[str],
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask] | None = None,
+) -> list[str]:
+    """Flag DAEMON RUNNING sessions idle past the watchdog budget with no sentinel.
+
+    These are sessions the wrapper never got a chance to signal — typically
+    because the child process self-backgrounded a subagent and exited before
+    the subagent returned (GitHub #105, #121). They appear ACTIVE/IDLE in cw
+    state while producing no output.
+
+    Only targets sessions whose ``surface_ref`` is currently in *native_live*
+    (the daemon still has them). Sessions with a dead surface ref are handled
+    by the phantom sweep → PENDING for retry.
+
+    Returns list of ticket IDs whose queue task was set to BLOCKED_ON_USER.
+    """
+    if task_by_ticket is None:
+        task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+
+    candidates: list[tuple[Session, str | None]] = []
+    for session in state.sessions:
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if _has_terminal_sentinel(session):
+            continue
+        # Only target sessions whose daemon surface is still live — phantom
+        # sessions (dead surface) are handled by the crashed-phantom sweep.
+        if session.surface_ref is None or session.surface_ref not in native_live:
+            continue
+        elapsed = (now - session.started_at).total_seconds()
+        ticket_id = ticket_id_for_session(session.name)
+        task = task_by_ticket.get(ticket_id) if ticket_id else None
+        budget = resolve_idle_watchdog_budget(task, config)
+        if elapsed < budget:
+            continue
+        candidates.append((session, ticket_id))
+
+    if not candidates:
+        return []
+
+    for session, _ in candidates:
+        # Flag-only: do not mark session COMPLETED. The worker on the daemon
+        # is still alive; operators disposition flagged sessions via
+        # `cw spawn complete` or `cw doctor --reap`. Setting last_result with
+        # paused_status still makes _has_terminal_sentinel return True so the
+        # watchdog skips this session on subsequent ticks (GitHub #324, #348).
+        session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+
+    # Write session to disk BEFORE queue mutation so a crash between the two
+    # leaves session.last_result set on disk — _has_terminal_sentinel returns
+    # True on the next reconcile tick and the watchdog skips the session,
+    # preventing a duplicate SESSION_NEEDS_ATTENTION. (GitHub #324)
+    save_state(state)
+
+    blocked: list[str] = []
+    ticket_ids_to_block = [tid for _, tid in candidates if tid]
+    if ticket_ids_to_block:
+        ticket_id_set = set(ticket_ids_to_block)
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id in ticket_id_set
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    blocked.append(task.ticket_id)
+            if blocked:
+                save_dev_queue(store)
+
+    for session, ticket_id in candidates:
+        payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "paused_status": _SILENTLY_IDLE_REASON,
+            "breadcrumbs": "",
+            "crashed": False,
+        }
+        record_event(OrchestratorEventType.SESSION_NEEDS_ATTENTION, payload)
+        fire_push_notification(session.name, session.client)
+
+    return blocked
+
+
 def reconcile() -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
@@ -357,8 +499,11 @@ def reconcile() -> ReconcileReport:
     # the outage guard so a daemon hiccup does not delay budget enforcement.
     # See GitHub issue #185.
     orchestrator_config = load_orchestrator_config()
+    # Load dev queue once here; pass to both sweeps to avoid a duplicate
+    # filesystem read within the same reconcile tick. See GitHub issue #326.
+    shared_task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     stalled_reverted = revert_stalled_headless_sessions(
-        state, now=now, config=orchestrator_config
+        state, now=now, config=orchestrator_config, task_by_ticket=shared_task_by_ticket
     )
 
     try:
@@ -380,6 +525,14 @@ def reconcile() -> ReconcileReport:
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
+    silently_idle_ticket_ids = flag_silently_idle_daemon_sessions(
+        state,
+        now=now,
+        native_live=native_live,
+        config=orchestrator_config,
+        task_by_ticket=shared_task_by_ticket,
+    )
+
     drift = compute_drift(state, native_live, now=now)
     if not drift.phantom_session_ids:
         # No phantom sessions to reap, but still run the TIMED_OUT and
@@ -389,7 +542,10 @@ def reconcile() -> ReconcileReport:
         completed_silent_ticket_ids = revert_completed_silent_tasks()
         all_reverted = list(
             dict.fromkeys(
-                stalled_reverted + timed_out_ticket_ids + completed_silent_ticket_ids
+                stalled_reverted
+                + silently_idle_ticket_ids
+                + timed_out_ticket_ids
+                + completed_silent_ticket_ids
             )
         )
         return ReconcileReport(reverted_ticket_ids=all_reverted)
@@ -451,6 +607,7 @@ def reconcile() -> ReconcileReport:
     all_reverted = list(
         dict.fromkeys(
             stalled_reverted
+            + silently_idle_ticket_ids
             + reverted
             + timed_out_ticket_ids
             + completed_silent_ticket_ids

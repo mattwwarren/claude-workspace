@@ -570,6 +570,88 @@ class TestCodeFenceStripping:
 
 
 # ---------------------------------------------------------------------------
+# Loose fallback: code-fenced JSON without AUTO_DEV_RESULT markers (GH #337)
+# ---------------------------------------------------------------------------
+
+
+class TestLooseFallback:
+    """parse_stdout must recover a valid payload from bare code-fenced JSON."""
+
+    def test_json_fence_without_markers_parses(self) -> None:
+        """```json\\n{...}\\n``` without markers is accepted as a loose fallback."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_plain_fence_without_markers_parses(self) -> None:
+        """```\\n{...}\\n``` (no language tag) is also accepted."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"All done:\n\n```\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_last_fence_wins_when_multiple(self) -> None:
+        """When multiple code fences exist, the last auto-dev-shaped one is used."""
+        shipped = _shipped_payload()
+        plan = _plan_pending_payload()
+        shipped_body = json.dumps(shipped)
+        plan_body = json.dumps(plan)
+        text = f"```json\n{shipped_body}\n```\nmore\n```json\n{plan_body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "plan_pending_approval"
+
+    def test_non_auto_dev_fence_not_accepted(self) -> None:
+        """A code fence without schema_version+status is not treated as a sentinel."""
+        text = '```json\n{"foo": "bar"}\n```\n'
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "no_result_emitted"
+
+    def test_opening_sentinel_present_takes_precedence(self) -> None:
+        """If the opening sentinel IS present (but close is missing), the
+        crash-mid-emit path fires — loose fallback does NOT apply."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        # Has the opening marker but no close; also has a bare code fence.
+        text = f"<<<AUTO_DEV_RESULT\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, BlockedResult)
+        assert "opening sentinel present" in result.blocker.details
+
+    def test_invalid_json_fence_skipped_valid_earlier_one_used(self) -> None:
+        """Invalid-JSON fence at end is skipped; earlier valid one is used.
+
+        _extract_loose_sentinel_json iterates reversed (last fence first).  The
+        last fence here contains unparseable text — exercises the JSONDecodeError
+        branch — then falls back to the earlier valid fence.
+        """
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        # Valid fence FIRST; invalid fence LAST (scanned first in reversed order).
+        text = f"```json\n{body}\n```\n\n```json\nnot parseable at all\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+
+    def test_loose_fallback_preserves_all_fields(self) -> None:
+        """Loose-parsed result round-trips all required fields correctly."""
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"worker output:\n\n```json\n{body}\n```\n"
+        result = parse_stdout(text)
+        assert isinstance(result, AutoDevResult)
+        assert result.ticket_id == payload["ticket_id"]
+        assert result.pr is not None
+        assert result.pr.number == payload["pr"]["number"]
+
+
+# ---------------------------------------------------------------------------
 # Cross-field invariants (per the owner's comment + §3-§5)
 # ---------------------------------------------------------------------------
 
@@ -979,15 +1061,106 @@ class TestStage1PreFlightBlocked:
         assert result.stage_reached == "stage1_pre_flight"
 
     def test_blocked_at_later_stage_still_requires_empty_next_actions(self) -> None:
-        """Regression guard: widening for pre-flight must NOT widen mid-pipeline.
+        """Regression: non-user-directed next_actions still rejected at stage2_impl.
 
-        A `blocked` exit at stage2_impl is the generic terminal-reject shape
-        — §4.3 still requires empty next_actions there.
+        A `blocked` exit at stage2_impl with `sync_local_main` (a pre-flight
+        recovery verb, not a user-directed prefix) must still fail — widening
+        for pre-flight and for user-directed actions must NOT carry over here.
         """
         p = _blocked_payload()  # blocked at stage2_impl
         p["next_actions"] = ["sync_local_main"]
         with pytest.raises(ValidationError, match="next_actions"):
             AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# blocked + user-directed next_actions (issue #328 — schema must accept
+# `status=blocked` payloads whose next_actions all start with a user_*
+# prefix, so _is_paused_for_user_input can be tested against real instances).
+# ---------------------------------------------------------------------------
+
+
+def _user_directed_blocked_payload(next_actions: list[str]) -> dict[str, Any]:
+    """blocked at stage2_impl with user-directed next_actions."""
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-user-blocked",
+        "status": "blocked",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 5,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": "auto-dev/GEN-user-blocked",
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage2_impl",
+            "reason": "awaiting_user_input",
+            "details": "blocked pending user action",
+        },
+        "next_actions": next_actions,
+    }
+
+
+class TestBlockedWithUserDirectedNextActions:
+    """Schema must accept blocked payloads whose next_actions are all user_*-prefixed.
+
+    These payloads signal that the session is paused for human input rather
+    than being a terminal-reject — _is_paused_for_user_input reads them at
+    runtime. See issue #328.
+    """
+
+    def test_user_resolve_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_resolve_ambiguities"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_resolve_ambiguities"]
+
+    def test_user_decide_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_decide_approach"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_decide_approach"]
+
+    def test_user_verify_prefix_allowed(self) -> None:
+        p = _user_directed_blocked_payload(["user_verify_something"])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == ["user_verify_something"]
+
+    def test_mixed_user_directed_prefixes_allowed(self) -> None:
+        """Multiple user_* entries in next_actions are all valid."""
+        p = _user_directed_blocked_payload(
+            ["user_resolve_ambiguities", "user_verify_premises"]
+        )
+        result = AutoDevResult.model_validate(p)
+        assert len(result.next_actions) == 2
+
+    def test_non_user_prefix_still_rejected(self) -> None:
+        """A non-user-directed action mixed with user_* must still fail."""
+        p = _user_directed_blocked_payload(
+            ["user_resolve_ambiguities", "sync_local_main"]
+        )
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_next_actions_still_valid_for_blocked(self) -> None:
+        """Generic terminal-reject blocked shape (empty next_actions) unchanged."""
+        p = _user_directed_blocked_payload([])
+        result = AutoDevResult.model_validate(p)
+        assert result.next_actions == []
 
 
 # ---------------------------------------------------------------------------
@@ -1032,20 +1205,45 @@ class TestV4StatusPromotion:
         assert result.status == "premises_pending_verification"
         assert result.schema_version == 4
 
-    def test_ambiguities_pending_rejected_at_v3(self) -> None:
-        # v4-gated status must not parse under schema_version=3
-        p = _ambiguities_pending_payload()
-        p["schema_version"] = 3
-        result = parse_stdout(_wrap_sentinel(p))
-        assert isinstance(result, BlockedResult)
-        assert result.blocker.reason == "validation_failed"
+    def test_ambiguities_pending_accepted_at_v2(self) -> None:
+        """ambiguities_pending_resolution parses at schema_version=2.
 
-    def test_premises_pending_rejected_at_v3(self) -> None:
-        p = _premises_pending_payload()
-        p["schema_version"] = 3
-        result = parse_stdout(_wrap_sentinel(p))
-        assert isinstance(result, BlockedResult)
-        assert result.blocker.reason == "validation_failed"
+        Rollout exception: producer emits v2 today (issue #316).
+        """
+        payload = {**_ambiguities_pending_payload(), "schema_version": 2}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_premises_pending_accepted_at_v2(self) -> None:
+        """premises_pending_verification parses at schema_version=2.
+
+        Rollout exception: producer emits v2 today (issue #316).
+        """
+        payload = {**_premises_pending_payload(), "schema_version": 2}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+
+    def test_ambiguities_pending_accepted_at_v3(self) -> None:
+        """ambiguities_pending_resolution parses at schema_version=3.
+
+        Rollout exception: accept under v3 as well (issue #316).
+        """
+        payload = {**_ambiguities_pending_payload(), "schema_version": 3}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_premises_pending_accepted_at_v3(self) -> None:
+        """premises_pending_verification parses at schema_version=3.
+
+        Rollout exception: accept under v3 as well (issue #316).
+        """
+        payload = {**_premises_pending_payload(), "schema_version": 3}
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
 
     def test_v4_schema_accepted(self) -> None:
         p = _ambiguities_pending_payload()
@@ -1245,3 +1443,250 @@ class TestStageReachedAliases:
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.stage_reached == "stage5_post_create"
+
+
+# ---------------------------------------------------------------------------
+# Phase C — Agent health aggregation (#174)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseC:
+    def test_old_payload_without_agent_health_summary_parses(self) -> None:
+        """Back-compat: payloads without agent_health_summary parse cleanly."""
+        p = _shipped_payload()
+        assert "agent_health_summary" not in p["health"]
+        result = AutoDevResult.model_validate(p)
+        assert result.health.agent_health_summary == []
+
+    def test_agent_health_summary_round_trip(self) -> None:
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH", "scope": "small"},
+            {"agent_id": "impl-agent-abc", "confidence": "MEDIUM", "scope": "large"},
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.health.agent_health_summary) == 2
+        assert result.health.agent_health_summary[0].agent_id == "plan-reviewer-xyz"
+        assert result.health.agent_health_summary[0].confidence == "HIGH"
+        assert result.health.agent_health_summary[0].scope == "small"
+        assert result.health.agent_health_summary[1].agent_id == "impl-agent-abc"
+        assert result.health.agent_health_summary[1].confidence == "MEDIUM"
+        assert result.health.agent_health_summary[1].scope == "large"
+
+    def test_agent_health_entry_scope_optional(self) -> None:
+        """scope is optional — agents without a scope concept omit it."""
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH"},
+        ]
+        result = AutoDevResult.model_validate(p)
+        entry = result.health.agent_health_summary[0]
+        assert entry.scope is None
+
+    def test_agent_health_entry_scope_accepts_unknown_string(self) -> None:
+        """scope is a free-form string; unknown values are tolerated."""
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH", "scope": "medium"},
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert result.health.agent_health_summary[0].scope == "medium"
+
+    def test_phase_c_on_v3_shipped_block(self) -> None:
+        """Full round-trip through parse_stdout with v3 agent_health_summary."""
+        p = _shipped_payload()
+        p["schema_version"] = 3
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "impl-agent-abc", "confidence": "LOW", "scope": "small"},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.health.agent_health_summary[0].confidence == "LOW"
+        assert result.health.agent_health_summary[0].agent_id == "impl-agent-abc"
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Pre-merge PR visibility (#174)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseD:
+    def test_shipped_without_pr_created_still_valid(self) -> None:
+        """Back-compat: pr_created absent on payloads from older producers."""
+        p = _shipped_payload()
+        assert "pr_created" not in p
+        result = AutoDevResult.model_validate(p)
+        assert result.pr_created is None
+
+    def test_pr_created_round_trip(self) -> None:
+        p = _shipped_payload()
+        p["pr_created"] = {
+            "number": 171,
+            "url": "https://github.com/mattwwarren/claude-workspace/pull/171",
+            "ci_status_at_creation": "pending",
+            "auto_merge_enabled": True,
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.pr_created is not None
+        assert result.pr_created.number == 171
+        assert "171" in result.pr_created.url
+        assert result.pr_created.ci_status_at_creation == "pending"
+        assert result.pr_created.auto_merge_enabled is True
+
+    def test_pr_created_ci_status_at_creation_is_open_enum(self) -> None:
+        """ci_status_at_creation accepts unknown strings — open-ish enum."""
+        p = _shipped_payload()
+        p["pr_created"] = {
+            "number": 172,
+            "url": "https://github.com/x/y/pull/172",
+            "ci_status_at_creation": "action_required",
+            "auto_merge_enabled": False,
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.pr_created is not None
+        assert result.pr_created.ci_status_at_creation == "action_required"
+
+    def test_phase_d_on_v3_shipped_block_via_parse_stdout(self) -> None:
+        p = _shipped_payload()
+        p["schema_version"] = 3
+        p["pr_created"] = {
+            "number": 42,
+            "url": "https://github.com/foo/bar/pull/42",
+            "ci_status_at_creation": "passing",
+            "auto_merge_enabled": True,
+        }
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.pr_created is not None
+        assert result.pr_created.number == 42
+        assert result.pr_created.ci_status_at_creation == "passing"
+
+
+# ---------------------------------------------------------------------------
+# Combined Phase B + E + C + D — all four phases together (issue #174)
+# ---------------------------------------------------------------------------
+
+
+class TestAllPhasesBECDCombined:
+    def test_all_phases_on_shipped_v3_block(self) -> None:
+        """Fixture exercising all four #174 phases in a single payload."""
+        p = _shipped_payload()
+        p["schema_version"] = 3
+        # Phase C: agent health summary
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "plan-reviewer-abc", "confidence": "HIGH", "scope": "small"},
+            {"agent_id": "impl-agent-def", "confidence": "MEDIUM", "scope": "small"},
+        ]
+        # Phase D: pre-merge PR snapshot
+        p["pr_created"] = {
+            "number": 99,
+            "url": "https://github.com/mattwwarren/claude-workspace/pull/99",
+            "ci_status_at_creation": "pending",
+            "auto_merge_enabled": True,
+        }
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+        # Phase C assertions
+        assert len(result.health.agent_health_summary) == 2
+        assert result.health.agent_health_summary[1].confidence == "MEDIUM"
+        # Phase D assertions
+        assert result.pr_created is not None
+        assert result.pr_created.number == 99
+        assert result.pr_created.ci_status_at_creation == "pending"
+
+    def test_all_phases_on_blocked_v3_block(self) -> None:
+        """Phase B+E on a blocked payload; Phase C on the health struct."""
+        p = _blocked_payload()
+        p["schema_version"] = 3
+        # Phase B + E on the blocker
+        p["blocker"].update(
+            {
+                "reason": "ci_timeout",
+                "exception_type": "CITimeoutError",
+                "message": "CI did not complete within 30 minutes",
+                "recovery_hint": "Re-dispatch with a 2-minute delay",
+                "retry_eligible": True,
+                "retry_delay_seconds": 120,
+            },
+        )
+        # Phase C on the health struct
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "impl-agent-ghi", "confidence": "LOW"},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        # Phase B+E
+        assert result.blocker is not None
+        assert result.blocker.exception_type == "CITimeoutError"
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds == 120
+        # Phase C
+        assert result.health.agent_health_summary[0].confidence == "LOW"
+        assert result.health.agent_health_summary[0].scope is None
+
+
+class TestCostUsdField:
+    def _make_shipped_payload(self, **extra: object) -> dict[str, object]:
+        """Minimal valid shipped payload for building test AutoDevResults."""
+        base: dict[str, object] = {
+            "schema_version": 2,
+            "ticket_id": "T-1",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 1,
+                "lines_estimate": 5,
+                "lines_actual": 5,
+                "forbidden_touched": False,
+            },
+            "plan_source": "linear_existing",
+            "branch": "dev/t-1",
+            "worktree_path": "/tmp/wt",
+            "fork_point_sha": "abc",
+            "commits": ["c1"],
+            "pr": {
+                "number": 1,
+                "url": "https://example.com",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+        base.update(extra)
+        return base
+
+    def test_cost_usd_defaults_to_none(self) -> None:
+        payload = self._make_shipped_payload()
+        result = AutoDevResult.model_validate(payload)
+        assert result.cost_usd is None
+
+    def test_cost_usd_accepts_float(self) -> None:
+        payload = self._make_shipped_payload(cost_usd=1.23)
+        result = AutoDevResult.model_validate(payload)
+        assert result.cost_usd == 1.23
+
+    def test_cost_usd_must_be_non_negative(self) -> None:
+        payload = self._make_shipped_payload(cost_usd=-0.01)
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(payload)
+
+    def test_cost_usd_round_trip(self) -> None:
+        payload = self._make_shipped_payload(cost_usd=2.5)
+        result = AutoDevResult.model_validate(payload)
+        dumped = result.model_dump(mode="json")
+        restored = AutoDevResult.model_validate(dumped)
+        assert restored.cost_usd == 2.5

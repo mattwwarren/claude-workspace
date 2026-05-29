@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cw-queue-events": {
+      "command": "cw",
+      "args": ["queue-channel", "proxy", "--client-id", "your-session-id"],
+      "env": {
+        "CW_QUEUE_EVENTS_BASE_URL": "http://127.0.0.1:8789"
+      }
+    }
+  }
+}

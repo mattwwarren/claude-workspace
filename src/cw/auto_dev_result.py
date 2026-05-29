@@ -46,6 +46,12 @@ _BLOCK_RE = re.compile(
     r"<<<AUTO_DEV_RESULT\s*\n(.*?)\nAUTO_DEV_RESULT>>>",
     re.DOTALL,
 )
+# Fallback locator for sentinels emitted as bare code-fenced JSON without
+# AUTO_DEV_RESULT markers (GitHub #337). Matches ```json or ``` fenced blocks.
+_LOOSE_FENCE_RE = re.compile(
+    r"```(?:json)?\n(.*?)\n```",
+    re.DOTALL,
+)
 
 # Keep the last-N-lines payload bounded so synthetic blocker details don't
 # bloat the persisted state file. 40 lines is enough to capture a typical
@@ -69,11 +75,16 @@ Status = Literal[
 # producer bug — it would silently degrade for downstream tools that key off
 # the version field.
 _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
-# Statuses introduced in v4 (issue #191). Emitting under schema_version<4 is
-# a producer bug.
+# Statuses introduced in v4 (issue #191). Per rollout exception (issue #316),
+# accepted under all supported schema versions (v2, v3, v4) until the producer
+# skill bumps its emitted schema_version to v4.
 _V4_STATUSES: frozenset[str] = frozenset(
     {"ambiguities_pending_resolution", "premises_pending_verification"}
 )
+# Public alias for consumers that need to check whether a status indicates the
+# session is paused waiting for human input (issue #129).
+PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES
+
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
 # gated by schema_version. Spec §8 says enum additions require a version
 # bump (v3), and v3 IS the official home for these values, BUT the producer
@@ -142,10 +153,48 @@ class PrInfo(BaseModel):
     base: str
 
 
+class PrCreated(BaseModel):
+    """Phase D — pre-merge PR snapshot captured at PR-creation time (issue #174).
+
+    Distinct from :class:`PrInfo` (the ``pr`` field, representing the final
+    shipped state). ``PrCreated`` is emitted *before* auto-merge is triggered so
+    the orchestrator can attach CI watchers or make merge decisions based on the
+    CI state at the moment the PR was opened, not after the merge completes.
+
+    ``ci_status_at_creation`` is a free-form string (open-ish enum). Observed
+    producer values: ``"pending"``, ``"passing"``, ``"failing"``. Consumers
+    MUST treat unknown values as opaque strings and surface verbatim.
+    """
+
+    number: int
+    url: str
+    ci_status_at_creation: str
+    auto_merge_enabled: bool
+
+
 class Review(BaseModel):
     must_fix_initial: int
     should_fix: int
     fix_cycles_used: int
+
+
+class AgentHealthEntry(BaseModel):
+    """Phase C — per-agent health snapshot for orchestrator retry targeting (#174).
+
+    Collected across all agents that ran during a pipeline (plan, impl,
+    reviewers, fix-loop cycles, prep-pr) so the orchestrator can identify
+    *which* agent caused a downgrade rather than just knowing that a downgrade
+    occurred.
+
+    ``scope`` mirrors the tier the agent was operating on; may be ``None`` for
+    agents that don't have a scope concept (e.g. plan-reviewer). Free-form
+    string rather than a closed ``ScopeTier`` enum — tolerate producer-side
+    values outside ``{"small", "large"}`` rather than failing validation.
+    """
+
+    agent_id: str
+    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    scope: str | None = None
 
 
 class Health(BaseModel):
@@ -155,6 +204,10 @@ class Health(BaseModel):
     recommendation: Literal["PROCEED", "EXIT_FOR_HUMAN_REVIEW"]
     downgrade_applied: bool = False
     fix_loop_escalated: bool = False
+    # Phase C — per-agent breakdown so the orchestrator can target retries at
+    # the specific agent that caused a downgrade (issue #174). Optional: absent
+    # on payloads from older producers; defaults to empty list.
+    agent_health_summary: list[AgentHealthEntry] = Field(default_factory=list)
 
 
 class Blocker(BaseModel):
@@ -224,6 +277,15 @@ _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
 _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
     {"sync_local_main", "manual_intervention"},
 )
+# next_actions prefixes that indicate a blocked session is paused for human
+# input (issue #328). A blocked result carrying only these prefixes is not a
+# terminal-reject shape — it will be re-dispatched once the human acts.
+# Public so wrapper.py can import and reuse the same list without duplicating.
+USER_DIRECTED_PREFIXES: tuple[str, ...] = (
+    "user_resolve_",
+    "user_decide_",
+    "user_verify_",
+)
 
 
 class AutoDevResult(BaseModel):
@@ -240,6 +302,10 @@ class AutoDevResult(BaseModel):
     fork_point_sha: str | None = None
     commits: list[str] = Field(default_factory=list)
     pr: PrInfo | None = None
+    # Phase D — pre-merge PR snapshot emitted before auto-merge is triggered
+    # (issue #174). Optional: absent on payloads from older producers. Non-null
+    # when a PR was created during this pipeline run (i.e. status=shipped).
+    pr_created: PrCreated | None = None
     review: Review
     health: Health
     friction_highlights: list[str] = Field(default_factory=list)
@@ -250,6 +316,18 @@ class AutoDevResult(BaseModel):
     # all keys optional, tolerate producer-side key-name drift.
     ambiguities: list[dict[str, Any]] = Field(default_factory=list)
     premises: list[dict[str, Any]] = Field(default_factory=list)
+    # Total USD cost for this auto-dev run. Optional — producers that don't
+    # track cost omit this field; consumers treat None as "cost unknown".
+    # Must be non-negative when present. See GitHub issue #124.
+    cost_usd: float | None = None
+
+    @field_validator("cost_usd")
+    @classmethod
+    def _validate_cost_usd(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            msg = "cost_usd must be non-negative"
+            raise ValueError(msg)
+        return v
 
     @field_validator("stage_reached", mode="before")
     @classmethod
@@ -269,13 +347,13 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
-        # §8 v4-introduced statuses cannot ride on a pre-v4-tagged payload.
-        if self.schema_version < 4 and self.status in _V4_STATUSES:
-            msg = (
-                f"status={self.status!r} requires schema_version>=4, "
-                f"got {self.schema_version}"
-            )
-            raise ValueError(msg)
+        # NOTE: ambiguities_pending_resolution and premises_pending_verification
+        # (_V4_STATUSES) are NOT gated by schema_version. Spec §8 says enum
+        # additions require a version bump (v4), and v4 IS the official home for
+        # these values, BUT the producer skill emits them under v2 today (see
+        # issue #316). One-time rollout exception: accept under v2, v3, AND v4
+        # until the skill bumps. When skill emits v4, this exception can be
+        # removed and the _V4_STATUSES gate re-added.
 
         # §3.3 pr: non-null iff status == shipped
         if self.status == "shipped" and self.pr is None:
@@ -383,12 +461,23 @@ class AutoDevResult(BaseModel):
                 )
                 raise ValueError(msg)
 
+        # blocked + all-user-directed next_actions = paused for human input
+        # (issue #328). Not a terminal-reject shape — will be re-dispatched.
+        user_directed_blocked = (
+            self.status == "blocked"
+            and bool(self.next_actions)
+            and all(a.startswith(USER_DIRECTED_PREFIXES) for a in self.next_actions)
+        )
+
         # §4.3 terminal-reject statuses have empty next_actions, EXCEPT for
-        # the pre-flight + blocked retry shape covered above.
+        # the pre-flight + blocked retry shape covered above, and the
+        # user-directed blocked shape where all actions start with a user_*
+        # prefix (issue #328).
         if (
             self.status in _TERMINAL_REJECT_STATUSES
             and self.next_actions
             and not pre_flight_blocked
+            and not user_directed_blocked
         ):
             msg = (
                 f"next_actions must be empty for terminal-reject status "
@@ -449,6 +538,26 @@ def _strip_code_fence(raw: str) -> str:
     return raw
 
 
+def _extract_loose_sentinel_json(text: str) -> str | None:
+    """Scan for the last code-fenced block that parses as an auto-dev payload.
+
+    Used as a fallback when ``parse_stdout`` finds no AUTO_DEV_RESULT markers
+    (GitHub #337 — producer occasionally emits the payload in a code fence
+    without the sentinel framing). Accepts only blocks whose inner JSON is a
+    dict containing both ``schema_version`` and ``status`` keys, distinguishing
+    an auto-dev result from unrelated code blocks in the output.
+    """
+    for m in reversed(list(_LOOSE_FENCE_RE.finditer(text))):
+        candidate = m.group(1).strip()
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "schema_version" in obj and "status" in obj:
+            return candidate
+    return None
+
+
 def extract_block(text: str) -> str | None:
     """Return the JSON text inside the LAST complete sentinel pair, or None.
 
@@ -483,20 +592,37 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         )
 
     if not matches:
-        # §6 (1) no sentinel, or §6 (2) opening without close. We don't
-        # distinguish — both indicate the skill failed before/during the
-        # emit step.
         if _OPEN_SENTINEL in text:
-            reason = "no_result_emitted"
-            details = f"opening sentinel present, close missing; tail:\n{_tail(text)}"
-        else:
-            reason = "no_result_emitted"
-            details = f"no sentinel block in stdout; tail:\n{_tail(text)}"
-        return BlockedResult(
-            blocker=Blocker(stage="unknown", reason=reason, details=details),
+            # §6 (2) opening sentinel present, close missing — skill crashed mid-emit
+            return BlockedResult(
+                blocker=Blocker(
+                    stage="unknown",
+                    reason="no_result_emitted",
+                    details=(
+                        f"opening sentinel present, close missing; tail:\n{_tail(text)}"
+                    ),
+                ),
+            )
+        # §6 (1) No AUTO_DEV_RESULT markers. Tolerate bare code-fenced JSON:
+        # the producer occasionally emits the payload in a ``` block without
+        # sentinel framing (GitHub #337). Accept iff the last fenced block
+        # parses as a JSON object with both schema_version and status.
+        loose_json = _extract_loose_sentinel_json(text)
+        if loose_json is None:
+            return BlockedResult(
+                blocker=Blocker(
+                    stage="unknown",
+                    reason="no_result_emitted",
+                    details=f"no sentinel block in stdout; tail:\n{_tail(text)}",
+                ),
+            )
+        _log.warning(
+            "auto-dev: sentinel emitted as bare code-fenced JSON without "
+            "AUTO_DEV_RESULT markers; using loose fallback (GitHub #337)"
         )
-
-    raw_block = _strip_code_fence(matches[0].group(1))
+        raw_block = loose_json
+    else:
+        raw_block = _strip_code_fence(matches[0].group(1))
 
     # §6 (3) JSON does not parse.
     try:

@@ -6,9 +6,159 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- feat: pre-dispatch worktree freshness check in `dispatch_tick`; stale clients emit `ticket.needs_sync` and skip the tick without burning a dispatch slot
-- feat: new `cw dev-queue refresh-all` CLI subcommand fast-forwards each client's local `main` to `origin/main`
-- feat: new `OrchestratorEventType.TICKET_NEEDS_SYNC = "ticket.needs_sync"` event type
+## [0.12.0] — 2026-05-29
+
+Minor release covering the cw 1.0-march observability and orchestration
+substrate: live work board, read-only session peek, atomic terminal
+transitions, the queue-events MCP channel, cost tracking, and `cw doctor`
+wedge detection. Also enables the native nightly soak clock toward 1.0.
+
+### Added
+
+- **`cw watch` live work board** (#126 → PR #347): full-screen TUI streaming
+  cross-client session + queue state, refreshed from the event bus.
+- **`cw peek`** (#122 → PR #346): read-only tail of a running session's output
+  without attaching to or disturbing the surface.
+- **`cw spawn complete`** (#121 → PR #344): atomic session terminal-state
+  transition, closing the race between session-flip and queue-flip.
+- **cw-queue-events MCP channel** (#125 → PR #355): pushes queue-state deltas
+  with persist-on-emit + cursor replay, mirroring the PR-events channel. Track C
+  complete (7/7).
+- **`cost_usd` persistence, schema v4** (#124 → PR #351): per-session and
+  per-ticket USD cost recorded on `Session` + `TicketTask`.
+- **`cw doctor` wedge detection** (#123 → PR #353): drift checks for wedged
+  sessions, `--reap` recipes, and `--json` output.
+- **AUTO_DEV_RESULT schema Phase C+D** (#174 → PR #343): expanded contract for
+  queue-orchestrator observability.
+
+### Changed
+
+- **CI: native nightly scheduled, cmux nightly de-scheduled** (PR #363):
+  `nightly-native.yml` gains a daily 09:00 UTC `schedule:` trigger, starting the
+  2-week native-soak clock toward 1.0 (gates #242/#119/#120). `nightly.yml`
+  (cmux integration) is de-scheduled to `workflow_dispatch`-only ahead of cmux
+  removal (#119).
+
+### Fixed
+
+- **Silently-idle watchdog → flag-only** (#348 → PR #349): the `silently_idle`
+  watchdog no longer reaps the worker; it flags only and lets the run reach the
+  60-min ceiling, avoiding false kills of active workers.
+- **`cw_queue_peek` stale-transcript false STOP** (#358 → PR #359):
+  `find_transcript_for_ticket` no longer picks the oldest stale transcript in a
+  reused worktree (which produced bogus age + a false STOP recommendation).
+
+### Removed / chore
+
+- **Delete `pr_responder.py`** (#245 → PR #357): superseded by the event-driven
+  review-monitor path.
+- **Suppression audit** (PR #362): `noqa` / `type: ignore` count reduced 110 → 52.
+- **Skill audit + `/cw-fanout`** (PR #350): cw skills re-aligned to current
+  workflows; new `/cw-fanout` multi-ticket dispatch skill added.
+
+## [0.11.2] — 2026-05-28
+
+Patch release with two reliability fixes for the dev-queue dispatch path,
+surfaced during the 2026-05-28 dogfood wave.
+
+- **Code-fenced sentinel parsing** (#337 → PR #339): `parse_stdout` now
+  tolerates AUTO_DEV_RESULT JSON wrapped in a Markdown code fence (```` ```json ````)
+  when the explicit `<<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>>` markers are
+  absent. Previously the dispatcher treated such sessions as no-sentinel and
+  spawned wasteful att2/att3 retries on already-shipped work. Closes #336
+  (downstream consequence — silently_idle hangs after the parser returned None).
+- **Watchdog default bump** (#340 stopgap → PR #341): `IDLE_WATCHDOG_SECONDS`
+  raised from `300` → `900` (15 min), `idle_watchdog_by_tier['large']` from
+  `600` → `1800`. The previous 300s budget false-positively flagged active
+  small-tier workers (#337 itself took 14 min wall time and tripped the
+  watchdog at 5 min). The deeper fix — transcript-mtime liveness detection
+  — remains open under #340.
+
+## [0.11.1] — 2026-05-27
+
+Patch release covering #129's BLOCKED_ON_USER producer + watchdog and the
+SHOULD_FIX follow-up batch from PR #323's review, plus the new
+`cw-queue-peek` skill for in-flight session inspection.
+
+- **`BLOCKED_ON_USER` producer + watchdog** (#129/#322 → PR #323):
+  `QueueItemStatus.BLOCKED_ON_USER` + `OrchestratorEventType.SESSION_NEEDS_ATTENTION`
+  enum additions; `signal_needs_attention` path in `wrapper.py` for paused-for-input
+  sentinels; `flag_silently_idle_daemon_sessions` watchdog in `reconcile.py` for
+  silently-stalled DAEMON sessions; `notify.py` peon-ping + `notify-send` push
+  helper; `docs/headless-contract.md` updated with the BLOCKED_ON_USER section.
+- **Watchdog hardening** (#324/#332): reorder writes — `save_state` (session →
+  COMPLETED + `last_result`) fires before queue mutation; crash between
+  session-flip and queue-flip recovers cleanly on next reconcile tick.
+- **Per-ticket / per-tier IDLE_WATCHDOG_SECONDS override** (#326/#331): mirrors
+  the `HEADLESS_TIMEOUT_SECONDS` override pattern from #265.
+- **`notify.py` debug logging** (#327/#330): each fail-quiet exception path now
+  logs at debug level so `CW_LOG_LEVEL=DEBUG` surfaces misconfigured peon.sh.
+- **Test rigor** (#328/#333): `_is_paused_for_user_input` tests construct real
+  `AutoDevResult` instances instead of `MagicMock`, so future schema changes
+  fail loudly.
+- **`cw-queue-peek` skill + script** (PR #335): in-flight inspection of
+  RUNNING dev-queue sessions. Computes age, idle gap, last sentinel status,
+  and PR state per session; recommends WAIT / PEEK / STOP via a 10-rule
+  peek-stop ladder. Reports only — operator runs `cw spawn close <id>`
+  after reviewing. Closes the gap between `cw-session-watch` (post-mortem
+  exit status) and `cw-validate-result` (post-mortem sentinel inspection).
+
+## [0.11.0] — 2026-05-27
+
+Pre-1.0 substrate release covering multiplexer-removal Phase D, the PR
+event channel architecture, orchestrator subagent + `cw orchestrator-start`,
+dispatcher routing hardening, and freshness-gate guardrails.
+
+Major themes since 0.10.0:
+
+- **Multiplexer Phase D complete**: `MultiplexerAdapter` removed from
+  `reconcile`, `dispatch`, `doctor`, `orchestrate`, and `cli`. Liveness
+  checks switched to `claude agents --json` + `roster.json`. Net -252 lines
+  across the substrate. (#167/#269)
+- **PR event channel architecture**: new `cw_pr_events_server` MCP channel
+  pushes review-monitor deltas with durable persist-on-emit and cursor
+  replay (#138/#282, #139/#284, #114/#288). Daemon's pr-watcher loop
+  retired in favor of event-driven routing (#299). Stdio MCP channel
+  proxy added for capability declaration (#291). Channel server lazy-imports
+  starlette so the module loads without the `[mcp]` extra (#306); 307
+  redirect on bare `/sse` path fixed (#309).
+- **Orchestrator subagent + `cw orchestrator-start`**: new `cw-orchestrator`
+  subagent routes channel events (#115/#296/#301); new `cw orchestrator-start`
+  CLI command spawns the orchestrator session (#295/#302). Frees the
+  daemon from PR-response logic and centralizes routing.
+- **Dispatcher routing hardening**: v4 statuses (`ambiguities_pending_resolution`,
+  `premises_pending_verification`) now recognized as terminal at
+  `schema_version=2` and route to BLOCKED (no more retry-on-paused-sentinel
+  bug) (#316/#319, e538638). New `QueueItemStatus.CANCELLED` prevents the
+  dispatcher race when `cw spawn close` runs against an in-flight tick
+  (#317/#320). Short-form `stage_reached` aliases mapped to canonical
+  values (#292/#293). Code-fence wrapped sentinels parsed correctly
+  (#307). `dispatch_tick` guards against worktree == main checkout
+  (#300/#311). Permission_mode uses explicit None check (#298).
+- **Reconcile resilience**: 30s spawn grace window prevents same-tick
+  phantom reaping (#271/#272). Short-id `surface_ref` matches against
+  UUID-prefix `sessionId` (#273). Stale Stop hook dropped on worktree
+  reuse for retry (#285/#287).
+- **Freshness gate**: pre-dispatch `dispatch_tick` checks each client's
+  local `main` against `origin/main`; stale clients emit
+  `OrchestratorEventType.TICKET_NEEDS_SYNC` and skip the tick without
+  burning a dispatch slot (#215/#268). Misconfigured clients no longer
+  dump tracebacks (#278). New `cw dev-queue refresh-all` subcommand
+  fast-forwards every configured client.
+- **Headless config**: default `HEADLESS_TIMEOUT_SECONDS` bumped 30→60
+  minutes (#266). Per-ticket / per-`scope.tier` override (#265/#279)
+  allows large-scope work room to finish.
+- **CI scaffolding**: nightly integration workflow at
+  `.github/workflows/nightly-integration.yml` exercises real `claude --bg`
+  / `claude agents --json` / `claude stop` via `pytest -m integration`;
+  `workflow_dispatch`-only until API budget is allocated (#110/#318).
+  `[mcp]` extra installed in CI so pr-events tests + coverage run
+  (#283).
+- **Cleanup**: legacy `handoff.py` deleted (#246/#277); transcript handoff
+  is now covered by `claude --resume`.
+
+Full per-PR detail in the GitHub release notes (auto-generated by
+`release.yml`).
 
 ## [0.10.0] — 2026-05-25
 

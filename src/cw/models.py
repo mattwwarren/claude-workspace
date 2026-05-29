@@ -47,13 +47,15 @@ class QueueItemStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    BLOCKED_ON_USER = "blocked_on_user"
 
 
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
-CW_STATE_SCHEMA_VERSION = 3
-DEV_QUEUE_SCHEMA_VERSION = 1
+CW_STATE_SCHEMA_VERSION = 4
+DEV_QUEUE_SCHEMA_VERSION = 2
 
 
 class TaskSpec(BaseModel):
@@ -117,6 +119,7 @@ class OrchestratorEventType(StrEnum):
     SESSION_SPAWNED = "session.spawned"
     SESSION_COMPLETED = "session.completed"
     SESSION_TIMED_OUT = "session.timed_out"
+    SESSION_NEEDS_ATTENTION = "session.needs_attention"
     TICKET_NEEDS_SYNC = "ticket.needs_sync"
     STAGE_ENTERED = "stage.entered"
     STAGE_ERRORED = "stage.errored"
@@ -164,6 +167,15 @@ class TicketTask(BaseModel):
     # the global HEADLESS_TIMEOUT_SECONDS fallback. Set via ``cw dev-queue add
     # --timeout <s>``. None means "use tier or global default". See issue #265.
     headless_timeout_override: int | None = None
+    # Per-ticket idle-watchdog budget override (seconds). When set, takes precedence
+    # over the per-tier default in OrchestratorConfig.idle_watchdog_by_tier and
+    # the global IDLE_WATCHDOG_SECONDS fallback. None means "use tier or global
+    # default". See GitHub issue #326.
+    idle_watchdog_override: int | None = None
+    # Cumulative USD cost across all auto-dev attempts for this ticket.
+    # Populated by _accumulate_task_cost in consume_completed_sessions.
+    # None when no cost data has been recorded yet. See GitHub issue #124.
+    total_cost_usd: float | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -187,6 +199,9 @@ class DevQueueStore(BaseModel):
 
     def completed(self) -> list[TicketTask]:
         return [t for t in self.tasks if t.status == QueueItemStatus.COMPLETED]
+
+    def cancelled(self) -> list[TicketTask]:
+        return [t for t in self.tasks if t.status == QueueItemStatus.CANCELLED]
 
     def by_client(self, client: str) -> list[TicketTask]:
         return [t for t in self.tasks if t.client == client]
@@ -221,6 +236,13 @@ class OrchestratorConfig(BaseModel):
     # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.
     headless_timeout_by_tier: dict[str, int] = Field(
         default_factory=lambda: {"small": 1800, "large": 5400}
+    )
+    # Per-tier idle-watchdog budgets (seconds). Keyed by TicketTask.scope_hint;
+    # unknown tiers fall back to IDLE_WATCHDOG_SECONDS (900s). Large-tier
+    # sessions can legitimately stall longer on slow tests/mypy before emitting
+    # any sentinel. See GitHub issues #326, #340.
+    idle_watchdog_by_tier: dict[str, int] = Field(
+        default_factory=lambda: {"large": 1800}
     )
 
     @model_validator(mode="before")
@@ -291,6 +313,13 @@ class Session(BaseModel):
     # readable when the result schema bumps independently of cw's CW_STATE
     # schema. See ``cw.auto_dev_result`` for the parser.
     last_result: dict[str, Any] | None = None
+    # Total USD cost for this session's auto-dev run. Populated by
+    # signal_completed from AutoDevResult.cost_usd. None when cost data
+    # was not emitted by the producer. See GitHub issue #124.
+    cost_usd: float | None = None
+    # Per-model cost breakdown for this session. Populated via the SDK
+    # orchestrator path (post-#116). None when not available.
+    cost_breakdown: dict[str, float] | None = None
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [

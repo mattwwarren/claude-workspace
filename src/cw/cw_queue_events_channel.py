@@ -1,4 +1,4 @@
-"""MCP stdio proxy: forwards cw-pr-events SSE notifications to Claude."""
+"""MCP stdio proxy: forwards cw-queue-events SSE notifications to Claude."""
 
 from __future__ import annotations
 
@@ -11,19 +11,35 @@ from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BASE_URL = "http://127.0.0.1:8788"
-# Intentionally not imported from cw_pr_events_server to avoid triggering
+_DEFAULT_BASE_URL = "http://127.0.0.1:8789"
+# Intentionally not imported from cw_queue_events_server to avoid triggering
 # module-level I/O (_cursors.update/_event_offset init) at import time.
-_NOTIFICATION_TYPE = "cw-pr-event"
+_NOTIFICATION_TYPE = "cw-queue-event"
+
+_CHANNEL_INSTRUCTIONS = """\
+Queue events from cw-queue-events server. Event types:
+- queue.ticket_enqueued: new ticket added to queue (ticket_id, client, status)
+- queue.ticket_claimed: PENDING->RUNNING (ticket_id, client, session_id)
+- queue.ticket_completed: RUNNING->COMPLETED (ticket_id, client, queue_status, \
+sentinel_status or null)
+- queue.ticket_failed: RUNNING->FAILED (ticket_id, client, error or null, attempts)
+  Note: ticket_failed fires from two code paths: cli.py validation_failed \
+(after 3 attempts)
+  and queue.py mark_item_failed(). Subscribers should not assume broader \
+failure coverage.
+- queue.session_idled: session ACTIVE->IDLE (session_id, session_name)
+RUNNING->CANCELLED: no event (system-driven cleanup)
+RUNNING->BLOCKED_ON_USER: no event (transient; session will resume)\
+"""
 
 # MCP types — deferred-import inside functions per project convention
 # (avoids hard dep at module load; mcp is an optional extra)
 
 
 def _extract_payload(session_msg: Any) -> dict[str, Any] | None:
-    """Extract {repo, pr_number, event_type, payload} from upstream SSE msg.
+    """Extract event dict from upstream SSE msg.
 
-    Returns None for non-PR-event messages (type guard, not error).
+    Returns None for non-queue-event messages (type guard, not error).
     """
     from mcp.types import JSONRPCNotification
 
@@ -47,16 +63,11 @@ def _extract_payload(session_msg: Any) -> dict[str, Any] | None:
 
 def _build_meta(data: dict[str, Any]) -> dict[str, str]:
     """Build the meta dict for notifications/claude/channel params."""
-    payload = data.get("payload") or {}
     meta: dict[str, str] = {
-        "event_type": str(data.get("event_type", "")),
-        "pr_number": str(data.get("pr_number", "")),
-        "repo": str(data.get("repo", "")),
+        "event_type": str(data.get("event", "")),
+        "ticket_id": str(data.get("ticket_id", "")),
+        "client": str(data.get("client", "")),
     }
-    if "role" in payload:
-        meta["role"] = str(payload["role"])
-    if "client" in payload:
-        meta["client"] = str(payload["client"])
     return {k: v for k, v in meta.items() if v}
 
 
@@ -76,14 +87,21 @@ def _build_outbound_notification(data: dict[str, Any]) -> Any:
     )
 
 
-async def _relay_upstream(sse_read: Any, stdio_write: Any) -> None:
-    """Read from SSE stream, write PR-event notifications to stdio."""
+async def _relay_upstream(
+    sse_read: Any,
+    stdio_write: Any,
+    client_id: str | None = None,
+) -> None:
+    """Read from SSE stream, write queue-event notifications to stdio."""
     async for item in sse_read:
         if isinstance(item, Exception):
             logger.debug("sse read error: %s", item)
             continue
         payload = _extract_payload(item)
         if payload is None:
+            continue
+        # Proxy-side client filter: skip events for other clients
+        if client_id and payload.get("client") != client_id:
             continue
         outbound = _build_outbound_notification(payload)
         await stdio_write.send(outbound)
@@ -96,12 +114,14 @@ def run_proxy(client_id: str | None = None) -> None:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
 
-    base_url = os.environ.get("CW_PR_EVENTS_BASE_URL", _DEFAULT_BASE_URL)
-    if client_id is None:
-        client_id = os.environ.get("CW_PR_EVENTS_CLIENT_ID", socket.gethostname())
-    sse_url = f"{base_url}/sse/?client_id={urllib.parse.quote(client_id)}"
+    base_url = os.environ.get("CW_QUEUE_EVENTS_BASE_URL", _DEFAULT_BASE_URL)
+    # filter_client: the cw client name to filter events by (None = relay all)
+    filter_client = client_id or os.environ.get("CW_QUEUE_EVENTS_CLIENT_ID")
+    # cursor_id: the SSE subscription identity for replay cursor tracking
+    cursor_id = filter_client or socket.gethostname()
+    sse_url = f"{base_url}/sse/?client_id={urllib.parse.quote(cursor_id)}"
 
-    mcp_server: Server = Server("cw-pr-events")
+    mcp_server: Server = Server("cw-queue-events")
     init_options = mcp_server.create_initialization_options(
         experimental_capabilities={"claude/channel": {}},
     )
@@ -113,7 +133,7 @@ def run_proxy(client_id: str | None = None) -> None:
             anyio.create_task_group() as tg,
         ):
             tg.start_soon(mcp_server.run, stdio_read, stdio_write, init_options)
-            tg.start_soon(_relay_upstream, sse_read, stdio_write)
+            tg.start_soon(_relay_upstream, sse_read, stdio_write, filter_client)
 
     anyio.run(_main)
 

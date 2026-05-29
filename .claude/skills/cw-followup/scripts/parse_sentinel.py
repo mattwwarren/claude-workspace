@@ -13,7 +13,7 @@ not be resolved or the transcript file was missing.
 
 Run via ``uv run`` from the cw repo so ``cw.auto_dev_result`` imports cleanly:
 
-    uv run --project /home/matthew/workspace/personal/claude-workspace \\
+    uv run --project "$(git rev-parse --show-toplevel)" \\
         python .claude/skills/cw-followup/scripts/parse_sentinel.py \\
         --session-id <short-id>
 """

@@ -7,16 +7,23 @@ import json
 import logging
 import subprocess
 import sys
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast, get_args
 
 import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
+from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
+    AutoDevResult,
+    BlockedResult,
+    Status,
+    extract_block,
+    parse_stdout,
+)
+from cw.cmux import MultiplexerAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
     init_client,
@@ -29,6 +36,8 @@ from cw.config import (
 from cw.daemon import run_watcher_tick
 from cw.dev_queue import (
     add_ticket,
+    cancel_task_for_session,
+    cancel_ticket,
     clear_tickets,
     dev_queue_lock,
     list_tickets,
@@ -37,8 +46,8 @@ from cw.dev_queue import (
     resolve_client,
     save_dev_queue,
 )
-from cw.dispatch import run_dispatch_loop
-from cw.doctor import format_report, run_doctor
+from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
+from cw.doctor import format_report, format_report_json, run_doctor
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, WorktreeError
 from cw.models import (
@@ -75,7 +84,7 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
-from cw.reconcile import reconcile, resolve_headless_budget
+from cw.reconcile import reconcile, resolve_headless_budget, ticket_id_for_session
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -84,23 +93,26 @@ from cw.session import (
     start_session,
 )
 from cw.spawn import spawn_create_impl
-from cw.tui import DetailLevel
+from cw.tui import DetailLevel, watch_flat
 from cw.tui import watch as tui_watch
 from cw.worktree import fast_forward_main
 from cw.wrapper import run_claude_wrapper, signal_idle
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def handle_errors[F: Callable[..., object]](fn: F) -> F:
+
+def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     """Convert CwError exceptions to click.ClickException at the CLI boundary."""
 
     @functools.wraps(fn)
-    def wrapper(*args: object, **kwargs: object) -> object:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return fn(*args, **kwargs)
         except CwError as e:
             raise click.ClickException(str(e)) from e
 
-    return wrapper  # type: ignore[return-value]
+    return wrapper
 
 
 def _complete_client(
@@ -226,6 +238,23 @@ def status() -> None:
 
 
 @main.command()
+@click.option(
+    "--interval",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Seconds between data refreshes (1-60).",
+)
+@handle_errors
+def watch(interval: int) -> None:
+    """Live flat-table work board (sessions + dev-queue tickets).
+
+    Keybindings: j/k navigate  p=peek  c=spawn-complete  o=open  r=refresh  q=quit
+    """
+    watch_flat(interval=interval, home=str(Path.home()))
+
+
+@main.command()
 @click.argument(
     "session_name", required=False, default=None, shell_complete=_complete_session
 )
@@ -253,8 +282,15 @@ def config() -> None:
     is_flag=True,
     help="Also reconcile state with the live multiplexer and reap phantoms.",
 )
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Output report as JSON.",
+)
 @handle_errors
-def doctor(reap: bool) -> None:
+def doctor(reap: bool, as_json: bool) -> None:
     """Run environment preflight checks and print a health report.
 
     Reports the resolved backend, backend binary/daemon availability,
@@ -264,6 +300,9 @@ def doctor(reap: bool) -> None:
     tickets to PENDING. Exits non-zero if any check fails.
     """
     report = run_doctor(reap=reap)
+    if as_json:
+        click.echo(format_report_json(report))
+        sys.exit(0 if report.ok else 1)
     click.echo(format_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)
@@ -825,16 +864,21 @@ _VALIDATION_FAILED_MAX_ATTEMPTS = 3
 # issue #251 Bug A where revert_completed_silent_tasks reverts a task to
 # PENDING before consume_completed_sessions can process the SESSION_COMPLETED
 # event — causing no_op and similar outcomes to trigger infinite re-dispatch.
-_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = frozenset(
-    {
-        "shipped",
-        "no_op",
-        "plan_pending_approval",
-        "review_pending_approval",
-        "merge_gate_blocked",
-        "scope_exceeded",
-        "forbidden_area",
-    }
+# Also covers ambiguities_pending_resolution and premises_pending_verification
+# (issue #316): these are terminal-pending-user, not retry candidates.
+_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = (
+    frozenset(
+        {
+            "shipped",
+            "no_op",
+            "plan_pending_approval",
+            "review_pending_approval",
+            "merge_gate_blocked",
+            "scope_exceeded",
+            "forbidden_area",
+        }
+    )
+    | PAUSED_FOR_USER_INPUT_STATUSES
 )
 
 
@@ -1374,6 +1418,28 @@ def dev_queue_remove(tickets: tuple[str, ...], client: str, remove_all: bool) ->
         click.echo(f"Removed {ticket} from {client} dev-queue.")
 
 
+@dev_queue.command(name="cancel")
+@click.argument("tickets", nargs=-1, required=True)
+@click.option("--client", "-c", "client", required=True, help="Client name")
+@handle_errors
+def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
+    """Cancel dev-queue task(s) and stop any running session."""
+    state = load_state()
+    daemon = get_native_daemon_client()
+    for ticket in tickets:
+        cleared_session_ids = cancel_ticket(ticket, client)
+        for old_session_id in cleared_session_ids:
+            if old_session_id is not None:
+                sess = state.find_by_name_or_id(old_session_id)
+                if (
+                    sess is not None
+                    and sess.surface_ref is not None
+                    and sess.origin is SessionOrigin.DAEMON
+                ):
+                    daemon.stop(sess.surface_ref)
+        click.echo(f"Cancelled {ticket} in {client} dev-queue.")
+
+
 @dev_queue.command(name="clear")
 @click.option("--client", "-c", "client", required=True, help="Client name")
 @click.option(
@@ -1412,9 +1478,12 @@ def dev_queue_status(client: str | None) -> None:
             by_client[task.client] = []
         by_client[task.client].append(task)
 
-    header = f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'COMPLETED':>9}  TICKETS"
+    header = (
+        f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'COMPLETED':>9}"
+        f"  {'CANCELLED':>9}  TICKETS"
+    )
     click.echo(header)
-    click.echo("-" * 70)
+    click.echo("-" * 82)
     for client_name in clients_seen:
         client_tasks = by_client[client_name]
         pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
@@ -1422,10 +1491,13 @@ def dev_queue_status(client: str | None) -> None:
         completed_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.COMPLETED
         ]
+        cancelled_tasks = [
+            t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
+        ]
         ticket_ids = ", ".join(t.ticket_id for t in client_tasks)
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
-            f"  {len(completed_tasks):>9}  {ticket_ids}"
+            f"  {len(completed_tasks):>9}  {len(cancelled_tasks):>9}  {ticket_ids}"
         )
 
 
@@ -1840,6 +1912,13 @@ def _spawn_close_impl(
                 sess.surface_ref,
             )
 
+    # For DAEMON sessions, atomically cancel any RUNNING TicketTask that owns
+    # this session so revert_completed_silent_tasks cannot revert it to PENDING
+    # and the dispatcher cannot re-spawn the same ticket in the same tick.
+    # (See GitHub issue #317.)
+    if sess.origin is SessionOrigin.DAEMON:
+        cancel_task_for_session(sess.id)
+
     sess.status = SessionStatus.COMPLETED
     sess.completed_at = datetime.now(UTC)
     sess.completed_reason = CompletionReason.USER
@@ -1929,6 +2008,135 @@ def spawn_close(session_id: str) -> None:
     click.echo(f"Closed session: {session_id}")
 
 
+def _spawn_complete_impl(
+    *,
+    session_id: str,
+    status: str,
+    ticket_id: str | None,
+    force: bool,
+    native_daemon: NativeDaemonClient | None = None,
+) -> None:
+    """Complete a daemon-spawned session atomically.
+
+    Performs three steps in sequence:
+    1. Records a session.completed event
+    2. Applies it to the dev queue inline (under dev_queue_lock)
+    3. Closes the session
+
+    Separated from the Click command so tests can inject the daemon client
+    directly.
+    """
+    state = load_state()
+    sess = state.find_by_name_or_id(session_id)
+    if sess is None:
+        msg = f"Session '{session_id}' not found."
+        raise CwError(msg)
+
+    if sess.status == SessionStatus.COMPLETED:
+        if not force:
+            msg = f"Session '{session_id}' is already completed. Use --force to no-op."
+            raise CwError(msg)
+        return
+
+    effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)
+
+    payload: dict[str, object] = {
+        "session_id": sess.id,
+        "client": sess.client,
+        "crashed": False,
+        "status": status,
+        **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
+    }
+
+    with dev_queue_lock():
+        store = load_dev_queue()
+
+        # Guard: queue task already COMPLETED (inside lock — authoritative)
+        if effective_ticket_id:
+            for task in store.tasks:
+                if (
+                    task.ticket_id == effective_ticket_id
+                    and task.status == QueueItemStatus.COMPLETED
+                ):
+                    already_done_task_msg = (
+                        f"Queue task for '{effective_ticket_id}' is already COMPLETED. "
+                        "Use 'cw spawn close' to close the session only."
+                    )
+                    raise CwError(already_done_task_msg)
+
+        # Step 1: Record event (record_event uses _inbox_lock — no deadlock risk)
+        event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+        # Step 2: Apply to queue
+        _apply_events_to_store(store, [event])
+
+        # Step 3: Close session state
+        sess.status = SessionStatus.COMPLETED
+        sess.completed_at = datetime.now(UTC)
+        if sess.completed_reason is None:
+            sess.completed_reason = CompletionReason.USER
+        save_state(state)
+
+    # Advance cursor after lock (advance_cursor uses inbox lock — safe)
+    advance_cursor(_DISPATCH_CONSUMER, event.id)
+
+    # daemon.stop outside lock — best-effort, slow (up to 10s timeout)
+    daemon = native_daemon or get_native_daemon_client()
+    if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
+        daemon.stop(sess.surface_ref)
+
+
+@spawn.command(name="complete")
+@click.argument("session_id")
+@click.option(
+    "--status",
+    "status",
+    required=True,
+    type=click.Choice(list(get_args(Status))),
+    help="Outcome status to record (every value in auto_dev_result.Status).",
+)
+@click.option(
+    "--ticket-id",
+    default=None,
+    help=(
+        "Ticket ID; inferred from session name via ticket_id_for_session() if omitted."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "If session is already COMPLETED, silently succeed (no-op) instead of erroring."
+    ),
+)
+@handle_errors
+def spawn_complete(
+    session_id: str,
+    status: str,
+    ticket_id: str | None,
+    force: bool,
+) -> None:
+    """Complete a daemon-spawned session, recording its outcome atomically.
+
+    Records a session.completed event, applies it to the dev queue, and
+    closes the session in one atomic operation. Replaces the three-command
+    manual recovery sequence used when sessions are stuck.
+
+    \b
+    Example:
+      cw spawn complete abc12345 --status shipped
+      cw spawn complete abc12345 --status blocked --ticket-id GEN-42
+    """
+    _spawn_complete_impl(
+        session_id=session_id,
+        status=status,
+        ticket_id=ticket_id,
+        force=force,
+    )
+    click.echo(f"Completed session: {session_id} (status={status})")
+
+
 _ORCHESTRATOR_AGENT = "cw-orchestrator"
 _ORCHESTRATOR_CHANNEL = "server:cw-pr-events"
 
@@ -1981,6 +2189,81 @@ def orchestrator_start(
     click.echo(f"Spawned orchestrator session: {session_id}")
 
 
+_PEEK_DEFAULT_LINES = 50
+_PEEK_DEFAULT_SCROLLBACK = 200
+
+
+def _peek_session(
+    session_name: str,
+    *,
+    lines: int,
+    scrollback: int,
+    adapter: MultiplexerAdapter | None = None,
+) -> None:
+    """Emit the last *lines* lines of worker output for *session_name*.
+
+    Raises :exc:`cw.exceptions.CwError` when the session is not found,
+    is already completed, or its surface is no longer live.
+    """
+    state = load_state()
+    session = state.find_by_name_or_id(session_name)
+    if session is None:
+        msg = f"Session '{session_name}' not found."
+        raise CwError(msg)
+    if session.status == SessionStatus.COMPLETED:
+        msg = (
+            f"Session '{session_name}' is completed (status: completed)."
+            " Its surface is no longer available."
+        )
+        raise CwError(msg)
+    if session.surface_ref is None:
+        msg = f"Session '{session_name}' has no surface reference recorded."
+        raise CwError(msg)
+    _adapter = adapter or get_cmux_adapter()
+    live = _adapter.list_surfaces()
+    if session.surface_ref not in live:
+        msg = (
+            f"Surface '{session.surface_ref}' for session '{session_name}' is gone."
+            f" Run 'cw post-mortem {session.id}' for the full transcript"
+            " once that command is available."
+        )
+        raise CwError(msg)
+    content = _adapter.capture_surface(
+        session.surface_ref, lines=lines, scrollback=scrollback
+    )
+    stripped = content.strip()
+    actual_lines = len(content.splitlines()) if stripped else 0
+    if actual_lines < lines and stripped:
+        click.echo(
+            f"Warning: fewer than {lines} lines available in scrollback"
+            f" (got {actual_lines}).",
+            err=True,
+        )
+    click.echo(content, nl=False)
+
+
+@main.command()
+@click.argument("session_name", shell_complete=_complete_session)
+@click.option(
+    "--lines",
+    "-n",
+    default=_PEEK_DEFAULT_LINES,
+    show_default=True,
+    help="Number of lines to emit from the end of worker output.",
+)
+@click.option(
+    "--scrollback",
+    "-s",
+    default=_PEEK_DEFAULT_SCROLLBACK,
+    show_default=True,
+    help="Maximum scrollback depth to search (lines).",
+)
+@handle_errors
+def peek(session_name: str, lines: int, scrollback: int) -> None:
+    """Emit the last N lines of worker output for a session."""
+    _peek_session(session_name, lines=lines, scrollback=scrollback)
+
+
 @main.group(name="pr-channel")
 def pr_channel() -> None:
     """PR channel server: push MCP notifications to subscribed Claude sessions."""
@@ -2006,5 +2289,34 @@ def pr_channel_serve(port: int, host: str) -> None:
     ``starlette`` (lives in the ``[mcp]`` optional-deps extra).
     """
     from cw.cw_pr_events_server import serve as _serve  # noqa: PLC0415
+
+    _serve(host=host, port=port)
+
+
+@main.group(name="queue-channel")
+def queue_channel() -> None:
+    """Queue channel server: push MCP notifications to subscribed Claude sessions."""
+
+
+@queue_channel.command(name="proxy")
+@click.option("--client-id", default=None, help="Unique client ID for cursor tracking.")
+def queue_channel_proxy(client_id: str | None) -> None:
+    """Start the MCP stdio proxy for cw-queue-events (add to .mcp.json)."""
+    from cw.cw_queue_events_channel import run_proxy  # noqa: PLC0415
+
+    run_proxy(client_id=client_id)
+
+
+@queue_channel.command(name="serve")
+@click.option("--port", default=8789, type=int, show_default=True)
+@click.option("--host", default="127.0.0.1", show_default=True)
+def queue_channel_serve(port: int, host: str) -> None:
+    """Start the cw-queue-events MCP channel server.
+
+    Defaults mirror ``cw.cw_queue_events_server.DEFAULT_HOST`` / ``DEFAULT_PORT`` —
+    kept inline here so the click decorators don't trigger an eager import of
+    ``starlette`` (lives in the ``[mcp]`` optional-deps extra).
+    """
+    from cw.cw_queue_events_server import serve as _serve  # noqa: PLC0415
 
     _serve(host=host, port=port)

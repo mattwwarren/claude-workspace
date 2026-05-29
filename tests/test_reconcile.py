@@ -6,6 +6,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import freezegun
 
@@ -30,12 +31,16 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _SILENTLY_IDLE_REASON,
     HEADLESS_TIMEOUT_SECONDS,
+    IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
     _claude_agents_json,
     compute_drift,
+    flag_silently_idle_daemon_sessions,
     reconcile,
     resolve_headless_budget,
+    resolve_idle_watchdog_budget,
     revert_completed_silent_tasks,
     revert_stalled_headless_sessions,
     revert_timed_out_tasks,
@@ -1218,3 +1223,490 @@ def test_revert_stalled_uses_per_session_budget(
 
     assert "per-sess-small" in reverted
     assert sess.status == SessionStatus.TIMED_OUT
+
+
+# ---------------------------------------------------------------------------
+# CANCELLED task skipped by revert_completed_silent_tasks
+# ---------------------------------------------------------------------------
+
+
+def test_revert_completed_silent_tasks_skips_cancelled_task(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON COMPLETED session + CANCELLED task → no revert, task stays CANCELLED."""
+    sess = _mk_daemon_completed_session("comp-sess-cancel")
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TKT-CANCEL",
+        client="client-a",
+        status=QueueItemStatus.CANCELLED,
+        session_id=None,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reverted = revert_completed_silent_tasks()
+    assert reverted == []
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "TKT-CANCEL")
+    assert t.status == QueueItemStatus.CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# flag_silently_idle_daemon_sessions tests (GitHub issue #129)
+# ---------------------------------------------------------------------------
+
+
+def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """DAEMON ACTIVE + no last_result + started >IDLE_WATCHDOG → BLOCKED_ON_USER."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="silent-1",
+        name="client-a/auto-dev/SILENT-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="SILENT-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="silent-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+        mock_notify.assert_called_once_with(sess.name, sess.client)
+
+    assert "SILENT-1" in blocked
+    # #348: flag-only — session stays ACTIVE so daemon worker can keep running.
+    # Operators disposition flagged sessions via `cw spawn complete` /
+    # `cw doctor --reap`. last_result.paused_status still set to prevent
+    # double-firing via _has_terminal_sentinel on subsequent ticks (#324).
+    assert sess.status == SessionStatus.ACTIVE
+    assert sess.completed_at is None
+    assert sess.completed_reason is None
+    assert sess.last_result == {"paused_status": _SILENTLY_IDLE_REASON}
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "SILENT-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    events = read_events(
+        consumer="test-silent-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["session_id"] == "silent-1"
+    assert payload["paused_status"] == _SILENTLY_IDLE_REASON
+    assert payload["crashed"] is False
+
+
+def test_flag_silently_idle_watchdog_does_not_call_native_daemon_stop(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Flag-only: watchdog must not invoke native_daemon stop() (#348).
+
+    The Track C wave-2 case study (2026-05-28) showed three workers that had
+    actually shipped work being silenced mid-stream by the watchdog. The fix
+    is flag-only: the queue task transitions to BLOCKED_ON_USER and the
+    operator dispositions the session via `cw spawn complete` or
+    `cw doctor --reap`. The session itself stays alive on the daemon.
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="alive-after-flag",
+        name="client-a/auto-dev/ALIVE-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="ALIVE-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="alive-after-flag",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with (
+        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.get_native_daemon_client") as mock_daemon,
+    ):
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    # The daemon client must not be touched — flag-only means the worker on
+    # the native daemon keeps running, even though the queue is BLOCKED_ON_USER.
+    mock_daemon.assert_not_called()
+
+    # Reload from disk and confirm session is still ACTIVE.
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "alive-after-flag")
+    assert s.status == SessionStatus.ACTIVE
+
+
+def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Crash recovery: session COMPLETED+last_result on disk, queue still RUNNING.
+
+    Simulates the on-disk state after a crash between save_state (succeeded)
+    and save_dev_queue (not yet called). The watchdog must skip the session
+    because it is no longer in _LIVE_STATUSES, preventing a duplicate
+    SESSION_NEEDS_ATTENTION event. (GitHub #324)
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="crash-silent",
+        name="client-a/auto-dev/CRASH-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.COMPLETED,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        last_result={"paused_status": _SILENTLY_IDLE_REASON},
+        completed_at=now,
+        completed_reason=CompletionReason.NORMAL,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="CRASH-S",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="crash-silent",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+    )
+
+    assert blocked == []
+    events = read_events(
+        consumer="test-crash-recovery",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 0
+
+
+def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session started under the watchdog budget → not flagged."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() < IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="under-silent",
+        name="client-a/auto-dev/UNDER-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_flag_silently_idle_daemon_sessions_skips_session_with_terminal_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session with last_result (terminal sentinel already stored) → not touched."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="has-sentinel",
+        name="client-a/auto-dev/HAS-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        last_result={"status": "shipped", "ticket_id": "HAS-S"},
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_flag_silently_idle_daemon_sessions_skips_user_origin(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """USER-origin session → not touched by watchdog."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="user-silent",
+        name="client-a/user-silent",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_reconcile_includes_silently_idle_in_report(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reconcile() calls watchdog and includes BLOCKED_ON_USER ticket in report."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    # The daemon returns this session as live (surface still registered).
+    live_short_id = "abcd1234"
+    full_uuid = f"{live_short_id}-1111-2222-3333-000000000000"
+
+    sess = Session(
+        id="rcl-silent",
+        name="client-a/auto-dev/RCL-S",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=live_short_id,
+        started_at=started_at,
+    )
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="RCL-S",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="rcl-silent",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": full_uuid}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert "RCL-S" in report.reverted_ticket_ids
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "RCL-S")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# resolve_idle_watchdog_budget + per-tier/per-ticket override tests (#326)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_idle_watchdog_budget_returns_global_default_with_no_task() -> None:
+    """No task → global IDLE_WATCHDOG_SECONDS fallback."""
+    config = OrchestratorConfig()
+    assert resolve_idle_watchdog_budget(None, config) == IDLE_WATCHDOG_SECONDS
+
+
+def test_resolve_idle_watchdog_budget_no_scope_hint_returns_global_default() -> None:
+    """Task with no scope_hint → global fallback."""
+    config = OrchestratorConfig()
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint=None)
+    assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
+
+
+def test_resolve_idle_watchdog_budget_respects_per_tier() -> None:
+    """scope_hint='large' → idle_watchdog_by_tier['large'] returned."""
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint="large")
+    assert resolve_idle_watchdog_budget(task, config) == 600
+
+
+def test_resolve_idle_watchdog_budget_per_ticket_overrides_tier() -> None:
+    """idle_watchdog_override beats per-tier dict."""
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(
+        ticket_id="T-1", client="c", scope_hint="large", idle_watchdog_override=900
+    )
+    assert resolve_idle_watchdog_budget(task, config) == 900
+
+
+def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Large-tier task at 1200s: > default 900s but < tier 1800s → not flagged."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)  # 1200 seconds elapsed
+    elapsed = (now - started_at).total_seconds()
+    assert elapsed > IDLE_WATCHDOG_SECONDS  # 1200 > 900 — would flag without override
+    assert elapsed < 1800  # but under the large-tier override
+
+    sess = Session(
+        id="tier-silent",
+        name="client-a/auto-dev/TIER-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="TIER-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="tier-silent",
+        scope_hint="large",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 1800})
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=config
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_resolve_idle_watchdog_budget_unknown_tier_falls_back_to_global() -> None:
+    """scope_hint not in idle_watchdog_by_tier → global IDLE_WATCHDOG_SECONDS."""
+    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint="unknown")
+    assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
+
+
+def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """idle_watchdog_override on task beats both tier and global defaults."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)  # 1200s elapsed
+    elapsed = (now - started_at).total_seconds()
+    assert elapsed > IDLE_WATCHDOG_SECONDS  # 1200 > 900 default
+    assert elapsed < 1500  # under the per-ticket override
+
+    sess = Session(
+        id="ticket-silent",
+        name="client-a/auto-dev/TICK-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="TICK-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="ticket-silent",
+        idle_watchdog_override=1500,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    config = OrchestratorConfig()
+    blocked = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=config
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE

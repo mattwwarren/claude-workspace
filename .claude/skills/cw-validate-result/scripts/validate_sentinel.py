@@ -24,7 +24,13 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
+
+# Single source of truth for the canonical status set — never hardcode it.
+# `Status` grew two v4 members in issue #191 (ambiguities_pending_resolution,
+# premises_pending_verification); deriving the set keeps this validator in
+# lockstep with the parser instead of drifting behind it.
+from cw.auto_dev_result import Status
 
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 # cw-followup's parse_sentinel lives in a sibling skill — it owns transcript
@@ -99,16 +105,7 @@ def _build_checks(parser_output: dict[str, Any], outcome: str) -> list[dict[str,
         ),
     )
 
-    canonical_statuses = {
-        "shipped",
-        "plan_pending_approval",
-        "review_pending_approval",
-        "merge_gate_blocked",
-        "scope_exceeded",
-        "forbidden_area",
-        "blocked",
-        "no_op",
-    }
+    canonical_statuses = set(get_args(Status))
     effective_status = raw.get("status") or result.get("status")
     checks.append(
         _check(
@@ -176,6 +173,30 @@ def _build_checks(parser_output: dict[str, Any], outcome: str) -> list[dict[str,
             f"is_shipped={is_shipped}, wait_for_ci_present={wait_present}",
         ),
     )
+
+    # Phase C (issue #174) — agent_health_summary advisory check.
+    # Optional field; absent on payloads from older producers. Always passes;
+    # surfaces entry count for human inspection.
+    agent_health_summary = health.get("agent_health_summary")
+    summary_detail = (
+        f"entries={len(agent_health_summary)}"
+        if isinstance(agent_health_summary, list)
+        else "absent"
+    )
+    checks.append(_check("agent_health_summary_present", True, summary_detail))
+
+    # Phase D (issue #174) — pr_created advisory check.
+    # Optional field; absent on payloads from older producers. Always passes;
+    # surfaces ci_status_at_creation for human inspection when present.
+    pr_created = raw.get("pr_created")
+    if isinstance(pr_created, dict):
+        created_detail = (
+            f"present, ci_status_at_creation="
+            f"{pr_created.get('ci_status_at_creation')!r}"
+        )
+    else:
+        created_detail = "absent"
+    checks.append(_check("pr_created_present", True, created_detail))
 
     return checks
 

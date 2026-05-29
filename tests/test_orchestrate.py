@@ -28,13 +28,15 @@ from cw.models import (
 from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
+    PRDispatchRecord,
     WorkerEntry,
+    clear_completed_pr_sessions,
     orchestrator_parent,
     orchestrator_status,
     orchestrator_workers,
     retire_merged_prs,
+    save_dispatch_record,
 )
-from cw.pr_responder import PRDispatchRecord, save_dispatch_record
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -252,7 +254,7 @@ class TestRetireMergedPRs:
         _calls, runner = fake_runner
         retire_merged_prs(runner=runner)  # type: ignore[arg-type]
 
-        from cw.pr_responder import load_dispatch_record
+        from cw.orchestrate import load_dispatch_record
 
         record = load_dispatch_record()
         assert record.active == {}
@@ -289,7 +291,7 @@ class TestRetireMergedPRs:
 
         assert retired == []
 
-        from cw.pr_responder import load_dispatch_record
+        from cw.orchestrate import load_dispatch_record
 
         assert load_dispatch_record().active == {}
 
@@ -1088,3 +1090,82 @@ class TestCliOrchestrateStatusLastStage:
         result = runner.invoke(main, ["orchestrate", "status"])
         assert result.exit_code == 0, result.output
         assert "last_stage=" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# clear_completed_pr_sessions
+# ---------------------------------------------------------------------------
+
+
+class TestClearCompletedPrSessions:
+    def test_removes_completed_session_dispatch_key(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Dispatch keys for completed sessions are removed."""
+        dispatch_key = "owner/repo#42|fix-ci"
+        session_id = "abc12345"
+        record = PRDispatchRecord(active={dispatch_key: session_id})
+        save_dispatch_record(record)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id=session_id,
+                    name="myproject/fix-ci-42",
+                    client="myproject",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.COMPLETED,
+                    workspace_path=workspace,
+                )
+            ]
+        )
+
+        clear_completed_pr_sessions(state)
+
+        from cw.orchestrate import load_dispatch_record
+
+        updated = load_dispatch_record()
+        assert dispatch_key not in updated.active
+
+    def test_retains_active_session_dispatch_key(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """Dispatch keys for non-completed sessions are kept."""
+        dispatch_key = "owner/repo#99|address-review"
+        session_id = "def67890"
+        record = PRDispatchRecord(active={dispatch_key: session_id})
+        save_dispatch_record(record)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id=session_id,
+                    name="myproject/address-review-99",
+                    client="myproject",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=workspace,
+                )
+            ]
+        )
+
+        clear_completed_pr_sessions(state)
+
+        from cw.orchestrate import load_dispatch_record
+
+        updated = load_dispatch_record()
+        assert dispatch_key in updated.active
+        assert updated.active[dispatch_key] == session_id
+
+    def test_no_op_when_dispatch_record_empty(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """No error when dispatch record is empty."""
+        state = CwState(sessions=[])
+        clear_completed_pr_sessions(state)  # should not raise

@@ -181,12 +181,22 @@ linear_prefix_map: {}
 headless_timeout_by_tier:
   small: 1800   # 30 min — tight cap for small-scope tickets
   large: 5400   # 90 min — room for 11-file, 600-line implementations
+
+# Per-tier idle-watchdog budgets (seconds). After this window of silence
+# (no terminal sentinel emitted), a DAEMON session is flagged as
+# BLOCKED_ON_USER and a push notification fires. Large-tier sessions can
+# legitimately stall on slow test runs or mypy before emitting any
+# sentinel. Sessions whose scope_hint is unknown fall back to the global
+# IDLE_WATCHDOG_SECONDS (900s). See GitHub issues #326, #340.
+idle_watchdog_by_tier:
+  large: 1800   # 30 min — large-tier sessions may stall on slow builds
 ```
 
 Override a single ticket's budget at enqueue time:
 
 ```bash
 cw dev-queue add GEN-123 --client my-project --timeout 7200
+cw dev-queue add GEN-456 --client my-project --idle-watchdog 600
 ```
 
 ## Managing Configuration

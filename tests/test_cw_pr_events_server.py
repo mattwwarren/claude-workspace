@@ -16,10 +16,10 @@ starlette = pytest.importorskip(
     "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
 )
 
-from starlette.testclient import TestClient  # noqa: E402
+from starlette.testclient import TestClient
 
-import cw.cw_pr_events_server as _server_mod  # noqa: E402
-from cw.cw_pr_events_server import (  # noqa: E402
+import cw.cw_pr_events_server as _server_mod
+from cw.cw_pr_events_server import (
     _NOTIFICATION_TYPE,
     PREventRequest,
     _build_notification,
@@ -598,3 +598,85 @@ class TestLazyStarlette:
 
         with pytest.raises(ImportError, match=r"channel server requires \[mcp\] extra"):
             _server_mod.serve()
+
+
+class TestSSERouting:
+    """Regression: /sse must not 307-redirect (issue #305).
+
+    TestClient hangs on live SSE connections so tests are structural/unit-level.
+    """
+
+    def test_app_redirect_slashes_disabled(self) -> None:
+        """make_app() disables Starlette's default redirect_slashes to stop /sse→307."""
+        app = make_app()
+        assert not app.router.redirect_slashes
+
+    def test_sse_slash_middleware_rewrites_bare_path(self) -> None:
+        """_SSESlashMiddleware rewrites /sse (no trailing slash) → /sse/."""
+        import asyncio
+
+        from cw.cw_pr_events_server import _SSESlashMiddleware
+
+        captured: list[str] = []
+
+        async def _capture(scope: object, receive: object, send: object) -> None:
+            assert isinstance(scope, dict)
+            captured.append(scope["path"])
+
+        mw = _SSESlashMiddleware(_capture)
+
+        async def _run() -> None:
+            await mw(
+                {"type": "http", "path": "/sse", "query_string": b"client_id=t"},
+                None,
+                None,
+            )
+
+        asyncio.run(_run())
+        assert captured == ["/sse/"]
+
+    def test_sse_slash_middleware_leaves_slash_path_unchanged(self) -> None:
+        """_SSESlashMiddleware leaves /sse/ (already has trailing slash) untouched."""
+        import asyncio
+
+        from cw.cw_pr_events_server import _SSESlashMiddleware
+
+        captured: list[str] = []
+
+        async def _capture(scope: object, receive: object, send: object) -> None:
+            assert isinstance(scope, dict)
+            captured.append(scope["path"])
+
+        mw = _SSESlashMiddleware(_capture)
+
+        async def _run() -> None:
+            await mw(
+                {"type": "http", "path": "/sse/", "query_string": b"client_id=t"},
+                None,
+                None,
+            )
+
+        asyncio.run(_run())
+        assert captured == ["/sse/"]
+
+    def test_sse_slash_middleware_ignores_other_paths(self) -> None:
+        """_SSESlashMiddleware does not rewrite non-/sse paths."""
+        import asyncio
+
+        from cw.cw_pr_events_server import _SSESlashMiddleware
+
+        captured: list[str] = []
+
+        async def _capture(scope: object, receive: object, send: object) -> None:
+            assert isinstance(scope, dict)
+            captured.append(scope["path"])
+
+        mw = _SSESlashMiddleware(_capture)
+
+        async def _run() -> None:
+            for path in ["/ack", "/pr-event", "/messages"]:
+                scope = {"type": "http", "path": path, "query_string": b""}
+                await mw(scope, None, None)
+
+        asyncio.run(_run())
+        assert captured == ["/ack", "/pr-event", "/messages"]

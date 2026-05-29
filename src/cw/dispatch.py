@@ -19,10 +19,15 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
 from cw.spawn import spawn_create_impl
-from cw.worktree import create_worktree, is_main_behind_origin
+from cw.worktree import check_not_main_checkout, create_worktree, is_main_behind_origin
 
 if TYPE_CHECKING:
-    from cw.models import OrchestratorConfig, TicketTask
+    from cw.models import (
+        DevQueueStore,
+        OrchestratorConfig,
+        OrchestratorEvent,
+        TicketTask,
+    )
     from cw.native_daemon import NativeDaemonClient
 
 _DISPATCH_CONSUMER = "dispatch"
@@ -185,6 +190,13 @@ def dispatch_tick(
                 # worked because that flag takes a name rather than a path.
                 worktree_path = create_worktree(client, branch)
 
+                # Guard against the #300 regression: if create_worktree
+                # returns the main checkout path (degenerate path-computation
+                # or symlink indirection), refuse the spawn.  create_worktree
+                # normally catches this itself, but a mocked or buggy
+                # implementation could still return the same path.
+                check_not_main_checkout(worktree_path, client)
+
                 label = branch
                 session_id = spawn_create_impl(
                     client=client,
@@ -264,6 +276,96 @@ def dispatch_tick(
     return spawned
 
 
+def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
+    """Add the session's cost_usd to task.total_cost_usd, if available.
+
+    Reads cost via two-source fallback:
+      1. session.cost_usd (populated by signal_completed — normal headless path)
+      2. session.last_result.get('cost_usd') (populated by persist_last_result —
+         event-replay path where signal_completed did not run first)
+
+    When both sources are absent, total_cost_usd is left unchanged.
+    Called inside dev_queue_lock so the mutation is covered by the same
+    save_dev_queue call that persists the COMPLETED status.
+    """
+    if not session_id:
+        return
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == session_id), None)
+    if session is None:
+        return
+    cost: float | None = session.cost_usd
+    if cost is None and isinstance(session.last_result, dict):
+        raw_cost = session.last_result.get("cost_usd")
+        if isinstance(raw_cost, (int, float)):
+            cost = float(raw_cost)
+    if cost is not None:
+        task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
+
+
+def _apply_events_to_store(
+    store: DevQueueStore,
+    events: list[OrchestratorEvent],
+) -> int:
+    """Apply SESSION_COMPLETED events to an already-loaded DevQueueStore.
+
+    Caller must hold ``dev_queue_lock``. Saves the store when tasks were
+    transitioned; does NOT advance the event cursor — cursor advancement
+    is the caller's responsibility after the lock is released.
+
+    Returns the number of tasks transitioned to COMPLETED.
+    """
+    completed = 0
+    for event in events:
+        # Crashed events are emitted by reconcile only. For DAEMON
+        # sessions reconcile has already reverted the task
+        # RUNNING → PENDING; marking the task COMPLETED here would
+        # shadow that revert and (worse) match the next freshly-
+        # respawned RUNNING task for the same ticket_id, falsely
+        # retiring a still-running session. For non-DAEMON crashed
+        # sessions reconcile does not touch the queue, so a blanket
+        # skip is conservative-safe (no queue task is expected to
+        # match anyway). See GitHub issue #97.
+        if event.payload.get("crashed"):
+            continue
+        ticket_id = event.payload.get("ticket_id")
+        if not ticket_id:
+            # Fallback: recover ticket_id from the session_name for events
+            # produced before the reconciler emitted ticket_id explicitly.
+            # Drains historical RUNNING tasks whose completion events
+            # predate the producer-side fix.
+            session_name = event.payload.get("session_name")
+            if isinstance(session_name, str):
+                ticket_id = ticket_id_for_session(session_name)
+        if not ticket_id:
+            continue
+        event_session_id = event.payload.get("session_id")
+        for task in store.tasks:
+            if task.ticket_id != ticket_id:
+                continue
+            if task.status != QueueItemStatus.RUNNING:
+                continue
+            # Disambiguate stale events: when the event carries a
+            # session_id and the task has been stamped with one, they
+            # must agree. Either side missing a session_id falls back to
+            # ticket_id-only matching for backward compatibility with
+            # legacy tasks/events that predate the field.
+            if (
+                isinstance(event_session_id, str)
+                and task.session_id is not None
+                and task.session_id != event_session_id
+            ):
+                continue
+            task.status = QueueItemStatus.COMPLETED
+            sid = event_session_id if isinstance(event_session_id, str) else None
+            _accumulate_task_cost(task, sid)
+            completed += 1
+            break
+    if completed:
+        save_dev_queue(store)
+    return completed
+
+
 def consume_completed_sessions() -> int:
     """Process session.completed events and mark tasks COMPLETED in the queue.
 
@@ -284,54 +386,9 @@ def consume_completed_sessions() -> int:
     if not events:
         return 0
 
-    completed = 0
     with dev_queue_lock():
         store = load_dev_queue()
-        for event in events:
-            # Crashed events are emitted by reconcile only. For DAEMON
-            # sessions reconcile has already reverted the task
-            # RUNNING → PENDING; marking the task COMPLETED here would
-            # shadow that revert and (worse) match the next freshly-
-            # respawned RUNNING task for the same ticket_id, falsely
-            # retiring a still-running session. For non-DAEMON crashed
-            # sessions reconcile does not touch the queue, so a blanket
-            # skip is conservative-safe (no queue task is expected to
-            # match anyway). See GitHub issue #97.
-            if event.payload.get("crashed"):
-                continue
-            ticket_id = event.payload.get("ticket_id")
-            if not ticket_id:
-                # Fallback: recover ticket_id from the session_name for events
-                # produced before the reconciler emitted ticket_id explicitly.
-                # Drains historical RUNNING tasks whose completion events
-                # predate the producer-side fix.
-                session_name = event.payload.get("session_name")
-                if isinstance(session_name, str):
-                    ticket_id = ticket_id_for_session(session_name)
-            if not ticket_id:
-                continue
-            event_session_id = event.payload.get("session_id")
-            for task in store.tasks:
-                if task.ticket_id != ticket_id:
-                    continue
-                if task.status != QueueItemStatus.RUNNING:
-                    continue
-                # Disambiguate stale events: when the event carries a
-                # session_id and the task has been stamped with one, they
-                # must agree. Either side missing a session_id falls back to
-                # ticket_id-only matching for backward compatibility with
-                # legacy tasks/events that predate the field.
-                if (
-                    isinstance(event_session_id, str)
-                    and task.session_id is not None
-                    and task.session_id != event_session_id
-                ):
-                    continue
-                task.status = QueueItemStatus.COMPLETED
-                completed += 1
-                break
-        if completed:
-            save_dev_queue(store)
+        completed = _apply_events_to_store(store, events)
 
     # Persist sentinel-block summaries on Sessions whose completion event
     # carried captured stdout. Producer side (worker stdout capture) is

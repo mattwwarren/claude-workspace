@@ -11,12 +11,21 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from typing import Any
 
+from cw._util import _tail_lines
 from cw.exceptions import CwError
 
 # Pane reference format returned by ``tmux split-window -P -F ...``.
 _PANE_FORMAT = "#{session_name}:#{window_index}.#{pane_index}"
+
+# Pane reference format used by inspect_pane to capture pane ref, current
+# command, and pane activity time (Unix epoch from #{pane_activity}).
+_PANE_FORMAT_WITH_ACTIVITY = (
+    "#{session_name}:#{window_index}.#{pane_index}"
+    " #{pane_current_command} #{pane_activity}"
+)
 
 # Pane reference format that also captures the foreground command name.
 # Used by :meth:`TmuxAdapter.list_live_surface_commands` to detect zombie
@@ -131,6 +140,23 @@ class TmuxAdapter:
             return set()
         return {line for line in result.stdout.strip().splitlines() if line}
 
+    def capture_surface(self, surface_ref: str, lines: int, scrollback: int) -> str:
+        """Return last *lines* lines of worker output for *surface_ref*.
+
+        Uses ``tmux capture-pane`` looking back at most *scrollback* lines.
+        Raises :exc:`cw.exceptions.CwError` when the pane is not found or
+        the tmux server is not running.
+        """
+        result = self._run(
+            ["capture-pane", "-t", surface_ref, "-p", "-S", f"-{scrollback}"],
+            check=False,
+        )
+        if result.returncode != 0:
+            msg = f"Surface '{surface_ref}' not found or tmux server is not running."
+            raise CwError(msg)
+        content = result.stdout
+        return _tail_lines(content, lines)
+
     def list_live_surface_commands(self) -> dict[str, str]:
         """Return mapping of pane ref to foreground command name.
 
@@ -155,3 +181,37 @@ class TmuxAdapter:
             if len(parts) == 2:
                 commands[parts[0]] = parts[1].strip()
         return commands
+
+    def inspect_pane(self, surface_ref: str) -> dict[str, Any]:
+        """Return pane info for *surface_ref*; empty dict if unavailable.
+
+        Calls ``tmux list-panes`` with a format string capturing the pane
+        ref, current command, and pane activity epoch. Fails open —
+        returns ``{}`` on any error so callers can treat missing info as
+        "skip this check" rather than false-positive detection.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "tmux",
+                    "list-panes",
+                    "-t",
+                    surface_ref,
+                    "-F",
+                    _PANE_FORMAT_WITH_ACTIVITY,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return {}
+            parts = result.stdout.strip().split()
+            if len(parts) < 3:  # need ref, cmd, and epoch
+                return {}
+            cmd = parts[1]
+            dt = datetime.fromtimestamp(int(parts[2]), tz=UTC)
+        except (ValueError, OSError):
+            return {}
+        else:
+            return {"cmd": cmd, "last_activity": dt}

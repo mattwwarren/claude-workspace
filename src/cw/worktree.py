@@ -127,6 +127,24 @@ def _run_git(
         raise WorktreeError(msg) from e
 
 
+def check_not_main_checkout(worktree_path: Path, client: ClientConfig) -> None:
+    """Raise WorktreeError if *worktree_path* resolves to the client's main checkout.
+
+    Guards against the #300 regression: a degenerate path where a worktree
+    resolves to the main checkout, causing git commits to land there instead of
+    the intended branch worktree.  Uses Path.resolve() to catch symlinks.
+    """
+    main_checkout = _git_dir(client)
+    if worktree_path.resolve() == main_checkout.resolve():
+        msg = (
+            f"Refusing to operate on main checkout: worktree path {worktree_path} "
+            f"resolves to the same location as the client's main checkout "
+            f"({main_checkout}). A prior 'git worktree add' likely targeted "
+            f"the main repo directory instead of a new branch worktree."
+        )
+        raise WorktreeError(msg)
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -139,6 +157,8 @@ def create_worktree(
     """
     wt_path = worktree_path_for(client, branch)
     git_cwd = _git_dir(client)
+
+    check_not_main_checkout(wt_path, client)
 
     if wt_path.exists():
         return wt_path

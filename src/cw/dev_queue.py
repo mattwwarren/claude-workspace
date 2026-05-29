@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cw.atomic import atomic_write_text
 from cw.config import (
@@ -18,6 +18,7 @@ from cw.config import (
 )
 from cw.exceptions import CwError
 from cw.models import (
+    DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
     OrchestratorConfig,
@@ -95,13 +96,30 @@ def load_plan() -> DispatchPlan | None:
         return None
 
 
+def _fill_task_cost_default(task_raw: dict[str, Any]) -> None:
+    """Fill total_cost_usd introduced in dev-queue schema v2."""
+    if "total_cost_usd" not in task_raw:
+        task_raw["total_cost_usd"] = None
+
+
+def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalise a raw dev_queue.json payload into a currently-valid shape."""
+    tasks = raw.get("tasks")
+    if isinstance(tasks, list):
+        for task_raw in tasks:
+            if isinstance(task_raw, dict):
+                _fill_task_cost_default(task_raw)
+    raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
+    return raw
+
+
 def load_dev_queue() -> DevQueueStore:
     """Load the dev queue from disk, returning an empty store if missing."""
     path = dev_queue_file()
     if not path.exists():
         return DevQueueStore()
     raw = json.loads(path.read_text())
-    return DevQueueStore.model_validate(raw)
+    return DevQueueStore.model_validate(migrate_dev_queue(raw))
 
 
 def save_dev_queue(store: DevQueueStore) -> None:
@@ -159,6 +177,55 @@ def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> N
         match_set = {id(m) for m in matches}
         store.tasks = [t for t in store.tasks if id(t) not in match_set]
         save_dev_queue(store)
+
+
+def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
+    """Mark a TicketTask as CANCELLED, clearing its session_id.
+
+    Returns the list of session_ids that were cleared (one per cancelled task).
+    Raises CwError when no task matches. Idempotent for already-CANCELLED tasks.
+    """
+    with _lock():
+        store = load_dev_queue()
+        matches = [
+            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+        ]
+        if not matches:
+            msg = (
+                f"No dev-queue task found for ticket '{ticket_id}'"
+                f" in client '{client}'."
+            )
+            raise CwError(msg)
+        cleared: list[str | None] = []
+        changed = False
+        for task in matches:
+            if task.status == QueueItemStatus.CANCELLED:
+                continue
+            cleared.append(task.session_id)
+            task.status = QueueItemStatus.CANCELLED
+            task.session_id = None
+            changed = True
+        if changed:
+            save_dev_queue(store)
+    return cleared
+
+
+def cancel_task_for_session(session_id: str) -> bool:
+    """Mark the RUNNING TicketTask that owns *session_id* as CANCELLED.
+
+    Returns True if a task was cancelled, False if none matched.
+    Used by _spawn_close_impl to atomically preempt the dispatcher before
+    the session is marked COMPLETED. See GitHub issue #317.
+    """
+    with _lock():
+        store = load_dev_queue()
+        for task in store.tasks:
+            if task.session_id == session_id and task.status == QueueItemStatus.RUNNING:
+                task.status = QueueItemStatus.CANCELLED
+                task.session_id = None
+                save_dev_queue(store)
+                return True
+    return False
 
 
 def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:

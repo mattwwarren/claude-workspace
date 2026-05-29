@@ -753,3 +753,42 @@ class TestMigrateCwState:
         raw = {"schema_version": 1, "sessions": "oops"}
         migrated = migrate_cw_state(raw)
         assert migrated["schema_version"] == 1
+
+    def test_v3_to_v4_fills_cost_fields(self) -> None:
+        """migrate_cw_state fills cost_usd and cost_breakdown on sessions."""
+        raw = {
+            "schema_version": 3,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["cost_usd"] is None
+        assert session["cost_breakdown"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v4_cost_fields_preserved_idempotently(self) -> None:
+        """Existing cost values survive a second migration pass."""
+        raw = {
+            "schema_version": 4,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": 1.5,
+                    "cost_breakdown": {"claude-sonnet-4-6": 1.5},
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["cost_usd"] == 1.5
+        assert session["cost_breakdown"] == {"claude-sonnet-4-6": 1.5}

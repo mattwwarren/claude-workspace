@@ -1526,3 +1526,246 @@ class TestClaimNextPendingAttempts:
         claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-cumulative")
         assert claimed.status == QueueItemStatus.RUNNING
         assert claimed.attempts == 3
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchDoesNotTouchMainCheckout
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchDoesNotTouchMainCheckout:
+    """Regression tests for #300: dispatch must never commit to the main checkout.
+
+    When create_worktree degenerately returns the main checkout path, the
+    identity guard in dispatch_tick must refuse the spawn and revert
+    the task to PENDING — no session created, no commits to the main repo.
+    """
+
+    def test_dispatch_tick_does_not_modify_main_checkout_head(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Normal dispatch: main checkout HEAD must be unchanged after the tick."""
+        workspace_dir = sample_client_config.workspace_path
+        before_head = subprocess.check_output(
+            ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        after_head = subprocess.check_output(
+            ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        assert spawned == 1, "session should have been spawned in the branch worktree"
+        assert len(daemon.spawn_calls) == 1
+        assert after_head == before_head
+
+    def test_dispatch_tick_with_worktree_equal_to_main_checkout_reverts_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Degenerate path: create_worktree returns main checkout → PENDING revert.
+
+        Simulates the #300 regression: if create_worktree returns the main
+        checkout path (due to a path-computation bug), the identity guard in
+        dispatch_tick must refuse and the dispatch loop must revert the
+        task to PENDING with no daemon spawn.
+        """
+        workspace_dir = sample_client_config.workspace_path
+        monkeypatch.setattr(
+            "cw.dispatch.create_worktree",
+            lambda _client, _branch: workspace_dir,
+        )
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-300-guard", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        assert daemon.spawn_calls == []
+
+        store = load_dev_queue()
+        tasks = [t for t in store.tasks if t.ticket_id == "GEN-300-guard"]
+        assert len(tasks) == 1
+        assert tasks[0].status == QueueItemStatus.PENDING
+        assert tasks[0].attempts == 1
+
+
+# ---------------------------------------------------------------------------
+# Race regression: spawn close cancels task so dispatcher cannot re-spawn
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnCloseRaceRegression:
+    def test_spawn_close_prevents_respawn_via_cancelled_status(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_spawn_close_impl CANCELS the task; dispatch_tick does not re-spawn it.
+
+        Regression test for GitHub issue #317.  Setup:
+        1. One DAEMON ACTIVE session with a RUNNING TicketTask that has its
+           session_id stamped.
+        2. _spawn_close_impl is called (simulates `cw spawn close`).
+        3. A subsequent dispatch_tick must NOT spawn a new session for the
+           now-CANCELLED task.
+        """
+        from cw.cli import _spawn_close_impl
+        from cw.config import CwState, save_state
+        from cw.models import SessionPurpose
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Build a DAEMON ACTIVE session.
+        workspace = sample_client_config.workspace_path
+        sess = Session(
+            id="race-sess-1",
+            name="test-client/auto-dev/RACE-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            status=SessionStatus.ACTIVE,
+            surface_ref="fake-surface-ref",
+        )
+        save_state(CwState(sessions=[sess]))
+
+        # Matching RUNNING TicketTask.
+        task = TicketTask(
+            ticket_id="RACE-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="race-sess-1",
+        )
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # Stub out daemon.stop so it doesn't error on the fake surface_ref.
+        daemon = FakeNativeDaemonClient()
+
+        # Call _spawn_close_impl — should CANCEL the task atomically.
+        _spawn_close_impl(session_id="race-sess-1", native_daemon=daemon)
+
+        # Verify the task is CANCELLED.
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "RACE-1")
+        assert t.status == QueueItemStatus.CANCELLED, (
+            f"Expected CANCELLED after spawn close, got {t.status}"
+        )
+
+        # Now dispatch_tick should NOT re-spawn (CANCELLED != PENDING).
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        assert spawned == 0, (
+            f"Dispatcher should not re-spawn a CANCELLED task, got {spawned}"
+        )
+
+        # Still CANCELLED — not reverted to PENDING.
+        store2 = load_dev_queue()
+        t2 = next(t for t in store2.tasks if t.ticket_id == "RACE-1")
+        assert t2.status == QueueItemStatus.CANCELLED
+
+
+class TestAccumulateTaskCost:
+    """Tests for _accumulate_task_cost helper inside consume_completed_sessions."""
+
+    def _make_running_task(
+        self, session_id: str, ticket_id: str = "GEN-1"
+    ) -> TicketTask:
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _make_session(
+        self,
+        session_id: str,
+        *,
+        cost_usd: float | None = None,
+        last_result: dict | None = None,
+    ) -> None:
+        sess = Session(
+            id=session_id,
+            name="test-client/auto-dev/GEN-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/dev/null"),
+            cost_usd=cost_usd,
+            last_result=last_result,
+        )
+        save_state(CwState(sessions=[sess]))
+
+    def test_accumulates_cost_from_cost_usd_field(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """When session.cost_usd is set, accumulates from that field."""
+        self._make_running_task("s_cost1")
+        self._make_session("s_cost1", cost_usd=1.5)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-1", "session_id": "s_cost1"},
+        )
+        consume_completed_sessions()
+        store = load_dev_queue()
+        assert store.tasks[0].total_cost_usd == pytest.approx(1.5)
+
+    def test_accumulates_cost_from_last_result_when_cost_usd_field_absent(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """Falls back to session.last_result['cost_usd'] when cost_usd field is None."""
+        self._make_running_task("s_lr1")
+        self._make_session(
+            "s_lr1",
+            cost_usd=None,
+            last_result={"cost_usd": 2.0, "status": "shipped"},
+        )
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-1", "session_id": "s_lr1"},
+        )
+        consume_completed_sessions()
+        store = load_dev_queue()
+        assert store.tasks[0].total_cost_usd == pytest.approx(2.0)
+
+    def test_accumulates_cost_zero_when_both_sources_absent(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """When both cost sources are None, total_cost_usd is unchanged (no crash)."""
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="s_none1",
+            total_cost_usd=5.0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        self._make_session("s_none1", cost_usd=None, last_result=None)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-1", "session_id": "s_none1"},
+        )
+        consume_completed_sessions()
+        store = load_dev_queue()
+        assert store.tasks[0].total_cost_usd == pytest.approx(5.0)
