@@ -14,10 +14,10 @@ starlette = pytest.importorskip(
     "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
 )
 
-from mcp.shared.message import SessionMessage  # noqa: E402
-from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse  # noqa: E402
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse
 
-from cw.cw_pr_events_channel import (  # noqa: E402
+from cw.cw_pr_events_channel import (
     _DEFAULT_BASE_URL,
     _NOTIFICATION_TYPE,
     _build_meta,

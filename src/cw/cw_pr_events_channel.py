@@ -25,7 +25,7 @@ def _extract_payload(session_msg: Any) -> dict[str, Any] | None:
 
     Returns None for non-PR-event messages (type guard, not error).
     """
-    from mcp.types import JSONRPCNotification  # noqa: PLC0415
+    from mcp.types import JSONRPCNotification
 
     root = session_msg.message.root
     if not isinstance(root, JSONRPCNotification):
@@ -62,8 +62,8 @@ def _build_meta(data: dict[str, Any]) -> dict[str, str]:
 
 def _build_outbound_notification(data: dict[str, Any]) -> Any:
     """Build a SessionMessage to emit on the stdio MCP connection."""
-    from mcp.shared.message import SessionMessage  # noqa: PLC0415
-    from mcp.types import JSONRPCMessage, JSONRPCNotification  # noqa: PLC0415
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCMessage, JSONRPCNotification
 
     return SessionMessage(
         message=JSONRPCMessage(
@@ -91,10 +91,10 @@ async def _relay_upstream(sse_read: Any, stdio_write: Any) -> None:
 
 def run_proxy(client_id: str | None = None) -> None:
     """Start the stdio MCP proxy. Blocks until the SSE connection closes."""
-    import anyio  # noqa: PLC0415
-    from mcp.client.sse import sse_client  # noqa: PLC0415
-    from mcp.server import Server  # noqa: PLC0415
-    from mcp.server.stdio import stdio_server  # noqa: PLC0415
+    import anyio
+    from mcp.client.sse import sse_client
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
 
     base_url = os.environ.get("CW_PR_EVENTS_BASE_URL", _DEFAULT_BASE_URL)
     if client_id is None:
