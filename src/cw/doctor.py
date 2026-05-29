@@ -432,12 +432,14 @@ def _check_wedge_task_running_no_session(
             )
         elif task.session_id not in live_session_ids:
             # session_id set but points to a non-live session (missing from
-            # state, TIMED_OUT, BACKGROUNDED, etc.).
-            # _check_wedge_task_running_completed_session handles COMPLETED
-            # specifically; everything else falls here.
+            # state, TIMED_OUT, etc.).
+            # _check_wedge_task_running_completed_session handles COMPLETED.
+            # BACKGROUNDED is excluded: the session is intentionally paused
+            # and will resume — flagging it as a wedge is a false positive.
             session_by_id_local = {s.id: s for s in state.sessions}
             sess = session_by_id_local.get(task.session_id)
-            if sess is None or sess.status != SessionStatus.COMPLETED:
+            _non_wedge = {SessionStatus.COMPLETED, SessionStatus.BACKGROUNDED}
+            if sess is None or sess.status not in _non_wedge:
                 findings.append(
                     WedgeFinding(
                         wedge_class="wedge/task-running-no-session",
@@ -526,10 +528,11 @@ def _check_wedge_repo_ahead(
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=10,
             )
             if ls_result.returncode != 0 or not ls_result.stdout.strip():
                 continue
-        except OSError:
+        except (OSError, _sp.TimeoutExpired):
             continue
         # Check PR status via gh CLI
         recipe: str
@@ -549,9 +552,10 @@ def _check_wedge_repo_ahead(
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=10,
             )
             prs = json.loads(pr_result.stdout) if pr_result.returncode == 0 else []
-        except (OSError, ValueError):
+        except (OSError, ValueError, _sp.TimeoutExpired):
             prs = []
         if not prs:
             recipe = (
@@ -592,20 +596,14 @@ def _reap_wedge_findings(
     session_by_id = {s.id: s for s in state.sessions}
     now = datetime.now(UTC)
 
-    # --- Class-1: in-memory mutations only (not yet persisted) ---
+    # Collect IDs for class-1 sessions and ticket IDs for queue revert (classes 1-3).
     class1_session_ids: set[str] = set()
     for f in findings:
         if f.wedge_class != "wedge/pane-idle-but-active" or f.session_id is None:
             continue
-        session = session_by_id.get(f.session_id)
-        if session is None:
-            continue
-        session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.NORMAL
-        session.completed_at = now
-        class1_session_ids.add(f.session_id)
+        if f.session_id in session_by_id:
+            class1_session_ids.add(f.session_id)
 
-    # Collect ticket IDs for queue revert (classes 1-3, not class-4).
     revert_ticket_ids: set[str] = set()
     for f in findings:
         if f.wedge_class == "wedge/repo-ahead-of-queue":
@@ -613,13 +611,17 @@ def _reap_wedge_findings(
         if f.ticket_id:
             revert_ticket_ids.add(f.ticket_id)
 
-    # FIX 5: Hold queue lock across BOTH state writes to prevent torn state
-    # window where dispatch observes sessions.json=COMPLETED but
-    # dev_queue.json=RUNNING and triggers a spurious re-spawn.
+    # Hold queue lock across BOTH state writes — mutations happen inside the
+    # lock so no reader sees sessions.json=COMPLETED while dev_queue.json=RUNNING.
     if class1_session_ids or revert_ticket_ids:
         with dev_queue_lock():
             if class1_session_ids:
-                save_state(state)  # session mutations persisted inside lock
+                for sid in class1_session_ids:
+                    session = session_by_id[sid]
+                    session.status = SessionStatus.COMPLETED
+                    session.completed_reason = CompletionReason.NORMAL
+                    session.completed_at = now
+                save_state(state)
             if revert_ticket_ids:
                 queue = load_dev_queue()
                 changed = False

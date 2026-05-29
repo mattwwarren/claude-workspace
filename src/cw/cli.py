@@ -295,14 +295,41 @@ def doctor(reap: bool, as_json: bool) -> None:
 
     Reports the resolved backend, backend binary/daemon availability,
     config file locations and validity, and state file parseability.
-    With ``--reap`` also reconciles cw's session state with the live
-    multiplexer, marking phantom sessions COMPLETED and reverting their
-    tickets to PENDING. Exits non-zero if any check fails.
+    Exits non-zero if any check fails.
+
+    With ``--reap``, also detects and repairs the following wedge conditions:
+
+    \b
+    Class 1 — wedge/pane-idle-but-active
+      Session pane shows an idle shell with no recent worktree activity.
+      Action: mark session COMPLETED, close pane, revert queue task to PENDING.
+      Recipe: cw doctor --reap
+
+    \b
+    Class 2 — wedge/task-running-no-session
+      Queue task is RUNNING but has no associated live session.
+      Action: revert queue task to PENDING.
+      Recipe: cw doctor --reap
+
+    \b
+    Class 3 — wedge/task-running-completed-session
+      Queue task is RUNNING but its session is already COMPLETED.
+      Action: revert queue task to PENDING.
+      Recipe: cw doctor --reap
+
+    \b
+    Class 4 — wedge/repo-ahead-of-queue (advisory only)
+      Branch is pushed to remote but queue task is still RUNNING.
+      No automatic mutation — inspect and resolve manually.
+      Recipe: cw spawn-complete <ticket_id> [--status shipped]
+
+    ``--reap`` also reconciles session state with the live multiplexer,
+    marking phantom sessions COMPLETED and reverting their tickets to PENDING.
     """
     report = run_doctor(reap=reap)
     if as_json:
         click.echo(format_report_json(report))
-        sys.exit(0 if report.ok else 1)
+        raise click.exceptions.Exit(0 if report.ok else 1)
     click.echo(format_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)

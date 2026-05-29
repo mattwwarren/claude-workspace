@@ -1643,6 +1643,43 @@ class TestWedgeTaskRunningNoSession:
         assert f.ticket_id == "TST-99"
         assert "PENDING" in f.recipe or "revert" in f.recipe.lower()
 
+    def test_backgrounded_session_skips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from cw.doctor import _check_wedge_task_running_no_session
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            Session,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+
+        session = Session(
+            id="bg-sess",
+            name="client-a/auto-dev/TST-BG",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.BACKGROUNDED,
+            workspace_path=Path("/tmp"),
+        )
+        old_time = datetime.now(UTC) - timedelta(seconds=120)
+        task = TicketTask(
+            ticket_id="TST-BG",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="bg-sess",
+            created_at=old_time,
+        )
+        state = CwState(sessions=[session])
+        queue = DevQueueStore(tasks=[task])
+        findings = _check_wedge_task_running_no_session(state, queue)
+        assert findings == []
+
 
 class TestWedgeTaskRunningCompletedSession:
     """wedge/task-running-completed-session detection logic."""
@@ -1969,6 +2006,69 @@ class TestWedgeRepoAheadOfQueue:
         _check_wedge_repo_ahead(state, queue)
         # The ls-remote call must reference my-branch, not auto-dev/TST-R6
         assert any("my-branch" in str(a) for a in ls_remote_args_seen)
+
+    def test_ls_remote_timeout_no_finding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        import subprocess
+
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-RT1")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                raise subprocess.TimeoutExpired(cmd=args, timeout=10)
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert findings == []
+
+    def test_gh_pr_timeout_emits_finding_with_empty_prs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        import subprocess
+
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-RT2")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                return _Proc(0, "abc123\trefs/heads/auto-dev/TST-RT2\n")
+            if "pr" in args and "list" in args:
+                raise subprocess.TimeoutExpired(cmd=args, timeout=10)
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        # TimeoutExpired on gh pr list → treated as no PRs → recipe mentions no open PR
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert len(findings) == 1
+        assert (
+            "no open PR" in findings[0].recipe
+            or "cw spawn-complete" in findings[0].recipe
+        )
 
 
 class TestWedgeReapRecipes:
