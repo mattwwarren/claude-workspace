@@ -14,6 +14,9 @@ starlette = pytest.importorskip(
     "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
 )
 
+from mcp.shared.message import SessionMessage  # noqa: E402
+from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse  # noqa: E402
+
 from cw.cw_queue_events_channel import (  # noqa: E402
     _DEFAULT_BASE_URL,
     _NOTIFICATION_TYPE,
@@ -22,8 +25,6 @@ from cw.cw_queue_events_channel import (  # noqa: E402
     _extract_payload,
     _relay_upstream,
 )
-from mcp.shared.message import SessionMessage  # noqa: E402
-from mcp.types import JSONRPCMessage, JSONRPCNotification, JSONRPCResponse  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -309,6 +310,7 @@ class TestRunProxyEnvVars:
         from contextlib import asynccontextmanager
 
         import mcp.client.sse as _sse_mod
+
         from cw.cw_queue_events_channel import run_proxy
 
         captured: list[str] = []
