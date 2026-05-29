@@ -17,6 +17,8 @@ starlette = pytest.importorskip(
     "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
 )
 
+from starlette.testclient import TestClient  # noqa: E402
+
 import cw.cw_queue_events_server as _server_mod  # noqa: E402
 from cw.cw_queue_events_server import (  # noqa: E402
     _NOTIFICATION_TYPE,
@@ -34,8 +36,6 @@ from cw.cw_queue_events_server import (  # noqa: E402
     subscribe_with_cursor,
     unsubscribe,
 )
-from starlette.testclient import TestClient  # noqa: E402
-
 from cw.models import (  # noqa: E402
     CwState,
     DevQueueStore,
@@ -63,10 +63,12 @@ def _reset_channel_state() -> Generator[None]:
     with _server_mod._file_lock:
         _server_mod._cursors.clear()
         _server_mod._event_offset[0] = 0
+    _server_mod._poller_started[0] = False
     yield
     with _server_mod._file_lock:
         _server_mod._cursors.clear()
         _server_mod._event_offset[0] = 0
+    _server_mod._poller_started[0] = False
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +248,8 @@ class TestSubscriberRegistry:
 
 class TestAppendEventQueueChannel:
     def test_appends_to_queue_channel_events_jsonl(self) -> None:
-        from cw.cw_queue_events_server import _append_event
-
         from cw.config import state_dir
+        from cw.cw_queue_events_server import _append_event
 
         _append_event(
             {"notification_type": _NOTIFICATION_TYPE, "message": "m", "title": "t"}
@@ -260,9 +261,8 @@ class TestAppendEventQueueChannel:
 
     def test_does_not_write_to_channel_events_jsonl(self) -> None:
         """Must use queue-channel-events.jsonl, NOT channel-events.jsonl."""
-        from cw.cw_queue_events_server import _append_event
-
         from cw.config import state_dir
+        from cw.cw_queue_events_server import _append_event
 
         _append_event(
             {"notification_type": _NOTIFICATION_TYPE, "message": "m", "title": "t"}
@@ -282,9 +282,8 @@ class TestAppendEventQueueChannel:
         assert _server_mod._event_offset[0] == 2
 
     def test_record_contains_offset_field(self) -> None:
-        from cw.cw_queue_events_server import _append_event
-
         from cw.config import state_dir
+        from cw.cw_queue_events_server import _append_event
 
         _append_event(
             {"notification_type": _NOTIFICATION_TYPE, "message": "m", "title": "t"}
@@ -294,9 +293,8 @@ class TestAppendEventQueueChannel:
         assert record["offset"] == 0
 
     def test_thread_safe_under_concurrent_appends(self) -> None:
-        from cw.cw_queue_events_server import _append_event
-
         from cw.config import state_dir
+        from cw.cw_queue_events_server import _append_event
 
         def worker() -> None:
             _append_event(
@@ -365,12 +363,11 @@ class TestReadEventsFromOffsetQueueChannel:
         assert result[1]["offset"] == 2
 
     def test_skips_malformed_lines(self) -> None:
+        from cw.config import state_dir
         from cw.cw_queue_events_server import (
             _append_event,
             _read_events_from_offset,
         )
-
-        from cw.config import state_dir
 
         _append_event(
             {"notification_type": _NOTIFICATION_TYPE, "message": "a", "title": "a"}
@@ -458,9 +455,8 @@ class TestSubscribeWithCursorQueueChannel:
 
 class TestAckOffsetQueueChannel:
     def test_persists_to_queue_channel_cursors_json(self) -> None:
-        from cw.cw_queue_events_server import ack_offset
-
         from cw.config import state_dir
+        from cw.cw_queue_events_server import ack_offset
 
         ack_offset("sub-a", 3)
         path = state_dir() / "queue-channel-cursors.json"
@@ -470,9 +466,8 @@ class TestAckOffsetQueueChannel:
 
     def test_does_not_write_channel_cursors_json(self) -> None:
         """Must use queue-channel-cursors.json, NOT channel-cursors.json."""
-        from cw.cw_queue_events_server import ack_offset
-
         from cw.config import state_dir
+        from cw.cw_queue_events_server import ack_offset
 
         ack_offset("sub-b", 5)
         wrong_path = state_dir() / "channel-cursors.json"

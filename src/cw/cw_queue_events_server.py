@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
+from cw.models import QueueItemStatus, SessionStatus
 
 if TYPE_CHECKING:
     from starlette.applications import Starlette
@@ -192,30 +193,28 @@ def _save_snapshot(snap: QueueSnapshot) -> None:
     atomic_write_text(path, snap.model_dump_json())
 
 
-def _get_sentinel_status(session_id: str | None, state: Any) -> str | None:
+def _get_last_result(session_id: str | None, state: Any) -> dict[str, Any] | None:
+    """Return last_result dict for the session matching session_id, or None."""
     if session_id is None:
         return None
     for session in state.sessions:
         if session.id == session_id:
             lr = session.last_result
-            if lr and isinstance(lr, dict):
-                return lr.get("status")
-            return None
+            return lr if isinstance(lr, dict) else None
     return None
+
+
+def _get_sentinel_status(session_id: str | None, state: Any) -> str | None:
+    lr = _get_last_result(session_id, state)
+    return lr.get("status") if lr is not None else None
 
 
 def _get_blocker_reason(session_id: str | None, state: Any) -> str | None:
-    if session_id is None:
+    lr = _get_last_result(session_id, state)
+    if lr is None:
         return None
-    for session in state.sessions:
-        if session.id == session_id:
-            lr = session.last_result
-            if lr and isinstance(lr, dict):
-                blocker = lr.get("blocker")
-                if blocker and isinstance(blocker, dict):
-                    return blocker.get("reason")
-            return None
-    return None
+    blocker = lr.get("blocker")
+    return blocker.get("reason") if isinstance(blocker, dict) else None
 
 
 def _compute_queue_deltas(
@@ -238,7 +237,7 @@ def _compute_queue_deltas(
                     "status": curr,
                 }
             )
-        elif prev == "pending" and curr == "running":
+        elif prev == QueueItemStatus.PENDING and curr == QueueItemStatus.RUNNING:
             events.append(
                 {
                     "event": "queue.ticket_claimed",
@@ -247,18 +246,18 @@ def _compute_queue_deltas(
                     "session_id": task.session_id,
                 }
             )
-        elif prev == "running" and curr == "completed":
+        elif prev == QueueItemStatus.RUNNING and curr == QueueItemStatus.COMPLETED:
             sentinel_status = _get_sentinel_status(task.session_id, state)
             events.append(
                 {
                     "event": "queue.ticket_completed",
                     "ticket_id": tid,
                     "client": task.client,
-                    "queue_status": "completed",
+                    "queue_status": QueueItemStatus.COMPLETED,
                     "sentinel_status": sentinel_status,
                 }
             )
-        elif prev == "running" and curr == "failed":
+        elif prev == QueueItemStatus.RUNNING and curr == QueueItemStatus.FAILED:
             error = _get_blocker_reason(task.session_id, state)
             events.append(
                 {
@@ -283,7 +282,7 @@ def _compute_session_deltas(
     for session in state.sessions:
         prev = old.session_statuses.get(session.id)
         curr = str(session.status)
-        if prev == "active" and curr == "idle":
+        if prev == SessionStatus.ACTIVE and curr == SessionStatus.IDLE:
             events.append(
                 {
                     "event": "queue.session_idled",
@@ -307,9 +306,12 @@ def _build_queue_notification(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _check_wedge() -> None:
-    """Check for wedged tasks. TODO: implement when doctor-drift ships."""
-    return
+def _check_wedge() -> dict[str, Any] | None:
+    """Check for wedged tasks. Returns wedge-event dict if detected, else None.
+
+    TODO: implement when doctor-drift ships.
+    """
+    return None
 
 
 def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]:
@@ -323,6 +325,11 @@ def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]
     events: list[dict[str, Any]] = []
     events.extend(_compute_queue_deltas(old, store, state))
     events.extend(_compute_session_deltas(old, state))
+
+    # Wire wedge-detection hook — always called, but currently a stub
+    wedge = _check_wedge()
+    if wedge is not None:
+        events.append(wedge)
 
     new_snap = QueueSnapshot(
         task_statuses={t.ticket_id: str(t.status) for t in store.tasks},
@@ -357,7 +364,14 @@ def _run_poller() -> None:
             logger.exception("poller error")
 
 
+_poller_started: list[bool] = [False]
+
+
 def _start_poller() -> None:
+    with _lock:
+        if _poller_started[0]:
+            return
+        _poller_started[0] = True
     t = threading.Thread(target=_run_poller, daemon=True, name="queue-events-poller")
     t.start()
 

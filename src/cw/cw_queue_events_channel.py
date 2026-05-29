@@ -115,9 +115,11 @@ def run_proxy(client_id: str | None = None) -> None:
     from mcp.server.stdio import stdio_server  # noqa: PLC0415
 
     base_url = os.environ.get("CW_QUEUE_EVENTS_BASE_URL", _DEFAULT_BASE_URL)
-    if client_id is None:
-        client_id = os.environ.get("CW_QUEUE_EVENTS_CLIENT_ID", socket.gethostname())
-    sse_url = f"{base_url}/sse/?client_id={urllib.parse.quote(client_id)}"
+    # filter_client: the cw client name to filter events by (None = relay all)
+    filter_client = client_id or os.environ.get("CW_QUEUE_EVENTS_CLIENT_ID")
+    # cursor_id: the SSE subscription identity for replay cursor tracking
+    cursor_id = filter_client or socket.gethostname()
+    sse_url = f"{base_url}/sse/?client_id={urllib.parse.quote(cursor_id)}"
 
     mcp_server: Server = Server("cw-queue-events")
     init_options = mcp_server.create_initialization_options(
@@ -131,7 +133,7 @@ def run_proxy(client_id: str | None = None) -> None:
             anyio.create_task_group() as tg,
         ):
             tg.start_soon(mcp_server.run, stdio_read, stdio_write, init_options)
-            tg.start_soon(_relay_upstream, sse_read, stdio_write, client_id)
+            tg.start_soon(_relay_upstream, sse_read, stdio_write, filter_client)
 
     anyio.run(_main)
 
