@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    import click
     import pytest
 
     from cw.cmux import FakeCmuxAdapter
@@ -2855,7 +2856,9 @@ class TestCompleteCallbacks:
         )
 
         # None ctx/param are fine - callbacks don't use them
-        items = _complete_client(None, None, "a")  # type: ignore[arg-type]
+        items = _complete_client(
+            cast("click.Context", None), cast("click.Parameter", None), "a"
+        )
         names = [item.value for item in items]
         assert "alpha" in names
         assert "apricot" in names
@@ -2874,7 +2877,9 @@ class TestCompleteCallbacks:
             "    workspace_path: /tmp/b\n"
         )
 
-        items = _complete_client(None, None, "")  # type: ignore[arg-type]
+        items = _complete_client(
+            cast("click.Context", None), cast("click.Parameter", None), ""
+        )
         names = [item.value for item in items]
         assert "alpha" in names
         assert "beta" in names
@@ -2906,7 +2911,9 @@ class TestCompleteCallbacks:
         )
         save_state(state)
 
-        items = _complete_session(None, None, "")  # type: ignore[arg-type]
+        items = _complete_session(
+            cast("click.Context", None), cast("click.Parameter", None), ""
+        )
         names = [item.value for item in items]
         assert "test-client/impl" in names
         assert "test-client/idea" not in names
@@ -2938,7 +2945,9 @@ class TestCompleteCallbacks:
         )
         save_state(state)
 
-        items = _complete_session(None, None, "alpha")  # type: ignore[arg-type]
+        items = _complete_session(
+            cast("click.Context", None), cast("click.Parameter", None), "alpha"
+        )
         names = [item.value for item in items]
         assert "alpha/impl" in names
         assert "beta/impl" not in names
