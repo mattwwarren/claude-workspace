@@ -983,6 +983,79 @@ class TestPreFlightNoOp:
 
 
 # ---------------------------------------------------------------------------
+# blocked + stray next_actions coerce (issue #371 — follow-up to #367/#370)
+# A producer bug emits status=blocked alongside next_actions=['redispatch_ticket']
+# (or other non-user-directed verbs). The §4.3 terminal-reject invariant then
+# rejects the whole sentinel as validation_failed, masking the real blocker.
+# parse_stdout coerces by dropping next_actions and preserving the blocker.
+# Two exempt shapes are NOT coerced: pre-flight blocked and user-directed blocked.
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedWithStrayNextActionsCoerce:
+    def test_blocked_with_stray_next_actions_coerced(self) -> None:
+        """parse_stdout coerces blocked+stray next_actions to clean blocked.
+
+        Regression for issue #371: the exact failure mode from #367's first
+        attempt — worker emitted blocked+next_actions=['redispatch_ticket'],
+        causing validation_failed and masking the underlying impl_failed blocker.
+        """
+        p = _blocked_payload()
+        p["next_actions"] = ["redispatch_ticket"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.next_actions == []
+
+    def test_blocked_coerce_preserves_blocker(self) -> None:
+        """Coercing stray next_actions must preserve the original blocker intact."""
+        p = _blocked_payload()
+        p["next_actions"] = ["redispatch_ticket"]
+        p["blocker"]["retry_eligible"] = True
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.reason == "impl_failed"
+        assert result.blocker.retry_eligible is True
+
+    def test_blocked_strict_construction_still_rejects_stray_next_actions(
+        self,
+    ) -> None:
+        """Strict AutoDevResult.model_validate still rejects blocked+next_actions."""
+        p = _blocked_payload()
+        p["next_actions"] = ["redispatch_ticket"]
+        with pytest.raises(ValidationError, match="next_actions must be empty"):
+            AutoDevResult.model_validate(p)
+
+    def test_blocked_pre_flight_not_coerced(self) -> None:
+        """Pre-flight blocked with sync_local_main is NOT coerced (legitimate shape)."""
+        p = _blocked_payload()
+        p["status"] = "blocked"
+        p["stage_reached"] = "stage1_pre_flight"
+        p["next_actions"] = ["sync_local_main"]
+        p["scope"]["lines_actual"] = None
+        p["branch"] = None
+        p["worktree_path"] = None
+        p["fork_point_sha"] = None
+        p["commits"] = []
+        p["blocker"]["stage"] = "stage1_pre_flight"
+        p["blocker"]["reason"] = "local_main_diverged_from_origin"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.next_actions == ["sync_local_main"]
+
+    def test_blocked_user_directed_not_coerced(self) -> None:
+        """User-directed blocked (user_resolve_ prefix) is NOT coerced."""
+        p = _blocked_payload()
+        p["next_actions"] = ["user_resolve_ambiguity"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.next_actions == ["user_resolve_ambiguity"]
+
+
+# ---------------------------------------------------------------------------
 # stage1_pre_flight + blocked (added per #226 — Origin Sync block emits this
 # combo legitimately; the consumer previously rejected it as a §4.3 violation,
 # so every Origin-Sync-blocked sentinel became validation_failed). When status

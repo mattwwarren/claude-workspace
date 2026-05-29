@@ -721,6 +721,35 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
                 payload.get("schema_version"),
             )
 
+    # Pre-validation normalization for blocked + stray next_actions (issue
+    # #371 — follow-up to #367/#370). A producer bug emitted status=blocked
+    # alongside next_actions=['redispatch_ticket'] (or similar non-user-directed
+    # verbs). The §4.3 terminal-reject invariant rejects the whole sentinel as
+    # validation_failed, masking the real blocker. Coerce: drop stray
+    # next_actions, preserve the original blocker intact. Leniency applies only
+    # at the parse boundary (same scoping as the no_op coerce above).
+    # Two legitimate shapes carry next_actions on blocked and MUST NOT be coerced:
+    #   - pre-flight blocked (stage_reached='stage1_pre_flight'), and
+    #   - user-directed blocked (all next_actions start with user_* prefixes).
+    if raw_status == "blocked":
+        raw_next_actions = payload.get("next_actions")
+        if isinstance(raw_next_actions, list) and raw_next_actions:
+            is_pre_flight = payload.get("stage_reached") == "stage1_pre_flight"
+            is_user_directed = all(
+                isinstance(a, str) and a.startswith(USER_DIRECTED_PREFIXES)
+                for a in raw_next_actions
+            )
+            if not is_pre_flight and not is_user_directed:
+                _log.warning(
+                    "auto-dev: blocked sentinel carried stray next_actions=%r; "
+                    "dropping next_actions, preserving blocker "
+                    "(ticket=%s, schema_version=%s)",
+                    raw_next_actions,
+                    payload.get("ticket_id", "unknown"),
+                    payload.get("schema_version"),
+                )
+                payload["next_actions"] = []
+
     try:
         return AutoDevResult.model_validate(payload)
     except ValidationError as exc:
