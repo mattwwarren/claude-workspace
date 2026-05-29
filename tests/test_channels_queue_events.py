@@ -27,6 +27,7 @@ from cw.cw_queue_events_server import (  # noqa: E402
     _check_wedge,
     _compute_queue_deltas,
     _compute_session_deltas,
+    _load_offset_from_file,
     _load_snapshot,
     _save_snapshot,
     broadcast,
@@ -895,3 +896,55 @@ class TestDurableReplayQueueChannel:
             assert {item["offset"] for item in items} == {0, 1, 2, 3, 4}
         finally:
             unsubscribe(q)
+
+
+# ---------------------------------------------------------------------------
+# TestLoadOffsetFromFile
+# ---------------------------------------------------------------------------
+
+
+class TestLoadOffsetFromFile:
+    """Deterministic coverage for _load_offset_from_file parse loop.
+
+    Without an explicit populated-file test, lines 134-146 are only covered
+    incidentally when a prior test leaves a file behind — which fails on a
+    clean ubuntu run where the early return (no file) fires first.
+    """
+
+    def test_returns_zero_when_file_missing(self) -> None:
+        from cw.config import state_dir
+
+        assert not (state_dir() / "queue-channel-events.jsonl").exists()
+        assert _load_offset_from_file() == 0
+
+    def test_returns_max_offset_plus_one_skipping_blank_and_malformed(self) -> None:
+        from cw.config import state_dir
+
+        path = state_dir() / "queue-channel-events.jsonl"
+        lines = [
+            json.dumps({"offset": 2, "message": "a"}),
+            "",  # blank line -> continue (137-138)
+            json.dumps({"offset": 5, "message": "b"}),
+            "not-json",  # malformed -> JSONDecodeError continue (144-145)
+            json.dumps({"offset": 3, "message": "c"}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        assert _load_offset_from_file() == 6
+
+    def test_returns_zero_when_only_blank_and_malformed_lines(self) -> None:
+        from cw.config import state_dir
+
+        path = state_dir() / "queue-channel-events.jsonl"
+        path.write_text("\n   \nnot-json\n")
+        assert _load_offset_from_file() == 0
+
+    def test_ignores_non_int_offset(self) -> None:
+        from cw.config import state_dir
+
+        path = state_dir() / "queue-channel-events.jsonl"
+        lines = [
+            json.dumps({"offset": "bad", "message": "a"}),
+            json.dumps({"offset": 4, "message": "b"}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        assert _load_offset_from_file() == 5
