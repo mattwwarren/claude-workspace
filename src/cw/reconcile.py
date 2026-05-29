@@ -320,12 +320,8 @@ def _salvage_terminal_result(
     to an :class:`AutoDevResult` whose status is in
     :data:`_SALVAGE_TERMINAL_STATUSES`. Returns ``None`` otherwise.
     """
-    worktree = session.worktree_path
-    if worktree is None:
-        return None
-    encoded = str(worktree).replace("/", "-")
-    project_dir = Path.home() / ".claude" / "projects" / encoded
-    if not project_dir.is_dir():
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
         return None
     candidates = sorted(
         project_dir.glob("*.jsonl"),
@@ -348,6 +344,14 @@ def _salvage_terminal_result(
     return None
 
 
+def _session_project_dir(session: Session) -> Path | None:
+    """Return the Claude project dir for *session*, or None if worktree path unset."""
+    worktree = session.worktree_path
+    if worktree is None:
+        return None
+    return Path.home() / ".claude" / "projects" / str(worktree).replace("/", "-")
+
+
 def _transcript_recently_active(
     session: Session,
     now: datetime,
@@ -361,12 +365,8 @@ def _transcript_recently_active(
     is found (either the session is pre-first-write or path unavailable).
     See GitHub #340.
     """
-    worktree = session.worktree_path
-    if worktree is None:
-        return False
-    encoded = str(worktree).replace("/", "-")
-    project_dir = Path.home() / ".claude" / "projects" / encoded
-    if not project_dir.is_dir():
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
         return False
 
     try:
@@ -386,9 +386,9 @@ def _transcript_recently_active(
         if not candidates:
             return False
         newest = candidates[0]
-        if datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC) <= session.started_at:
-            return False
         mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
+        if mtime <= session.started_at:
+            return False
         return (now - mtime).total_seconds() < window_seconds
     except OSError:
         return False
