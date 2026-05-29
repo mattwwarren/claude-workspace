@@ -840,9 +840,11 @@ class TestFastForwardMain:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When already current, before_sha == after_sha."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
         client = ClientConfig(
             name="test-client",
-            workspace_path=tmp_path / "ws",
+            workspace_path=ws,
             default_branch="main",
         )
         sha = "abc123def456abc123def456abc123def456abc1"
@@ -863,9 +865,11 @@ class TestFastForwardMain:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """After a fast-forward, before_sha != after_sha."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
         client = ClientConfig(
             name="test-client",
-            workspace_path=tmp_path / "ws",
+            workspace_path=ws,
             default_branch="main",
         )
         old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -897,9 +901,11 @@ class TestFastForwardMain:
         """WorktreeError raised on pull failure (non-FF or network error)."""
         from cw.exceptions import WorktreeError as _WorktreeError
 
+        ws = tmp_path / "ws"
+        ws.mkdir()
         client = ClientConfig(
             name="test-client",
-            workspace_path=tmp_path / "ws",
+            workspace_path=ws,
             default_branch="main",
         )
         old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -919,6 +925,24 @@ class TestFastForwardMain:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
 
         with pytest.raises(WorktreeError, match="would clobber"):
+            fast_forward_main(client)
+
+    def test_fast_forward_main_raises_missing_workspace_error_when_dir_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """fast_forward_main raises MissingWorkspaceError when git_dir does not exist.
+
+        The guard fires before any git ops, so no _run_git mock is needed.
+        """
+        from cw.exceptions import MissingWorkspaceError
+
+        client = ClientConfig(
+            name="absent-client",
+            workspace_path=tmp_path / "nonexistent-workspace",
+            default_branch="main",
+        )
+
+        with pytest.raises(MissingWorkspaceError, match="absent-client"):
             fast_forward_main(client)
 
 

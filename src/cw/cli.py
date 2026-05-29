@@ -49,7 +49,7 @@ from cw.dev_queue import (
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
 from cw.doctor import format_report, format_report_json, run_doctor
 from cw.events import advance_cursor, read_events, record_event
-from cw.exceptions import CwError, WorktreeError
+from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -1635,6 +1635,9 @@ def dev_queue_refresh_all() -> None:
                 click.echo(f"{client.name}: already up to date ({before[:8]})")
             else:
                 click.echo(f"{client.name}: updated {before[:8]}..{after[:8]}")
+        except MissingWorkspaceError as exc:
+            click.echo(f"{client.name}: SKIP — {exc}", err=True)
+            # missing workspace is config-hygiene; does not contribute to had_error
         except WorktreeError as exc:
             click.echo(f"{client.name}: ERROR — {exc}", err=True)
             had_error = True
