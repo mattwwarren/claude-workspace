@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,6 +39,8 @@ from cw.orchestrate import (
     save_dispatch_record,
 )
 
+_RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -65,7 +68,7 @@ def workspace(tmp_path: Path) -> Path:
 @pytest.fixture
 def captured_runner() -> tuple[
     list[list[str]],
-    subprocess.CompletedProcess[str],
+    _RunnerFn,
 ]:
     """Provide a runner that records calls and returns success."""
     calls: list[list[str]] = []
@@ -76,11 +79,11 @@ def captured_runner() -> tuple[
         return completed
 
     # Returning the closure plus the calls list so tests can inspect both.
-    return calls, _runner  # type: ignore[return-value]
+    return calls, _runner
 
 
 @pytest.fixture
-def fake_runner() -> tuple[list[list[str]], object]:
+def fake_runner() -> tuple[list[list[str]], _RunnerFn]:
     """Yield (recorded_calls, runner_callable)."""
     calls: list[list[str]] = []
 
@@ -168,18 +171,18 @@ class TestRetireMergedPRs:
     def test_no_events_returns_empty_list(
         self,
         tmp_orchestrate_dirs: Path,
-        fake_runner: tuple[list[list[str]], object],
+        fake_runner: tuple[list[list[str]], _RunnerFn],
     ) -> None:
         """When there are no pr.merged events, retirement is a no-op."""
         _calls, runner = fake_runner
-        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)
         assert retired == []
 
     def test_retires_correlated_session(
         self,
         tmp_orchestrate_dirs: Path,
         workspace: Path,
-        fake_runner: tuple[list[list[str]], object],
+        fake_runner: tuple[list[list[str]], _RunnerFn],
     ) -> None:
         """A pr.merged event marks the correlated session COMPLETED."""
         # Set up state with one ACTIVE session linked via dispatch record.
@@ -189,7 +192,7 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 42)
 
         calls, runner = fake_runner
-        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)
 
         # Returned list contains the session ID.
         assert retired == ["sess0001"]
@@ -221,7 +224,7 @@ class TestRetireMergedPRs:
         self,
         tmp_orchestrate_dirs: Path,
         workspace: Path,
-        fake_runner: tuple[list[list[str]], object],
+        fake_runner: tuple[list[list[str]], _RunnerFn],
     ) -> None:
         """A second tick with no new events returns empty and does no work."""
         sess = _make_session("sess0010", workspace)
@@ -230,12 +233,12 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 9)
 
         calls, runner = fake_runner
-        first = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        first = retire_merged_prs(runner=runner)
         assert first == ["sess0010"]
         assert len(calls) == 1
 
         # Second call: cursor advanced, nothing left to do.
-        second = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        second = retire_merged_prs(runner=runner)
         assert second == []
         assert len(calls) == 1  # no additional review-monitor invocations
 
@@ -243,7 +246,7 @@ class TestRetireMergedPRs:
         self,
         tmp_orchestrate_dirs: Path,
         workspace: Path,
-        fake_runner: tuple[list[list[str]], object],
+        fake_runner: tuple[list[list[str]], _RunnerFn],
     ) -> None:
         """The dispatch record entry is dropped after retirement."""
         sess = _make_session("sess0020", workspace)
@@ -252,7 +255,7 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 11)
 
         _calls, runner = fake_runner
-        retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        retire_merged_prs(runner=runner)
 
         from cw.orchestrate import load_dispatch_record
 
@@ -262,14 +265,14 @@ class TestRetireMergedPRs:
     def test_no_dispatch_match_only_calls_review_monitor(
         self,
         tmp_orchestrate_dirs: Path,
-        fake_runner: tuple[list[list[str]], object],
+        fake_runner: tuple[list[list[str]], _RunnerFn],
     ) -> None:
         """A merged PR with no correlated sessions still cleans monitor state."""
         save_state(CwState(sessions=[]))
         _seed_pr_merged("owner/other", 5)
 
         calls, runner = fake_runner
-        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)
 
         assert retired == []
         assert len(calls) == 1
@@ -278,7 +281,7 @@ class TestRetireMergedPRs:
         self,
         tmp_orchestrate_dirs: Path,
         workspace: Path,
-        fake_runner: tuple[list[list[str]], object],
+        fake_runner: tuple[list[list[str]], _RunnerFn],
     ) -> None:
         """An already-COMPLETED session is not re-closed but its record is removed."""
         sess = _make_session("sess0030", workspace, status=SessionStatus.COMPLETED)
@@ -287,7 +290,7 @@ class TestRetireMergedPRs:
         _seed_pr_merged("owner/repo", 14)
 
         _calls, runner = fake_runner
-        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)
 
         assert retired == []
 
@@ -298,7 +301,7 @@ class TestRetireMergedPRs:
     def test_invalid_pr_number_advances_cursor(
         self,
         tmp_orchestrate_dirs: Path,
-        fake_runner: tuple[list[list[str]], object],
+        fake_runner: tuple[list[list[str]], _RunnerFn],
     ) -> None:
         """A pr.merged event without a usable pr_number is skipped, cursor advances."""
         record_event(
@@ -307,14 +310,14 @@ class TestRetireMergedPRs:
         )
 
         calls, runner = fake_runner
-        retired = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        retired = retire_merged_prs(runner=runner)
 
         assert retired == []
         # review_monitor.py was NOT invoked because pr_number was invalid.
         assert calls == []
 
         # Second call is a no-op (cursor advanced).
-        retired_second = retire_merged_prs(runner=runner)  # type: ignore[arg-type]
+        retired_second = retire_merged_prs(runner=runner)
         assert retired_second == []
 
 
