@@ -698,7 +698,7 @@ class TestWatchFlat:
         # we can control termination without relying on timing.
         call_count = 0
 
-        class _FakeSimpleQueue(_queue.SimpleQueue[str]):  # type: ignore[type-arg]
+        class _FakeSimpleQueue(_queue.SimpleQueue[str]):
             def __init__(self) -> None:
                 nonlocal call_count
                 call_count += 1
@@ -710,9 +710,6 @@ class TestWatchFlat:
 
         buf = StringIO()
         con = Console(file=buf, width=120, force_terminal=False)
-        import cw.tui as _tui
-
-        monkeypatch.setattr(_tui.queue, "SimpleQueue", _FakeSimpleQueue)
 
         # Not passing key_queue → hits the key_queue is None branch
         watch_flat(ticks=None, status_fn=lambda: sample_status, console=con)
