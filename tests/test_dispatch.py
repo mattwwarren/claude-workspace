@@ -13,6 +13,7 @@ import pytest
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue, save_plan
 from cw.dispatch import (
+    _accumulate_task_cost,
     consume_completed_sessions,
     dispatch_tick,
     persist_last_result,
@@ -1627,7 +1628,7 @@ class TestSpawnCloseRaceRegression:
            now-CANCELLED task.
         """
         from cw.cli import _spawn_close_impl
-        from cw.config import CwState, save_state
+        from cw.config import save_state
         from cw.models import SessionPurpose
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -1703,7 +1704,7 @@ class TestAccumulateTaskCost:
         session_id: str,
         *,
         cost_usd: float | None = None,
-        last_result: dict | None = None,
+        last_result: dict[str, object] | None = None,
     ) -> None:
         sess = Session(
             id=session_id,
@@ -1769,3 +1770,20 @@ class TestAccumulateTaskCost:
         consume_completed_sessions()
         store = load_dev_queue()
         assert store.tasks[0].total_cost_usd == pytest.approx(5.0)
+
+    def test_empty_string_session_id_is_not_treated_as_missing(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """Empty-string session_id must not short-circuit like None."""
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="",
+            total_cost_usd=3.0,
+        )
+        # No session in state — _accumulate_task_cost should attempt the lookup
+        # (not return early on empty string) and leave total_cost_usd unchanged.
+        save_state(CwState(sessions=[]))
+        _accumulate_task_cost(task, "")
+        assert task.total_cost_usd == pytest.approx(3.0)
