@@ -1,9 +1,9 @@
 name: Nightly (cmux integration)
 
 on:
-  schedule:
-    # 09:00 UTC daily (~02:00 PT / ~05:00 ET) — off peak
-    - cron: "0 9 * * *"
+  # De-scheduled: the cmux backend is slated for removal (#119), so the soak
+  # clock runs on the native nightly (nightly-native.yml) instead. Kept as a
+  # manual dispatch for on-demand cmux integration checks until #119 lands.
   workflow_dispatch: {}
 
 jobs:

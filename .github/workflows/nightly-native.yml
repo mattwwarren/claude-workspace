@@ -1,7 +1,11 @@
 name: Nightly (native daemon integration)
 
 on:
-  # TODO: add schedule trigger once API budget allocated — see #110
+  schedule:
+    # 09:00 UTC daily (~02:00 PT / ~05:00 ET) — off peak. Starts the
+    # 2-week native-soak clock toward 1.0 (gates #242/#119/#120). The cmux
+    # nightly is de-scheduled in favour of this native path (#119 removes cmux).
+    - cron: "0 9 * * *"
   workflow_dispatch: {}
 
 jobs:
