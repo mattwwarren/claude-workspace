@@ -39,6 +39,12 @@ def _make_task(
     return TaskSpec(description=description, purpose=purpose, prompt=prompt)
 
 
+def get_item(store: QueueStore, item_id: str) -> QueueItem:
+    item = store.find_item(item_id)
+    assert item is not None, f"queue item {item_id} not found"
+    return item
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -230,7 +236,7 @@ class TestClaimNext:
 
         # Manually set first to running so claim should return second
         store = load_queue("test-client")
-        store.find_item(first.id).status = QueueItemStatus.RUNNING  # type: ignore[union-attr]
+        get_item(store, first.id).status = QueueItemStatus.RUNNING
         save_queue("test-client", store)
 
         claimed = claim_next("test-client")
@@ -256,7 +262,7 @@ class TestClaimNext:
     def test_claim_next_skips_completed_items(self, tmp_queues_dir: Path) -> None:
         item = add_item("test-client", _make_task())
         store = load_queue("test-client")
-        store.find_item(item.id).status = QueueItemStatus.COMPLETED  # type: ignore[union-attr]
+        get_item(store, item.id).status = QueueItemStatus.COMPLETED
         save_queue("test-client", store)
         result = claim_next("test-client")
         assert result is None
@@ -264,7 +270,7 @@ class TestClaimNext:
     def test_claim_next_skips_failed_items(self, tmp_queues_dir: Path) -> None:
         item = add_item("test-client", _make_task())
         store = load_queue("test-client")
-        store.find_item(item.id).status = QueueItemStatus.FAILED  # type: ignore[union-attr]
+        get_item(store, item.id).status = QueueItemStatus.FAILED
         save_queue("test-client", store)
         result = claim_next("test-client")
         assert result is None
@@ -484,7 +490,7 @@ class TestClearQueue:
         running_item = add_item("c", _make_task())
         # Manually set second item to RUNNING
         store = load_queue("c")
-        store.find_item(running_item.id).status = QueueItemStatus.RUNNING  # type: ignore[union-attr]
+        get_item(store, running_item.id).status = QueueItemStatus.RUNNING
         save_queue("c", store)
 
         removed = clear_queue("c", status=QueueItemStatus.RUNNING)
@@ -499,7 +505,7 @@ class TestClearQueue:
         impl_running = add_item("c", _make_task(purpose=SessionPurpose.IMPL))
         # Set third to running
         store = load_queue("c")
-        store.find_item(impl_running.id).status = QueueItemStatus.RUNNING  # type: ignore[union-attr]
+        get_item(store, impl_running.id).status = QueueItemStatus.RUNNING
         save_queue("c", store)
 
         # Only remove IMPL + PENDING
@@ -651,8 +657,8 @@ class TestEdgeCases:
     ) -> None:
         item = add_item("c", _make_task())
         store = load_queue("c")
-        store.find_item(item.id).status = QueueItemStatus.COMPLETED  # type: ignore[union-attr]
-        store.find_item(item.id).result = "done"  # type: ignore[union-attr]
+        get_item(store, item.id).status = QueueItemStatus.COMPLETED
+        get_item(store, item.id).result = "done"
         save_queue("c", store)
         assert claim_next("c") is None
 
