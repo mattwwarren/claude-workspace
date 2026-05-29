@@ -2129,6 +2129,137 @@ def test_flag_silently_idle_skips_worker_with_recent_transcript(
     assert sess.last_result is None  # watchdog did not fire
 
 
+def test_flag_silently_idle_fires_when_project_dir_missing(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worktree_path set but project dir absent → proceeds to fire watchdog."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    worktree = tmp_path / "wt-no-proj"
+    sess = _mk_headless_daemon_session("no-proj-1", worktree, started_at)
+    sess.surface_ref = "live-ref"
+    # Do NOT create the .claude/projects/<encoded>/ directory.
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="no-proj-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="no-proj-1",
+                )
+            ]
+        )
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    with patch("cw.reconcile.fire_push_notification"):
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    assert "no-proj-1" in blocked
+
+
+def test_flag_silently_idle_fires_when_session_id_file_missing(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Known claude_session_id but the specific .jsonl doesn't exist → fires."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    worktree = tmp_path / "wt-missing-file"
+    sess = _mk_headless_daemon_session("missing-file-1", worktree, started_at)
+    sess.surface_ref = "live-ref"
+    sess.claude_session_id = "missing-uuid"
+    # Create project dir but NOT the expected .jsonl.
+    encoded = str(worktree).replace("/", "-")
+    (home / ".claude" / "projects" / encoded).mkdir(parents=True, exist_ok=True)
+
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="missing-file-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="missing-file-1",
+                )
+            ]
+        )
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    with patch("cw.reconcile.fire_push_notification"):
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    assert "missing-file-1" in blocked
+
+
+def test_flag_silently_idle_fires_when_transcript_predates_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transcript mtime <= started_at → stale-transcript guard fires watchdog."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    worktree = tmp_path / "wt-predates"
+    sess = _mk_headless_daemon_session("predates-1", worktree, started_at)
+    sess.surface_ref = "live-ref"
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="predates-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="predates-1",
+                )
+            ]
+        )
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    transcript = _write_idle_transcript(home, worktree)
+    # Stamp before started_at — stale-transcript guard should reject this file.
+    before_start = (started_at - timedelta(seconds=60)).timestamp()
+    os.utime(str(transcript), (before_start, before_start))
+
+    with patch("cw.reconcile.fire_push_notification"):
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    assert "predates-1" in blocked
+
+
 def test_flag_silently_idle_fires_on_stale_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
