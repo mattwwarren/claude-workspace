@@ -6,9 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-05-29
+
+Minor release hardening the dispatch-reliability path: terminal-sentinel
+salvage before timeout/crash disposition, cleaner no_op contract parsing, and a
+`cw doctor` worktree-path check — plus the dev-queue missing-dir guard and a
+type-suppression cleanup batch.
+
+### Added
+
+- **`cw doctor` worktree path existence check** (#143 → PR #365): `cw doctor`
+  now flags sessions whose recorded worktree path no longer exists on disk,
+  catching the drift where a worktree is removed out from under a tracked
+  session.
+
 ### Fixed
 
-- **Sentinel salvage on timeout/crash** (#372): the `TIMED_OUT` and
+- **Sentinel salvage on timeout/crash** (#372 → PR #374): the `TIMED_OUT` and
   crashed-phantom sweeps in `reconcile` now recover a terminal-success
   `AUTO_DEV_RESULT` (`shipped`/`no_op`) from the session's transcript before
   finalizing disposition. A headless worker that emitted a valid sentinel and
@@ -17,6 +31,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   PENDING — instead of being mislabeled `timed_out`/`crash` and re-dispatched
   (dup-PR risk). Guards the reused-worktree stale-transcript case (#358) by
   only trusting a transcript modified after the session started.
+- **`no_op` + stray-PR coerced at parse boundary** (#367 → PR #370): a sentinel
+  reporting `no_op` while also carrying a stray `pr_url` is now coerced to a
+  clean `no_op` at the parse boundary, so the disposition isn't ambiguous
+  downstream.
+- **dev-queue `refresh-all` skips missing client dirs** (#356 → PR #369):
+  `refresh-all` now gracefully skips clients whose workspace directory is
+  missing (e.g. a dead `sigma` entry) instead of crashing the whole refresh.
+
+### Removed / chore
+
+- **`get_item` queue helper** (#360 → PR #368): adds a `get_item` accessor,
+  dropping 7 `type: ignore[union-attr]` suppressions.
+- **Test annotation fixes** (#361 → PR #373): removes 32 `type: ignore`
+  suppressions across the test suite via proper annotations.
 
 ## [0.12.0] — 2026-05-29
 
