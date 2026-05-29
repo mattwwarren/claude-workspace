@@ -23,8 +23,7 @@ from cw.config import (
 )
 from cw.events import record_event
 from cw.models import OrchestratorEventType, SessionStatus
-from cw.orchestrate import retire_merged_prs
-from cw.pr_responder import clear_completed_pr_sessions
+from cw.orchestrate import clear_completed_pr_sessions, retire_merged_prs
 
 logger = logging.getLogger(__name__)
 
