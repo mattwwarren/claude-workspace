@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import freezegun
@@ -1036,6 +1037,368 @@ def test_revert_stalled_headless_sessions_stops_daemon_surface(
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
 
     assert short_id in daemon.stop_calls
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-salvage tests (GitHub issue #372): a stalled/crashed session that
+# emitted a terminal-success sentinel must be dispositioned by that sentinel,
+# not mislabeled timed_out/crash, and its ticket must NOT be re-dispatched.
+# ---------------------------------------------------------------------------
+
+
+def _shipped_salvage_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "salv-1",
+        "status": "shipped",
+        "stage_reached": "stage5_post_create",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 12,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": "auto-dev/salv-1",
+        "worktree_path": "/tmp/wt/salv-1",
+        "fork_point_sha": "abc1234",
+        "commits": ["sha1"],
+        "pr": {
+            "number": 99,
+            "url": "https://github.com/foo/bar/pull/99",
+            "auto_merge": True,
+            "base": "main",
+        },
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "cost_usd": 1.5,
+        "next_actions": ["wait_for_ci"],
+    }
+
+
+def _no_op_salvage_payload() -> dict[str, Any]:
+    return {
+        "schema_version": 4,
+        "ticket_id": "salv-noop",
+        "status": "no_op",
+        "stage_reached": "stage1_pre_flight",
+        "scope": {
+            "tier": "small",
+            "files": 0,
+            "lines_estimate": 0,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "none",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": ["close_issue_as_completed"],
+    }
+
+
+def _write_salvage_transcript(
+    home: Path, worktree: Path, claude_session_id: str, payload: dict[str, Any]
+) -> Path:
+    """Write a transcript jsonl under ``home`` carrying a wrapped sentinel.
+
+    Mirrors Claude's on-disk layout: ``<home>/.claude/projects/<encoded>/
+    <uuid>.jsonl`` with the encoded path replacing ``/`` with ``-``.
+    """
+    encoded = str(worktree).replace("/", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(payload)
+    sentinel = f"narrative\n<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
+    record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": sentinel}],
+        },
+    }
+    path = project_dir / f"{claude_session_id}.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+    return path
+
+
+def test_revert_stalled_salvages_shipped_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over-budget session that shipped → COMPLETED, task NOT reverted."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-salv"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salv-1", worktree, started_at)
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-1", _shipped_salvage_payload()
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-1",
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=OrchestratorConfig()
+    )
+
+    # Not reverted for re-dispatch.
+    assert reverted == []
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-1")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "shipped"
+    assert reloaded.claude_session_id == "claude-uuid-1"
+    assert reloaded.cost_usd == 1.5
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-1")
+    assert task.status == QueueItemStatus.COMPLETED
+
+    events = read_events(
+        consumer="test-salv-1",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    payload = next(e.payload for e in events if e.payload.get("ticket_id") == "salv-1")
+    assert payload["crashed"] is False
+    assert payload["salvaged"] is True
+
+
+def test_revert_stalled_salvages_no_op_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over-budget session that no-op'd → COMPLETED, task NOT reverted."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-noop"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salv-noop", worktree, started_at)
+    _write_salvage_transcript(home, worktree, "claude-uuid-2", _no_op_salvage_payload())
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-noop",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-noop",
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=OrchestratorConfig()
+    )
+
+    assert reverted == []
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-noop")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "no_op"
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-noop")
+    assert task.status == QueueItemStatus.COMPLETED
+
+
+def test_revert_stalled_no_salvage_without_sentinel_times_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh transcript but no terminal sentinel → TIMED_OUT + revert (unchanged)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-nosent"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salv-none", worktree, started_at)
+    # Transcript exists but carries no AUTO_DEV_RESULT block.
+    encoded = str(worktree).replace("/", "-")
+    proj = home / ".claude" / "projects" / encoded
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "claude-uuid-3.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "still working on it"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-none",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-none",
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=OrchestratorConfig()
+    )
+
+    assert "salv-none" in reverted
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-none")
+    assert reloaded.status == SessionStatus.TIMED_OUT
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-none")
+    assert task.status == QueueItemStatus.PENDING
+
+
+def test_revert_stalled_ignores_stale_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transcript older than started_at (reused worktree, #358) → TIMED_OUT."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-stale"
+    # started_at in the future relative to the (real-now) transcript mtime, so
+    # the freshly-written transcript is "stale" by the started_at guard.
+    started_at = datetime(2099, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2099, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salv-stale", worktree, started_at)
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-4", _shipped_salvage_payload()
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-stale",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-stale",
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=OrchestratorConfig()
+    )
+
+    # Stale transcript ignored → genuine timeout.
+    assert "salv-stale" in reverted
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-stale")
+    assert reloaded.status == SessionStatus.TIMED_OUT
+
+
+def test_reconcile_crashed_phantom_salvages_shipped_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom (surface gone) session that shipped → COMPLETED, not re-dispatched."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-crash"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # Past the spawn grace window but well under the headless budget, so the
+    # timeout sweep ignores it and the crashed-phantom sweep handles it.
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        "salv-crash", worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "salv-crash"
+    _write_salvage_transcript(home, worktree, "claude-uuid-5", payload)
+    # A second, genuinely-live session keeps the daemon roster non-empty so the
+    # transient-outage guard does not trip (it would otherwise abort reconcile
+    # when native_live is empty). Its ref IS in the live set, so it is not a
+    # phantom; only "gone-ref" is.
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-crash",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-crash",
+                )
+            ]
+        )
+    )
+
+    # Only "live-ref" is live → "gone-ref" is a phantom; non-empty roster
+    # keeps the outage guard from tripping.
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert "salv-crash" not in report.reverted_ticket_ids
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-crash")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "shipped"
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-crash")
+    assert task.status == QueueItemStatus.COMPLETED
 
 
 def test_reconcile_includes_stalled_reverts_in_report(
