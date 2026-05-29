@@ -31,8 +31,10 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import AutoDevResult, parse_stdout
 from cw.config import load_orchestrator_config, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
@@ -255,6 +257,111 @@ def _is_headless(session: Session) -> bool:
         return False
 
 
+# AUTO_DEV_RESULT statuses for which a stalled/crashed session must NOT be
+# re-dispatched: the work either shipped (a PR exists) or no work was needed.
+# Salvaging these recovers the real disposition instead of mislabeling the
+# session timed_out/crashed and re-running already-finished work. Non-success
+# statuses (blocked, *_pending_*) keep the existing retry-on-timeout behavior.
+# See GitHub issue #372.
+_SALVAGE_TERMINAL_STATUSES: frozenset[str] = frozenset({"shipped", "no_op"})
+
+
+def _assistant_text_from_transcript(path: Path) -> str:
+    """Concatenate the text of every assistant message in a jsonl transcript.
+
+    The AUTO_DEV_RESULT sentinel block is emitted inside an assistant text
+    message, so joining assistant text reconstructs the input ``parse_stdout``
+    would have seen on the worker's stdout. Returns "" on any read error.
+    """
+    parts: list[str] = []
+    try:
+        with path.open() as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                parts.extend(
+                    block["text"]
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                )
+    except OSError:
+        return ""
+    return "\n".join(parts)
+
+
+def _salvage_terminal_result(
+    session: Session, *, after: datetime
+) -> tuple[AutoDevResult, str] | None:
+    """Recover a terminal-success AUTO_DEV_RESULT from the session's transcript.
+
+    A headless session that emitted a valid sentinel and then stalled (e.g.
+    sitting in ``wait_for_ci``) or crashed never reaches the wrapper's
+    post-exit parse, so its disposition is lost. This recovers it directly
+    from the transcript.
+
+    Returns ``(result, claude_session_id)`` only when the newest transcript
+    in the session's worktree — modified strictly after ``after`` (the session
+    start, guarding the reused-worktree stale-transcript case, #358) — parses
+    to an :class:`AutoDevResult` whose status is in
+    :data:`_SALVAGE_TERMINAL_STATUSES`. Returns ``None`` otherwise.
+    """
+    worktree = session.worktree_path
+    if worktree is None:
+        return None
+    encoded = str(worktree).replace("/", "-")
+    project_dir = Path.home() / ".claude" / "projects" / encoded
+    if not project_dir.is_dir():
+        return None
+    candidates = sorted(
+        project_dir.glob("*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+    newest = candidates[0]
+    # Stale-transcript guard (#358): a reused worktree may retain a prior
+    # run's transcript. Only trust output written since this session began.
+    if datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC) <= after:
+        return None
+    result = parse_stdout(_assistant_text_from_transcript(newest))
+    if (
+        isinstance(result, AutoDevResult)
+        and result.status in _SALVAGE_TERMINAL_STATUSES
+    ):
+        return result, newest.stem
+    return None
+
+
+def _apply_salvaged_completion(
+    session: Session,
+    result: AutoDevResult,
+    claude_session_id: str,
+    *,
+    now: datetime,
+) -> None:
+    """Mark ``session`` COMPLETED from a salvaged sentinel (like signal_completed)."""
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = now
+    session.completed_reason = CompletionReason.NORMAL
+    session.last_result = result.model_dump(mode="json")
+    if result.cost_usd is not None:
+        session.cost_usd = result.cost_usd
+    session.claude_session_id = claude_session_id
+
+
 def revert_stalled_headless_sessions(
     state: CwState,
     *,
@@ -292,6 +399,7 @@ def revert_stalled_headless_sessions(
         task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
     pending: list[tuple[Session, str | None]] = []
+    salvaged: list[tuple[Session, str | None, AutoDevResult]] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
             continue
@@ -305,31 +413,48 @@ def revert_stalled_headless_sessions(
         elapsed = (now - session.started_at).total_seconds()
         if elapsed < budget:
             continue
+        # Before declaring a timeout, try to recover a terminal-success
+        # sentinel the worker emitted before stalling (e.g. waiting on CI).
+        # If found, the session is dispositioned by that sentinel and its
+        # ticket is NOT reverted for re-dispatch. See GitHub issue #372.
+        salvage = _salvage_terminal_result(session, after=session.started_at)
+        if salvage is not None:
+            result, claude_session_id = salvage
+            _apply_salvaged_completion(session, result, claude_session_id, now=now)
+            salvaged.append((session, ticket_id, result))
+            continue
         session.status = SessionStatus.TIMED_OUT
         session.completed_at = now
         session.completed_reason = CompletionReason.TIMED_OUT
         pending.append((session, ticket_id))
 
-    if not pending:
+    if not pending and not salvaged:
         return []
 
     save_state(state)
 
-    ticket_ids_to_revert = [tid for _, tid in pending if tid]
+    timed_out_ticket_ids = {tid for _, tid in pending if tid}
+    salvaged_ticket_ids = {tid for _, tid, _ in salvaged if tid}
     reverted: list[str] = []
-    if ticket_ids_to_revert:
-        ticket_id_set = set(ticket_ids_to_revert)
+    if timed_out_ticket_ids or salvaged_ticket_ids:
         with dev_queue_lock():
             store = load_dev_queue()
+            changed = False
             for task in store.tasks:
-                if (
-                    task.ticket_id in ticket_id_set
-                    and task.status == QueueItemStatus.RUNNING
-                ):
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                if task.ticket_id in timed_out_ticket_ids:
                     task.status = QueueItemStatus.PENDING
                     task.session_id = None
                     reverted.append(task.ticket_id)
-            if reverted:
+                    changed = True
+                elif task.ticket_id in salvaged_ticket_ids:
+                    # Terminal-success salvage: retire the task so the
+                    # COMPLETED-silent backstop does not revert it to PENDING
+                    # and re-dispatch already-finished work (#372).
+                    task.status = QueueItemStatus.COMPLETED
+                    changed = True
+            if changed:
                 save_dev_queue(store)
 
     for session, ticket_id in pending:
@@ -343,6 +468,21 @@ def revert_stalled_headless_sessions(
             "last_assistant_message_excerpt": "",
         }
         record_event(OrchestratorEventType.SESSION_TIMED_OUT, payload)
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+
+    for session, ticket_id, result in salvaged:
+        completed_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "crashed": False,
+            "salvaged": True,
+            "status": result.status,
+        }
+        record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
         if session.surface_ref is not None:
             get_native_daemon_client().stop(session.surface_ref)
 
@@ -552,16 +692,42 @@ def reconcile() -> ReconcileReport:
 
     phantom_set = set(drift.phantom_session_ids)
     ticket_ids_to_revert: list[str] = []
+    salvaged_ticket_ids: list[str] = []
     pending_events: list[dict[str, object]] = []
     phantom_names: list[str] = []
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
+        ticket_id = ticket_id_for_session(session.name)
+        # Recover a terminal-success sentinel before declaring the phantom
+        # crashed, so already-shipped work is not re-dispatched (#372).
+        salvage = (
+            _salvage_terminal_result(session, after=session.started_at)
+            if session.origin is SessionOrigin.DAEMON
+            else None
+        )
+        if salvage is not None:
+            result, claude_session_id = salvage
+            _apply_salvaged_completion(session, result, claude_session_id, now=now)
+            phantom_names.append(session.name)
+            if ticket_id:
+                salvaged_ticket_ids.append(ticket_id)
+            salvaged_payload: dict[str, object] = {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "crashed": False,
+                "salvaged": True,
+                "status": result.status,
+            }
+            if ticket_id:
+                salvaged_payload["ticket_id"] = ticket_id
+            pending_events.append(salvaged_payload)
+            continue
         session.status = SessionStatus.COMPLETED
         session.completed_reason = CompletionReason.CRASHED
         session.completed_at = now
         phantom_names.append(session.name)
-        ticket_id = ticket_id_for_session(session.name)
         if ticket_id and session.origin is SessionOrigin.DAEMON:
             ticket_ids_to_revert.append(ticket_id)
         payload: dict[str, object] = {
@@ -579,14 +745,16 @@ def reconcile() -> ReconcileReport:
         record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
     reverted: list[str] = []
-    if ticket_ids_to_revert:
+    if ticket_ids_to_revert or salvaged_ticket_ids:
+        revert_set = set(ticket_ids_to_revert)
+        salvaged_set = set(salvaged_ticket_ids)
         with dev_queue_lock():
             store = load_dev_queue()
+            changed = False
             for task in store.tasks:
-                if (
-                    task.ticket_id in ticket_ids_to_revert
-                    and task.status == QueueItemStatus.RUNNING
-                ):
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                if task.ticket_id in revert_set:
                     task.status = QueueItemStatus.PENDING
                     # Drop the stamp from the prior (now-crashed) session so
                     # the next dispatch_tick can re-stamp with the freshly
@@ -594,7 +762,13 @@ def reconcile() -> ReconcileReport:
                     # carries a stale id. See GitHub issue #97.
                     task.session_id = None
                     reverted.append(task.ticket_id)
-            if reverted:
+                    changed = True
+                elif task.ticket_id in salvaged_set:
+                    # Terminal-success salvage: retire the task instead of
+                    # reverting, so shipped/no_op work is not re-dispatched (#372).
+                    task.status = QueueItemStatus.COMPLETED
+                    changed = True
+            if changed:
                 save_dev_queue(store)
 
     # Sweep for TIMED_OUT and DAEMON-COMPLETED sessions whose owning TicketTask

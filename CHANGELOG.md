@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sentinel salvage on timeout/crash** (#372): the `TIMED_OUT` and
+  crashed-phantom sweeps in `reconcile` now recover a terminal-success
+  `AUTO_DEV_RESULT` (`shipped`/`no_op`) from the session's transcript before
+  finalizing disposition. A headless worker that emitted a valid sentinel and
+  then stalled (e.g. waiting on CI) or whose surface died is now recorded
+  COMPLETED with its real result — and its ticket is **not** reverted to
+  PENDING — instead of being mislabeled `timed_out`/`crash` and re-dispatched
+  (dup-PR risk). Guards the reused-worktree stale-transcript case (#358) by
+  only trusting a transcript modified after the session started.
+
 ## [0.12.0] — 2026-05-29
 
 Minor release covering the cw 1.0-march observability and orchestration
