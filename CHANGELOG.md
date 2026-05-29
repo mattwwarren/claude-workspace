@@ -6,6 +6,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-05-29
+
+Minor release covering the cw 1.0-march observability and orchestration
+substrate: live work board, read-only session peek, atomic terminal
+transitions, the queue-events MCP channel, cost tracking, and `cw doctor`
+wedge detection. Also enables the native nightly soak clock toward 1.0.
+
+### Added
+
+- **`cw watch` live work board** (#126 → PR #347): full-screen TUI streaming
+  cross-client session + queue state, refreshed from the event bus.
+- **`cw peek`** (#122 → PR #346): read-only tail of a running session's output
+  without attaching to or disturbing the surface.
+- **`cw spawn complete`** (#121 → PR #344): atomic session terminal-state
+  transition, closing the race between session-flip and queue-flip.
+- **cw-queue-events MCP channel** (#125 → PR #355): pushes queue-state deltas
+  with persist-on-emit + cursor replay, mirroring the PR-events channel. Track C
+  complete (7/7).
+- **`cost_usd` persistence, schema v4** (#124 → PR #351): per-session and
+  per-ticket USD cost recorded on `Session` + `TicketTask`.
+- **`cw doctor` wedge detection** (#123 → PR #353): drift checks for wedged
+  sessions, `--reap` recipes, and `--json` output.
+- **AUTO_DEV_RESULT schema Phase C+D** (#174 → PR #343): expanded contract for
+  queue-orchestrator observability.
+
+### Changed
+
+- **CI: native nightly scheduled, cmux nightly de-scheduled** (PR #363):
+  `nightly-native.yml` gains a daily 09:00 UTC `schedule:` trigger, starting the
+  2-week native-soak clock toward 1.0 (gates #242/#119/#120). `nightly.yml`
+  (cmux integration) is de-scheduled to `workflow_dispatch`-only ahead of cmux
+  removal (#119).
+
+### Fixed
+
+- **Silently-idle watchdog → flag-only** (#348 → PR #349): the `silently_idle`
+  watchdog no longer reaps the worker; it flags only and lets the run reach the
+  60-min ceiling, avoiding false kills of active workers.
+- **`cw_queue_peek` stale-transcript false STOP** (#358 → PR #359):
+  `find_transcript_for_ticket` no longer picks the oldest stale transcript in a
+  reused worktree (which produced bogus age + a false STOP recommendation).
+
+### Removed / chore
+
+- **Delete `pr_responder.py`** (#245 → PR #357): superseded by the event-driven
+  review-monitor path.
+- **Suppression audit** (PR #362): `noqa` / `type: ignore` count reduced 110 → 52.
+- **Skill audit + `/cw-fanout`** (PR #350): cw skills re-aligned to current
+  workflows; new `/cw-fanout` multi-ticket dispatch skill added.
+
 ## [0.11.2] — 2026-05-28
 
 Patch release with two reliability fixes for the dev-queue dispatch path,
