@@ -3635,6 +3635,110 @@ class TestDevQueueRefreshAll:
         )
         assert len(events) == 0
 
+    def test_refresh_all_skips_missing_workspace_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """MissingWorkspaceError for one client -> SKIP line on stderr.
+
+        Other clients should still be called.
+        """
+        from cw.exceptions import MissingWorkspaceError
+
+        ws_b = tmp_path / "ws-b"
+        ws_b.mkdir()
+        self._write_clients_yaml(
+            tmp_config_dir,
+            [("client-a", str(tmp_path / "nonexistent")), ("client-b", str(ws_b))],
+        )
+
+        called_clients: list[str] = []
+
+        def _mock_ff(client: object) -> tuple[str, str]:
+            from cw.models import ClientConfig
+
+            assert isinstance(client, ClientConfig)
+            called_clients.append(client.name)
+            if client.name == "client-a":
+                msg = "workspace missing for client-a"
+                raise MissingWorkspaceError(msg)
+            return ("aaa", "bbb")
+
+        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert "client-a" in called_clients
+        assert "client-b" in called_clients
+        assert "SKIP" in result.output
+
+    def test_refresh_all_missing_workspace_does_not_set_exit_1(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing workspace alone -> exit code 0."""
+        from cw.exceptions import MissingWorkspaceError
+
+        ws = tmp_path / "nonexistent"
+        self._write_clients_yaml(tmp_config_dir, [("client-a", str(ws))])
+
+        def _mock_ff(client: object) -> tuple[str, str]:
+            msg = "workspace missing for client-a"
+            raise MissingWorkspaceError(msg)
+
+        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 0
+
+    def test_refresh_all_missing_workspace_mixed_with_real_failure(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One missing workspace (soft skip) + one real WorktreeError.
+
+        Expects exit 1 and both SKIP and ERROR messages printed.
+        """
+        from cw.exceptions import MissingWorkspaceError, WorktreeError
+
+        ws_c = tmp_path / "ws-c"
+        ws_c.mkdir()
+        self._write_clients_yaml(
+            tmp_config_dir,
+            [
+                ("client-a", str(tmp_path / "nonexistent")),
+                ("client-b", str(tmp_path / "ws-b")),
+                ("client-c", str(ws_c)),
+            ],
+        )
+
+        def _mock_ff(client: object) -> tuple[str, str]:
+            from cw.models import ClientConfig
+
+            assert isinstance(client, ClientConfig)
+            if client.name == "client-a":
+                msg = "workspace missing for client-a"
+                raise MissingWorkspaceError(msg)
+            if client.name == "client-b":
+                msg = "ff failed"
+                raise WorktreeError(msg)
+            return ("aaa", "bbb")
+
+        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "refresh-all"])
+        assert result.exit_code == 1
+        assert "SKIP" in result.output
+        assert "ERROR" in result.output
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueAddTimeout (GitHub issue #265)

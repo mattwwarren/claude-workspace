@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.exceptions import WorktreeError
+from cw.exceptions import MissingWorkspaceError, WorktreeError
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
@@ -307,13 +307,17 @@ def fast_forward_main(client: ClientConfig) -> tuple[str, str]:
     """Fast-forward the client's local default branch to origin.
 
     Runs ``git pull --ff-only origin <default_branch>`` in the client's git
-    directory.  Raises :exc:`WorktreeError` if the pull fails (non-zero exit).
+    directory.  Raises :exc:`MissingWorkspaceError` if the workspace directory
+    does not exist, or :exc:`WorktreeError` if the pull fails (non-zero exit).
 
     Returns:
         ``(before_sha, after_sha)`` — the SHA before and after the pull.
         When already up to date both values are equal.
     """
     git_dir = _git_dir(client)
+    if not git_dir.exists():
+        msg = f"workspace missing for {client.name} ({git_dir})"
+        raise MissingWorkspaceError(msg)
     default_branch = client.default_branch
     before_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
     _run_git("pull", "--ff-only", "origin", default_branch, cwd=git_dir)

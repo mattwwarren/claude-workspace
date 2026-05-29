@@ -15,6 +15,17 @@ class WorktreeError(CwError):
     __slots__ = ()
 
 
+class MissingWorkspaceError(WorktreeError):
+    """Raised when a client's workspace directory does not exist.
+
+    This is a config-hygiene condition (stale/misconfigured entry), not a git
+    operation failure. Callers should treat it as a soft skip rather than an
+    error that contributes to exit-1 semantics.
+    """
+
+    __slots__ = ()
+
+
 class HookContextConflictError(CwError):
     """A user-owned ``.claude/settings.local.json`` already exists.
 
