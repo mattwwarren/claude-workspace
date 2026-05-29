@@ -282,13 +282,13 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
     Reads cost via two-source fallback:
       1. session.cost_usd (populated by signal_completed — normal headless path)
       2. session.last_result.get('cost_usd') (populated by persist_last_result —
-         event-replay path where signal_completed did not run first)
+         event-replay path where signal_completed did not run)
 
     When both sources are absent, total_cost_usd is left unchanged.
     Called inside dev_queue_lock so the mutation is covered by the same
     save_dev_queue call that persists the COMPLETED status.
     """
-    if not session_id:
+    if session_id is None:
         return
     state = load_state()
     session = next((s for s in state.sessions if s.id == session_id), None)
