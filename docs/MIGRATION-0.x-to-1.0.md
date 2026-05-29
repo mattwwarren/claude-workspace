@@ -41,7 +41,7 @@ The check is **read-only and warn-only**: cw never moves or recreates a
 missing worktree. A missing worktree is informational — you may have
 intentionally deleted a finished branch. No manual action is required unless
 you want to resume that session, in which case create a new worktree and
-update the session's `worktree_path` via `cw doctor --reap` or by editing
+update the session's `worktree_path` by editing
 `~/.local/share/cw/sessions.json` directly.
 
 ## What you need to do

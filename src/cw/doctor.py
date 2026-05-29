@@ -303,15 +303,16 @@ def _check_worktree_paths_sessions(
     """Verify each session's worktree_path exists. Read-only, warn-only."""
     if state is None:
         return []
-    sessions_with_wt = [s for s in state.sessions if s.worktree_path is not None]
-    total_checked = len(sessions_with_wt)
+    wt_paths: list[tuple[str, Path]] = [
+        (s.id, s.worktree_path) for s in state.sessions if s.worktree_path is not None
+    ]
+    total_checked = len(wt_paths)
     results: list[CheckResult] = []
-    for session in sessions_with_wt:
-        wt = session.worktree_path  # local narrowing satisfies mypy
-        if wt is not None and not wt.exists():
+    for session_id, wt in wt_paths:
+        if not wt.exists():
             results.append(
                 CheckResult(
-                    f"worktree/{session.id}",
+                    f"worktree/{session_id}",
                     ok=True,
                     warn=True,
                     detail=f"path does not exist: {wt}",
