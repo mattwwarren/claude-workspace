@@ -1,0 +1,92 @@
+name: Dispatch Guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/cw/dispatch.py
+      - src/cw/reconcile.py
+      - src/cw/spawn.py
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+
+      - name: Ensure dispatch-drift label exists
+        run: |
+          gh label create "dispatch-drift" \
+            --description "Unreleased changes to dispatch/reconcile/spawn" \
+            --color "e4e669" \
+            || true
+
+      - name: Check for unreleased changes in critical files
+        id: drift
+        run: |
+          # If no tags exist yet there is no released version to compare against.
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -z "$LAST_TAG" ]; then
+            echo "No release tags found — nothing to guard."
+            echo "unreleased=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "${LAST_TAG}..HEAD" -- \
+            src/cw/dispatch.py \
+            src/cw/reconcile.py \
+            src/cw/spawn.py)
+
+          if [ -n "$CHANGED" ]; then
+            echo "unreleased=true" >> "$GITHUB_OUTPUT"
+            echo "last_tag=${LAST_TAG}" >> "$GITHUB_OUTPUT"
+            {
+              echo "changed_files<<EOF"
+              echo "$CHANGED"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "unreleased=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for existing open dispatch-drift issue
+        id: existing
+        if: steps.drift.outputs.unreleased == 'true'
+        run: |
+          COUNT=$(gh issue list \
+            --label dispatch-drift \
+            --state open \
+            --json number \
+            --jq 'length')
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: Open dispatch-drift issue
+        if: >
+          steps.drift.outputs.unreleased == 'true' &&
+          steps.existing.outputs.count == '0'
+        env:
+          LAST_TAG: ${{ steps.drift.outputs.last_tag }}
+          CHANGED_FILES: ${{ steps.drift.outputs.changed_files }}
+        run: |
+          gh issue create \
+            --title "ops(release): unreleased dispatch/reconcile/spawn changes since ${LAST_TAG}" \
+            --label dispatch-drift \
+            --body "Commits have landed on \`main\` that touch one or more dispatch-reliability files without a subsequent release being cut.
+
+**Last release tag:** \`${LAST_TAG}\`
+
+**Changed files since that tag:**
+\`\`\`
+${CHANGED_FILES}
+\`\`\`
+
+Cut a new release to close this issue automatically.
+
+> Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."

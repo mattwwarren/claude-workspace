@@ -6,6 +6,7 @@
 | `nightly.yml` | 09:00 UTC daily | macOS | cmux integration (requires live cmux daemon) |
 | `nightly-native.yml` | Manual (`workflow_dispatch`) | ubuntu | Full test suite (excl. cmux) + native daemon smoke tests |
 | `release.yml` | Tag push | ubuntu | Build and publish to PyPI |
+| `dispatch-guard.yml` | Push to `main` (dispatch/reconcile/spawn) | ubuntu | Opens a `dispatch-drift` issue when critical files are unreleased; closes on next release |
 
 ## Triggering workflows manually
 
