@@ -581,6 +581,26 @@ def queue_add(
     click.echo(f"Added queue item: {item.id} ({description})")
 
 
+def _filter_queue_items(
+    items: list[QueueItem],
+    purpose: str | None,
+    status_filter: str | None,
+) -> list[QueueItem]:
+    if purpose:
+        items = [i for i in items if i.task.purpose == purpose]
+    if status_filter:
+        items = [i for i in items if i.status == status_filter]
+    return items
+
+
+def _print_queue_table(items: list[QueueItem]) -> None:
+    click.echo(f"{'ID':<10} {'STATUS':<12} {'PURPOSE':<10} {'DESCRIPTION'}")
+    click.echo("-" * 60)
+    for item in items:
+        desc = item.task.description[:40]
+        click.echo(f"{item.id:<10} {item.status:<12} {item.task.purpose:<10} {desc}")
+
+
 @queue.command(name="list")
 @click.argument("client", required=False, default=None, shell_complete=_complete_client)
 @click.option(
@@ -604,47 +624,24 @@ def queue_list(
 ) -> None:
     """Show queue items for a client, or all clients if CLIENT is omitted."""
     if client is not None:
-        store = load_queue(client)
-        items = store.items
-        if purpose:
-            items = [i for i in items if i.task.purpose == purpose]
-        if status_filter:
-            items = [i for i in items if i.status == status_filter]
-
+        items = _filter_queue_items(load_queue(client).items, purpose, status_filter)
         if not items:
             click.echo("Queue is empty.")
             return
-
-        click.echo(f"{'ID':<10} {'STATUS':<12} {'PURPOSE':<10} {'DESCRIPTION'}")
-        click.echo("-" * 60)
-        for item in items:
-            desc = item.task.description[:40]
-            click.echo(
-                f"{item.id:<10} {item.status:<12} {item.task.purpose:<10} {desc}"
-            )
+        _print_queue_table(items)
     else:
         clients = load_clients()
-        any_printed = False
+        has_output = False
         for name in clients:
-            store = load_queue(name)
-            items = store.items
-            if purpose:
-                items = [i for i in items if i.task.purpose == purpose]
-            if status_filter:
-                items = [i for i in items if i.status == status_filter]
+            items = _filter_queue_items(load_queue(name).items, purpose, status_filter)
             if not items:
-                continue  # silently skip empty clients
+                continue
+            if has_output:
+                click.echo()  # blank line between client sections, not after last
             click.echo(f"--- {name} ---")
-            click.echo(f"{'ID':<10} {'STATUS':<12} {'PURPOSE':<10} {'DESCRIPTION'}")
-            click.echo("-" * 60)
-            for item in items:
-                desc = item.task.description[:40]
-                click.echo(
-                    f"{item.id:<10} {item.status:<12} {item.task.purpose:<10} {desc}"
-                )
-            click.echo()
-            any_printed = True
-        if not any_printed:
+            _print_queue_table(items)
+            has_output = True
+        if not has_output:
             click.echo("Queue is empty.")
 
 
