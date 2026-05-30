@@ -1895,6 +1895,183 @@ def test_flag_silently_idle_daemon_sessions_skips_user_origin(
     assert sess.status == SessionStatus.ACTIVE
 
 
+# ---------------------------------------------------------------------------
+# Idle-watchdog sentinel-salvage tests (GitHub issue #398): sessions that
+# emitted a shipped/no_op sentinel but haven't had it consumed into
+# last_result yet must be COMPLETED, not parked as BLOCKED_ON_USER.
+# ---------------------------------------------------------------------------
+
+
+def test_flag_silently_idle_salvages_shipped_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle-past-budget session with shipped sentinel in transcript → COMPLETED."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-idle-salv"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = _mk_headless_daemon_session("idle-salv-1", worktree, started_at)
+    sess.last_result = None  # sentinel NOT yet consumed into state
+    _write_salvage_transcript(
+        home, worktree, "claude-idle-uuid-1", _shipped_salvage_payload()
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-salv-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-salv-1",
+                    attempts=2,  # at cap — would park without salvage
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        # Transcript mtime is real-time (May 2026) but now is fake (Jan 2026);
+        # negative diff < window_seconds would falsely mark the worker alive.
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+    ):
+        state = load_state()
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
+        )
+
+    assert blocked == []
+    reloaded = next(s for s in load_state().sessions if s.id == "idle-salv-1")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "shipped"
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-salv-1")
+    assert task.status == QueueItemStatus.COMPLETED
+
+    mock_daemon.stop.assert_called_once_with("fake-short-id")
+
+
+def test_flag_silently_idle_salvages_no_op_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle-past-budget session with no_op sentinel in transcript → COMPLETED."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-idle-noop"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = _mk_headless_daemon_session("idle-noop-1", worktree, started_at)
+    sess.last_result = None
+    _write_salvage_transcript(
+        home, worktree, "claude-idle-uuid-2", _no_op_salvage_payload()
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-noop-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-noop-1",
+                    attempts=2,
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+    ):
+        state = load_state()
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
+        )
+
+    assert blocked == []
+    reloaded = next(s for s in load_state().sessions if s.id == "idle-noop-1")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "no_op"
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-noop-1")
+    assert task.status == QueueItemStatus.COMPLETED
+
+    mock_daemon.stop.assert_called_once_with("fake-short-id")
+
+
+def test_flag_silently_idle_no_salvage_without_sentinel_still_parks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Idle-past-budget with no sentinel and attempts >= cap → parks BLOCKED_ON_USER.
+
+    Existing park behavior preserved — salvage path does not regress it.
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    # No worktree_path → _salvage_terminal_result returns None
+    sess = Session(
+        id="idle-nosentinel",
+        name="client-a/auto-dev/IDLE-NS",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="IDLE-NS",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-nosentinel",
+                    attempts=2,  # at cap → park path
+                )
+            ]
+        )
+    )
+
+    with patch("cw.reconcile.fire_push_notification"):
+        state = load_state()
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    assert "IDLE-NS" in blocked
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "IDLE-NS")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+
 def test_reconcile_includes_silently_idle_in_report(
     tmp_config_dir: Path,
     tmp_path: Path,
