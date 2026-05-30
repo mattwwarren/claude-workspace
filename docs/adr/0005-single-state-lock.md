@@ -117,3 +117,5 @@ the loop are concurrent by design, and RFC 0004 multiplies the writers
 ## Referenced by
 
 - RFC 0004 (State integrity section)
+- #387 (T1 — foundation + dominant-race writers), #388 (T2 — sweep)
+- Plan: `docs/superpowers/plans/2026-05-30-single-state-lock.md`

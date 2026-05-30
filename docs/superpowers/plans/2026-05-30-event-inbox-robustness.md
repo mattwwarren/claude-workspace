@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Driven by:** RFC 0004 State-integrity finding **S6**. Tracked by issue **T7** (the three inbox edges). This plan exists because finding **S6b (compaction)** has a genuine design fork — compacting a shared append-only log without orphaning any consumer's cursor is not mechanical.
+**Driven by:** RFC 0004 State-integrity finding **S6**. Tracked by **#393 (T7)** (the three inbox edges). This plan exists because finding **S6b (compaction)** has a genuine design fork — compacting a shared append-only log without orphaning any consumer's cursor is not mechanical.
 
 **Goal:** Harden `src/cw/events.py` (append-only inbox, per-consumer cursors) against three failure modes the audit found:
 - **S6a — silent wedge:** if a consumer's cursor id is no longer present in the inbox, `read_events` never flips `past_cursor` true and returns `[]` *forever* (`events.py:150-153`).
@@ -68,8 +68,8 @@ The wedge (S6a) and compaction (S6b) are coupled: compaction is the *only* thing
 
 - **Idempotency dependency:** Option B's fallback can re-deliver. The queue-events consumers must tolerate replays. This is the *same* property S5 (snapshot atomicity) is driving toward — coordinate so both land on "consumers are idempotent" rather than each assuming exactly-once.
 - **Interior vs trailing malformed line:** only the *trailing* partial line is an expected concurrent-append artifact. Swallowing interior parse errors would hide real corruption — keep that distinction.
-- **Scope discipline:** Tasks 1 and 2 are self-contained correctness/robustness fixes and can ship as issue T7 without Task 3. Compaction (Task 3) is optional until inbox growth is actually measured to be a problem — do not gold-plate.
+- **Scope discipline:** Tasks 1 and 2 are self-contained correctness/robustness fixes and can ship as #393 (T7) without Task 3. Compaction (Task 3) is optional until inbox growth is actually measured to be a problem — do not gold-plate.
 
 ## Referenced by
 
-- RFC 0004 (State integrity, S6), issue T7.
+- RFC 0004 (State integrity, S6), issue #393.

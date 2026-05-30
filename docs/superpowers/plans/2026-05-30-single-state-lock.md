@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Driven by:** ADR 0005 (`docs/adr/0005-single-state-lock.md`), RFC 0004 State-integrity finding **S1**. Tracked by issues **T1 (foundation)** and **T2 (sweep)** — see the issue links at the bottom.
+**Driven by:** ADR 0005 (`docs/adr/0005-single-state-lock.md`), RFC 0004 State-integrity finding **S1**. Tracked by **#387 (T1, foundation — Tasks 1-3)** and **#388 (T2, sweep — Task 4)**.
 
 **Goal:** Make every mutation of `sessions.json` (`CwState`) pass through a single `mutate_state()` helper that holds an exclusive file lock across the whole `load_state → mutate → save_state` cycle, closing the last-writer-wins race between the worker Stop-hook (`wrapper.signal_*`, out-of-process) and the orchestrator loop (`reconcile` / `spawn`, in the dispatcher process).
 
@@ -69,9 +69,9 @@
 - [ ] **Step 3:** `spawn.py` — wrap the append-new-session write.
 - [ ] **Step 4:** All three modules' test suites green; existing behavior unchanged.
 
-**↑ Tasks 1–3 are issue T1 and fully close the dominant race. Stop here for the T1 PR.**
+**↑ Tasks 1–3 are issue #387 (T1) and fully close the dominant race. Stop here for the T1 PR.**
 
-## Task 4: Mechanical sweep — remaining lifecycle writers (issue T2)
+## Task 4: Mechanical sweep — remaining lifecycle writers (issue #388 / T2)
 
 **Files:** `src/cw/cli.py`, `src/cw/session.py`, `src/cw/doctor.py`, `src/cw/orchestrate.py` + their tests.
 
@@ -90,4 +90,4 @@
 
 ## Referenced by
 
-- ADR 0005, RFC 0004 (State integrity, S1), issues T1 + T2.
+- ADR 0005, RFC 0004 (State integrity, S1), issues #387 + #388.
