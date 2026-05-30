@@ -989,10 +989,12 @@ def _apply_sentinel_to_task(
                 target.status = QueueItemStatus.PENDING
                 target.session_id = None
             else:
-                # Known unhandled codes that intentionally fall here:
-                # multiple_result_blocks, status_unknown.  Both are terminal
-                # (retry won't fix them) and conservative COMPLETED avoids
-                # re-burning dispatch cycles.
+                # Known codes that intentionally fall here:
+                # BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
+                # BLOCKER_REASON_STATUS_UNKNOWN.
+                # Both are terminal (retry won't fix them); COMPLETED avoids
+                # re-burning dispatch cycles.  The else also catches any future
+                # unknown reason code conservatively.
                 target.status = QueueItemStatus.COMPLETED
 
         save_dev_queue(store)

@@ -87,8 +87,10 @@ PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES
 
 # BlockedResult reason codes produced by parse_stdout.  Exported so consumers
 # (e.g. cli.py) can reference them without duplicating the literal strings.
-BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED = "schema_version_unsupported"
+BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS = "multiple_result_blocks"
 BLOCKER_REASON_NO_RESULT_EMITTED = "no_result_emitted"
+BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED = "schema_version_unsupported"
+BLOCKER_REASON_STATUS_UNKNOWN = "status_unknown"
 BLOCKER_REASON_VALIDATION_FAILED = "validation_failed"
 
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
@@ -592,7 +594,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="multiple_result_blocks",
+                reason=BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
                 details=f"count={len(matches)}; last_block={last_payload}",
             ),
         )
@@ -603,7 +605,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
             return BlockedResult(
                 blocker=Blocker(
                     stage="unknown",
-                    reason="no_result_emitted",
+                    reason=BLOCKER_REASON_NO_RESULT_EMITTED,
                     details=(
                         f"opening sentinel present, close missing; tail:\n{_tail(text)}"
                     ),
@@ -618,7 +620,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
             return BlockedResult(
                 blocker=Blocker(
                     stage="unknown",
-                    reason="no_result_emitted",
+                    reason=BLOCKER_REASON_NO_RESULT_EMITTED,
                     details=f"no sentinel block in stdout; tail:\n{_tail(text)}",
                 ),
             )
@@ -638,7 +640,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="no_result_emitted",
+                reason=BLOCKER_REASON_NO_RESULT_EMITTED,
                 details=f"sentinel block JSON parse failed ({exc}); raw:\n{raw_block}",
             ),
         )
@@ -648,7 +650,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="no_result_emitted",
+                reason=BLOCKER_REASON_NO_RESULT_EMITTED,
                 details=f"sentinel block was not a JSON object (got {type_name})",
             ),
         )
@@ -666,7 +668,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="schema_version_unsupported",
+                reason=BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
                 details=(
                     f"got schema_version={raw_version!r}, "
                     f"parser supports {sorted(SUPPORTED_SCHEMA_VERSIONS)}"
@@ -692,7 +694,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="status_unknown",
+                reason=BLOCKER_REASON_STATUS_UNKNOWN,
                 details=(
                     f"got status={raw_status!r}; surface verbatim, do not auto-route"
                 ),
@@ -763,7 +765,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
-                reason="validation_failed",
+                reason=BLOCKER_REASON_VALIDATION_FAILED,
                 details=f"{exc}",
             ),
         )
