@@ -686,6 +686,7 @@ def flag_silently_idle_daemon_sessions(
 
     recover: list[tuple[Session, str | None]] = []
     park: list[tuple[Session, str | None]] = []
+    salvaged: list[tuple[Session, str | None, AutoDevResult]] = []
     for session in state.sessions:
         if session.origin is not SessionOrigin.DAEMON:
             continue
@@ -710,13 +711,22 @@ def flag_silently_idle_daemon_sessions(
             session, now
         ):
             continue
+        # Before parking or recovering, try to find a terminal-success sentinel
+        # the worker emitted while waiting on CI (e.g. shipped-then-wait_for_ci).
+        # If found, the session is dispositioned by that sentinel. (#398)
+        salvage = _salvage_terminal_result(session, after=session.started_at)
+        if salvage is not None:
+            result, claude_session_id = salvage
+            _apply_salvaged_completion(session, result, claude_session_id, now=now)
+            salvaged.append((session, ticket_id, result))
+            continue
         cap = resolve_idle_retry_cap(task, config)
         if task is not None and task.attempts < cap:
             recover.append((session, ticket_id))
         else:
             park.append((session, ticket_id))
 
-    if not recover and not park:
+    if not recover and not park and not salvaged:
         return []
 
     # Auto-recover: retire the session and revert its task for re-dispatch.
@@ -734,8 +744,9 @@ def flag_silently_idle_daemon_sessions(
 
     recovered_ids = {tid for _, tid in recover if tid}
     parked_ids = {tid for _, tid in park if tid}
+    salvaged_ticket_ids = {tid for _, tid, _ in salvaged if tid}
     blocked: list[str] = []
-    if recovered_ids or parked_ids:
+    if recovered_ids or parked_ids or salvaged_ticket_ids:
         with dev_queue_lock():
             store = load_dev_queue()
             changed = False
@@ -749,6 +760,9 @@ def flag_silently_idle_daemon_sessions(
                 elif task.ticket_id in parked_ids:
                     task.status = QueueItemStatus.BLOCKED_ON_USER
                     blocked.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in salvaged_ticket_ids:
+                    task.status = QueueItemStatus.COMPLETED
                     changed = True
             if changed:
                 save_dev_queue(store)
@@ -788,6 +802,21 @@ def flag_silently_idle_daemon_sessions(
             },
         )
         fire_push_notification(session.name, session.client)
+
+    for session, ticket_id, result in salvaged:
+        completed_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "crashed": False,
+            "salvaged": True,
+            "status": result.status,
+        }
+        record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
 
     return blocked
 
