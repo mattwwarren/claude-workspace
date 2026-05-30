@@ -48,6 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
@@ -68,3 +69,18 @@ jobs:
             cw init my-project --path /path/to/repo
             cw start my-project
             ```
+
+      - name: Close dispatch-drift issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh issue list \
+            --label "dispatch-drift" \
+            --state open \
+            --json number \
+            --jq '.[].number' | \
+          while read -r NUM; do
+            gh issue close "$NUM" \
+              --comment "Closed by release ${RELEASE_TAG} — dispatch/reconcile/spawn changes are now shipped."
+          done
