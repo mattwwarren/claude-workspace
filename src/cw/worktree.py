@@ -20,9 +20,9 @@ _log = logging.getLogger(__name__)
 
 # The native spawn backend (``spawn_create_impl`` / ``claude --bg`` with
 # ``cwd=``) has no path-length restriction beyond OS limits (PATH_MAX ~4096).
-# The 64-char threshold is a conservative cap: for any realistic workspace
-# path the full candidate path exceeds 64 chars, so the hash-fallback base
-# (``~/.cw/wt/``) is always used, keeping paths short and predictable.
+# The 64-char threshold is a conservative trigger: for any realistic workspace
+# path the default candidate exceeds this cap, so the hash-fallback base
+# (``~/.cw/wt/``) is used in practice — keeping paths short and predictable.
 _WORKTREE_NAME_CAP = 64
 _HASH_BASE_SEGMENTS = (".cw", "wt")
 # 8 hex chars = 32 bits. For a single-user tool with a handful of
