@@ -19,6 +19,7 @@ from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
     fast_forward_main,
+    fetch_feature_branch,
     is_main_behind_origin,
     remove_worktree,
     resolve_worktree_base,
@@ -952,3 +953,133 @@ class TestFetchDefaultBranch:
         missing = tmp_path / "does-not-exist"
         result = _fetch_default_branch("test-client", "main", missing)
         assert result is False
+
+
+class TestFetchFeatureBranch:
+    """Regression tests for fetch_feature_branch.
+
+    Covers GitHub issue #381: the parent worktree holds a stale local ref for
+    the feature branch after the impl agent pushes from an isolation sub-worktree.
+    Without fetching, ``git diff FORK_POINT...origin/<branch>`` fails or returns
+    an empty diff, causing reviewers to return a false BLOCK.
+    """
+
+    @staticmethod
+    def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
+        """Run a git command stripped of GIT_* env vars; return stdout."""
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(cwd) if cwd else None,
+            env=clean_env,
+        )
+        return result.stdout.strip()
+
+    def _setup_repo(self, tmp_path: Path) -> tuple[Path, Path, ClientConfig]:
+        """Create bare origin and parent clone. Returns (bare, parent, client)."""
+        bare = tmp_path / "bare.git"
+        bare.mkdir()
+        self._run_bare_git("init", "--bare", "-b", "main", str(bare))
+
+        parent = tmp_path / "parent"
+        self._run_bare_git("clone", str(bare), str(parent))
+        self._run_bare_git("config", "user.email", "test@example.com", cwd=parent)
+        self._run_bare_git("config", "user.name", "cw test", cwd=parent)
+        (parent / "README.md").write_text("init\n")
+        self._run_bare_git("add", "README.md", cwd=parent)
+        self._run_bare_git("commit", "-m", "initial", cwd=parent)
+        self._run_bare_git("push", "origin", "main", cwd=parent)
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=parent,
+            default_branch="main",
+        )
+        return bare, parent, client
+
+    def test_stale_local_ref_fixed_by_fetch(self, tmp_path: Path) -> None:
+        """Fetching after impl push makes origin/<branch> visible for diff.
+
+        Simulates: impl agent pushes from isolation worktree, parent's local ref
+        is stale, reviewer dispatched — expects non-empty diff via origin/<branch>.
+        """
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        bare, parent, client = self._setup_repo(tmp_path)
+        fork_point = self._run_bare_git("rev-parse", "main", cwd=parent)
+
+        # Simulate impl agent: separate clone, create feature branch, push.
+        impl = tmp_path / "impl"
+        self._run_bare_git("clone", str(bare), str(impl))
+        self._run_bare_git("config", "user.email", "test@example.com", cwd=impl)
+        self._run_bare_git("config", "user.name", "cw test", cwd=impl)
+        self._run_bare_git("checkout", "-b", "auto-dev/381", cwd=impl)
+        (impl / "fix.py").write_text("# fix\n")
+        self._run_bare_git("add", "fix.py", cwd=impl)
+        self._run_bare_git("commit", "-m", "implement fix", cwd=impl)
+        self._run_bare_git("push", "origin", "auto-dev/381", cwd=impl)
+
+        # Parent: local branch does not exist — stale ref scenario.
+        local_ref = subprocess.run(
+            ["git", "rev-parse", "--verify", "refs/heads/auto-dev/381"],
+            capture_output=True,
+            cwd=str(parent),
+            check=False,
+            env=clean_env,
+        )
+        assert local_ref.returncode != 0, "local branch must not exist pre-fetch"
+
+        # diff against origin/<branch> fails before fetch — unknown ref.
+        diff_before = subprocess.run(
+            ["git", "diff", f"{fork_point}...origin/auto-dev/381"],
+            capture_output=True,
+            text=True,
+            cwd=str(parent),
+            check=False,
+            env=clean_env,
+        )
+        assert diff_before.returncode != 0, "diff must fail before fetch (unknown ref)"
+
+        ok = fetch_feature_branch(client, "auto-dev/381")
+        assert ok is True
+
+        # After fetch, origin/auto-dev/381 is known; diff is non-empty.
+        diff_after = subprocess.run(
+            ["git", "diff", f"{fork_point}...origin/auto-dev/381"],
+            capture_output=True,
+            text=True,
+            cwd=str(parent),
+            check=False,
+            env=clean_env,
+        )
+        assert diff_after.returncode == 0
+        assert "fix.py" in diff_after.stdout
+
+    def test_missing_workspace_returns_false(self, tmp_path: Path) -> None:
+        """Returns False without raising when workspace directory is absent."""
+        client = ClientConfig(
+            name="absent",
+            workspace_path=tmp_path / "nonexistent",
+            default_branch="main",
+        )
+        assert fetch_feature_branch(client, "auto-dev/999") is False
+
+    def test_nonexistent_remote_branch_returns_false(self, tmp_path: Path) -> None:
+        """Returns False when the remote branch does not exist."""
+        _bare, _parent, client = self._setup_repo(tmp_path)
+        assert fetch_feature_branch(client, "auto-dev/does-not-exist") is False
+
+    def test_run_git_exception_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Returns False without raising when _run_git raises WorktreeError."""
+        _bare, _parent, client = self._setup_repo(tmp_path)
+
+        def mock_run(*args: object, **kwargs: object) -> object:
+            msg = "simulated git failure"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert fetch_feature_branch(client, "auto-dev/381") is False

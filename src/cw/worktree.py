@@ -250,6 +250,20 @@ def _fetch_default_branch(client_name: str, default_branch: str, git_dir: Path) 
     return True
 
 
+def fetch_feature_branch(client: ClientConfig, branch_name: str) -> bool:
+    """Fetch origin/<branch_name> into the client's git directory.
+
+    Resolves the stale-local-ref problem described in GitHub issue #381:
+    when the impl agent pushes commits from an isolation worktree, the
+    parent worktree's local ref for the feature branch is not updated.
+    Calling this before computing ``git diff FORK_POINT...origin/<branch>``
+    for reviewer prompts ensures the diff reflects the actual pushed state.
+
+    Returns True on success, False on any failure (fetch errors do not raise).
+    """
+    return _fetch_default_branch(client.name, branch_name, _git_dir(client))
+
+
 def _get_behind_count(
     client_name: str, default_branch: str, git_dir: Path
 ) -> tuple[str, str, int] | None:
