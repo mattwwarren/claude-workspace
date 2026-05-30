@@ -47,6 +47,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0002](0002-blocker-retry-policy-pair.md) | Blocker carries an explicit retry policy | Accepted |
 | [0003](0003-stop-hook-canonical-completion-signal.md) | Stop hook is the canonical worker-completion signal | Accepted |
 | [0004](0004-stage-events-on-orchestrator-bus.md) | Stage-transition events on the orchestrator event bus | Accepted |
+| [0005](0005-single-state-lock.md) | All `sessions.json` mutations go through a single state lock | Proposed |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.
