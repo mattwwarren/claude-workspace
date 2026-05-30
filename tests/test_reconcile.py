@@ -2251,6 +2251,29 @@ def test_resolve_idle_watchdog_budget_respects_per_tier() -> None:
     assert resolve_idle_watchdog_budget(task, config) == 600
 
 
+def test_resolve_idle_watchdog_budget_global_config_override_no_task() -> None:
+    """config.idle_watchdog_seconds overrides the hardcoded fallback (no task)."""
+    config = OrchestratorConfig(idle_watchdog_seconds=1800)
+    assert resolve_idle_watchdog_budget(None, config) == 1800
+
+
+def test_resolve_idle_watchdog_budget_global_config_override_no_scope_hint() -> None:
+    """A pre-Stage-1 task (no scope_hint) uses the global config override, not
+    the hardcoded 900s — this is the fanout-cascade fix (workers reaped mid-work)."""
+    config = OrchestratorConfig(idle_watchdog_seconds=1800)
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint=None)
+    assert resolve_idle_watchdog_budget(task, config) == 1800
+
+
+def test_resolve_idle_watchdog_budget_per_tier_beats_global_override() -> None:
+    """A resolvable per-tier budget still wins over the global config default."""
+    config = OrchestratorConfig(
+        idle_watchdog_seconds=1800, idle_watchdog_by_tier={"large": 600}
+    )
+    task = TicketTask(ticket_id="T-1", client="c", scope_hint="large")
+    assert resolve_idle_watchdog_budget(task, config) == 600
+
+
 def test_resolve_idle_watchdog_budget_per_ticket_overrides_tier() -> None:
     """idle_watchdog_override beats per-tier dict."""
     config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
