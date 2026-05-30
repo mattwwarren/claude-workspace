@@ -2936,6 +2936,123 @@ def test_flag_silently_idle_auto_recovers_under_cap(
     assert events[0].payload["cause"] == "idle_stall_recovered"
 
 
+def test_flag_silently_idle_recover_cleans_up_worktree(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Idle-stall recover (the second cleanup call site) removes the stale
+    worktree so the re-dispatched ticket starts clean (#404)."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id="hang-wt",
+        name="client-a/auto-dev/HANG-WT",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        branch="auto-dev/HANG-WT",
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="HANG-WT",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="hang-wt",
+                    attempts=1,  # < cap → recover path
+                )
+            ]
+        )
+    )
+
+    removed: list[tuple[str, str, bool]] = []
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile.fire_push_notification"),
+        patch(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        ),
+        patch(
+            "cw.reconcile.remove_worktree",
+            lambda client, branch, *, force=False: removed.append(
+                (client.name, branch, force)
+            ),
+        ),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    assert removed == [("client-a", "auto-dev/HANG-WT", True)]
+    assert sess.status == SessionStatus.TIMED_OUT
+
+
+def test_flag_silently_idle_recover_skips_cleanup_when_no_branch(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Recover with no branch on the session attempts no worktree cleanup (#404)."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id="hang-nb",
+        name="client-a/auto-dev/HANG-NB",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        # branch left as the model default (None)
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="HANG-NB",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="hang-nb",
+                    attempts=1,
+                )
+            ]
+        )
+    )
+
+    calls: list[str] = []
+
+    def record_get_client(name: str) -> ClientConfig:
+        calls.append(name)
+        return ClientConfig(name=name, workspace_path=tmp_path / "ws")
+
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.get_client", record_get_client),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+    assert calls == []
+    assert sess.status == SessionStatus.TIMED_OUT
+
+
 def test_flag_silently_idle_parks_when_cap_exhausted(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:

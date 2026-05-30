@@ -19,7 +19,7 @@ from cw.dispatch import (
     persist_last_result,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import WorktreeError
+from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -1162,6 +1162,81 @@ class TestDispatchTickSpawnErrors:
             for record in caplog.records
             if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'spawn failed'"
+
+    def test_stale_worktree_error_force_removes_then_reverts(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A StaleWorktreeError from create_worktree force-removes the stale
+        tree (so the next tick rebuilds fresh) and reverts the task to PENDING.
+
+        Without the removal the task would re-claim and re-hit the same stale
+        worktree every tick — an infinite spin, because no session is created
+        here for reconcile's TIMED_OUT cleanup to act on (#404).
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-404S", client="test-client"))
+
+        def _stale(*_args: object, **_kwargs: object) -> Path:
+            msg = "Refusing to reuse stale worktree"
+            raise StaleWorktreeError(msg)
+
+        removed: list[tuple[str, bool]] = []
+
+        def _record_remove(
+            _client: object, branch: str, *, force: bool = False
+        ) -> None:
+            removed.append((branch, force))
+
+        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.remove_worktree", _record_remove)
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        assert daemon.spawn_calls == []
+        # Stale tree force-removed for the ticket's branch before the revert.
+        assert removed == [("auto-dev/GEN-404S", True)]
+
+        queue = load_dev_queue()
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_stale_worktree_removal_failure_still_reverts(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the force-remove itself fails, the loop still survives and reverts
+        the task to PENDING — removal is best-effort (#404)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-404F", client="test-client"))
+
+        def _stale(*_args: object, **_kwargs: object) -> Path:
+            msg = "Refusing to reuse stale worktree"
+            raise StaleWorktreeError(msg)
+
+        def _remove_boom(*_args: object, **_kwargs: object) -> None:
+            msg = "git worktree remove failed"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.remove_worktree", _remove_boom)
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        queue = load_dev_queue()
+        assert queue.tasks[0].status == QueueItemStatus.PENDING
+        assert queue.tasks[0].session_id is None
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.exceptions import MissingWorkspaceError, WorktreeError
+from cw.exceptions import MissingWorkspaceError, StaleWorktreeError, WorktreeError
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
@@ -149,11 +149,16 @@ def _checked_out_branch(wt_path: Path) -> str | None:
     """Return the branch checked out in *wt_path*, or None.
 
     None means *wt_path* is not a registered git worktree or is in
-    detached-HEAD state (``git branch --show-current`` prints nothing).
-    Never raises — the idempotent-reuse guard in :func:`create_worktree`
-    decides what a non-matching value means.
+    detached-HEAD state (``git branch --show-current`` prints nothing or
+    exits non-zero), or git itself could not be invoked. Never raises — the
+    idempotent-reuse guard in :func:`create_worktree` treats every None as a
+    refuse-to-reuse signal, so swallowing an ``OSError`` here (e.g. a missing
+    git binary) is correct: the worktree cannot be trusted either way.
     """
-    result = _run_git("branch", "--show-current", cwd=wt_path, check=False)
+    try:
+        result = _run_git("branch", "--show-current", cwd=wt_path, check=False)
+    except OSError:
+        return None
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
@@ -169,8 +174,8 @@ def create_worktree(
 
     Returns the worktree path. Idempotent: returns the existing path when it is
     already a worktree on *branch*. A pre-existing directory checked out on a
-    *different* branch is treated as stale and raises :exc:`WorktreeError`
-    rather than being reused (see below).
+    *different* branch (or not a worktree at all) is treated as stale and
+    raises :exc:`StaleWorktreeError` rather than being reused (see below).
     """
     wt_path = worktree_path_for(client, branch)
     git_cwd = _git_dir(client)
@@ -191,11 +196,10 @@ def create_worktree(
             found = current_branch or "(none / detached HEAD / not a worktree)"
             msg = (
                 f"Refusing to reuse stale worktree at {wt_path}: expected "
-                f"branch {branch!r} but found {found}. Remove it "
-                f"(`git worktree remove --force {wt_path}`) or run "
-                f"`cw doctor --reap`, then re-dispatch."
+                f"branch {branch!r} but found {found}. Remove it with "
+                f"`git worktree remove --force {wt_path}`, then re-dispatch."
             )
-            raise WorktreeError(msg)
+            raise StaleWorktreeError(msg)
         return wt_path
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)

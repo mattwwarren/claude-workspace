@@ -26,6 +26,19 @@ class MissingWorkspaceError(WorktreeError):
     __slots__ = ()
 
 
+class StaleWorktreeError(WorktreeError):
+    """A pre-existing worktree is checked out on a branch other than requested.
+
+    Raised only by ``create_worktree``'s idempotent-reuse guard (#404). Kept
+    distinct from the base :class:`WorktreeError` so the dispatch loop can
+    force-remove the stale tree and let the task retry — without conflating it
+    with other git failures (notably the main-checkout guard) that must never
+    trigger a removal.
+    """
+
+    __slots__ = ()
+
+
 class HookContextConflictError(CwError):
     """A user-owned ``.claude/settings.local.json`` already exists.
 

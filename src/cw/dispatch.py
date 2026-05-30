@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -10,6 +11,7 @@ from cw.auto_dev_result import AutoDevResult, parse_stdout
 from cw.config import load_clients, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
+from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
@@ -19,7 +21,12 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
 from cw.spawn import spawn_create_impl
-from cw.worktree import check_not_main_checkout, create_worktree, is_main_behind_origin
+from cw.worktree import (
+    check_not_main_checkout,
+    create_worktree,
+    is_main_behind_origin,
+    remove_worktree,
+)
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -188,7 +195,21 @@ def dispatch_tick(
                 # dispatch made an empty directory and relied on
                 # ``claude -w`` to turn it into a worktree, which never
                 # worked because that flag takes a name rather than a path.
-                worktree_path = create_worktree(client, branch)
+                try:
+                    worktree_path = create_worktree(client, branch)
+                except StaleWorktreeError:
+                    # A stale worktree (wrong branch / not a worktree) refused
+                    # reuse (#404). No session exists yet, so reconcile's
+                    # TIMED_OUT cleanup will never fire for it — without
+                    # removing it here the task reverts to PENDING and re-hits
+                    # the same stale tree every tick (an infinite spin). Force-
+                    # remove it (best-effort) so the next claim rebuilds fresh,
+                    # then re-raise into the handler below to revert to PENDING.
+                    # Caught narrowly as StaleWorktreeError (not WorktreeError)
+                    # so the main-checkout guard never triggers a removal.
+                    with contextlib.suppress(WorktreeError, OSError):
+                        remove_worktree(client, branch, force=True)
+                    raise
 
                 # Guard against the #300 regression: if create_worktree
                 # returns the main checkout path (degenerate path-computation

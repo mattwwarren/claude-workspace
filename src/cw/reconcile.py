@@ -518,6 +518,10 @@ def _cleanup_timed_out_worktree(session: Session) -> None:
             session.branch,
             exc,
         )
+    else:
+        # Audit breadcrumb for a destructive (force=True) removal — a skip is
+        # logged above, so a successful reap leaves a matching record (#404).
+        _log.info("worktree_cleanup_ok: %s/%s", session.client, session.branch)
 
 
 def revert_stalled_headless_sessions(
