@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
+from cw.exceptions import WorktreeError
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -1039,6 +1040,107 @@ def test_revert_stalled_headless_sessions_stops_daemon_surface(
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
 
     assert short_id in daemon.stop_calls
+
+
+# ---------------------------------------------------------------------------
+# Stale-worktree cleanup on timeout (GitHub issue #404): a timed-out session's
+# task is reverted to PENDING, so its worktree must be removed or the retry
+# would inherit this run's branch/commits.
+# ---------------------------------------------------------------------------
+
+
+def test_revert_stalled_cleans_up_worktree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wall-clock timeout removes the stale worktree so re-dispatch is clean."""
+    worktree = tmp_path / "wt-cleanup"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session(
+        "clean-1", worktree, started_at, surface_ref=None
+    )
+    sess.branch = "auto-dev/clean-1"
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    removed: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.remove_worktree",
+        lambda client, branch, *, force=False: removed.append(
+            (client.name, branch, force)
+        ),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    assert removed == [("client-a", "auto-dev/clean-1", True)]
+
+
+def test_revert_stalled_worktree_cleanup_is_best_effort(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worktree-removal failure must not abort the timeout sweep (#404)."""
+    worktree = tmp_path / "wt-boom"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("boom-1", worktree, started_at, surface_ref=None)
+    sess.branch = "auto-dev/boom-1"
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    def boom(client: ClientConfig, branch: str, *, force: bool = False) -> None:
+        msg = "git worktree remove exploded"
+        raise WorktreeError(msg)
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.remove_worktree", boom)
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    assert sess.status == SessionStatus.TIMED_OUT
+
+
+def test_revert_stalled_skips_cleanup_when_no_branch(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session with no branch attempts no worktree cleanup (#404)."""
+    worktree = tmp_path / "wt-nobranch"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session(
+        "nobranch-1", worktree, started_at, surface_ref=None
+    )
+    # branch left as the model default (None)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    calls: list[str] = []
+
+    def record_get_client(name: str) -> ClientConfig:
+        calls.append(name)
+        return ClientConfig(name=name, workspace_path=tmp_path / "ws")
+
+    monkeypatch.setattr("cw.reconcile.get_client", record_get_client)
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ targets.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -35,9 +36,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import AutoDevResult, parse_stdout
-from cw.config import load_orchestrator_config, load_state, save_state
+from cw.config import get_client, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import (
     CompletionReason,
     OrchestratorConfig,
@@ -49,9 +51,12 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.notify import fire_push_notification
+from cw.worktree import remove_worktree
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session
+
+_log = logging.getLogger(__name__)
 
 
 # Session-name prefix for DAEMON sessions spawned by the dispatch loop. The
@@ -488,6 +493,33 @@ def _apply_salvaged_completion(
     session.claude_session_id = claude_session_id
 
 
+def _cleanup_timed_out_worktree(session: Session) -> None:
+    """Remove a timed-out session's worktree so the re-dispatch starts clean.
+
+    A timed-out DAEMON session has its ``TicketTask`` reverted to PENDING for
+    re-dispatch. If its worktree is left on disk, ``create_worktree`` would
+    reuse it (or, post-#404, refuse and spin) — either way feeding the retry a
+    prior run's branch and commits. Removing it here means the next claim builds
+    a fresh worktree from the current default branch. See GitHub issue #404.
+
+    Best-effort: every failure is logged and swallowed. Worktree cleanup must
+    never abort the reconcile sweep — a missing/renamed client, an
+    already-gone directory, or a git error is non-fatal.
+    """
+    if not session.branch:
+        return
+    try:
+        client = get_client(session.client)
+        remove_worktree(client, session.branch, force=True)
+    except (CwError, OSError) as exc:
+        _log.warning(
+            "worktree_cleanup_skip: %s/%s: %s",
+            session.client,
+            session.branch,
+            exc,
+        )
+
+
 def revert_stalled_headless_sessions(
     state: CwState,
     *,
@@ -596,6 +628,9 @@ def revert_stalled_headless_sessions(
         record_event(OrchestratorEventType.SESSION_TIMED_OUT, payload)
         if session.surface_ref is not None:
             get_native_daemon_client().stop(session.surface_ref)
+        # Stale-worktree cleanup: the task was reverted to PENDING above, so
+        # the retry must not inherit this run's worktree state (#404).
+        _cleanup_timed_out_worktree(session)
 
     for session, ticket_id, result in salvaged:
         completed_payload: dict[str, object] = {
@@ -772,6 +807,9 @@ def flag_silently_idle_daemon_sessions(
     for session, ticket_id in recover:
         if session.surface_ref is not None:
             get_native_daemon_client().stop(session.surface_ref)
+        # Stale-worktree cleanup: this task was reverted to PENDING above for
+        # re-dispatch, so the retry must start from a fresh worktree (#404).
+        _cleanup_timed_out_worktree(session)
         record_event(
             OrchestratorEventType.SESSION_TIMED_OUT,
             {

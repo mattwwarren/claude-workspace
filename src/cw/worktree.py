@@ -145,6 +145,20 @@ def check_not_main_checkout(worktree_path: Path, client: ClientConfig) -> None:
         raise WorktreeError(msg)
 
 
+def _checked_out_branch(wt_path: Path) -> str | None:
+    """Return the branch checked out in *wt_path*, or None.
+
+    None means *wt_path* is not a registered git worktree or is in
+    detached-HEAD state (``git branch --show-current`` prints nothing).
+    Never raises — the idempotent-reuse guard in :func:`create_worktree`
+    decides what a non-matching value means.
+    """
+    result = _run_git("branch", "--show-current", cwd=wt_path, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -153,7 +167,10 @@ def create_worktree(
 ) -> Path:
     """Create a git worktree for the given branch.
 
-    Returns the worktree path. Idempotent: returns existing path if already created.
+    Returns the worktree path. Idempotent: returns the existing path when it is
+    already a worktree on *branch*. A pre-existing directory checked out on a
+    *different* branch is treated as stale and raises :exc:`WorktreeError`
+    rather than being reused (see below).
     """
     wt_path = worktree_path_for(client, branch)
     git_cwd = _git_dir(client)
@@ -161,6 +178,24 @@ def create_worktree(
     check_not_main_checkout(wt_path, client)
 
     if wt_path.exists():
+        # Idempotent reuse is only safe when the existing worktree is still on
+        # the branch we were asked for. A stale worktree left by a prior failed
+        # dispatch (crash before reconcile's TIMED_OUT cleanup, see #404) can
+        # carry a different branch — and thus a prior run's commits — into the
+        # new session. Silently reusing it feeds the worker the wrong context
+        # and has caused cross-ticket isolation breaches (#402). Refuse on
+        # mismatch: the dispatch loop reverts the task to PENDING and reconcile
+        # removes the stale tree so the retry starts clean.
+        current_branch = _checked_out_branch(wt_path)
+        if current_branch != branch:
+            found = current_branch or "(none / detached HEAD / not a worktree)"
+            msg = (
+                f"Refusing to reuse stale worktree at {wt_path}: expected "
+                f"branch {branch!r} but found {found}. Remove it "
+                f"(`git worktree remove --force {wt_path}`) or run "
+                f"`cw doctor --reap`, then re-dispatch."
+            )
+            raise WorktreeError(msg)
         return wt_path
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)
