@@ -16,6 +16,9 @@ from click.shell_completion import CompletionItem
 
 from cw import __version__
 from cw.auto_dev_result import (
+    BLOCKER_REASON_NO_RESULT_EMITTED,
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+    BLOCKER_REASON_VALIDATION_FAILED,
     PAUSED_FOR_USER_INPUT_STATUSES,
     AutoDevResult,
     BlockedResult,
@@ -886,6 +889,19 @@ def run_claude(extra_args: tuple[str, ...]) -> None:
 # FAILED rather than reverting to PENDING. See issue #251 Bug B.
 _VALIDATION_FAILED_MAX_ATTEMPTS = 3
 
+# BlockedResult reason codes that are deterministic — the running parser binary
+# will produce the same result on every retry, so there is no point retrying.
+# Route these to FAILED on first occurrence.  See GitHub issue #263.
+_DETERMINISTIC_PARSE_FAILURES: frozenset[str] = frozenset(
+    {BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED}
+)
+
+# BlockedResult reason codes that are transient — the failure condition could
+# resolve on a fresh dispatch (e.g. worker crashed before emitting a sentinel).
+_TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
+    {BLOCKER_REASON_NO_RESULT_EMITTED}
+)
+
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. Marking these COMPLETED prevents the race described in
 # issue #251 Bug A where revert_completed_silent_tasks reverts a task to
@@ -960,16 +976,26 @@ def _apply_sentinel_to_task(
                 target.status = QueueItemStatus.COMPLETED
         else:
             # BlockedResult: sentinel failed to parse or was malformed.
-            if sentinel.blocker.reason == "validation_failed":
+            if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+                # Deterministic failure — retrying the same binary won't help.
+                target.status = QueueItemStatus.FAILED
+            elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
                 if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
                     target.status = QueueItemStatus.FAILED
                 else:
                     target.status = QueueItemStatus.PENDING
                     target.session_id = None
-            else:
-                # Other parse failures (no_result_emitted, etc.) → retry.
+            elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
                 target.status = QueueItemStatus.PENDING
                 target.session_id = None
+            else:
+                # Known codes that intentionally fall here:
+                # BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
+                # BLOCKER_REASON_STATUS_UNKNOWN.
+                # Both are terminal (retry won't fix them); COMPLETED avoids
+                # re-burning dispatch cycles.  The else also catches any future
+                # unknown reason code conservatively.
+                target.status = QueueItemStatus.COMPLETED
 
         save_dev_queue(store)
 

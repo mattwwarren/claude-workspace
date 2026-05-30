@@ -2165,6 +2165,121 @@ class TestSignalStop:
             "regression: stale stop hook left task PENDING after blocked→retry→shipped"
         )
 
+    def test_signal_stop_schema_version_unsupported_marks_failed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """schema_version_unsupported sentinel → task FAILED on first occurrence.
+
+        Regression for GitHub issue #263 Bug A: a BlockedResult with
+        reason='schema_version_unsupported' is a deterministic failure —
+        retrying will not produce a different schema_version in the running
+        parser binary.  Must be routed to FAILED (not PENDING).
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-263-schema-unsupported", "worktree-263-schema-unsupported"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-263-schema-unsupported"
+        fake_home = tmp_path / "fake-home-263-schema-unsupported"
+        self._write_transcript(
+            worktree,
+            claude_session_id,
+            _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED,
+            fake_home,
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.FAILED
+
+    def test_signal_stop_unknown_blocker_reason_marks_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Unknown blocker reason → task COMPLETED (conservative, don't re-burn cycles).
+
+        Regression for GitHub issue #263 Bug A: unrecognised BlockedResult
+        reasons must not perpetually re-dispatch via PENDING.  COMPLETED is
+        the conservative terminal state for anything that doesn't match a
+        known deterministic or transient failure reason.
+        """
+        from cw.auto_dev_result import BlockedResult, Blocker
+        from cw.cli import _apply_sentinel_to_task
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        _worktree, session = self._setup_headless_session(
+            tmp_path, "sess-263-unknown-reason", "worktree-263-unknown-reason"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="unknown_reason_xyz",
+                details="test: unrecognised reason code",
+            )
+        )
+        _apply_sentinel_to_task(self.SEED_TICKET_ID, session.id, sentinel)
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.COMPLETED
+
 
 class TestSentinelPresentInTranscript:
     """Direct tests for the real _sentinel_present_in_transcript helper.
@@ -2621,6 +2736,15 @@ _SENTINEL_316_AMBIGUITIES_PENDING_V2 = (
     '  "premises": [],\n'
     '  "next_actions": ["user_resolve_ambiguities"]\n'
     "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# Sentinel for GitHub issue #263 regression tests.
+# schema_version=99 is not in SUPPORTED_SCHEMA_VERSIONS, so parse_stdout
+# returns BlockedResult(reason="schema_version_unsupported").
+_SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED = (
+    "<<<AUTO_DEV_RESULT\n"
+    '{"schema_version": 99, "status": "shipped"}\n'
     "AUTO_DEV_RESULT>>>"
 )
 
