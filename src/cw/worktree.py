@@ -18,13 +18,11 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-# cmux rejects worktree names longer than 64 chars with:
-#   "Invalid worktree name: must be 64 characters or fewer (got N)"
-# The full ``claude -w <path>`` argument is what cmux measures. When the
-# default ``<ws.parent>/.worktrees/<ws.name>/<slug>`` layout would exceed
-# this cap, fall back to a hash-derived short base under ``~/.cw/wt/``
-# so path length stays bounded regardless of client name or workspace
-# nesting depth.
+# The native spawn backend (``spawn_create_impl`` / ``claude --bg`` with
+# ``cwd=``) has no path-length restriction beyond OS limits (PATH_MAX ~4096).
+# The 64-char threshold is a conservative trigger: for any realistic workspace
+# path the default candidate exceeds this cap, so the hash-fallback base
+# (``~/.cw/wt/``) is used in practice — keeping paths short and predictable.
 _WORKTREE_NAME_CAP = 64
 _HASH_BASE_SEGMENTS = (".cw", "wt")
 # 8 hex chars = 32 bits. For a single-user tool with a handful of
@@ -84,10 +82,10 @@ def worktree_path_for(client: ClientConfig, branch: str) -> Path:
     """Return the full worktree path for a branch.
 
     Falls back to a hash-derived short base under ``~/.cw/wt/`` when the
-    default layout would produce a path longer than cmux's 64-char
-    worktree-name cap. An explicit ``client.worktree_base`` is always
-    honoured, even if it produces a path over the cap — user choice
-    wins over the safety net.
+    default layout would produce a path longer than the 64-char path-length
+    threshold. An explicit ``client.worktree_base`` is always honoured, even
+    if it produces a path over the threshold — user choice wins over the
+    safety net.
     """
     slug = slugify_branch(branch)
     base = resolve_worktree_base(client)
