@@ -391,6 +391,18 @@ The parser tolerates this format. When no sentinel markers are found and the ope
 
 Parser must NEVER act on a partial parse — if any of the above fire, treat the run as blocked and require human attention.
 
+### Parse-boundary coercions
+
+The parser applies several pre-validation coercions before handing the payload to Pydantic. Each coercion targets a known producer-drift pattern: a field combination that the model correctly rejects, but that arises from a well-understood producer bug rather than a genuinely ambiguous payload. These coercions are scoped tightly — they fire only for the specific `status` + `stage_reached` shapes where the producer bug has been observed. They do NOT apply to `shipped` or `blocked` (where the same field contradictions are genuinely ambiguous and should fail loudly).
+
+| Coercion | Trigger | Action | Issue |
+|---|---|---|---|
+| `no_op` + stray `pr` / `branch` / `commits` | `status=no_op` and `pr`, `branch`, or `commits` is non-null/non-empty | Set `pr=null`, `branch=null`, `commits=[]` | #367 |
+| `blocked` + stray `next_actions` | `status=blocked` and `next_actions` is non-empty with non-user-directed verbs (not `user_resolve_*` / `user_decide_*` / `user_verify_*` prefixes; not `stage_reached=stage1_pre_flight`) | Drop `next_actions` (set to `[]`), preserve `blocker` | #371 |
+| `no_op` + stray `scope.lines_actual` | `status=no_op` and `stage_reached ∈ {stage1_pre_flight, stage1_plan}` and `scope.lines_actual` is non-null | Set `scope.lines_actual=null` | #399 |
+
+All coercions log a `WARNING` with the affected field names and ticket ID. The model-level invariants remain strict — coercion happens only at the parse boundary so existing test coverage for the invariants is unaffected.
+
 ---
 
 ## 7. Resume Protocol (Reserved — Not Yet Specified)

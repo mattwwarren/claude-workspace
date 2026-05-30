@@ -720,6 +720,22 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
         if payload.get("commits"):
             stray.append("commits")
             payload["commits"] = []
+        # Coerce stray scope.lines_actual on pre-impl exits (issue #399).
+        # A no_op at stage1_pre_flight or stage1_plan exited before any
+        # implementation work; lines_actual must be null. The producer
+        # sometimes emits a non-null value, tripping the §3.3 cross-field
+        # invariant and causing the sentinel to fail as validation_failed.
+        scope_dict = payload.get("scope")
+        if isinstance(scope_dict, dict) and scope_dict.get("lines_actual") is not None:
+            raw_stage = payload.get("stage_reached", "")
+            effective_stage = (
+                _STAGE_REACHED_ALIASES.get(raw_stage, raw_stage)
+                if isinstance(raw_stage, str)
+                else raw_stage
+            )
+            if effective_stage in ("stage1_pre_flight", "stage1_plan"):
+                stray.append("scope.lines_actual")
+                scope_dict["lines_actual"] = None
         if stray:
             _log.warning(
                 "auto-dev: no_op sentinel carried non-null %s; coercing to clean "

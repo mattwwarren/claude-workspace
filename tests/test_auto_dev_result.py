@@ -983,6 +983,122 @@ class TestPreFlightNoOp:
 
 
 # ---------------------------------------------------------------------------
+# no_op + stray scope.lines_actual coerce (issue #399)
+# A producer bug emitted status=no_op with stage_reached=stage1_pre_flight
+# carrying a non-null scope.lines_actual.  The §3.3 cross-field invariant
+# rejects this, routing a legitimate no_op to validation_failed → retry cap
+# → failed (session 8043fe9f re-running already-satisfied ticket #143).
+# parse_stdout coerces scope.lines_actual to null for no_op sentinels where
+# stage_reached is stage1_pre_flight or stage1_plan.
+# ---------------------------------------------------------------------------
+
+
+class TestNoOpStrayLinesActualCoerce:
+    def test_no_op_stray_lines_actual_coerced_at_stage1_pre_flight(self) -> None:
+        """parse_stdout coerces no_op + stray scope.lines_actual to clean no_op.
+
+        Regression for issue #399: the exact failure mode from session 8043fe9f
+        re-running already-satisfied ticket #143 — a no_op sentinel carrying a
+        non-null scope.lines_actual triggered the §3.3 pre-impl invariant,
+        routing to validation_failed instead of cleanly closing the issue.
+        """
+        p = _no_op_payload()
+        p["scope"]["lines_actual"] = 42  # stray non-null value from producer
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.scope.lines_actual is None
+
+    def test_no_op_stray_lines_actual_coerced_at_stage1_plan(self) -> None:
+        """Coercion also fires when stage_reached is stage1_plan (pre-impl)."""
+        p = _no_op_payload()
+        p["stage_reached"] = "stage1_plan"
+        p["scope"]["lines_actual"] = 10
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.scope.lines_actual is None
+
+    def test_no_op_stray_lines_actual_coerced_via_alias(self) -> None:
+        """Coercion fires when stage_reached uses a short-form alias (pre_flight)."""
+        p = _no_op_payload()
+        p["stage_reached"] = "pre_flight"  # alias for stage1_pre_flight
+        p["scope"]["lines_actual"] = 7
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.scope.lines_actual is None
+
+    def test_no_op_null_lines_actual_unchanged(self) -> None:
+        """null scope.lines_actual is the correct shape — coerce must not touch it."""
+        p = _no_op_payload()
+        assert p["scope"]["lines_actual"] is None
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.scope.lines_actual is None
+
+    def test_post_impl_non_null_lines_actual_not_coerced(self) -> None:
+        """Coerce does not fire for post-impl stages — non-null passes through."""
+        p = _no_op_payload()
+        # stage2_impl is outside {stage1_pre_flight, stage1_plan}, so the
+        # coerce guard does NOT fire. lines_actual=30 is valid for a post-impl
+        # stage and passes through to the parsed result unchanged.
+        p["stage_reached"] = "stage2_impl"
+        p["scope"]["lines_actual"] = 30
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "no_op"
+        assert result.scope.lines_actual == 30  # not zeroed by coerce
+
+    def test_regression_issue_399_session_8043fe9f_payload(self) -> None:
+        """Exact payload shape from session 8043fe9f that triggered the #399 bug.
+
+        The headless re-run of #143 emitted schema_version=4, status=no_op,
+        stage_reached=stage1_pre_flight with a stray non-null scope.lines_actual.
+        This caused BlockedResult(reason='validation_failed') → PENDING → retry
+        cap → 'failed', burning 3 sessions on already-satisfied work.
+        """
+        payload = {
+            "schema_version": 4,
+            "ticket_id": "GEN-143",
+            "status": "no_op",
+            "stage_reached": "stage1_pre_flight",
+            "scope": {
+                "tier": "small",
+                "files": 0,
+                "lines_estimate": 0,
+                "lines_actual": 0,  # stray non-null: the producer emitted 0, not null
+                "forbidden_touched": False,
+            },
+            "plan_source": "none",
+            "branch": None,
+            "worktree_path": None,
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["close_issue_as_completed"],
+        }
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult), (
+            f"Expected AutoDevResult, got BlockedResult: {result}"
+        )
+        assert result.status == "no_op"
+        assert result.stage_reached == "stage1_pre_flight"
+        assert result.scope.lines_actual is None
+
+
+# ---------------------------------------------------------------------------
 # blocked + stray next_actions coerce (issue #371 — follow-up to #367/#370)
 # A producer bug emits status=blocked alongside next_actions=['redispatch_ticket']
 # (or other non-user-directed verbs). The §4.3 terminal-reject invariant then
