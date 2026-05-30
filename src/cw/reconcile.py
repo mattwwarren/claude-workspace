@@ -684,9 +684,12 @@ def flag_silently_idle_daemon_sessions(
         budget = resolve_idle_watchdog_budget(task, config)
         if elapsed < budget:
             continue
-        # Liveness check: if the worker's transcript was modified recently the
-        # process is still actively making progress — skip this tick (#340).
-        if _transcript_recently_active(session, now):
+        # Liveness check: skip workers that are still making progress. A recent
+        # transcript write (#340) OR an in-flight subagent (#384 — parent
+        # transcript goes quiet while a subagent runs) both count as alive.
+        if _transcript_recently_active(session, now) or _awaiting_subagent(
+            session, now
+        ):
             continue
         candidates.append((session, ticket_id))
 

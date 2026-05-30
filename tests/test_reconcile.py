@@ -2500,3 +2500,58 @@ def test_awaiting_subagent_false_when_pending_tool_use_too_old(
     sess = _make_daemon_session(claude_session_id="sess-uuid")
     with patch("cw.reconcile._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is False
+
+
+# ---------------------------------------------------------------------------
+# Task A2: watchdog skips workers awaiting a subagent
+# ---------------------------------------------------------------------------
+
+
+def test_flag_silently_idle_skips_worker_awaiting_subagent(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A worker past the idle budget but awaiting a subagent is NOT flagged (#384)."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="busy-1",
+        name="client-a/auto-dev/BUSY-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="BUSY-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="busy-1",
+                )
+            ]
+        )
+    )
+
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=True),
+        patch("cw.reconcile.fire_push_notification") as mock_notify,
+    ):
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+        mock_notify.assert_not_called()
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+    store = load_dev_queue()
+    assert store.tasks[0].status == QueueItemStatus.RUNNING
