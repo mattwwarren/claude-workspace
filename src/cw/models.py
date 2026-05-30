@@ -244,6 +244,13 @@ class OrchestratorConfig(BaseModel):
     idle_watchdog_by_tier: dict[str, int] = Field(
         default_factory=lambda: {"large": 1800}
     )
+    # Global idle-watchdog budget (seconds) applied when a session has no
+    # per-ticket override and no resolvable per-tier budget (e.g. it stalled
+    # before Stage 1 set a scope_hint). ``None`` falls back to the
+    # IDLE_WATCHDOG_SECONDS constant (900s). Raise this so the watchdog does
+    # not reap workers still mid-plan/mid-review — 15 min is too short for a
+    # full plan+review pass. See the 2026-05-30 fanout-cascade RCA.
+    idle_watchdog_seconds: int | None = None
     # Per-tier cap on idle-stall auto-retries before a headless worker is
     # parked BLOCKED_ON_USER for the operator. Keyed by TicketTask.scope_hint;
     # unknown tiers fall back to DEFAULT_IDLE_RETRY_CAP. See GitHub issue #384.
