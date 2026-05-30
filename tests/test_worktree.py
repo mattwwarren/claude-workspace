@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cw.exceptions import WorktreeError
+from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import ClientConfig
 from cw.worktree import (
     _fetch_default_branch,
@@ -175,7 +175,8 @@ class TestCreateWorktree:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """If worktree path already exists, return it without running git."""
+        """Existing worktree on the requested branch is reused after a single
+        branch-verification call — no ``worktree add`` (#404)."""
         client = ClientConfig(
             name="test",
             workspace_path=tmp_path / "ws",
@@ -184,17 +185,115 @@ class TestCreateWorktree:
         wt_path = tmp_path / "wt" / "feat-search"
         wt_path.mkdir(parents=True)
 
-        # Should NOT call git at all
         calls: list[tuple[str, ...]] = []
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             calls.append(args)
-            return MagicMock(returncode=0, stdout="", stderr="")
+            # _checked_out_branch queries the current branch; it matches.
+            return MagicMock(returncode=0, stdout="feat/search\n", stderr="")
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         result = create_worktree(client, "feat/search")
         assert result == wt_path
-        assert len(calls) == 0
+        # The behavior under test: an on-branch worktree is reused without a
+        # `worktree add`. Assert that, not the exact verification command.
+        assert not any("add" in call for call in calls)
+
+    def test_existing_worktree_wrong_branch_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pre-existing worktree on a *different* branch is stale: refuse to
+        reuse it rather than feed the worker a prior run's commits (#404)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "auto-dev-399"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            # Existing worktree is checked out on a different branch.
+            return MagicMock(returncode=0, stdout="auto-dev/201\n", stderr="")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(StaleWorktreeError, match="stale worktree"):
+            create_worktree(client, "auto-dev/399")
+
+    def test_existing_path_not_a_worktree_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A leftover plain directory (``git branch --show-current`` exits
+        non-zero) is treated as stale and refused (#404)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "auto-dev-399"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            # `git branch --show-current` fails: not a git worktree.
+            return MagicMock(returncode=128, stdout="", stderr="not a git repo")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(StaleWorktreeError, match="stale worktree"):
+            create_worktree(client, "auto-dev/399")
+
+    def test_existing_worktree_detached_head_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Detached HEAD: ``git branch --show-current`` exits 0 with empty
+        stdout. _checked_out_branch maps that to None, which mismatches any
+        requested branch and is refused (#404). Distinct code path from the
+        non-zero-returncode case above."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "auto-dev-399"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            # Detached HEAD: success exit, but no current branch name.
+            return MagicMock(returncode=0, stdout="\n", stderr="")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(StaleWorktreeError, match="detached HEAD"):
+            create_worktree(client, "auto-dev/399")
+
+    def test_existing_worktree_git_unavailable_raises_stale_not_oserror(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If git itself cannot be invoked (OSError), _checked_out_branch
+        swallows it and returns None, so create_worktree raises
+        StaleWorktreeError rather than letting the OSError leak to the caller
+        — honouring the helper's no-raise contract (#404)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "auto-dev-399"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            msg = "git binary not found"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(StaleWorktreeError):
+            create_worktree(client, "auto-dev/399")
 
     def test_creates_new_branch(
         self,
