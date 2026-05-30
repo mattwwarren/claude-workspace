@@ -2709,3 +2709,165 @@ def test_flag_silently_idle_parks_when_cap_exhausted(
     assert sess.last_result == {"paused_status": "silently_idle"}
     store = load_dev_queue()
     assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# _awaiting_subagent edge-case coverage
+# ---------------------------------------------------------------------------
+
+
+def test_awaiting_subagent_skips_blank_lines_and_bad_json(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Blank lines and malformed JSON in transcript are skipped gracefully."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    # blank line, bad JSON, then valid tool_use with no result
+    transcript.write_text(
+        "\n"
+        "not-json\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:04:00Z",
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is True
+
+
+def test_awaiting_subagent_skips_non_list_content(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Entries with non-list content field are skipped without error."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    # entry with non-list content — should be skipped, not crash
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:04:00Z",
+                "message": {"content": "not-a-list"},
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        # Nothing to track — returns False (no pending tool_use)
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_awaiting_subagent_handles_invalid_timestamp(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Invalid ISO timestamp on tool_use → last_tool_use_ts stays None → False."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "not-a-valid-timestamp",
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        # invalid ts → last_tool_use_ts = None → returns False
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_awaiting_subagent_returns_false_on_oserror(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """OSError while reading transcript → fail-open False."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    # Point at a file that does not exist
+    sess = _make_daemon_session(claude_session_id="no-such-file")
+    # project_dir exists but the specific .jsonl doesn't
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_flag_silently_idle_recover_skips_non_running_task(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Queue task not RUNNING is not mutated during recover/park sweep (#384)."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="skip-nonrunning",
+        name="client-a/auto-dev/SKIP-NR",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    # Task is PENDING (not RUNNING) — should be left alone
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="SKIP-NR",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id=None,
+                    attempts=1,  # < cap → would recover if RUNNING
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+    ):
+        result = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+        # Surface still stopped (recover path, attempts=1 < cap=2)
+        mock_daemon.stop.assert_called_once_with("live-ref")
+
+    # Task was PENDING, not RUNNING → not touched
+    store = load_dev_queue()
+    assert store.tasks[0].status == QueueItemStatus.PENDING
+    assert result == []
