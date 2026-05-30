@@ -3548,6 +3548,201 @@ class TestQueueFailCli:
             assert result.exit_code != 0
 
 
+class TestQueueListCli:
+    def test_list_no_arg_requires_no_client(self, tmp_config_dir: Path) -> None:
+        """No CLIENT arg should succeed (exit_code 0), not raise usage error."""
+        runner = CliRunner()
+        with patch("cw.cli.load_clients", return_value={}):
+            result = runner.invoke(main, ["queue", "list"])
+            assert result.exit_code == 0
+            assert "Queue is empty." in result.output
+
+    def test_list_no_arg_shows_all_clients_with_items(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Cross-client view: shows clients with items, skips empty ones."""
+        from cw.models import QueueStore
+
+        alpha_item = QueueItem(
+            client="alpha",
+            task=TaskSpec(
+                description="Task for alpha",
+                purpose=SessionPurpose.IMPL,
+                prompt="do it",
+            ),
+        )
+        alpha_store = QueueStore(items=[alpha_item])
+        beta_store = QueueStore(items=[])
+
+        runner = CliRunner()
+        clients = {
+            "alpha": ClientConfig(
+                name="alpha",
+                workspace_path=tmp_path / "alpha",
+            ),
+            "beta": ClientConfig(
+                name="beta",
+                workspace_path=tmp_path / "beta",
+            ),
+        }
+        with (
+            patch("cw.cli.load_clients", return_value=clients),
+            patch(
+                "cw.cli.load_queue",
+                side_effect=lambda c: alpha_store if c == "alpha" else beta_store,
+            ),
+        ):
+            result = runner.invoke(main, ["queue", "list"])
+            assert result.exit_code == 0
+            assert "--- alpha ---" in result.output
+            assert alpha_item.id in result.output
+            assert "Task for alpha" in result.output
+            assert "--- beta ---" not in result.output  # empty client skipped
+
+    def test_list_no_arg_all_clients_empty(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """All clients empty → 'Queue is empty.'"""
+        from cw.models import QueueStore
+
+        runner = CliRunner()
+        clients = {
+            "alpha": ClientConfig(
+                name="alpha",
+                workspace_path=tmp_path / "alpha",
+            ),
+            "beta": ClientConfig(
+                name="beta",
+                workspace_path=tmp_path / "beta",
+            ),
+        }
+        with (
+            patch("cw.cli.load_clients", return_value=clients),
+            patch("cw.cli.load_queue", return_value=QueueStore(items=[])),
+        ):
+            result = runner.invoke(main, ["queue", "list"])
+            assert result.exit_code == 0
+            assert "Queue is empty." in result.output
+
+    def test_list_no_arg_zero_clients_empty(self, tmp_config_dir: Path) -> None:
+        """Zero configured clients also shows 'Queue is empty.'"""
+        runner = CliRunner()
+        with patch("cw.cli.load_clients", return_value={}):
+            result = runner.invoke(main, ["queue", "list"])
+            assert result.exit_code == 0
+            assert "Queue is empty." in result.output
+
+    def test_list_single_client_shows_items(self, tmp_config_dir: Path) -> None:
+        """Existing per-client mode still works."""
+        from cw.models import QueueStore
+
+        item = QueueItem(
+            client="my-client",
+            task=TaskSpec(
+                description="Fix bug",
+                purpose=SessionPurpose.IMPL,
+                prompt="fix it",
+            ),
+        )
+        runner = CliRunner()
+        with patch("cw.cli.load_queue", return_value=QueueStore(items=[item])):
+            result = runner.invoke(main, ["queue", "list", "my-client"])
+            assert result.exit_code == 0
+            assert item.id in result.output
+            assert "Fix bug" in result.output
+
+    def test_list_single_client_empty(self, tmp_config_dir: Path) -> None:
+        """Per-client empty queue still says 'Queue is empty.'"""
+        from cw.models import QueueStore
+
+        runner = CliRunner()
+        with patch("cw.cli.load_queue", return_value=QueueStore(items=[])):
+            result = runner.invoke(main, ["queue", "list", "my-client"])
+            assert result.exit_code == 0
+            assert "Queue is empty." in result.output
+
+    def test_list_no_arg_purpose_filter(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--purpose filter applies in cross-client mode."""
+        from cw.models import QueueStore
+
+        impl_item = QueueItem(
+            client="alpha",
+            task=TaskSpec(
+                description="impl task",
+                purpose=SessionPurpose.IMPL,
+                prompt="impl",
+            ),
+        )
+        debt_item = QueueItem(
+            client="alpha",
+            task=TaskSpec(
+                description="debt task",
+                purpose=SessionPurpose.DEBT,
+                prompt="debt",
+            ),
+        )
+        store = QueueStore(items=[impl_item, debt_item])
+        clients = {
+            "alpha": ClientConfig(
+                name="alpha",
+                workspace_path=tmp_path / "alpha",
+            ),
+        }
+
+        runner = CliRunner()
+        with (
+            patch("cw.cli.load_clients", return_value=clients),
+            patch("cw.cli.load_queue", return_value=store),
+        ):
+            result = runner.invoke(main, ["queue", "list", "--purpose", "impl"])
+            assert result.exit_code == 0
+            assert "impl task" in result.output
+            assert "debt task" not in result.output
+
+    def test_list_no_arg_status_filter(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--status filter applies in cross-client mode."""
+        from cw.models import QueueItemStatus, QueueStore
+
+        pending_item = QueueItem(
+            client="alpha",
+            task=TaskSpec(
+                description="pending task",
+                purpose=SessionPurpose.IMPL,
+                prompt="p",
+            ),
+        )
+        running_item = QueueItem(
+            client="alpha",
+            task=TaskSpec(
+                description="running task",
+                purpose=SessionPurpose.IMPL,
+                prompt="r",
+            ),
+        )
+        running_item.status = QueueItemStatus.RUNNING
+        store = QueueStore(items=[pending_item, running_item])
+        clients = {
+            "alpha": ClientConfig(
+                name="alpha",
+                workspace_path=tmp_path / "alpha",
+            ),
+        }
+
+        runner = CliRunner()
+        with (
+            patch("cw.cli.load_clients", return_value=clients),
+            patch("cw.cli.load_queue", return_value=store),
+        ):
+            result = runner.invoke(main, ["queue", "list", "--status", "running"])
+            assert result.exit_code == 0
+            assert "running task" in result.output
+            assert "pending task" not in result.output
+
+
 def test_display_status_reconciles_phantom_active_sessions(
     tmp_config_dir: Path,
     sample_client: ClientConfig,
