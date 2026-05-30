@@ -1070,3 +1070,16 @@ class TestFetchFeatureBranch:
         """Returns False when the remote branch does not exist."""
         _bare, _parent, client = self._setup_repo(tmp_path)
         assert fetch_feature_branch(client, "auto-dev/does-not-exist") is False
+
+    def test_run_git_exception_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Returns False without raising when _run_git raises WorktreeError."""
+        _bare, _parent, client = self._setup_repo(tmp_path)
+
+        def mock_run(*args: object, **kwargs: object) -> object:
+            msg = "simulated git failure"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert fetch_feature_branch(client, "auto-dev/381") is False
