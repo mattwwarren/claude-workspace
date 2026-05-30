@@ -2383,3 +2383,120 @@ def test_flag_silently_idle_skips_with_known_session_id_and_recent_transcript(
 
     assert blocked == []
     assert sess.last_result is None
+
+
+# ---------------------------------------------------------------------------
+# Helpers for _awaiting_subagent tests
+# ---------------------------------------------------------------------------
+
+
+def _make_daemon_session(
+    *, claude_session_id: str | None = None, surface_ref: str = "live-ref"
+) -> Session:
+    return Session(
+        id="sess-1",
+        name="client-a/auto-dev/T-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref=surface_ref,
+        claude_session_id=claude_session_id,
+        started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+
+
+# ---------------------------------------------------------------------------
+# _awaiting_subagent tests (Task A1)
+# ---------------------------------------------------------------------------
+
+
+def test_awaiting_subagent_true_when_tail_is_pending_tool_use(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Last assistant turn is a tool_use with no tool_result yet → awaiting."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    tu_ts = "2026-01-01T00:04:00Z"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": tu_ts,
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is True
+
+
+def test_awaiting_subagent_false_when_tool_result_delivered(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """tool_use followed by tool_result → NOT awaiting (genuine hang)."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    lines = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:04:00Z",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "name": "Agent"}],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T00:04:01Z",
+            "message": {"content": [{"type": "tool_result"}]},
+        },
+    ]
+    transcript.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_awaiting_subagent_false_when_pending_tool_use_too_old(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Pending tool_use older than SUBAGENT_LIVENESS_WINDOW → hung subagent."""
+    from cw.reconcile import SUBAGENT_LIVENESS_WINDOW_SECONDS, _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    assert SUBAGENT_LIVENESS_WINDOW_SECONDS < 1800
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:30:00Z",
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is False

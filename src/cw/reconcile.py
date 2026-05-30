@@ -77,11 +77,20 @@ HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 # flags the session as BLOCKED_ON_USER and fires a push notification.
 IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
 
+DEFAULT_IDLE_RETRY_CAP = 2  # idle-stall auto-retries before parking (#384)
+
 # How recently a session's transcript must have been modified to be considered
 # actively making progress. If the newest .jsonl under the session's project
 # dir was written within this window, the watchdog skips the session (GitHub
 # #340). Conservative default: 2 min = well below the 15-min budget.
-TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 120
+# 5 min — widened from 2 min (#384): covers short inter-turn gaps;
+# subagent gaps handled by _awaiting_subagent below.
+TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 300
+
+# A worker awaiting a subagent leaves the parent transcript quiet (subagent output
+# only lands on return). Treat a pending tool_use at the transcript tail as alive
+# for up to this long before concluding the subagent itself is hung. See #384.
+SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
 
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
@@ -390,6 +399,74 @@ def _transcript_recently_active(
         if mtime <= session.started_at:
             return False
         return (now - mtime).total_seconds() < window_seconds
+    except OSError:
+        return False
+
+
+def _awaiting_subagent(session: Session, now: datetime) -> bool:
+    """Return True if the worker is mid-tool/subagent (parent tail pending).
+
+    A subagent's output only lands in the parent transcript when it returns,
+    so the parent goes quiet during execution and mtime-based liveness
+    false-positives. Detect the in-flight case: the last assistant turn is a
+    ``tool_use`` with no following ``tool_result``, and that turn is within
+    ``SUBAGENT_LIVENESS_WINDOW_SECONDS`` of *now* (a pending tool_use older than
+    that is a hung subagent — not alive). See GitHub #384.
+
+    Fail-open to False (permit the watchdog to proceed) on any read/parse error.
+    """
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
+        return False
+    try:
+        if session.claude_session_id is not None:
+            transcript = project_dir / f"{session.claude_session_id}.jsonl"
+        else:
+            candidates = sorted(
+                project_dir.glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidates:
+                return False
+            transcript = candidates[0]
+        if not transcript.is_file():
+            return False
+
+        last_tool_use_ts: datetime | None = None
+        saw_result_after_tool_use = True
+        for raw in transcript.read_text().splitlines():
+            if not raw.strip():
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            etype = entry.get("type")
+            message = entry.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                continue
+            if etype == "assistant" and any(
+                isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+            ):
+                ts = entry.get("timestamp")
+                if isinstance(ts, str):
+                    try:
+                        last_tool_use_ts = datetime.fromisoformat(ts)
+                    except ValueError:
+                        last_tool_use_ts = None
+                saw_result_after_tool_use = False
+            elif etype == "user" and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                saw_result_after_tool_use = True
+
+        if saw_result_after_tool_use or last_tool_use_ts is None:
+            return False
+        return (
+            now - last_tool_use_ts
+        ).total_seconds() < SUBAGENT_LIVENESS_WINDOW_SECONDS
     except OSError:
         return False
 
