@@ -684,7 +684,8 @@ def flag_silently_idle_daemon_sessions(
     if task_by_ticket is None:
         task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
-    candidates: list[tuple[Session, str | None]] = []
+    recover: list[tuple[Session, str | None]] = []
+    park: list[tuple[Session, str | None]] = []
     for session in state.sessions:
         if session.origin is not SessionOrigin.DAEMON:
             continue
@@ -709,53 +710,83 @@ def flag_silently_idle_daemon_sessions(
             session, now
         ):
             continue
-        candidates.append((session, ticket_id))
+        cap = resolve_idle_retry_cap(task, config)
+        if task is not None and task.attempts < cap:
+            recover.append((session, ticket_id))
+        else:
+            park.append((session, ticket_id))
 
-    if not candidates:
+    if not recover and not park:
         return []
 
-    for session, _ in candidates:
-        # Flag-only: do not mark session COMPLETED. The worker on the daemon
-        # is still alive; operators disposition flagged sessions via
-        # `cw spawn complete` or `cw doctor --reap`. Setting last_result with
-        # paused_status still makes _has_terminal_sentinel return True so the
-        # watchdog skips this session on subsequent ticks (GitHub #324, #348).
+    # Auto-recover: retire the session and revert its task for re-dispatch.
+    for session, _ in recover:
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+    # Park: flag-only (preserves #348 — no daemon stop, session stays ACTIVE).
+    for session, _ in park:
         session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
 
     # Write session to disk BEFORE queue mutation so a crash between the two
-    # leaves session.last_result set on disk — _has_terminal_sentinel returns
-    # True on the next reconcile tick and the watchdog skips the session,
-    # preventing a duplicate SESSION_NEEDS_ATTENTION. (GitHub #324)
+    # leaves state set on disk — watchdog skips on subsequent ticks. (#324, #348)
     save_state(state)
 
+    recovered_ids = {tid for _, tid in recover if tid}
+    parked_ids = {tid for _, tid in park if tid}
     blocked: list[str] = []
-    ticket_ids_to_block = [tid for _, tid in candidates if tid]
-    if ticket_ids_to_block:
-        ticket_id_set = set(ticket_ids_to_block)
+    if recovered_ids or parked_ids:
         with dev_queue_lock():
             store = load_dev_queue()
+            changed = False
             for task in store.tasks:
-                if (
-                    task.ticket_id in ticket_id_set
-                    and task.status == QueueItemStatus.RUNNING
-                ):
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                if task.ticket_id in recovered_ids:
+                    task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    changed = True
+                elif task.ticket_id in parked_ids:
                     task.status = QueueItemStatus.BLOCKED_ON_USER
                     blocked.append(task.ticket_id)
-            if blocked:
+                    changed = True
+            if changed:
                 save_dev_queue(store)
 
-    for session, ticket_id in candidates:
-        payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "paused_status": _SILENTLY_IDLE_REASON,
-            "breadcrumbs": "",
-            "crashed": False,
-        }
-        record_event(OrchestratorEventType.SESSION_NEEDS_ATTENTION, payload)
+    # Recovery: stop the dead surface + emit a distinguishable timeout event.
+    # Payload mirrors the wall-clock timeout path; cause distinguishes the source.
+    for session, ticket_id in recover:
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "elapsed_seconds": (now - session.started_at).total_seconds(),
+                "cause": "idle_stall_recovered",
+                "last_assistant_message_excerpt": "",
+            },
+        )
+
+    # Park: needs-attention for operator disposition (unchanged from #348).
+    for session, ticket_id in park:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _SILENTLY_IDLE_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+        )
         fire_push_notification(session.name, session.client)
 
     return blocked
