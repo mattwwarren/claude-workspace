@@ -16,6 +16,9 @@ from click.shell_completion import CompletionItem
 
 from cw import __version__
 from cw.auto_dev_result import (
+    BLOCKER_REASON_NO_RESULT_EMITTED,
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+    BLOCKER_REASON_VALIDATION_FAILED,
     PAUSED_FOR_USER_INPUT_STATUSES,
     AutoDevResult,
     BlockedResult,
@@ -890,12 +893,14 @@ _VALIDATION_FAILED_MAX_ATTEMPTS = 3
 # will produce the same result on every retry, so there is no point retrying.
 # Route these to FAILED on first occurrence.  See GitHub issue #263.
 _DETERMINISTIC_PARSE_FAILURES: frozenset[str] = frozenset(
-    {"schema_version_unsupported"}
+    {BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED}
 )
 
 # BlockedResult reason codes that are transient — the failure condition could
 # resolve on a fresh dispatch (e.g. worker crashed before emitting a sentinel).
-_TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset({"no_result_emitted"})
+_TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
+    {BLOCKER_REASON_NO_RESULT_EMITTED}
+)
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. Marking these COMPLETED prevents the race described in
@@ -974,7 +979,7 @@ def _apply_sentinel_to_task(
             if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
                 # Deterministic failure — retrying the same binary won't help.
                 target.status = QueueItemStatus.FAILED
-            elif sentinel.blocker.reason == "validation_failed":
+            elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
                 if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
                     target.status = QueueItemStatus.FAILED
                 else:
@@ -984,8 +989,10 @@ def _apply_sentinel_to_task(
                 target.status = QueueItemStatus.PENDING
                 target.session_id = None
             else:
-                # Unknown reason — conservative: COMPLETED to avoid re-burning
-                # dispatch cycles on an unrecognised failure type.
+                # Known unhandled codes that intentionally fall here:
+                # multiple_result_blocks, status_unknown.  Both are terminal
+                # (retry won't fix them) and conservative COMPLETED avoids
+                # re-burning dispatch cycles.
                 target.status = QueueItemStatus.COMPLETED
 
         save_dev_queue(store)

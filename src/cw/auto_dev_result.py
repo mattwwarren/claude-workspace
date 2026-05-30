@@ -85,6 +85,12 @@ _V4_STATUSES: frozenset[str] = frozenset(
 # session is paused waiting for human input (issue #129).
 PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES
 
+# BlockedResult reason codes produced by parse_stdout.  Exported so consumers
+# (e.g. cli.py) can reference them without duplicating the literal strings.
+BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED = "schema_version_unsupported"
+BLOCKER_REASON_NO_RESULT_EMITTED = "no_result_emitted"
+BLOCKER_REASON_VALIDATION_FAILED = "validation_failed"
+
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
 # gated by schema_version. Spec §8 says enum additions require a version
 # bump (v3), and v3 IS the official home for these values, BUT the producer
