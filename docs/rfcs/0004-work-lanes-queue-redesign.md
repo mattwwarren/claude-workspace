@@ -450,13 +450,42 @@ global knob are strictly additive.
 > lifts it, mirroring the existing `default` → `default_max_parallel`
 > migration in `OrchestratorConfig`), then deprecated with a warning.
 
+## State integrity (tick correctness)
+
+A static audit of the tick loops (`dispatch.run_dispatch_loop`,
+`daemon.run_watcher_tick`) surfaced state-loss conditions that this
+redesign **worsens** — every lane adds a concurrent state writer — and so
+must be fixed as part of it, not after. They are catalogued here; the two
+load-bearing ones (the state lock and hot-reload) are pulled into Phase 0
+because the lane scheduler is neither correct nor tunable without them.
+
+| # | Condition | Symptom | Severity | Fix |
+|---|---|---|---|---|
+| S1 | `sessions.json` has no lock around `load → mutate → save` (21 call sites, 9 modules). The worker Stop-hook (`wrapper.signal_*`) races the loop's `reconcile`/`spawn`. | Lost completion ⇒ ticket stuck `RUNNING`, slot leaks; lost spawn ⇒ orphan session; clobbered `TIMED_OUT` revert ⇒ no retry. **Worsens linearly with lane count.** | **P0** | `state_lock()` + `mutate_state(fn)` — see **ADR 0005**. |
+| S2 | Config read **once before** `while True` in both loops (`dispatch.py:461`, `daemon.py:358`). | `tick_interval`, caps, and every RFC-0004 knob are frozen for process life — the tunable knobs are inert. | **P1** | Re-resolve config at the top of each tick. |
+| S3 | `run_watcher_tick` guards only `retire_merged_prs`; `watch_prs_for_client` is unguarded. | One malformed monitor file or IO hiccup raises out of `while True` ⇒ **daemon silently exits**, all PR watching stops. | **P1** | Per-client try/except + whole-tick guard, mirroring `dispatch_tick`. |
+| S4 | `ThrottleStore` (and per-client `WatcherSnapshot`) do unlocked `load → mutate → save`. | Lost throttle updates ⇒ **the duplicate PR dispatch the throttle exists to prevent.** | **P1** | File lock around the throttle/snapshot mutate. |
+| S5 | Events emitted as the PR loop walks, but the snapshot is saved only after the client loop returns (`watch_prs_for_client`). | Crash between emit and save ⇒ next tick **re-emits** `PR_REVIEW_RECEIVED`/`PR_CI_FAILED` (the channel consumers aren't cursor-deduped). | **P2** | Persist snapshot per-PR, or make the channel consumer idempotent. |
+| S6 | Event inbox (`events.py`): (a) cursor-id absent from inbox ⇒ `read_events` returns `[]` **forever** (silent wedge); (b) full file re-read+parsed every call every tick (unbounded O(n)); (c) reads are unlocked ⇒ a torn trailing line crashes the consuming tick. | Silent consumer stall; per-tick cost grows without bound; crash on concurrent append. | **P2** | Cursor-not-found falls back + logs; cursor-aware compaction; read under `_inbox_lock` or tolerate a partial final line. |
+
+The state lock (S1) is recorded as its own cross-cutting invariant in
+**ADR 0005** because it outlives this RFC: it governs *all* `CwState`
+mutation, not just lane dispatch.
+
 ## Phased rollout
 
-- **Phase 0 — Knob surface (no scheduler change).** Add the
-  `concurrency:` block, layered resolution, override store, hot-reload,
-  `cw config concurrency`, and `CONCURRENCY_SAMPLE` telemetry. Values are
-  defined and tunable; `max_parallel_clients=null` keeps behavior
-  identical. *Ships the tuning surface a platform needs, independently.*
+- **Phase 0 — State integrity + knob surface (no scheduler change).**
+  Land the **state lock + `mutate_state()`** (S1, ADR 0005), **per-tick
+  config hot-reload** (S2) in both loops, and the **per-client watcher
+  guard** (S3). Then the `concurrency:` block, layered resolution,
+  override store, `cw config concurrency`, and `CONCURRENCY_SAMPLE`
+  telemetry. Also land the **throttle/snapshot lock** (S4) since it is the
+  same trivial lock class as S3. All behavior-preserving:
+  `max_parallel_clients=null` keeps dispatch identical, and the
+  lock/guard/reload only change *correctness under concurrency*, not the
+  happy path. *This is the foundation both the lane scheduler and a future
+  tuning platform stand on.* (S5 snapshot-atomicity and S6 inbox edges are
+  not on the lane critical path — track as a follow-up cleanup.)
 - **Phase 1 — Data model + migration.** `TicketTask.lane`, `LaneConfig`,
   `ClientConfig.lanes`, `effective_lanes`, schema v3 migration. No
   behavior change (everything is `default`).
@@ -521,5 +550,7 @@ behavior and can merge first.
 - `src/cw/reconcile.py` — RUNNING→PENDING revert + transient-outage guard
 - RFC 0002 — Agent SDK orchestrator + MCP channels (naming collision)
 - ADR 0004 — stage events on the orchestrator bus (event-shape precedent)
+- ADR 0005 — single state lock (S1; the cross-cutting state-integrity invariant)
+- `src/cw/daemon.py` — `run_watcher_tick` (S2/S3/S4/S5), `src/cw/events.py` (S6)
 - `docs/events.md` — orchestrator event bus
 - `ROADMAP.md` v4 (Autonomous Delegation), v6 (JARVIS)
