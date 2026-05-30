@@ -6,6 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-05-30
+
+Dispatch-reliability release: the idle watchdog now **auto-recovers** stalled
+headless workers (bounded retries, then parks) and **salvages** a terminal
+sentinel before flagging, so a worker that already shipped is never mis-parked
+as `blocked_on_user`. Plus deterministic sentinel routing, parse-boundary
+coercions, a cross-client `cw queue list`, and watchdog/doctor robustness fixes.
+
+### Added
+
+- **Idle-stall auto-recovery** (#384 → PR #394): the idle watchdog now reverts a
+  provably-idle headless worker to `PENDING` for re-dispatch (capped per tier via
+  `idle_retry_cap_by_tier`), only parking it `BLOCKED_ON_USER` once retries are
+  exhausted — instead of parking on the first stall.
+- **Cross-client `cw queue list`** (#201 → PR #397): `cw queue list` with no
+  CLIENT arg now shows tasks grouped across all configured clients.
+
+### Fixed
+
+- **Idle watchdog salvages terminal sentinels** (#398 → PR #400): a shipped/no_op
+  session idle past the budget is salvaged to `COMPLETED` rather than flagged
+  `BLOCKED_ON_USER`.
+- **Deterministic parse-failure routing** (#263 → PR #396): `schema_version_unsupported`
+  and other deterministic parse failures route to `FAILED` (not an infinite
+  PENDING retry); unknown blocker reasons route to `COMPLETED`.
+- **no_op pre-impl `scope.lines_actual` coercion** (#399 → PR #401): a `no_op` at
+  `stage1_pre_flight`/`stage1_plan` with a stray non-null `lines_actual` is
+  coerced clean at the parse boundary instead of failing `validation_failed`.
+- **blocked + stray `next_actions` coercion** (#371 → PR #376).
+- **Transcript-mtime liveness check** (#340 → PR #383): prevents false-positive
+  watchdog fires on workers that are actively writing their transcript.
+- **`cw doctor` wedge-detection robustness** (#354 → PRs #378/#379): BACKGROUNDED
+  exclusion + subprocess timeouts.
+- **Reviewer stale-ref helper** (#381 → PR #385): `fetch_feature_branch` resolves
+  stale local refs before review.
+- **`_accumulate_task_cost` docstring + is-None guard** (#352 → PR #377).
+
 ## [0.13.0] — 2026-05-29
 
 Minor release hardening the dispatch-reliability path: terminal-sentinel
