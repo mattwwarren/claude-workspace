@@ -77,11 +77,20 @@ HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 # flags the session as BLOCKED_ON_USER and fires a push notification.
 IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
 
+DEFAULT_IDLE_RETRY_CAP = 2  # idle-stall auto-retries before parking (#384)
+
 # How recently a session's transcript must have been modified to be considered
 # actively making progress. If the newest .jsonl under the session's project
 # dir was written within this window, the watchdog skips the session (GitHub
 # #340). Conservative default: 2 min = well below the 15-min budget.
-TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 120
+# 5 min — widened from 2 min (#384): covers short inter-turn gaps;
+# subagent gaps handled by _awaiting_subagent below.
+TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 300
+
+# A worker awaiting a subagent leaves the parent transcript quiet (subagent output
+# only lands on return). Treat a pending tool_use at the transcript tail as alive
+# for up to this long before concluding the subagent itself is hung. See #384.
+SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
 
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
@@ -394,6 +403,74 @@ def _transcript_recently_active(
         return False
 
 
+def _awaiting_subagent(session: Session, now: datetime) -> bool:
+    """Return True if the worker is mid-tool/subagent (parent tail pending).
+
+    A subagent's output only lands in the parent transcript when it returns,
+    so the parent goes quiet during execution and mtime-based liveness
+    false-positives. Detect the in-flight case: the last assistant turn is a
+    ``tool_use`` with no following ``tool_result``, and that turn is within
+    ``SUBAGENT_LIVENESS_WINDOW_SECONDS`` of *now* (a pending tool_use older than
+    that is a hung subagent — not alive). See GitHub #384.
+
+    Fail-open to False (permit the watchdog to proceed) on any read/parse error.
+    """
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
+        return False
+    try:
+        if session.claude_session_id is not None:
+            transcript = project_dir / f"{session.claude_session_id}.jsonl"
+        else:
+            candidates = sorted(
+                project_dir.glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidates:
+                return False
+            transcript = candidates[0]
+        if not transcript.is_file():
+            return False
+
+        last_tool_use_ts: datetime | None = None
+        saw_result_after_tool_use = True
+        for raw in transcript.read_text().splitlines():
+            if not raw.strip():
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            etype = entry.get("type")
+            message = entry.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                continue
+            if etype == "assistant" and any(
+                isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+            ):
+                ts = entry.get("timestamp")
+                if isinstance(ts, str):
+                    try:
+                        last_tool_use_ts = datetime.fromisoformat(ts)
+                    except ValueError:
+                        last_tool_use_ts = None
+                saw_result_after_tool_use = False
+            elif etype == "user" and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                saw_result_after_tool_use = True
+
+        if saw_result_after_tool_use or last_tool_use_ts is None:
+            return False
+        return (
+            now - last_tool_use_ts
+        ).total_seconds() < SUBAGENT_LIVENESS_WINDOW_SECONDS
+    except OSError:
+        return False
+
+
 def _apply_salvaged_completion(
     session: Session,
     result: AutoDevResult,
@@ -565,6 +642,24 @@ def resolve_idle_watchdog_budget(
     return IDLE_WATCHDOG_SECONDS
 
 
+def resolve_idle_retry_cap(
+    task: TicketTask | None,
+    config: OrchestratorConfig,
+) -> int:
+    """Return the idle-stall auto-retry cap for a session's ticket.
+
+    Precedence: task.scope_hint per-tier override, else the global default.
+    See GitHub issue #384.
+    """
+    if task is None:
+        return DEFAULT_IDLE_RETRY_CAP
+    if task.scope_hint is not None:
+        tier_cap = config.idle_retry_cap_by_tier.get(task.scope_hint)
+        if tier_cap is not None:
+            return tier_cap
+    return DEFAULT_IDLE_RETRY_CAP
+
+
 def flag_silently_idle_daemon_sessions(
     state: CwState,
     *,
@@ -589,7 +684,8 @@ def flag_silently_idle_daemon_sessions(
     if task_by_ticket is None:
         task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
-    candidates: list[tuple[Session, str | None]] = []
+    recover: list[tuple[Session, str | None]] = []
+    park: list[tuple[Session, str | None]] = []
     for session in state.sessions:
         if session.origin is not SessionOrigin.DAEMON:
             continue
@@ -607,57 +703,90 @@ def flag_silently_idle_daemon_sessions(
         budget = resolve_idle_watchdog_budget(task, config)
         if elapsed < budget:
             continue
-        # Liveness check: if the worker's transcript was modified recently the
-        # process is still actively making progress — skip this tick (#340).
-        if _transcript_recently_active(session, now):
+        # Liveness check: skip workers that are still making progress. A recent
+        # transcript write (#340) OR an in-flight subagent (#384 — parent
+        # transcript goes quiet while a subagent runs) both count as alive.
+        if _transcript_recently_active(session, now) or _awaiting_subagent(
+            session, now
+        ):
             continue
-        candidates.append((session, ticket_id))
+        cap = resolve_idle_retry_cap(task, config)
+        if task is not None and task.attempts < cap:
+            recover.append((session, ticket_id))
+        else:
+            park.append((session, ticket_id))
 
-    if not candidates:
+    if not recover and not park:
         return []
 
-    for session, _ in candidates:
-        # Flag-only: do not mark session COMPLETED. The worker on the daemon
-        # is still alive; operators disposition flagged sessions via
-        # `cw spawn complete` or `cw doctor --reap`. Setting last_result with
-        # paused_status still makes _has_terminal_sentinel return True so the
-        # watchdog skips this session on subsequent ticks (GitHub #324, #348).
+    # Auto-recover: retire the session and revert its task for re-dispatch.
+    for session, _ in recover:
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+    # Park: flag-only (preserves #348 — no daemon stop, session stays ACTIVE).
+    for session, _ in park:
         session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
 
     # Write session to disk BEFORE queue mutation so a crash between the two
-    # leaves session.last_result set on disk — _has_terminal_sentinel returns
-    # True on the next reconcile tick and the watchdog skips the session,
-    # preventing a duplicate SESSION_NEEDS_ATTENTION. (GitHub #324)
+    # leaves state set on disk — watchdog skips on subsequent ticks. (#324, #348)
     save_state(state)
 
+    recovered_ids = {tid for _, tid in recover if tid}
+    parked_ids = {tid for _, tid in park if tid}
     blocked: list[str] = []
-    ticket_ids_to_block = [tid for _, tid in candidates if tid]
-    if ticket_ids_to_block:
-        ticket_id_set = set(ticket_ids_to_block)
+    if recovered_ids or parked_ids:
         with dev_queue_lock():
             store = load_dev_queue()
+            changed = False
             for task in store.tasks:
-                if (
-                    task.ticket_id in ticket_id_set
-                    and task.status == QueueItemStatus.RUNNING
-                ):
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                if task.ticket_id in recovered_ids:
+                    task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    changed = True
+                elif task.ticket_id in parked_ids:
                     task.status = QueueItemStatus.BLOCKED_ON_USER
                     blocked.append(task.ticket_id)
-            if blocked:
+                    changed = True
+            if changed:
                 save_dev_queue(store)
 
-    for session, ticket_id in candidates:
-        payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "paused_status": _SILENTLY_IDLE_REASON,
-            "breadcrumbs": "",
-            "crashed": False,
-        }
-        record_event(OrchestratorEventType.SESSION_NEEDS_ATTENTION, payload)
+    # Recovery: stop the dead surface + emit a distinguishable timeout event.
+    # Payload mirrors the wall-clock timeout path; cause distinguishes the source.
+    for session, ticket_id in recover:
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "elapsed_seconds": (now - session.started_at).total_seconds(),
+                "cause": "idle_stall_recovered",
+                "last_assistant_message_excerpt": "",
+            },
+        )
+
+    # Park: needs-attention for operator disposition (unchanged from #348).
+    for session, ticket_id in park:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _SILENTLY_IDLE_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+        )
         fire_push_notification(session.name, session.client)
 
     return blocked

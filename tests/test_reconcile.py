@@ -8,7 +8,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import freezegun
 
@@ -1627,7 +1627,8 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     tmp_config_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """DAEMON ACTIVE + no last_result + started >IDLE_WATCHDOG → BLOCKED_ON_USER."""
+    """DAEMON ACTIVE + no last_result + started >IDLE_WATCHDOG + cap exhausted →
+    BLOCKED_ON_USER park (#348, updated for #384: park only when attempts >= cap)."""
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
@@ -1653,6 +1654,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
         client="client-a",
         status=QueueItemStatus.RUNNING,
         session_id="silent-1",
+        attempts=2,  # at DEFAULT_IDLE_RETRY_CAP → park path (#384)
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -1687,25 +1689,23 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     assert payload["crashed"] is False
 
 
-def test_flag_silently_idle_watchdog_does_not_call_native_daemon_stop(
+def test_flag_silently_idle_watchdog_does_not_stop_working_worker(
     tmp_config_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """Flag-only: watchdog must not invoke native_daemon stop() (#348).
+    """#348 intent preserved (#384): a worker still doing work is never stopped.
 
-    The Track C wave-2 case study (2026-05-28) showed three workers that had
-    actually shipped work being silenced mid-stream by the watchdog. The fix
-    is flag-only: the queue task transitions to BLOCKED_ON_USER and the
-    operator dispositions the session via `cw spawn complete` or
-    `cw doctor --reap`. The session itself stays alive on the daemon.
+    Pre-#384 enforced by flag-only. Post-#384 enforced by the liveness gate:
+    a worker the liveness check considers alive (recent write OR awaiting
+    subagent) is skipped entirely, so stop() is never reached.
     """
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
 
     sess = Session(
-        id="alive-after-flag",
-        name="client-a/auto-dev/ALIVE-1",
+        id="working-1",
+        name="client-a/auto-dev/WORK-1",
         client="client-a",
         purpose=SessionPurpose.IMPL,
         origin=SessionOrigin.DAEMON,
@@ -1720,29 +1720,28 @@ def test_flag_silently_idle_watchdog_does_not_call_native_daemon_stop(
     save_state(state)
 
     task = TicketTask(
-        ticket_id="ALIVE-1",
+        ticket_id="WORK-1",
         client="client-a",
         status=QueueItemStatus.RUNNING,
-        session_id="alive-after-flag",
+        session_id="working-1",
+        attempts=0,
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
+    mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.fire_push_notification"),
-        patch("cw.reconcile.get_native_daemon_client") as mock_daemon,
+        patch("cw.reconcile._transcript_recently_active", return_value=True),
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
     ):
-        flag_silently_idle_daemon_sessions(
+        result = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
-    # The daemon client must not be touched — flag-only means the worker on
-    # the native daemon keeps running, even though the queue is BLOCKED_ON_USER.
-    mock_daemon.assert_not_called()
-
-    # Reload from disk and confirm session is still ACTIVE.
-    reloaded = load_state()
-    s = next(s for s in reloaded.sessions if s.id == "alive-after-flag")
-    assert s.status == SessionStatus.ACTIVE
+    mock_daemon.stop.assert_not_called()
+    assert result == []
+    assert sess.status == SessionStatus.ACTIVE
+    store = load_dev_queue()
+    assert store.tasks[0].status == QueueItemStatus.RUNNING
 
 
 def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
@@ -1901,7 +1900,8 @@ def test_reconcile_includes_silently_idle_in_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """reconcile() calls watchdog and includes BLOCKED_ON_USER ticket in report."""
+    """reconcile() calls watchdog and includes BLOCKED_ON_USER ticket in report
+    when attempts >= cap (park path, #384)."""
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
@@ -1930,6 +1930,7 @@ def test_reconcile_includes_silently_idle_in_report(
         client="client-a",
         status=QueueItemStatus.RUNNING,
         session_id="rcl-silent",
+        attempts=2,  # at cap → park path (#384)
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -2155,6 +2156,7 @@ def test_flag_silently_idle_fires_when_project_dir_missing(
                     client="client-a",
                     status=QueueItemStatus.RUNNING,
                     session_id="no-proj-1",
+                    attempts=2,  # at cap → park path (#384)
                 )
             ]
         )
@@ -2200,6 +2202,7 @@ def test_flag_silently_idle_fires_when_session_id_file_missing(
                     client="client-a",
                     status=QueueItemStatus.RUNNING,
                     session_id="missing-file-1",
+                    attempts=2,  # at cap → park path (#384)
                 )
             ]
         )
@@ -2240,6 +2243,7 @@ def test_flag_silently_idle_fires_when_transcript_predates_session(
                     client="client-a",
                     status=QueueItemStatus.RUNNING,
                     session_id="predates-1",
+                    attempts=2,  # at cap → park path (#384)
                 )
             ]
         )
@@ -2285,6 +2289,7 @@ def test_flag_silently_idle_fires_on_stale_transcript(
                     client="client-a",
                     status=QueueItemStatus.RUNNING,
                     session_id="stale-tx-1",
+                    attempts=2,  # at cap → park path (#384)
                 )
             ]
         )
@@ -2336,6 +2341,7 @@ def test_flag_silently_idle_fires_when_no_transcript_in_project_dir(
                     client="client-a",
                     status=QueueItemStatus.RUNNING,
                     session_id="no-tx-1",
+                    attempts=2,  # at cap → park path (#384)
                 )
             ]
         )
@@ -2383,3 +2389,485 @@ def test_flag_silently_idle_skips_with_known_session_id_and_recent_transcript(
 
     assert blocked == []
     assert sess.last_result is None
+
+
+# ---------------------------------------------------------------------------
+# Helpers for _awaiting_subagent tests
+# ---------------------------------------------------------------------------
+
+
+def _make_daemon_session(
+    *, claude_session_id: str | None = None, surface_ref: str = "live-ref"
+) -> Session:
+    return Session(
+        id="sess-1",
+        name="client-a/auto-dev/T-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref=surface_ref,
+        claude_session_id=claude_session_id,
+        started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+
+
+# ---------------------------------------------------------------------------
+# _awaiting_subagent tests (Task A1)
+# ---------------------------------------------------------------------------
+
+
+def test_awaiting_subagent_true_when_tail_is_pending_tool_use(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Last assistant turn is a tool_use with no tool_result yet → awaiting."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    tu_ts = "2026-01-01T00:04:00Z"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": tu_ts,
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is True
+
+
+def test_awaiting_subagent_false_when_tool_result_delivered(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """tool_use followed by tool_result → NOT awaiting (genuine hang)."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    lines = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:04:00Z",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "name": "Agent"}],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T00:04:01Z",
+            "message": {"content": [{"type": "tool_result"}]},
+        },
+    ]
+    transcript.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_awaiting_subagent_false_when_pending_tool_use_too_old(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Pending tool_use older than SUBAGENT_LIVENESS_WINDOW → hung subagent."""
+    from cw.reconcile import SUBAGENT_LIVENESS_WINDOW_SECONDS, _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    assert SUBAGENT_LIVENESS_WINDOW_SECONDS < 1800
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:30:00Z",
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is False
+
+
+# ---------------------------------------------------------------------------
+# Task A2: watchdog skips workers awaiting a subagent
+# ---------------------------------------------------------------------------
+
+
+def test_flag_silently_idle_skips_worker_awaiting_subagent(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A worker past the idle budget but awaiting a subagent is NOT flagged (#384)."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="busy-1",
+        name="client-a/auto-dev/BUSY-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="BUSY-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="busy-1",
+                )
+            ]
+        )
+    )
+
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=True),
+        patch("cw.reconcile.fire_push_notification") as mock_notify,
+    ):
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+        mock_notify.assert_not_called()
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+    store = load_dev_queue()
+    assert store.tasks[0].status == QueueItemStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# Task B1: resolve_idle_retry_cap + idle_retry_cap_by_tier config field
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_idle_retry_cap_default_with_no_task() -> None:
+    from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, resolve_idle_retry_cap
+
+    assert resolve_idle_retry_cap(None, OrchestratorConfig()) == DEFAULT_IDLE_RETRY_CAP
+
+
+def test_resolve_idle_retry_cap_respects_per_tier() -> None:
+    from cw.reconcile import resolve_idle_retry_cap
+
+    cfg = OrchestratorConfig(idle_retry_cap_by_tier={"large": 4})
+    task = TicketTask(ticket_id="T", client="c", scope_hint="large")
+    assert resolve_idle_retry_cap(task, cfg) == 4
+
+
+def test_resolve_idle_retry_cap_unknown_tier_falls_back() -> None:
+    from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, resolve_idle_retry_cap
+
+    cfg = OrchestratorConfig(idle_retry_cap_by_tier={"large": 4})
+    task = TicketTask(ticket_id="T", client="c", scope_hint="small")
+    assert resolve_idle_retry_cap(task, cfg) == DEFAULT_IDLE_RETRY_CAP
+
+
+# ---------------------------------------------------------------------------
+# Task B2: auto-recover under cap, park on exhaustion
+# ---------------------------------------------------------------------------
+
+
+def test_flag_silently_idle_auto_recovers_under_cap(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Confirmed-idle worker, attempts < cap → surface stopped, task PENDING (#384)."""
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id="hang-1",
+        name="client-a/auto-dev/HANG-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="HANG-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="hang-1",
+                    attempts=1,  # < DEFAULT_IDLE_RETRY_CAP (2)
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.fire_push_notification") as mock_notify,
+    ):
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+        mock_daemon.stop.assert_called_once_with("live-ref")
+        mock_notify.assert_not_called()
+
+    store = load_dev_queue()
+    t = store.tasks[0]
+    assert t.status == QueueItemStatus.PENDING
+    assert t.session_id is None
+    assert sess.status == SessionStatus.TIMED_OUT
+    assert sess.completed_reason == CompletionReason.TIMED_OUT
+    events = read_events(
+        consumer="test-hang-recover",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert len(events) == 1
+    assert events[0].payload["cause"] == "idle_stall_recovered"
+
+
+def test_flag_silently_idle_parks_when_cap_exhausted(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Confirmed-idle worker, attempts >= cap → BLOCKED_ON_USER park (#384)."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id="hang-2",
+        name="client-a/auto-dev/HANG-2",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="HANG-2",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="hang-2",
+                    attempts=2,  # == DEFAULT_IDLE_RETRY_CAP
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.fire_push_notification") as mock_notify,
+    ):
+        blocked = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+        mock_daemon.stop.assert_not_called()
+        mock_notify.assert_called_once_with(sess.name, sess.client)
+
+    assert "HANG-2" in blocked
+    assert sess.status == SessionStatus.ACTIVE
+    assert sess.last_result == {"paused_status": "silently_idle"}
+    store = load_dev_queue()
+    assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# _awaiting_subagent edge-case coverage
+# ---------------------------------------------------------------------------
+
+
+def test_awaiting_subagent_skips_blank_lines_and_bad_json(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Blank lines and malformed JSON in transcript are skipped gracefully."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    # blank line, bad JSON, then valid tool_use with no result
+    transcript.write_text(
+        "\n"
+        "not-json\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:04:00Z",
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is True
+
+
+def test_awaiting_subagent_skips_non_list_content(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Entries with non-list content field are skipped without error."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    # entry with non-list content — should be skipped, not crash
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:04:00Z",
+                "message": {"content": "not-a-list"},
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        # Nothing to track — returns False (no pending tool_use)
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_awaiting_subagent_handles_invalid_timestamp(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Invalid ISO timestamp on tool_use → last_tool_use_ts stays None → False."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "not-a-valid-timestamp",
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        # invalid ts → last_tool_use_ts = None → returns False
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_awaiting_subagent_returns_false_on_oserror(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """OSError while reading transcript → fail-open False."""
+    from cw.reconcile import _awaiting_subagent
+
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    # Point at a file that does not exist
+    sess = _make_daemon_session(claude_session_id="no-such-file")
+    # project_dir exists but the specific .jsonl doesn't
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_flag_silently_idle_recover_skips_non_running_task(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Queue task not RUNNING is not mutated during recover/park sweep (#384)."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="skip-nonrunning",
+        name="client-a/auto-dev/SKIP-NR",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    # Task is PENDING (not RUNNING) — should be left alone
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="SKIP-NR",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id=None,
+                    attempts=1,  # < cap → would recover if RUNNING
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+    ):
+        result = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+        # Surface still stopped (recover path, attempts=1 < cap=2)
+        mock_daemon.stop.assert_called_once_with("live-ref")
+
+    # Task was PENDING, not RUNNING → not touched
+    store = load_dev_queue()
+    assert store.tasks[0].status == QueueItemStatus.PENDING
+    assert result == []

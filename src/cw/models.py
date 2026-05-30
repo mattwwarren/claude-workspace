@@ -244,6 +244,10 @@ class OrchestratorConfig(BaseModel):
     idle_watchdog_by_tier: dict[str, int] = Field(
         default_factory=lambda: {"large": 1800}
     )
+    # Per-tier cap on idle-stall auto-retries before a headless worker is
+    # parked BLOCKED_ON_USER for the operator. Keyed by TicketTask.scope_hint;
+    # unknown tiers fall back to DEFAULT_IDLE_RETRY_CAP. See GitHub issue #384.
+    idle_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
