@@ -1,0 +1,35 @@
+# Project tooling config consumed by /auto-dev and related skills.
+# claude-workspace tracks all work in GitHub Issues (this repo), NOT Linear.
+# Without this file, headless /auto-dev workers default to the Linear MCP for
+# ticket resolution, which cannot complete its interactive OAuth in a daemon
+# context and silently stalls until the watchdog reaps them (see the
+# 2026-05-30 fanout-cascade RCA). Pinning github-issues keeps workers on `gh`.
+
+tracking:
+  primary:
+    system: github-issues
+    tool: gh
+    scope: "technical efforts — bugs, features, implementation tasks"
+    auto_create_issues: false
+    auto_close_on_complete: true
+
+quality_gates:
+  # Run in order; all must pass before commit/PR. Mirrors CLAUDE.md.
+  - name: lint
+    command: "uv run ruff check src/ tests/"
+  - name: typecheck
+    command: "uv run mypy src/"
+  - name: test
+    command: "uv run pytest tests/ -q"
+
+review:
+  self_review: true
+  max_cycles: 3
+
+pr:
+  tool: gh
+  auto_create: false
+  branch_pattern: "{type}/{plan_id}"
+
+plan_exit:
+  mode: suggest
