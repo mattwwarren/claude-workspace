@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-05-30
+
+Bug-fix release closing dispatch-reliability gaps surfaced by the 2026-05-30
+fanout-cascade RCA: a re-dispatched ticket can no longer inherit a prior run's
+worktree state, and the idle-watchdog budget is now operator-tunable so workers
+mid-plan/review aren't reaped at 15 minutes.
+
+### Fixed
+
+- **Stale-worktree reuse** (#404 → PR #410): `create_worktree` verifies the
+  existing worktree is checked out on the requested branch before reusing it,
+  raising `StaleWorktreeError` on a mismatch (wrong branch, detached HEAD, or not
+  a registered worktree). The dispatch loop catches it, force-removes the stale
+  tree, and reverts the task to `PENDING` so the retry rebuilds clean — closing
+  an infinite-respawn window. `reconcile` also reaps a timed-out session's
+  worktree on both the wall-clock-timeout and idle-stall-recover paths.
+
+### Added
+
+- **Tunable idle-watchdog budget** (#412): new `idle_watchdog_seconds` key in
+  `orchestrator.yaml` overrides the hardcoded 900s (15 min) global default —
+  15 min was reaping headless workers still mid-plan/mid-review. Falls back to
+  the constant when unset; per-ticket and per-tier overrides still take
+  precedence. Also adds `.claude/project-config.yaml` pinning
+  `tracking.primary.system: github-issues` for this repo.
+
 ## [0.14.0] — 2026-05-30
 
 Dispatch-reliability release: the idle watchdog now **auto-recovers** stalled
