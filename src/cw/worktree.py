@@ -261,36 +261,7 @@ def fetch_feature_branch(client: ClientConfig, branch_name: str) -> bool:
 
     Returns True on success, False on any failure (fetch errors do not raise).
     """
-    git_dir = _git_dir(client)
-    if not git_dir.exists():
-        _log.warning(
-            "fetch_feature_branch: workspace missing for %s (%s)",
-            client.name,
-            git_dir,
-        )
-        return False
-    try:
-        result = _run_git(
-            "fetch", "origin", branch_name, "--quiet", cwd=git_dir, check=False
-        )
-    except (WorktreeError, FileNotFoundError, PermissionError) as exc:
-        _log.warning(
-            "fetch_feature_branch: %s branch %s: %s",
-            client.name,
-            branch_name,
-            exc,
-        )
-        return False
-    if result.returncode != 0:
-        _log.warning(
-            "fetch_feature_branch: failed for %s branch %s (rc=%d): %s",
-            client.name,
-            branch_name,
-            result.returncode,
-            result.stderr.strip(),
-        )
-        return False
-    return True
+    return _fetch_default_branch(client.name, branch_name, _git_dir(client))
 
 
 def _get_behind_count(
