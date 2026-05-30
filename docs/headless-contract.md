@@ -99,7 +99,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
   },
   "plan_source": "linear_existing",
   "branch": "dev/gen-1234-fix-login",
-  "worktree_path": "/home/matthew/.cw/wt/abc/dev-gen-1234-fix-login",
+  "worktree_path": "/home/matthew/.cw/wt/abc/auto-dev-1234",
   "fork_point_sha": "abc1234",
   "commits": ["sha1", "sha2"],
   "pr": {
@@ -137,8 +137,8 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `scope.lines_actual` | int \| null | Actual lines touched; `null` if exited before impl. |
 | `scope.forbidden_touched` | bool | Whether any `--forbidden` area was touched. |
 | `plan_source` | `"linear_existing"` \| `"github_issue_existing"` \| `"generated"` \| `"free_text"` \| `"none"` | How the plan was sourced. `"linear_existing"` and `"github_issue_existing"` are equivalent (the latter is the post-Linear, GitHub-Issues-era label — producers should emit whichever matches their tracker). `"none"` is used for pre-flight exits where no plan was produced. |
-| `branch` | string \| null | Branch name; `null` if exited before branch creation (e.g. `plan_pending_approval`). |
-| `worktree_path` | string \| null | Absolute path; `null` if no worktree was created. |
+| `branch` | string \| null | The **feature branch** where the impl agent pushed (e.g. `dev/<ticket-id>`). `null` if exited before branch creation (e.g. `plan_pending_approval`). Distinct from the cw session branch (`auto-dev/<ticket>`) that hosts the orchestrating skill run. |
+| `worktree_path` | string \| null | Absolute path of the **cw session worktree** (e.g. `~/.cw/wt/<hash>/auto-dev-<ticket>`). This is the worktree that cw creates on the session branch for the skill to run in — not the impl feature branch. `null` if no worktree was created. |
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
 | `commits` | string[] | Commit SHAs created during this run. |
 | `pr` | object \| null | Non-null **only** when `status = shipped`. All other statuses — including `review_pending_approval` (whether reached via the large-scope path or the §5.1 downgrade), `merge_gate_blocked`, `plan_pending_approval`, the rejects, and `blocked` — leave `pr` as `null`. `branch` may still be non-null on these (see `branch` row). |
