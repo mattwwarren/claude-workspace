@@ -582,7 +582,7 @@ def queue_add(
 
 
 @queue.command(name="list")
-@click.argument("client", shell_complete=_complete_client)
+@click.argument("client", required=False, default=None, shell_complete=_complete_client)
 @click.option(
     "--purpose",
     type=click.Choice([e.value for e in SessionPurpose]),
@@ -598,27 +598,54 @@ def queue_add(
 )
 @handle_errors
 def queue_list(
-    client: str,
+    client: str | None,
     purpose: str | None,
     status_filter: str | None,
 ) -> None:
-    """Show queue items for a client."""
-    store = load_queue(client)
-    items = store.items
-    if purpose:
-        items = [i for i in items if i.task.purpose == purpose]
-    if status_filter:
-        items = [i for i in items if i.status == status_filter]
+    """Show queue items for a client, or all clients if CLIENT is omitted."""
+    if client is not None:
+        store = load_queue(client)
+        items = store.items
+        if purpose:
+            items = [i for i in items if i.task.purpose == purpose]
+        if status_filter:
+            items = [i for i in items if i.status == status_filter]
 
-    if not items:
-        click.echo("Queue is empty.")
-        return
+        if not items:
+            click.echo("Queue is empty.")
+            return
 
-    click.echo(f"{'ID':<10} {'STATUS':<12} {'PURPOSE':<10} {'DESCRIPTION'}")
-    click.echo("-" * 60)
-    for item in items:
-        desc = item.task.description[:40]
-        click.echo(f"{item.id:<10} {item.status:<12} {item.task.purpose:<10} {desc}")
+        click.echo(f"{'ID':<10} {'STATUS':<12} {'PURPOSE':<10} {'DESCRIPTION'}")
+        click.echo("-" * 60)
+        for item in items:
+            desc = item.task.description[:40]
+            click.echo(
+                f"{item.id:<10} {item.status:<12} {item.task.purpose:<10} {desc}"
+            )
+    else:
+        clients = load_clients()
+        any_printed = False
+        for name in clients:
+            store = load_queue(name)
+            items = store.items
+            if purpose:
+                items = [i for i in items if i.task.purpose == purpose]
+            if status_filter:
+                items = [i for i in items if i.status == status_filter]
+            if not items:
+                continue  # silently skip empty clients
+            click.echo(f"--- {name} ---")
+            click.echo(f"{'ID':<10} {'STATUS':<12} {'PURPOSE':<10} {'DESCRIPTION'}")
+            click.echo("-" * 60)
+            for item in items:
+                desc = item.task.description[:40]
+                click.echo(
+                    f"{item.id:<10} {item.status:<12} {item.task.purpose:<10} {desc}"
+                )
+            click.echo()
+            any_printed = True
+        if not any_printed:
+            click.echo("Queue is empty.")
 
 
 @queue.command(name="remove")
