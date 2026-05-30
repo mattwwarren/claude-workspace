@@ -642,6 +642,24 @@ def resolve_idle_watchdog_budget(
     return IDLE_WATCHDOG_SECONDS
 
 
+def resolve_idle_retry_cap(
+    task: TicketTask | None,
+    config: OrchestratorConfig,
+) -> int:
+    """Return the idle-stall auto-retry cap for a session's ticket.
+
+    Precedence: task.scope_hint per-tier override, else the global default.
+    See GitHub issue #384.
+    """
+    if task is None:
+        return DEFAULT_IDLE_RETRY_CAP
+    if task.scope_hint is not None:
+        tier_cap = config.idle_retry_cap_by_tier.get(task.scope_hint)
+        if tier_cap is not None:
+            return tier_cap
+    return DEFAULT_IDLE_RETRY_CAP
+
+
 def flag_silently_idle_daemon_sessions(
     state: CwState,
     *,

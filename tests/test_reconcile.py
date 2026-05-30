@@ -2555,3 +2555,30 @@ def test_flag_silently_idle_skips_worker_awaiting_subagent(
     assert sess.status == SessionStatus.ACTIVE
     store = load_dev_queue()
     assert store.tasks[0].status == QueueItemStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# Task B1: resolve_idle_retry_cap + idle_retry_cap_by_tier config field
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_idle_retry_cap_default_with_no_task() -> None:
+    from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, resolve_idle_retry_cap
+
+    assert resolve_idle_retry_cap(None, OrchestratorConfig()) == DEFAULT_IDLE_RETRY_CAP
+
+
+def test_resolve_idle_retry_cap_respects_per_tier() -> None:
+    from cw.reconcile import resolve_idle_retry_cap
+
+    cfg = OrchestratorConfig(idle_retry_cap_by_tier={"large": 4})
+    task = TicketTask(ticket_id="T", client="c", scope_hint="large")
+    assert resolve_idle_retry_cap(task, cfg) == 4
+
+
+def test_resolve_idle_retry_cap_unknown_tier_falls_back() -> None:
+    from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, resolve_idle_retry_cap
+
+    cfg = OrchestratorConfig(idle_retry_cap_by_tier={"large": 4})
+    task = TicketTask(ticket_id="T", client="c", scope_hint="small")
+    assert resolve_idle_retry_cap(task, cfg) == DEFAULT_IDLE_RETRY_CAP
