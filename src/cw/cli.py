@@ -143,10 +143,41 @@ def _complete_session(
     ]
 
 
+_LOG_FORMAT = "%(levelname)s %(name)s %(message)s"
+
+_VERBOSE_DEBUG_THRESHOLD = 2
+
+
+def _configure_logging(verbose: int) -> None:
+    """Install a single stderr logging handler for the CLI process.
+
+    Uses ``basicConfig`` *without* ``force`` on purpose: when a test harness
+    (pytest) has already attached handlers to the root logger, ``basicConfig``
+    is a no-op, so the harness keeps full control of log capture. In a real
+    ``cw`` process the root logger starts empty, so a stderr handler is
+    installed once at the requested level. ``-v`` -> INFO, ``-vv`` -> DEBUG.
+    """
+    if verbose >= _VERBOSE_DEBUG_THRESHOLD:
+        level = logging.DEBUG
+    elif verbose == 1:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
+    logging.basicConfig(level=level, stream=sys.stderr, format=_LOG_FORMAT)
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="cw")
-def main() -> None:
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    default=0,
+    help="Increase log verbosity (-v INFO, -vv DEBUG).",
+)
+def main(verbose: int) -> None:
     """Claude Workspace - multi-session orchestrator for Claude Code."""
+    _configure_logging(verbose)
 
 
 @main.command()
