@@ -714,11 +714,14 @@ class TestInvariants:
         result = AutoDevResult.model_validate(p)
         assert result.health.downgrade_applied is True
 
-    def test_merge_gate_blocked_requires_small(self) -> None:
+    def test_merge_gate_blocked_accepts_large_tier(self) -> None:
+        # Issue #430 case 3: tier constraint on merge_gate_blocked relaxed.
+        # A large ticket that hit a merge gate is no longer rejected.
         p = _merge_gate_payload()
         p["scope"]["tier"] = "large"
-        with pytest.raises(ValidationError):
-            AutoDevResult.model_validate(p)
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "merge_gate_blocked"
+        assert result.scope.tier == "large"
 
     def test_pre_branch_status_rejects_branch(self) -> None:
         p = _plan_pending_payload()
@@ -1922,3 +1925,433 @@ class TestCostUsdField:
         dumped = result.model_dump(mode="json")
         restored = AutoDevResult.model_validate(dumped)
         assert restored.cost_usd == 2.5
+
+
+# ---------------------------------------------------------------------------
+# Issue #430 — coerce legitimate-but-sparse sentinels
+#
+# Case 1: ambiguities_pending_resolution with empty ambiguities (omitted key →
+# []) and premises_pending_verification with empty premises both hard-fail.
+# Accept empty with a warning; don't fail.
+# ---------------------------------------------------------------------------
+
+
+class TestCase1EmptyAmbiguitiesAndPremisesCoerce:
+    """parse_stdout coerces sparse v4 sentinels with empty ambiguities/premises.
+
+    A producer that emits ambiguities_pending_resolution without the
+    `ambiguities` key (omitted → defaults to []) previously hit the
+    §4.4 A5 invariant and became validation_failed -> retry x3 -> FAILED.
+    Same for premises_pending_verification + missing premises.
+
+    Strict AutoDevResult.model_validate still rejects the shape (negative
+    tests below); leniency applies only at the parse boundary.
+    """
+
+    def _ambiguities_empty_payload(self) -> dict[str, Any]:
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = []  # omitted key defaults to []
+        return p
+
+    def _premises_empty_payload(self) -> dict[str, Any]:
+        p = _premises_pending_payload()
+        p["premises"] = []  # omitted key defaults to []
+        return p
+
+    @pytest.mark.parametrize(
+        ("payload_fn", "expected_status"),
+        [
+            (
+                lambda: {**_ambiguities_pending_payload(), "ambiguities": []},
+                "ambiguities_pending_resolution",
+            ),
+            (
+                lambda: {**_premises_pending_payload(), "premises": []},
+                "premises_pending_verification",
+            ),
+        ],
+    )
+    def test_empty_array_coerced_to_parse_success(
+        self, payload_fn: Any, expected_status: str
+    ) -> None:
+        """parse_stdout accepts sparse sentinels with empty ambiguities/premises."""
+        result = parse_stdout(_wrap_sentinel(payload_fn()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == expected_status
+
+    def test_empty_ambiguities_strict_still_rejects(self) -> None:
+        """Strict model_validate still rejects empty ambiguities (negative test)."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = []
+        with pytest.raises(ValidationError, match="ambiguities"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_premises_strict_still_rejects(self) -> None:
+        """Strict model_validate still rejects empty premises (negative test)."""
+        p = _premises_pending_payload()
+        p["premises"] = []
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    def test_non_empty_ambiguities_unchanged(self) -> None:
+        """Coerce must not touch non-empty ambiguities arrays."""
+        result = parse_stdout(_wrap_sentinel(_ambiguities_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.ambiguities) == 1
+
+    def test_non_empty_premises_unchanged(self) -> None:
+        """Coerce must not touch non-empty premises arrays."""
+        result = parse_stdout(_wrap_sentinel(_premises_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.premises) == 1
+
+    def test_missing_ambiguities_key_same_as_empty(self) -> None:
+        """Omitting the ambiguities key entirely (omit → []) also parses."""
+        p = _ambiguities_pending_payload()
+        del p["ambiguities"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_missing_premises_key_same_as_empty(self) -> None:
+        """Omitting the premises key entirely (omit → []) also parses."""
+        p = _premises_pending_payload()
+        del p["premises"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+
+
+# ---------------------------------------------------------------------------
+# Issue #430 — Case 2: downgrade_applied=True requires scope.tier='small' —
+# relax to require only the status, not tier (a producer reporting original
+# tier='large' is now accepted).
+# ---------------------------------------------------------------------------
+
+
+class TestCase2DowngradeAppliedLargeTierCoerce:
+    """downgrade_applied=True with scope.tier='large' now parses.
+
+    The original invariant rejected any downgrade=True + tier!='small'
+    combination. A producer that reports the original tier='large' would
+    fail as validation_failed. Relax the invariant: require only
+    status='review_pending_approval'; accept any tier value.
+
+    The genuinely-malformed case (downgrade=True on a non-review_pending
+    status) must still fail.
+    """
+
+    def _downgrade_large_payload(self) -> dict[str, Any]:
+        p = _review_pending_payload()
+        p["health"]["downgrade_applied"] = True
+        # tier remains 'large' — the producer reported the original tier
+        assert p["scope"]["tier"] == "large"
+        return p
+
+    @pytest.mark.parametrize(
+        "tier",
+        ["large", "small"],
+    )
+    def test_downgrade_applied_accepted_with_any_tier(self, tier: str) -> None:
+        """downgrade_applied=True parses regardless of scope.tier."""
+        p = _review_pending_payload()
+        p["scope"]["tier"] = tier
+        if tier == "large":
+            # large post-impl stage requires lines_actual set
+            p["scope"]["lines_actual"] = 580
+        p["health"]["downgrade_applied"] = True
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "review_pending_approval"
+        assert result.health.downgrade_applied is True
+
+    def test_downgrade_applied_wrong_status_still_rejects(self) -> None:
+        """downgrade=True on shipped still fails (genuinely malformed)."""
+        p = _shipped_payload()
+        p["health"]["downgrade_applied"] = True
+        with pytest.raises(ValidationError, match="downgrade_applied"):
+            AutoDevResult.model_validate(p)
+
+    def test_downgrade_applied_blocked_still_rejects(self) -> None:
+        """downgrade=True on blocked still fails (genuinely malformed)."""
+        p = _blocked_payload()
+        p["health"]["downgrade_applied"] = True
+        with pytest.raises(ValidationError, match="downgrade_applied"):
+            AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# Issue #430 — Case 3: merge_gate_blocked requires scope.tier='small' —
+# relax so a large ticket that hit a merge gate is accepted.
+# ---------------------------------------------------------------------------
+
+
+class TestCase3MergeGateBlockedLargeTierCoerce:
+    """merge_gate_blocked now parses regardless of scope.tier.
+
+    The original §4.1 invariant rejected merge_gate_blocked + tier!='small'.
+    A large ticket hitting a merge gate was rejected as validation_failed.
+    Relax: accept any tier value for merge_gate_blocked status.
+
+    A genuinely-malformed sentinel (wrong status) still fails.
+    """
+
+    @pytest.mark.parametrize(
+        "tier",
+        ["large", "small"],
+    )
+    def test_merge_gate_blocked_accepted_with_any_tier(self, tier: str) -> None:
+        """merge_gate_blocked parses regardless of scope.tier."""
+        p = _merge_gate_payload()
+        p["scope"]["tier"] = tier
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "merge_gate_blocked"
+
+    def test_merge_gate_blocked_large_tier_strict_also_parses(self) -> None:
+        """model_validate also accepts merge_gate_blocked + tier='large'."""
+        p = _merge_gate_payload()
+        p["scope"]["tier"] = "large"
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "merge_gate_blocked"
+        assert result.scope.tier == "large"
+
+    def test_shipped_with_large_tier_still_valid(self) -> None:
+        """Relaxing merge_gate_blocked tier check must not affect other statuses."""
+        p = _shipped_payload()
+        p["scope"]["tier"] = "large"
+        # shipped+large is valid (no tier constraint on shipped)
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "shipped"
+
+
+# ---------------------------------------------------------------------------
+# Issue #430 — Case 4: scope_exceeded / forbidden_area emitted at/after
+# stage2_impl carry non-null branch and/or lines_actual. Extend the no_op
+# stray-branch/lines coerce to scope_exceeded and forbidden_area.
+# ---------------------------------------------------------------------------
+
+
+class TestCase4ScopeExceededForbiddenAreaStrayFieldsCoerce:
+    """parse_stdout coerces stray branch/lines_actual on scope_exceeded/forbidden_area.
+
+    A producer that exits with scope_exceeded or forbidden_area at/after
+    stage2_impl may emit a non-null branch or lines_actual. The §3.3 pre-branch
+    and lines_actual invariants previously rejected these sentinels as
+    validation_failed. Extend the no_op coerce to these statuses.
+
+    Strict model_validate still rejects the shapes (negative tests below).
+    """
+
+    def _scope_exceeded_at_stage2_payload(self) -> dict[str, Any]:
+        """scope_exceeded at stage2_impl with stray branch + lines_actual."""
+        p = _scope_exceeded_payload()
+        p["stage_reached"] = "stage2_impl"
+        p["branch"] = "dev/gen-5-scope-exceeded"
+        p["scope"]["lines_actual"] = 120
+        return p
+
+    def _forbidden_area_at_stage2_payload(self) -> dict[str, Any]:
+        """forbidden_area at stage2_impl with stray branch + lines_actual."""
+        p = _forbidden_area_payload()
+        p["stage_reached"] = "stage2_impl"
+        p["branch"] = "dev/gen-6-forbidden"
+        p["scope"]["lines_actual"] = 55
+        return p
+
+    @pytest.mark.parametrize(
+        ("payload_fn", "expected_status"),
+        [
+            (
+                lambda: {
+                    **_scope_exceeded_payload(),
+                    "stage_reached": "stage2_impl",
+                    "branch": "dev/gen-5-scope",
+                    "scope": {
+                        **_scope_exceeded_payload()["scope"],
+                        "lines_actual": 120,
+                    },
+                },
+                "scope_exceeded",
+            ),
+            (
+                lambda: {
+                    **_forbidden_area_payload(),
+                    "stage_reached": "stage2_impl",
+                    "branch": "dev/gen-6-forbidden",
+                    "scope": {
+                        **_forbidden_area_payload()["scope"],
+                        "lines_actual": 55,
+                    },
+                },
+                "forbidden_area",
+            ),
+        ],
+    )
+    def test_stray_branch_and_lines_actual_coerced(
+        self, payload_fn: Any, expected_status: str
+    ) -> None:
+        """parse_stdout coerces stray branch/lines_actual on terminal statuses."""
+        result = parse_stdout(_wrap_sentinel(payload_fn()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == expected_status
+        assert result.branch is None
+
+    def test_scope_exceeded_stray_branch_only_coerced(self) -> None:
+        """Stray branch alone (lines_actual already null) is also coerced."""
+        p = _scope_exceeded_payload()
+        p["stage_reached"] = "stage1_plan"  # pre-impl exit — branch still stray
+        p["branch"] = "dev/gen-5-stray"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "scope_exceeded"
+        assert result.branch is None
+
+    def test_forbidden_area_post_impl_lines_actual_preserved(self) -> None:
+        """At post-impl stages, lines_actual is valid and must NOT be coerced.
+
+        A producer exiting forbidden_area at stage2_impl after doing some impl
+        work emits a non-null lines_actual. This is correct per §3.3. The coerce
+        must NOT null it out, and the payload must parse cleanly.
+        """
+        p = _forbidden_area_payload()
+        p["stage_reached"] = "stage2_impl"
+        p["scope"]["lines_actual"] = 88
+        # branch is already None in _forbidden_area_payload
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "forbidden_area"
+        # lines_actual is preserved (not coerced) at post-impl stage
+        assert result.scope.lines_actual == 88
+
+    def test_scope_exceeded_pre_impl_stray_lines_actual_coerced(self) -> None:
+        """At pre-impl stage, stray lines_actual IS coerced to null."""
+        p = _scope_exceeded_payload()
+        # stage1_plan is pre-impl; stray lines_actual triggers coerce
+        assert p["stage_reached"] == "stage1_plan"
+        p["scope"]["lines_actual"] = 20
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "scope_exceeded"
+        assert result.scope.lines_actual is None
+
+    def test_scope_exceeded_strict_rejects_stray_branch(self) -> None:
+        """Strict model_validate still rejects scope_exceeded + non-null branch."""
+        p = _scope_exceeded_payload()
+        p["branch"] = "dev/gen-5-stray"
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_forbidden_area_strict_rejects_stray_lines_actual(self) -> None:
+        """Strict model_validate still rejects forbidden_area + non-null lines_actual
+        at a pre-impl stage."""
+        p = _forbidden_area_payload()
+        # stage1_plan is pre-impl — lines_actual must be null
+        p["scope"]["lines_actual"] = 50
+        with pytest.raises(ValidationError, match="lines_actual"):
+            AutoDevResult.model_validate(p)
+
+    def test_scope_exceeded_stray_commits_coerced(self) -> None:
+        """Stray commits are also coerced to empty for scope_exceeded."""
+        p = _scope_exceeded_payload()
+        p["commits"] = ["sha1", "sha2"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "scope_exceeded"
+        assert result.commits == []
+
+    def test_clean_scope_exceeded_unchanged(self) -> None:
+        """Clean scope_exceeded (already null branch + lines_actual) is untouched."""
+        result = parse_stdout(_wrap_sentinel(_scope_exceeded_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "scope_exceeded"
+        assert result.branch is None
+
+    def test_clean_forbidden_area_unchanged(self) -> None:
+        """Clean forbidden_area (already null branch + lines_actual) is untouched."""
+        result = parse_stdout(_wrap_sentinel(_forbidden_area_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "forbidden_area"
+        assert result.branch is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #430 — Case 5: Blocker rejects retry_delay_seconds set without
+# retry_eligible=True; an older producer omitting retry_eligible (→ None)
+# fails the whole sentinel. Treat None as "not set" (legitimate) or coerce
+# to True when retry_delay_seconds is present.
+# ---------------------------------------------------------------------------
+
+
+class TestCase5BlockerRetryEligibleNoneWithDelay:
+    """Blocker now accepts retry_eligible=None with a non-null retry_delay_seconds.
+
+    An older producer omitting retry_eligible (defaults to None) paired with
+    a non-null retry_delay_seconds previously failed the _check_retry_invariants
+    validator. Coerce: when retry_delay_seconds is set and retry_eligible is
+    None, treat it as retry_eligible=True (the producer implied retryability
+    by supplying a delay).
+
+    Genuinely malformed cases (retry_eligible=False with a delay) still fail.
+    """
+
+    @pytest.mark.parametrize(
+        ("retry_eligible", "retry_delay_seconds"),
+        [
+            (None, 60),  # older producer omits retry_eligible
+            (None, 0),  # delay of 0 is also valid
+            (True, 120),  # explicit True still works
+        ],
+    )
+    def test_retry_delay_with_none_or_true_eligible_parses(
+        self, retry_eligible: bool | None, retry_delay_seconds: int
+    ) -> None:
+        """retry_delay_seconds with retry_eligible=None or True now parses."""
+        p = _blocked_payload()
+        p["blocker"]["retry_eligible"] = retry_eligible
+        p["blocker"]["retry_delay_seconds"] = retry_delay_seconds
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.retry_delay_seconds == retry_delay_seconds
+
+    def test_retry_eligible_false_with_delay_still_rejects(self) -> None:
+        """retry_eligible=False with a delay is genuinely malformed — still fails."""
+        p = _blocked_payload()
+        p["blocker"]["retry_eligible"] = False
+        p["blocker"]["retry_delay_seconds"] = 30
+        with pytest.raises(ValidationError, match="retry_delay_seconds"):
+            AutoDevResult.model_validate(p)
+
+    def test_retry_eligible_none_no_delay_still_valid(self) -> None:
+        """retry_eligible=None without a delay is the legacy shape — still valid."""
+        p = _blocked_payload()
+        assert p["blocker"].get("retry_eligible") is None
+        assert p["blocker"].get("retry_delay_seconds") is None
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is None
+        assert result.blocker.retry_delay_seconds is None
+
+    def test_retry_eligible_none_with_delay_coerced_to_true_via_parse_stdout(
+        self,
+    ) -> None:
+        """End-to-end: parse_stdout coerces retry_eligible=None+delay to eligible."""
+        p = _blocked_payload()
+        p["blocker"]["retry_eligible"] = None
+        p["blocker"]["retry_delay_seconds"] = 45
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.retry_delay_seconds == 45
+        # After coerce, retry_eligible is True
+        assert result.blocker.retry_eligible is True
+
+    def test_negative_delay_still_rejected_even_with_none_eligible(self) -> None:
+        """Negative delay is always malformed regardless of retry_eligible."""
+        p = _blocked_payload()
+        p["blocker"]["retry_eligible"] = None
+        p["blocker"]["retry_delay_seconds"] = -1
+        with pytest.raises(ValidationError, match="retry_delay_seconds"):
+            AutoDevResult.model_validate(p)
