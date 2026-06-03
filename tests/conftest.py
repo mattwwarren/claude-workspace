@@ -55,6 +55,7 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.DEV_PLAN_FILE", state_dir / "dev_plan.json")
     monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", state_dir / ".dev_plan.lock")
     monkeypatch.setattr("cw.config.DEV_PLAN_OUTPUT_DIR", state_dir / "plan_output")
+    monkeypatch.setattr("cw.config.SESSIONS_LOCK", state_dir / ".sessions.lock")
 
     # Redirect the native-daemon roster path so tests don't read the
     # user's real ~/.claude/daemon/roster.json. RealNativeDaemonClient

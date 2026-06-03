@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 import yaml
@@ -26,6 +28,9 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,7 @@ DEV_QUEUE_LOCK = STATE_DIR / ".dev_queue.lock"
 DEV_PLAN_FILE = STATE_DIR / "dev_plan.json"
 DEV_PLAN_LOCK = STATE_DIR / ".dev_plan.lock"
 DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
+SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30
@@ -134,6 +140,32 @@ def dev_plan_lock() -> Path:
 
 def dev_plan_output_dir() -> Path:
     return DEV_PLAN_OUTPUT_DIR
+
+
+def sessions_lock_file() -> Path:
+    return SESSIONS_LOCK
+
+
+@contextlib.contextmanager
+def sessions_lock() -> Iterator[None]:
+    """Acquire an exclusive file lock over the sessions.json write window.
+
+    Mirror of ``_queue_lock`` in ``cw.queue``. Hold this across every
+    load_state → mutate → save_state sequence so concurrent ``cw``
+    processes cannot clobber each other's mutations (last-writer-wins
+    data loss). The lock is advisory (``fcntl.flock``) and per-open-fd,
+    so sequential re-acquisitions in the same process (non-nested) are
+    safe. Do NOT nest: acquiring while already holding will deadlock.
+    """
+    state_dir().mkdir(parents=True, exist_ok=True)
+    lock_path = sessions_lock_file()
+    fd = lock_path.open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 def load_clients() -> dict[str, ClientConfig]:

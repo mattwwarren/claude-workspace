@@ -11,7 +11,7 @@ import click
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cw.config import get_client, load_state, save_state
+from cw.config import get_client, load_state, save_state, sessions_lock
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
@@ -162,12 +162,6 @@ def start_session(
         session.worktree_path = worktree_path
         session.branch = worktree_branch
 
-    if parent_session is not None:
-        session.parent_session_id = parent_session.id
-        parent_session.worker_session_ids.append(session.id)
-
-    state.sessions.append(session)
-
     # Write Stop hook + correlation context before spawning. Raises
     # HookContextConflictError if a USER-origin worktree already has
     # settings.local.json (gate-behind-worktree strategy from #165).
@@ -196,7 +190,19 @@ def start_session(
     short_id = daemon.spawn_bg(cwd=session_cwd, prompt=prompt)
     session.surface_ref = short_id
 
-    save_state(state)
+    with sessions_lock():
+        # Reload under lock to pick up any mutations since the post-reconcile
+        # load; append the new session and save atomically.
+        state = load_state()
+        if parent_session is not None:
+            # Re-resolve parent under lock so the worker_session_ids append
+            # lands on the freshest copy.
+            live_parent = state.find_by_name_or_id(parent_session.id)
+            if live_parent is not None:
+                session.parent_session_id = live_parent.id
+                live_parent.worker_session_ids.append(session.id)
+        state.sessions.append(session)
+        save_state(state)
     record_event(
         client_name,
         HistoryEvent(
@@ -243,26 +249,30 @@ def background_session(
     auto: bool = False,
 ) -> None:
     """Background a session by triggering /session-done and recording the handoff."""
-    state = load_state()
-    session = _resolve_session(state, session_name)
+    with sessions_lock():
+        state = load_state()
+        session = _resolve_session(state, session_name)
 
-    if session.status not in (SessionStatus.ACTIVE, SessionStatus.IDLE):
-        msg = f"Session {session.name} is not active or idle (status: {session.status})"
-        raise CwError(msg)
+        if session.status not in (SessionStatus.ACTIVE, SessionStatus.IDLE):
+            msg = (
+                f"Session {session.name} is not active or idle"
+                f" (status: {session.status})"
+            )
+            raise CwError(msg)
 
-    click.echo(f"Backgrounding session: {session.name}...")
+        click.echo(f"Backgrounding session: {session.name}...")
 
-    if session.status == SessionStatus.ACTIVE:
-        click.echo(
-            "Marking as backgrounded without /session-done injection"
-            " (not inside a cmux session)."
-        )
+        if session.status == SessionStatus.ACTIVE:
+            click.echo(
+                "Marking as backgrounded without /session-done injection"
+                " (not inside a cmux session)."
+            )
 
-    session.status = SessionStatus.BACKGROUNDED
-    session.backgrounded_at = datetime.now(UTC)
-    if auto:
-        session.auto_backgrounded = True
-    save_state(state)
+        session.status = SessionStatus.BACKGROUNDED
+        session.backgrounded_at = datetime.now(UTC)
+        if auto:
+            session.auto_backgrounded = True
+        save_state(state)
     record_event(
         session.client,
         HistoryEvent(
@@ -342,9 +352,13 @@ def resume_session(
 
     if surface and _is_native_surface_ref(surface) and surface in live_ids:
         # Happy path: session still alive in daemon — attach directly.
-        session.status = SessionStatus.ACTIVE
-        session.resumed_at = datetime.now(UTC)
-        save_state(state)
+        with sessions_lock():
+            state = load_state()
+            _live_sess = state.find_by_name_or_id(session_name)
+            if _live_sess is not None:
+                _live_sess.status = SessionStatus.ACTIVE
+                _live_sess.resumed_at = datetime.now(UTC)
+                save_state(state)
         record_event(
             session.client,
             HistoryEvent(
@@ -382,10 +396,14 @@ def resume_session(
             prompt=full_prompt,
             extra_args=extra_args or None,
         )
-        session.surface_ref = new_short_id
-        session.status = SessionStatus.ACTIVE
-        session.resumed_at = datetime.now(UTC)
-        save_state(state)
+        with sessions_lock():
+            state = load_state()
+            _dead_sess = state.find_by_name_or_id(session_name)
+            if _dead_sess is not None:
+                _dead_sess.surface_ref = new_short_id
+                _dead_sess.status = SessionStatus.ACTIVE
+                _dead_sess.resumed_at = datetime.now(UTC)
+                save_state(state)
         record_event(
             session.client,
             HistoryEvent(
@@ -408,23 +426,24 @@ def done_session(
     force: bool = False,
 ) -> None:
     """Mark a session as completed and optionally remove its worktree."""
-    state = load_state()
-    session = _resolve_session(state, session_name)
+    with sessions_lock():
+        state = load_state()
+        session = _resolve_session(state, session_name)
 
-    if session.status == SessionStatus.COMPLETED:
-        msg = f"Session {session.name} is already completed."
-        raise CwError(msg)
+        if session.status == SessionStatus.COMPLETED:
+            msg = f"Session {session.name} is already completed."
+            raise CwError(msg)
 
-    if cleanup and session.worktree_path and session.branch:
-        client = get_client(session.client)
-        click.echo(f"Removing worktree for branch '{session.branch}'...")
-        remove_worktree(client, session.branch, force=force)
-        click.echo("Worktree removed.")
+        if cleanup and session.worktree_path and session.branch:
+            client = get_client(session.client)
+            click.echo(f"Removing worktree for branch '{session.branch}'...")
+            remove_worktree(client, session.branch, force=force)
+            click.echo("Worktree removed.")
 
-    session.status = SessionStatus.COMPLETED
-    session.completed_reason = CompletionReason.USER
-    session.completed_at = datetime.now(UTC)
-    save_state(state)
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.USER
+        session.completed_at = datetime.now(UTC)
+        save_state(state)
     record_event(
         session.client,
         HistoryEvent(

@@ -8,7 +8,13 @@ import time
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import AutoDevResult, parse_stdout
-from cw.config import load_clients, load_orchestrator_config, load_state, save_state
+from cw.config import (
+    load_clients,
+    load_orchestrator_config,
+    load_state,
+    save_state,
+    sessions_lock,
+)
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
@@ -443,6 +449,9 @@ def consume_completed_sessions() -> int:
     with dev_queue_lock():
         store = load_dev_queue()
         completed = _apply_events_to_store(store, events)
+        # Advance cursor inside the dev-queue lock so the cursor never
+        # moves past events whose queue mutations haven't been persisted yet.
+        advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
 
     # Persist sentinel-block summaries on Sessions whose completion event
     # carried captured stdout. Producer side (worker stdout capture) is
@@ -453,9 +462,6 @@ def consume_completed_sessions() -> int:
         stdout = event.payload.get("stdout")
         if isinstance(session_id, str) and isinstance(stdout, str):
             persist_last_result(session_id, stdout)
-
-    # Advance cursor to the last event processed
-    advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
 
     return completed
 
@@ -469,23 +475,24 @@ def persist_last_result(session_id: str, stdout: str) -> bool:
     inspection still has something to look at.
     """
     parsed = parse_stdout(stdout)
-    state = load_state()
-    target = None
-    for session in state.sessions:
-        if session.id == session_id:
-            target = session
-            break
-    if target is None:
-        _log.warning(
-            "persist_last_result: session %s not found in state",
-            session_id,
-        )
-        return False
-    if isinstance(parsed, AutoDevResult):
-        target.last_result = parsed.model_dump(mode="json")
-    else:
-        target.last_result = parsed.model_dump(mode="json")
-    save_state(state)
+    with sessions_lock():
+        state = load_state()
+        target = None
+        for session in state.sessions:
+            if session.id == session_id:
+                target = session
+                break
+        if target is None:
+            _log.warning(
+                "persist_last_result: session %s not found in state",
+                session_id,
+            )
+            return False
+        if isinstance(parsed, AutoDevResult):
+            target.last_result = parsed.model_dump(mode="json")
+        else:
+            target.last_result = parsed.model_dump(mode="json")
+        save_state(state)
     return True
 
 
