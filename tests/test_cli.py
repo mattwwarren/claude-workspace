@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+import logging
+import subprocess
+import sys
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -14,6 +19,7 @@ from freezegun import freeze_time
 from cw.cli import (
     _complete_client,
     _complete_session,
+    _configure_logging,
     _display_sessions,
     _display_status,
     main,
@@ -34,7 +40,7 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     import click
@@ -203,6 +209,83 @@ class TestCli:
         assert result.exit_code == 0
         assert "Note: cw daemon's PR-dispatch role is deprecated as of 0.11." in (
             result.output
+        )
+
+
+class TestLogging:
+    """Logging handler configuration at the CLI entrypoint (#423).
+
+    These tests drive ``_configure_logging`` against a root logger whose
+    handlers have been cleared to simulate a fresh ``cw`` process. They
+    deliberately do NOT rely on global log capture under pytest, and they
+    restore the root logger's handlers/level afterward so they never leak
+    state into the rest of the suite (the ``force=True`` regression that
+    hung the suite).
+    """
+
+    @staticmethod
+    @contextmanager
+    def _fresh_root_logger() -> Iterator[logging.Logger]:
+        root = logging.getLogger()
+        saved_handlers = root.handlers[:]
+        saved_level = root.level
+        root.handlers.clear()
+        try:
+            yield root
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved_handlers)
+            root.setLevel(saved_level)
+
+    def test_installs_stderr_handler_by_default(self) -> None:
+        with self._fresh_root_logger() as root:
+            _configure_logging(0)
+            stream_handlers = [
+                h
+                for h in root.handlers
+                if isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
+            ]
+            assert stream_handlers, "no stderr handler installed"
+            assert root.level == logging.WARNING
+
+    def test_verbose_flag_sets_info_level(self) -> None:
+        with self._fresh_root_logger() as root:
+            _configure_logging(1)
+            assert root.level == logging.INFO
+
+    def test_double_verbose_flag_sets_debug_level(self) -> None:
+        with self._fresh_root_logger() as root:
+            _configure_logging(2)
+            assert root.level == logging.DEBUG
+
+    def test_emitted_warning_reaches_stderr(self) -> None:
+        """A WARNING emitted after configuration is written to stderr."""
+        with self._fresh_root_logger():
+            stream = io.StringIO()
+            with patch.object(sys, "stderr", stream):
+                _configure_logging(0)
+                logging.getLogger("cw.test_sentinel").warning("sentinel-423")
+        assert "sentinel-423" in stream.getvalue()
+
+    def test_no_handler_installed_at_import_time(self) -> None:
+        """Importing cw.cli must NOT configure logging.
+
+        Checked in a fresh subprocess so the assertion observes a pristine
+        interpreter and never mutates this process's ``sys.modules`` / logging
+        state. An in-process pop+reimport of ``cw.cli`` corrupts the rest of
+        the suite, so isolation via subprocess is required here.
+        """
+        code = (
+            "import logging, cw.cli, sys; "
+            "sys.exit(1 if logging.getLogger().handlers else 0)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"cw.cli configured logging at import time: {result.stderr.decode()}"
         )
 
 
