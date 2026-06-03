@@ -255,6 +255,75 @@ def remove_worktree(
     _run_git(*args, cwd=_git_dir(client))
 
 
+def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
+    """Return True if the worktree for *branch* has unsaved work.
+
+    "Unsaved" means either:
+    - uncommitted changes (``git status --porcelain`` is non-empty), OR
+    - unpushed commits (``git log origin/<branch>..HEAD`` is non-empty).
+
+    Returns False when the worktree path does not exist (nothing to lose).
+    When ``origin/<branch>`` does not exist, treats all HEAD commits as
+    unpushed (conservative: assume they would be lost).
+
+    Never raises — every git error is swallowed and logged at WARNING level
+    so that a git failure cannot block a cleanup sweep.
+    """
+    wt_path = worktree_path_for(client, branch)
+    if not wt_path.exists():
+        return False
+
+    # 1. Uncommitted changes check
+    try:
+        status = _run_git("status", "--porcelain", cwd=wt_path, check=False)
+        if status.stdout.strip():
+            return True
+    except (WorktreeError, OSError) as exc:
+        _log.warning(
+            "worktree_has_unsaved_work: status check failed for %s/%s: %s",
+            client.name,
+            branch,
+            exc,
+        )
+        # Fail-safe: treat as having unsaved work so we don't silently destroy.
+        return True
+
+    # 2. Unpushed commits check — compare HEAD against origin/<branch>.
+    # First verify that origin/<branch> exists; if not, every HEAD commit is
+    # "unpushed" (conservative).
+    try:
+        ref_check = _run_git(
+            "rev-parse",
+            "--verify",
+            f"origin/{branch}",
+            cwd=wt_path,
+            check=False,
+        )
+        if ref_check.returncode != 0:
+            # origin/<branch> unknown — check whether HEAD has any commits
+            head_check = _run_git(
+                "rev-parse", "--verify", "HEAD", cwd=wt_path, check=False
+            )
+            return head_check.returncode == 0 and bool(head_check.stdout.strip())
+        log_result = _run_git(
+            "log",
+            f"origin/{branch}..HEAD",
+            "--oneline",
+            cwd=wt_path,
+            check=False,
+        )
+        return bool(log_result.stdout.strip())
+    except (WorktreeError, OSError) as exc:
+        _log.warning(
+            "worktree_has_unsaved_work: log check failed for %s/%s: %s",
+            client.name,
+            branch,
+            exc,
+        )
+        # Fail-safe: treat as having unsaved work.
+        return True
+
+
 def _fetch_default_branch(client_name: str, default_branch: str, git_dir: Path) -> bool:
     """Fetch origin/<default_branch>. Returns True on success, False on failure."""
     if not git_dir.exists():

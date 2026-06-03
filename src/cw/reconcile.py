@@ -56,7 +56,7 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.notify import fire_push_notification
-from cw.worktree import remove_worktree
+from cw.worktree import remove_worktree, worktree_has_unsaved_work, worktree_path_for
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session
@@ -498,7 +498,10 @@ def _apply_salvaged_completion(
     session.claude_session_id = claude_session_id
 
 
-def _cleanup_timed_out_worktree(session: Session) -> None:
+def _cleanup_timed_out_worktree(
+    session: Session,
+    ticket_id: str | None = None,
+) -> None:
     """Remove a timed-out session's worktree so the re-dispatch starts clean.
 
     A timed-out DAEMON session has its ``TicketTask`` reverted to PENDING for
@@ -506,6 +509,12 @@ def _cleanup_timed_out_worktree(session: Session) -> None:
     reuse it (or, post-#404, refuse and spin) — either way feeding the retry a
     prior run's branch and commits. Removing it here means the next claim builds
     a fresh worktree from the current default branch. See GitHub issue #404.
+
+    Dirty-check guard (#425): if the worktree contains uncommitted changes or
+    unpushed commits the removal is SKIPPED.  Instead the owning task is flipped
+    from PENDING back to BLOCKED_ON_USER so the operator can inspect the tree
+    before it is removed.  *ticket_id* is required for the BLOCKED_ON_USER flip;
+    when omitted the skip is logged but the queue is not mutated.
 
     Best-effort: every failure is logged and swallowed. Worktree cleanup must
     never abort the reconcile sweep — a missing/renamed client, an
@@ -515,6 +524,29 @@ def _cleanup_timed_out_worktree(session: Session) -> None:
         return
     try:
         client = get_client(session.client)
+        if worktree_has_unsaved_work(client, session.branch):
+            wt_path = str(worktree_path_for(client, session.branch))
+            _log.warning(
+                "worktree_cleanup_skip_dirty: %s/%s has unsaved work"
+                " — leaving worktree at %s for operator inspection"
+                " (ticket=%s)",
+                session.client,
+                session.branch,
+                wt_path,
+                ticket_id,
+            )
+            if ticket_id:
+                with dev_queue_lock():
+                    store = load_dev_queue()
+                    for task in store.tasks:
+                        if (
+                            task.ticket_id == ticket_id
+                            and task.status == QueueItemStatus.PENDING
+                        ):
+                            task.status = QueueItemStatus.BLOCKED_ON_USER
+                            save_dev_queue(store)
+                            break
+            return
         remove_worktree(client, session.branch, force=True)
     except (CwError, OSError) as exc:
         _log.warning(
@@ -639,7 +671,7 @@ def revert_stalled_headless_sessions(
             get_native_daemon_client().stop(session.surface_ref)
         # Stale-worktree cleanup: the task was reverted to PENDING above, so
         # the retry must not inherit this run's worktree state (#404).
-        _cleanup_timed_out_worktree(session)
+        _cleanup_timed_out_worktree(session, ticket_id)
 
     for session, ticket_id, result in salvaged:
         completed_payload: dict[str, object] = {
@@ -820,7 +852,7 @@ def flag_silently_idle_daemon_sessions(
             get_native_daemon_client().stop(session.surface_ref)
         # Stale-worktree cleanup: this task was reverted to PENDING above for
         # re-dispatch, so the retry must start from a fresh worktree (#404).
-        _cleanup_timed_out_worktree(session)
+        _cleanup_timed_out_worktree(session, ticket_id)
         record_event(
             OrchestratorEventType.SESSION_TIMED_OUT,
             {

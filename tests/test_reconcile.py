@@ -1144,6 +1144,111 @@ def test_revert_stalled_skips_cleanup_when_no_branch(
 
 
 # ---------------------------------------------------------------------------
+# Dirty-check guard on worktree cleanup (GitHub issue #425): force-remove must
+# be skipped when the worktree has unsaved work; task parks as BLOCKED_ON_USER.
+# ---------------------------------------------------------------------------
+
+
+def test_revert_stalled_skips_removal_and_blocks_task_when_dirty(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timed-out session with unpushed commits: worktree NOT removed.
+
+    Task must move to BLOCKED_ON_USER, not PENDING (#425).
+    """
+    worktree = tmp_path / "wt-dirty"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session(
+        "dirty-1", worktree, started_at, surface_ref=None
+    )
+    sess.branch = "auto-dev/dirty-1"
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="dirty-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="dirty-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    removed: list[str] = []
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.remove_worktree",
+        lambda _client, branch, *, _force=False: removed.append(branch),
+    )
+    # Simulate dirty worktree (has unsaved work)
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    # Worktree must NOT have been removed
+    assert removed == []
+    # Task must be BLOCKED_ON_USER (not PENDING)
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "dirty-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_revert_stalled_removes_when_clean(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timed-out session with clean worktree: removal proceeds as before."""
+    worktree = tmp_path / "wt-cleanX"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session(
+        "cleanX-1", worktree, started_at, surface_ref=None
+    )
+    sess.branch = "auto-dev/cleanX-1"
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="cleanX-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cleanX-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    removed: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.remove_worktree",
+        lambda client, branch, *, force=False: removed.append(
+            (client.name, branch, force)
+        ),
+    )
+    # Clean worktree
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    # Removal proceeds with force=True
+    assert removed == [("client-a", "auto-dev/cleanX-1", True)]
+    # Task reverted to PENDING (normal timeout path)
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "cleanX-1")
+    assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
 # Sentinel-salvage tests (GitHub issue #372): a stalled/crashed session that
 # emitted a terminal-success sentinel must be dispositioned by that sentinel,
 # not mislabeled timed_out/crash, and its ticket must NOT be re-dispatched.

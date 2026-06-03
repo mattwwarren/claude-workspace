@@ -24,6 +24,7 @@ from cw.worktree import (
     remove_worktree,
     resolve_worktree_base,
     slugify_branch,
+    worktree_has_unsaved_work,
     worktree_path_for,
 )
 
@@ -1182,3 +1183,189 @@ class TestFetchFeatureBranch:
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert fetch_feature_branch(client, "auto-dev/381") is False
+
+
+# ---------------------------------------------------------------------------
+# TestWorktreeHasUnsavedWork (#425)
+# ---------------------------------------------------------------------------
+
+
+class TestWorktreeHasUnsavedWork:
+    """Tests for worktree_has_unsaved_work."""
+
+    def _client(self, tmp_path: Path) -> ClientConfig:
+        return ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+
+    def test_returns_false_when_worktree_path_absent(self, tmp_path: Path) -> None:
+        """No worktree on disk → nothing to lose → False."""
+        client = self._client(tmp_path)
+        # wt_path does NOT exist
+        assert worktree_has_unsaved_work(client, "auto-dev/absent") is False
+
+    def test_returns_true_for_uncommitted_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dirty working tree (git status --porcelain non-empty) → True."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-dirty"
+        wt_path.mkdir(parents=True)
+
+        calls: list[tuple[str, ...]] = []
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            calls.append(args)
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = " M some_file.py\n"
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/dirty") is True
+        # status was the first check — we short-circuit, no log check needed
+        assert any("status" in c for c in calls)
+
+    def test_returns_true_for_unpushed_commits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clean working tree but commits not yet pushed → True."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-unpushed"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args and "origin/" in " ".join(args):
+                result.returncode = 0  # origin/branch exists
+                result.stdout = "abc1234\n"
+            elif "log" in args:
+                result.stdout = "abc1234 add feature\n"  # unpushed commit
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/unpushed") is True
+
+    def test_returns_true_when_origin_branch_missing_and_head_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No origin/<branch> but HEAD exists → treat all commits as unpushed → True."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-noorigin"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args and "origin/" in " ".join(args):
+                result.returncode = 128  # origin/<branch> does NOT exist
+                result.stdout = ""
+            elif "rev-parse" in args and "HEAD" in args:
+                result.returncode = 0  # HEAD exists
+                result.stdout = "abc1234def567890\n"
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/noorigin") is True
+
+    def test_returns_false_when_origin_missing_and_head_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No origin/<branch> and no HEAD commits → nothing to lose → False."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-empty"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args and "origin/" in " ".join(args):
+                result.returncode = 128  # origin/<branch> does NOT exist
+                result.stdout = ""
+            elif "rev-parse" in args and "HEAD" in args:
+                result.returncode = 128  # no commits yet
+                result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/empty") is False
+
+    def test_returns_false_for_clean_pushed_worktree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clean working tree and all commits pushed → False."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-clean"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean
+            elif "rev-parse" in args and "origin/" in " ".join(args):
+                result.returncode = 0  # origin/branch exists
+                result.stdout = "abc1234\n"
+            elif "log" in args:
+                result.stdout = ""  # no unpushed commits
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/clean") is False
+
+    def test_returns_true_on_status_git_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """git status fails → fail-safe: treat as unsaved to avoid data loss."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-err"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "status" in args:
+                msg = "git status exploded"
+                raise WorktreeError(msg)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/err") is True
+
+    def test_returns_true_on_log_git_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """git log fails after clean status → fail-safe: treat as unsaved."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-logerr"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args and "origin/" in " ".join(args):
+                result.returncode = 0
+                result.stdout = "abc1234\n"
+            elif "log" in args:
+                msg = "git log exploded"
+                raise WorktreeError(msg)
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/logerr") is True

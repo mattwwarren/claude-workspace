@@ -32,6 +32,7 @@ from cw.worktree import (
     create_worktree,
     is_main_behind_origin,
     remove_worktree,
+    worktree_has_unsaved_work,
 )
 
 if TYPE_CHECKING:
@@ -235,8 +236,36 @@ def dispatch_tick(
                     # then re-raise into the handler below to revert to PENDING.
                     # Caught narrowly as StaleWorktreeError (not WorktreeError)
                     # so the main-checkout guard never triggers a removal.
-                    with contextlib.suppress(WorktreeError, OSError):
-                        remove_worktree(client, branch, force=True)
+                    #
+                    # Dirty-check guard (#425): if the stale tree contains
+                    # unsaved work, skip the removal and park the task as
+                    # BLOCKED_ON_USER instead of PENDING so the operator can
+                    # inspect. The outer except handler will not overwrite
+                    # BLOCKED_ON_USER (it checks status == RUNNING before
+                    # reverting).
+                    if worktree_has_unsaved_work(client, branch):
+                        _log.warning(
+                            "dispatch: stale worktree %s/%s has unsaved work"
+                            " — leaving for operator inspection; parking as"
+                            " BLOCKED_ON_USER",
+                            client.name,
+                            branch,
+                        )
+                        with dev_queue_lock():
+                            store = load_dev_queue()
+                            for stored_task in store.tasks:
+                                if (
+                                    stored_task.ticket_id == task.ticket_id
+                                    and stored_task.client == client.name
+                                    and stored_task.status == QueueItemStatus.RUNNING
+                                ):
+                                    stored_task.status = QueueItemStatus.BLOCKED_ON_USER
+                                    stored_task.session_id = None
+                                    break
+                            save_dev_queue(store)
+                    else:
+                        with contextlib.suppress(WorktreeError, OSError):
+                            remove_worktree(client, branch, force=True)
                     raise
 
                 # Guard against the #300 regression: if create_worktree
