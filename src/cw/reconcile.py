@@ -708,7 +708,11 @@ def resolve_idle_watchdog_budget(
     3. config.idle_watchdog_seconds — operator-tunable global default.
     4. IDLE_WATCHDOG_SECONDS — hardcoded fallback.
     """
-    global_default = config.idle_watchdog_seconds or IDLE_WATCHDOG_SECONDS
+    global_default = (
+        IDLE_WATCHDOG_SECONDS
+        if config.idle_watchdog_seconds is None
+        else config.idle_watchdog_seconds
+    )
     if task is None:
         return global_default
     if task.idle_watchdog_override is not None:
@@ -962,7 +966,7 @@ def _reconcile_locked() -> ReconcileReport:
             if isinstance(sid := a.get("sessionId"), str)
         }
         daemon_errored = False
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
         native_live = set()
         daemon_errored = True
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
