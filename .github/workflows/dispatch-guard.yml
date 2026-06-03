@@ -80,13 +80,13 @@ jobs:
             --label dispatch-drift \
             --body "Commits have landed on \`main\` that touch one or more dispatch-reliability files without a subsequent release being cut.
 
-**Last release tag:** \`${LAST_TAG}\`
+          **Last release tag:** \`${LAST_TAG}\`
 
-**Changed files since that tag:**
-\`\`\`
-${CHANGED_FILES}
-\`\`\`
+          **Changed files since that tag:**
+          \`\`\`
+          ${CHANGED_FILES}
+          \`\`\`
 
-Cut a new release to close this issue automatically.
+          Cut a new release to close this issue automatically.
 
-> Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
+          > Opened automatically by the [Dispatch Guard workflow](/.github/workflows/dispatch-guard.yml). Closes when a release tag is pushed."
