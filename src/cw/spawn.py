@@ -7,7 +7,7 @@ import os
 import subprocess
 from typing import TYPE_CHECKING
 
-from cw.config import load_state, save_state
+from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose
 from cw.native_daemon import get_native_daemon_client
@@ -157,12 +157,11 @@ def spawn_create_impl(
     if the parent session is not in state.
     """
     _validate_worktree(worktree)
-    state = load_state()
 
-    parent_session: Session | None = None
+    # Validate parent exists before spawning (fail fast, no daemon call yet).
     if parent is not None:
-        parent_session = state.find_by_name_or_id(parent)
-        if parent_session is None:
+        _pre_state = load_state()
+        if _pre_state.find_by_name_or_id(parent) is None:
             msg = f"Parent session not found: {parent}"
             raise CwError(msg)
 
@@ -205,10 +204,15 @@ def spawn_create_impl(
         permission_mode=permission_mode,
     )
 
-    if parent_session is not None:
-        sess.parent_session_id = parent_session.id
-        parent_session.worker_session_ids.append(sess.id)
-
-    state.sessions.append(sess)
-    save_state(state)
+    with sessions_lock():
+        state = load_state()
+        if parent is not None:
+            parent_session = state.find_by_name_or_id(parent)
+            if parent_session is None:
+                msg = f"Parent session not found: {parent}"
+                raise CwError(msg)
+            sess.parent_session_id = parent_session.id
+            parent_session.worker_session_ids.append(sess.id)
+        state.sessions.append(sess)
+        save_state(state)
     return sess.id

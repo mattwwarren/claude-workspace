@@ -16,13 +16,12 @@ state still contains ACTIVE/IDLE sessions with surface refs. A transient
 daemon hiccup would otherwise irreversibly mark every session as CRASHED.
 ``compute_drift`` stays pure and does not apply this guard.
 
-Race note: ``reconcile`` does ``load_state → mutate → save_state`` without
-a dedicated ``sessions.json`` file lock. This matches every other
-``save_state`` call site in the codebase (``cw.session``, ``cw.cli``, …);
-a unified state lock is a larger refactor tracked separately. In
-practice the race window is the in-memory mutation between load and save,
-and concurrent writers are rare in the single-user model this tool
-targets.
+Lock note: ``reconcile`` acquires ``sessions_lock`` (config.py) across its
+entire load_state → mutate → save_state sequence.  The helpers called from
+within the lock (``revert_stalled_headless_sessions``,
+``flag_silently_idle_daemon_sessions``) save_state directly without
+re-acquiring; callers of those helpers must hold the lock themselves if
+called outside ``reconcile``.
 """
 
 from __future__ import annotations
@@ -36,7 +35,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import AutoDevResult, parse_stdout
-from cw.config import get_client, load_orchestrator_config, load_state, save_state
+from cw.config import (
+    get_client,
+    load_orchestrator_config,
+    load_state,
+    save_state,
+    sessions_lock,
+)
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
@@ -885,6 +890,17 @@ def reconcile() -> ReconcileReport:
     session is no longer ACTIVE/IDLE — so a stranded RUNNING task can
     only be recovered by explicit operator action. This is an acceptable
     tradeoff for a file-based, single-user tool.
+    """
+    with sessions_lock():
+        return _reconcile_locked()
+
+
+def _reconcile_locked() -> ReconcileReport:
+    """Body of reconcile(), called while sessions_lock is held.
+
+    Separated so reconcile() holds exactly one lock acquisition and the
+    helpers (revert_stalled_headless_sessions, flag_silently_idle_daemon_sessions)
+    can save_state directly without re-acquiring the lock.
     """
     state = load_state()
     now = datetime.now(UTC)

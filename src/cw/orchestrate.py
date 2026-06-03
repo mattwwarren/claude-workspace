@@ -31,7 +31,13 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from cw.atomic import atomic_write_text
-from cw.config import load_state, review_monitor_dir, save_state, state_dir
+from cw.config import (
+    load_state,
+    review_monitor_dir,
+    save_state,
+    sessions_lock,
+    state_dir,
+)
 from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
@@ -248,66 +254,67 @@ def retire_merged_prs(
     if not events:
         return []
 
-    state = load_state()
-    dispatch_record = load_dispatch_record()
-    retired: list[str] = []
+    with sessions_lock():
+        state = load_state()
+        dispatch_record = load_dispatch_record()
+        retired: list[str] = []
 
-    for event in events:
-        payload = event.payload
-        repo = str(payload.get("repo", ""))
-        pr_number_raw = payload.get("pr_number", 0)
-        try:
-            pr_number = int(pr_number_raw)
-        except (TypeError, ValueError):
-            logger.warning(
-                "pr.merged event %s missing valid pr_number: %r",
-                event.id,
-                pr_number_raw,
-            )
-            advance_cursor(_RETIREMENT_CONSUMER, event.id)
-            continue
+        for event in events:
+            payload = event.payload
+            repo = str(payload.get("repo", ""))
+            pr_number_raw = payload.get("pr_number", 0)
+            try:
+                pr_number = int(pr_number_raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "pr.merged event %s missing valid pr_number: %r",
+                    event.id,
+                    pr_number_raw,
+                )
+                advance_cursor(_RETIREMENT_CONSUMER, event.id)
+                continue
 
-        if not repo:
-            logger.warning("pr.merged event %s missing repo field", event.id)
-            advance_cursor(_RETIREMENT_CONSUMER, event.id)
-            continue
+            if not repo:
+                logger.warning("pr.merged event %s missing repo field", event.id)
+                advance_cursor(_RETIREMENT_CONSUMER, event.id)
+                continue
 
-        # 1. Cleanup review-monitor state.
-        _invoke_review_monitor_complete(repo, pr_number, runner=runner)
+            # 1. Cleanup review-monitor state.
+            _invoke_review_monitor_complete(repo, pr_number, runner=runner)
 
-        # 2-4. Find and retire correlated sessions.
-        matches = _sessions_for_pr(dispatch_record, repo, pr_number)
-        for dispatch_key, session_id in matches:
-            sess = next(
-                (s for s in state.sessions if s.id == session_id),
-                None,
-            )
-            if sess is None:
-                logger.info(
-                    "Dispatch key %s references unknown session %s; dropping",
-                    dispatch_key,
-                    session_id,
+            # 2-4. Find and retire correlated sessions.
+            matches = _sessions_for_pr(dispatch_record, repo, pr_number)
+            for dispatch_key, session_id in matches:
+                sess = next(
+                    (s for s in state.sessions if s.id == session_id),
+                    None,
+                )
+                if sess is None:
+                    logger.info(
+                        "Dispatch key %s references unknown session %s; dropping",
+                        dispatch_key,
+                        session_id,
+                    )
+                    dispatch_record.active.pop(dispatch_key, None)
+                    continue
+
+                if sess.status == SessionStatus.COMPLETED:
+                    # Already retired; drop the stale dispatch entry.
+                    dispatch_record.active.pop(dispatch_key, None)
+                    continue
+
+                _close_session(
+                    sess,
+                    pr_number=pr_number,
+                    repo=repo,
                 )
                 dispatch_record.active.pop(dispatch_key, None)
-                continue
+                retired.append(session_id)
 
-            if sess.status == SessionStatus.COMPLETED:
-                # Already retired; drop the stale dispatch entry.
-                dispatch_record.active.pop(dispatch_key, None)
-                continue
+            advance_cursor(_RETIREMENT_CONSUMER, event.id)
 
-            _close_session(
-                sess,
-                pr_number=pr_number,
-                repo=repo,
-            )
-            dispatch_record.active.pop(dispatch_key, None)
-            retired.append(session_id)
-
-        advance_cursor(_RETIREMENT_CONSUMER, event.id)
-
-    save_state(state)
-    save_dispatch_record(dispatch_record)
+        save_state(state)
+        save_dispatch_record(dispatch_record)
 
     return retired
 

@@ -32,7 +32,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     parse_stdout,
 )
-from cw.config import events_dir, load_state, save_state
+from cw.config import events_dir, load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as record_orchestrator_event
 from cw.history import EventType, HistoryEvent, record_event
@@ -177,45 +177,47 @@ def signal_needs_attention(
     Also transitions the RUNNING TicketTask (if any) to BLOCKED_ON_USER so
     the dispatch loop does not re-enqueue the ticket on the next reconcile tick.
     """
-    state = load_state()
-    session = _resolve_session(client, purpose, session_id=session_id, state=state)
-    if session is None:
-        _log.debug(
-            "signal_needs_attention: no session found for client=%s purpose=%s id=%s",
-            client,
-            purpose,
-            session_id,
-        )
-        return
-    if session.status == SessionStatus.COMPLETED:
-        _log.debug(
-            "signal_needs_attention: session %s already COMPLETED — no-op",
-            session.id,
-        )
-        return
+    with sessions_lock():
+        state = load_state()
+        session = _resolve_session(client, purpose, session_id=session_id, state=state)
+        if session is None:
+            _log.debug(
+                "signal_needs_attention: no session found"
+                " for client=%s purpose=%s id=%s",
+                client,
+                purpose,
+                session_id,
+            )
+            return
+        if session.status == SessionStatus.COMPLETED:
+            _log.debug(
+                "signal_needs_attention: session %s already COMPLETED — no-op",
+                session.id,
+            )
+            return
 
-    now = datetime.now(UTC)
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = now
-    session.completed_reason = CompletionReason.NORMAL
-    session.last_result = {"breadcrumbs": breadcrumbs, "needs_attention": True}
-    if claude_session_id:
-        session.claude_session_id = claude_session_id
+        now = datetime.now(UTC)
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.last_result = {"breadcrumbs": breadcrumbs, "needs_attention": True}
+        if claude_session_id:
+            session.claude_session_id = claude_session_id
 
-    ticket_id = ticket_id_for_session(session.name)
-    if ticket_id:
-        with dev_queue_lock():
-            store = load_dev_queue()
-            for task in store.tasks:
-                if (
-                    task.ticket_id == ticket_id
-                    and task.status == QueueItemStatus.RUNNING
-                ):
-                    task.status = QueueItemStatus.BLOCKED_ON_USER
-                    save_dev_queue(store)
-                    break
+        ticket_id = ticket_id_for_session(session.name)
+        if ticket_id:
+            with dev_queue_lock():
+                store = load_dev_queue()
+                for task in store.tasks:
+                    if (
+                        task.ticket_id == ticket_id
+                        and task.status == QueueItemStatus.RUNNING
+                    ):
+                        task.status = QueueItemStatus.BLOCKED_ON_USER
+                        save_dev_queue(store)
+                        break
 
-    save_state(state)
+        save_state(state)
 
     payload: dict[str, object] = {
         "session_id": session.id,
@@ -326,16 +328,17 @@ def signal_idle(
     session_id: str | None = None,
 ) -> None:
     """Transition the session to IDLE and write an event signal file."""
-    state = load_state()
-    session = _resolve_session(client, purpose, session_id=session_id, state=state)
-    if session is None or session.status != SessionStatus.ACTIVE:
-        return
+    with sessions_lock():
+        state = load_state()
+        session = _resolve_session(client, purpose, session_id=session_id, state=state)
+        if session is None or session.status != SessionStatus.ACTIVE:
+            return
 
-    session.status = SessionStatus.IDLE
-    session.idle_at = datetime.now(UTC)
-    if claude_session_id:
-        session.claude_session_id = claude_session_id
-    save_state(state)
+        session.status = SessionStatus.IDLE
+        session.idle_at = datetime.now(UTC)
+        if claude_session_id:
+            session.claude_session_id = claude_session_id
+        save_state(state)
 
     events_dir().mkdir(parents=True, exist_ok=True)
     signal_file = _idle_signal_path(client, purpose)
@@ -377,33 +380,34 @@ def signal_completed(
     parsed ``result`` to ``session.last_result`` so the daemon's
     consume_completed_sessions can route by status.
     """
-    state = load_state()
-    session = _resolve_session(client, purpose, session_id=session_id, state=state)
-    if session is None:
-        _log.debug(
-            "signal_completed: no session found for client=%s purpose=%s id=%s",
-            client,
-            purpose,
-            session_id,
-        )
-        return
-    if session.status == SessionStatus.COMPLETED:
-        _log.debug(
-            "signal_completed: session %s already COMPLETED — no-op",
-            session.id,
-        )
-        return
+    with sessions_lock():
+        state = load_state()
+        session = _resolve_session(client, purpose, session_id=session_id, state=state)
+        if session is None:
+            _log.debug(
+                "signal_completed: no session found for client=%s purpose=%s id=%s",
+                client,
+                purpose,
+                session_id,
+            )
+            return
+        if session.status == SessionStatus.COMPLETED:
+            _log.debug(
+                "signal_completed: session %s already COMPLETED — no-op",
+                session.id,
+            )
+            return
 
-    now = datetime.now(UTC)
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = now
-    session.completed_reason = CompletionReason.NORMAL
-    session.last_result = result.model_dump(mode="json")
-    if result.cost_usd is not None:
-        session.cost_usd = result.cost_usd
-    if claude_session_id:
-        session.claude_session_id = claude_session_id
-    save_state(state)
+        now = datetime.now(UTC)
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.last_result = result.model_dump(mode="json")
+        if result.cost_usd is not None:
+            session.cost_usd = result.cost_usd
+        if claude_session_id:
+            session.claude_session_id = claude_session_id
+        save_state(state)
 
     payload: dict[str, object] = {
         "session_id": session.id,

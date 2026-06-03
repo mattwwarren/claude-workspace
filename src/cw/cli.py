@@ -34,6 +34,7 @@ from cw.config import (
     load_orchestrator_config,
     load_state,
     save_state,
+    sessions_lock,
     show_config,
 )
 from cw.daemon import run_watcher_tick
@@ -1204,157 +1205,167 @@ def signal_stop() -> None:
         # Recovery, not silent wedge.
         return
 
-    state = load_state()
-    session = next((s for s in state.sessions if s.id == cw_session_id), None)
-    if session is None or session.status in (
-        SessionStatus.COMPLETED,
-        SessionStatus.IDLE,
-        SessionStatus.TIMED_OUT,
-    ):
-        return
-
-    claude_session_id = hook_payload.get("session_id")
-
-    # Issue #285: stale-hook guard. When dispatch reuses a worktree for a
-    # blocked→retry sequence, spawn_create_impl overwrites cw-context.json with
-    # the new session's ID *before* the old Claude process finishes. The old
-    # process can then fire one final Stop hook: the hook reads the new session's
-    # CW ID from context but carries the old Claude UUID in its payload. Without
-    # this guard the stale hook would parse the old (blocked) transcript and
-    # apply that sentinel to the new session's task, reverting it to PENDING.
-    # Fix: drop any DAEMON-origin hook whose Claude UUID doesn't match this
-    # session's surface_ref (the 8-char prefix stored at spawn time).
-    # USER-origin sessions are interactive and never have cw-context.json
-    # overwritten by dispatch, so the guard does not apply to them.
-    if (
-        session.origin is SessionOrigin.DAEMON
-        and isinstance(claude_session_id, str)
-        and session.surface_ref is not None
-        and not claude_session_id.startswith(session.surface_ref)
-    ):
-        return
-
-    # Issue #165 Phase B: USER-origin sessions are interactive — the Stop
-    # hook fires at every agent turn but the human is still driving. Mark
-    # IDLE so wait loops / daemon triggers can react, but do NOT emit
-    # SESSION_COMPLETED (no dev_queue task to retire) and do NOT call
-    # native_daemon.stop (no roster entry to clean up). DAEMON-origin
-    # falls through to the existing COMPLETED transition below.
-    if session.origin is SessionOrigin.USER:
-        if session.status != SessionStatus.ACTIVE:
-            # BACKGROUNDED (or any non-ACTIVE state) — silent no-op so a
-            # Stop hook firing on a session the user has explicitly
-            # parked doesn't flip its status.
+    with sessions_lock():
+        state = load_state()
+        session = next((s for s in state.sessions if s.id == cw_session_id), None)
+        if session is None or session.status in (
+            SessionStatus.COMPLETED,
+            SessionStatus.IDLE,
+            SessionStatus.TIMED_OUT,
+        ):
             return
-        session.status = SessionStatus.IDLE
-        if isinstance(claude_session_id, str):
-            session.claude_session_id = claude_session_id
-        save_state(state)
-        return
 
-    # Issue #176 Layer 1: headless backstop.
-    #
-    # A headless DAEMON session (ticket_id present in context) must NOT be
-    # silently marked COMPLETED unless it emitted an AUTO_DEV_RESULT sentinel.
-    # The bg_tasks guard above correctly defers when a subagent is in flight,
-    # but the parent's *next* turn may end (with background_tasks=[]) before
-    # it has finished its post-wait pipeline work — a silent orphan.
-    #
-    # Detection: DAEMON-origin + non-None ticket_id in context ≡ headless.
-    # Sentinel check: look for the sentinel open tag in the Claude transcript.
-    # Budget: if no sentinel AND wall-clock since session.started_at exceeds
-    # HEADLESS_TIMEOUT_SECONDS, transition to TIMED_OUT (retry-eligible) so
-    # the failure is loud and dev-queue can retry. Under budget: defer (return)
-    # so another Stop hook (or reconcile) can catch it later.
-    #
-    # The guard does NOT replace the bg_tasks deferral — both fire independently.
-    ticket_id_value = context.get("ticket_id")
-    # ``headless: true`` in cw-context.json is written by spawn_create_impl
-    # when dispatch launches a /auto-dev session. Absent (or False) for legacy
-    # sessions and non-headless daemon sessions — those fall through to the
-    # normal COMPLETED path unchanged.
-    is_headless = session.origin is SessionOrigin.DAEMON and bool(
-        context.get("headless")
-    )
-    now = datetime.now(UTC)
-    parsed_sentinel: AutoDevResult | BlockedResult | None = None
-    if is_headless:
-        parsed_sentinel = _parse_sentinel_from_transcript(
-            cwd_value, claude_session_id if isinstance(claude_session_id, str) else None
-        )
-        if parsed_sentinel is None:
-            elapsed = (now - session.started_at).total_seconds()
-            _headless_config = load_orchestrator_config()
-            _stop_task: TicketTask | None = None
-            if isinstance(ticket_id_value, str):
-                _stop_store = load_dev_queue()
-                _stop_task = next(
-                    (t for t in _stop_store.tasks if t.ticket_id == ticket_id_value),
-                    None,
-                )
-            _budget = resolve_headless_budget(_stop_task, session, _headless_config)
-            if elapsed < _budget:
-                # Under budget — defer. Another Stop hook turn will fire, or
-                # reconcile will eventually catch a phantom and CRASH it.
+        claude_session_id = hook_payload.get("session_id")
+
+        # Issue #285: stale-hook guard. When dispatch reuses a worktree for a
+        # blocked→retry sequence, spawn_create_impl overwrites cw-context.json with
+        # the new session's ID *before* the old Claude process finishes. The old
+        # process can then fire one final Stop hook: the hook reads the new session's
+        # CW ID from context but carries the old Claude UUID in its payload. Without
+        # this guard the stale hook would parse the old (blocked) transcript and
+        # apply that sentinel to the new session's task, reverting it to PENDING.
+        # Fix: drop any DAEMON-origin hook whose Claude UUID doesn't match this
+        # session's surface_ref (the 8-char prefix stored at spawn time).
+        # USER-origin sessions are interactive and never have cw-context.json
+        # overwritten by dispatch, so the guard does not apply to them.
+        if (
+            session.origin is SessionOrigin.DAEMON
+            and isinstance(claude_session_id, str)
+            and session.surface_ref is not None
+            and not claude_session_id.startswith(session.surface_ref)
+        ):
+            return
+
+        # Issue #165 Phase B: USER-origin sessions are interactive — the Stop
+        # hook fires at every agent turn but the human is still driving. Mark
+        # IDLE so wait loops / daemon triggers can react, but do NOT emit
+        # SESSION_COMPLETED (no dev_queue task to retire) and do NOT call
+        # native_daemon.stop (no roster entry to clean up). DAEMON-origin
+        # falls through to the existing COMPLETED transition below.
+        if session.origin is SessionOrigin.USER:
+            if session.status != SessionStatus.ACTIVE:
+                # BACKGROUNDED (or any non-ACTIVE state) — silent no-op so a
+                # Stop hook firing on a session the user has explicitly
+                # parked doesn't flip its status.
                 return
-            # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
-            last_msg = hook_payload.get("last_assistant_message", "")
-            excerpt = str(last_msg)[:500] if last_msg else ""
-            session.status = SessionStatus.TIMED_OUT
-            session.completed_at = now
-            session.completed_reason = CompletionReason.TIMED_OUT
+            session.status = SessionStatus.IDLE
             if isinstance(claude_session_id, str):
                 session.claude_session_id = claude_session_id
             save_state(state)
-            timed_out_payload: dict[str, object] = {
-                "session_id": session.id,
-                "session_name": session.name,
-                "client": context.get("client"),
-                "ticket_id": ticket_id_value,
-                "claude_session_id": claude_session_id,
-                "elapsed_seconds": elapsed,
-                "last_assistant_message_excerpt": excerpt,
-            }
-            record_event(OrchestratorEventType.SESSION_TIMED_OUT, timed_out_payload)
-            # Revert the owning TicketTask from RUNNING → PENDING so the
-            # dispatch loop can retry this ticket on the next tick.
-            with dev_queue_lock():
-                store = load_dev_queue()
-                for task in store.tasks:
-                    if (
-                        task.ticket_id == ticket_id_value
-                        and task.status == QueueItemStatus.RUNNING
-                    ):
-                        task.status = QueueItemStatus.PENDING
-                        task.session_id = None
-                        break
-                save_dev_queue(store)
-            if session.surface_ref is not None:
-                get_native_daemon_client().stop(session.surface_ref)
             return
 
-    # Issue #251: directly update the dev-queue task *before* marking the
-    # session COMPLETED. This closes the race where revert_completed_silent_tasks
-    # sees a COMPLETED session with a still-RUNNING task and reverts it to
-    # PENDING before consume_completed_sessions can process the event — causing
-    # no_op and similar terminal outcomes to trigger infinite re-dispatch.
-    if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
-        _apply_sentinel_to_task(ticket_id_value, session.id, parsed_sentinel)
+        # Issue #176 Layer 1: headless backstop.
+        #
+        # A headless DAEMON session (ticket_id present in context) must NOT be
+        # silently marked COMPLETED unless it emitted an AUTO_DEV_RESULT sentinel.
+        # The bg_tasks guard above correctly defers when a subagent is in flight,
+        # but the parent's *next* turn may end (with background_tasks=[]) before
+        # it has finished its post-wait pipeline work — a silent orphan.
+        #
+        # Detection: DAEMON-origin + non-None ticket_id in context ≡ headless.
+        # Sentinel check: look for the sentinel open tag in the Claude transcript.
+        # Budget: if no sentinel AND wall-clock since session.started_at exceeds
+        # HEADLESS_TIMEOUT_SECONDS, transition to TIMED_OUT (retry-eligible) so
+        # the failure is loud and dev-queue can retry. Under budget: defer (return)
+        # so another Stop hook (or reconcile) can catch it later.
+        #
+        # The guard does NOT replace the bg_tasks deferral — both fire independently.
+        ticket_id_value = context.get("ticket_id")
+        # ``headless: true`` in cw-context.json is written by spawn_create_impl
+        # when dispatch launches a /auto-dev session. Absent (or False) for legacy
+        # sessions and non-headless daemon sessions — those fall through to the
+        # normal COMPLETED path unchanged.
+        is_headless = session.origin is SessionOrigin.DAEMON and bool(
+            context.get("headless")
+        )
+        now = datetime.now(UTC)
+        parsed_sentinel: AutoDevResult | BlockedResult | None = None
+        if is_headless:
+            parsed_sentinel = _parse_sentinel_from_transcript(
+                cwd_value,
+                claude_session_id if isinstance(claude_session_id, str) else None,
+            )
+            if parsed_sentinel is None:
+                elapsed = (now - session.started_at).total_seconds()
+                _headless_config = load_orchestrator_config()
+                _stop_task: TicketTask | None = None
+                if isinstance(ticket_id_value, str):
+                    _stop_store = load_dev_queue()
+                    _stop_task = next(
+                        (
+                            t
+                            for t in _stop_store.tasks
+                            if t.ticket_id == ticket_id_value
+                        ),
+                        None,
+                    )
+                _budget = resolve_headless_budget(_stop_task, session, _headless_config)
+                if elapsed < _budget:
+                    # Under budget — defer. Another Stop hook turn will fire, or
+                    # reconcile will eventually catch a phantom and CRASH it.
+                    return
+                # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
+                last_msg = hook_payload.get("last_assistant_message", "")
+                excerpt = str(last_msg)[:500] if last_msg else ""
+                session.status = SessionStatus.TIMED_OUT
+                session.completed_at = now
+                session.completed_reason = CompletionReason.TIMED_OUT
+                if isinstance(claude_session_id, str):
+                    session.claude_session_id = claude_session_id
+                save_state(state)
+                timed_out_payload: dict[str, object] = {
+                    "session_id": session.id,
+                    "session_name": session.name,
+                    "client": context.get("client"),
+                    "ticket_id": ticket_id_value,
+                    "claude_session_id": claude_session_id,
+                    "elapsed_seconds": elapsed,
+                    "last_assistant_message_excerpt": excerpt,
+                }
+                record_event(OrchestratorEventType.SESSION_TIMED_OUT, timed_out_payload)
+                # Revert the owning TicketTask from RUNNING → PENDING so the
+                # dispatch loop can retry this ticket on the next tick.
+                with dev_queue_lock():
+                    store = load_dev_queue()
+                    for task in store.tasks:
+                        if (
+                            task.ticket_id == ticket_id_value
+                            and task.status == QueueItemStatus.RUNNING
+                        ):
+                            task.status = QueueItemStatus.PENDING
+                            task.session_id = None
+                            break
+                    save_dev_queue(store)
+                if session.surface_ref is not None:
+                    get_native_daemon_client().stop(session.surface_ref)
+                return
 
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = now
-    session.completed_reason = CompletionReason.NORMAL
-    if isinstance(claude_session_id, str):
-        session.claude_session_id = claude_session_id
-    # Issue #225: headless DAEMON sessions bypass the cw wrapper, so
-    # signal_completed (wrapper.py) never runs and last_result stayed None.
-    # Capture the parsed sentinel here before save_state so downstream
-    # consumers (consume_completed_sessions, /cw-followup) can route by
-    # status. parse_stdout returns BlockedResult on malformed payloads — we
-    # persist either shape; both serialize to a dict with a "status" field.
-    if parsed_sentinel is not None:
-        session.last_result = parsed_sentinel.model_dump(mode="json")
-    save_state(state)
+        # Issue #251: directly update the dev-queue task *before* marking the
+        # session COMPLETED. This closes the race where revert_completed_silent_tasks
+        # sees a COMPLETED session with a still-RUNNING task and reverts it to
+        # PENDING before consume_completed_sessions can process the event — causing
+        # no_op and similar terminal outcomes to trigger infinite re-dispatch.
+        if (
+            is_headless
+            and parsed_sentinel is not None
+            and isinstance(ticket_id_value, str)
+        ):
+            _apply_sentinel_to_task(ticket_id_value, session.id, parsed_sentinel)
+
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        if isinstance(claude_session_id, str):
+            session.claude_session_id = claude_session_id
+        # Issue #225: headless DAEMON sessions bypass the cw wrapper, so
+        # signal_completed (wrapper.py) never runs and last_result stayed None.
+        # Capture the parsed sentinel here before save_state so downstream
+        # consumers (consume_completed_sessions, /cw-followup) can route by
+        # status. parse_stdout returns BlockedResult on malformed payloads — we
+        # persist either shape; both serialize to a dict with a "status" field.
+        if parsed_sentinel is not None:
+            session.last_result = parsed_sentinel.model_dump(mode="json")
+        save_state(state)
 
     payload: dict[str, object] = {
         "session_id": session.id,
@@ -2011,37 +2022,38 @@ def _spawn_close_impl(
     skipped — the multiplexer adapter has been removed. Separated from
     the Click command so tests can inject the daemon client directly.
     """
-    state = load_state()
-    sess = state.find_by_name_or_id(session_id)
-    if sess is None:
-        msg = f"Session '{session_id}' not found."
-        raise CwError(msg)
-    if sess.status == SessionStatus.COMPLETED:
-        msg = f"Session '{session_id}' is already completed."
-        raise CwError(msg)
+    with sessions_lock():
+        state = load_state()
+        sess = state.find_by_name_or_id(session_id)
+        if sess is None:
+            msg = f"Session '{session_id}' not found."
+            raise CwError(msg)
+        if sess.status == SessionStatus.COMPLETED:
+            msg = f"Session '{session_id}' is already completed."
+            raise CwError(msg)
 
-    if sess.surface_ref is not None:
+        if sess.surface_ref is not None:
+            if sess.origin is SessionOrigin.DAEMON:
+                daemon = native_daemon or get_native_daemon_client()
+                daemon.stop(sess.surface_ref)
+            else:
+                logging.getLogger(__name__).warning(
+                    "Session %s has legacy surface_ref %r; skipping surface close",
+                    sess.id,
+                    sess.surface_ref,
+                )
+
+        # For DAEMON sessions, atomically cancel any RUNNING TicketTask that owns
+        # this session so revert_completed_silent_tasks cannot revert it to PENDING
+        # and the dispatcher cannot re-spawn the same ticket in the same tick.
+        # (See GitHub issue #317.)
         if sess.origin is SessionOrigin.DAEMON:
-            daemon = native_daemon or get_native_daemon_client()
-            daemon.stop(sess.surface_ref)
-        else:
-            logging.getLogger(__name__).warning(
-                "Session %s has legacy surface_ref %r; skipping surface close",
-                sess.id,
-                sess.surface_ref,
-            )
+            cancel_task_for_session(sess.id)
 
-    # For DAEMON sessions, atomically cancel any RUNNING TicketTask that owns
-    # this session so revert_completed_silent_tasks cannot revert it to PENDING
-    # and the dispatcher cannot re-spawn the same ticket in the same tick.
-    # (See GitHub issue #317.)
-    if sess.origin is SessionOrigin.DAEMON:
-        cancel_task_for_session(sess.id)
-
-    sess.status = SessionStatus.COMPLETED
-    sess.completed_at = datetime.now(UTC)
-    sess.completed_reason = CompletionReason.USER
-    save_state(state)
+        sess.status = SessionStatus.COMPLETED
+        sess.completed_at = datetime.now(UTC)
+        sess.completed_reason = CompletionReason.USER
+        save_state(state)
 
 
 @main.group(invoke_without_command=True)
@@ -2145,56 +2157,61 @@ def _spawn_complete_impl(
     Separated from the Click command so tests can inject the daemon client
     directly.
     """
-    state = load_state()
-    sess = state.find_by_name_or_id(session_id)
-    if sess is None:
-        msg = f"Session '{session_id}' not found."
-        raise CwError(msg)
-
-    if sess.status == SessionStatus.COMPLETED:
-        if not force:
-            msg = f"Session '{session_id}' is already completed. Use --force to no-op."
+    with sessions_lock():
+        state = load_state()
+        sess = state.find_by_name_or_id(session_id)
+        if sess is None:
+            msg = f"Session '{session_id}' not found."
             raise CwError(msg)
-        return
 
-    effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)
+        if sess.status == SessionStatus.COMPLETED:
+            if not force:
+                msg = (
+                    f"Session '{session_id}' is already completed."
+                    " Use --force to no-op."
+                )
+                raise CwError(msg)
+            return
 
-    payload: dict[str, object] = {
-        "session_id": sess.id,
-        "client": sess.client,
-        "crashed": False,
-        "status": status,
-        **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
-    }
+        effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)
 
-    with dev_queue_lock():
-        store = load_dev_queue()
+        payload: dict[str, object] = {
+            "session_id": sess.id,
+            "client": sess.client,
+            "crashed": False,
+            "status": status,
+            **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
+        }
 
-        # Guard: queue task already COMPLETED (inside lock — authoritative)
-        if effective_ticket_id:
-            for task in store.tasks:
-                if (
-                    task.ticket_id == effective_ticket_id
-                    and task.status == QueueItemStatus.COMPLETED
-                ):
-                    already_done_task_msg = (
-                        f"Queue task for '{effective_ticket_id}' is already COMPLETED. "
-                        "Use 'cw spawn close' to close the session only."
-                    )
-                    raise CwError(already_done_task_msg)
+        with dev_queue_lock():
+            store = load_dev_queue()
 
-        # Step 1: Record event (record_event uses _inbox_lock — no deadlock risk)
-        event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+            # Guard: queue task already COMPLETED (inside lock — authoritative)
+            if effective_ticket_id:
+                for task in store.tasks:
+                    if (
+                        task.ticket_id == effective_ticket_id
+                        and task.status == QueueItemStatus.COMPLETED
+                    ):
+                        already_done_task_msg = (
+                            f"Queue task for '{effective_ticket_id}'"
+                            " is already COMPLETED."
+                            " Use 'cw spawn close' to close the session only."
+                        )
+                        raise CwError(already_done_task_msg)
 
-        # Step 2: Apply to queue
-        _apply_events_to_store(store, [event])
+            # Step 1: Record event (record_event uses _inbox_lock — no deadlock risk)
+            event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
-        # Step 3: Close session state
-        sess.status = SessionStatus.COMPLETED
-        sess.completed_at = datetime.now(UTC)
-        if sess.completed_reason is None:
-            sess.completed_reason = CompletionReason.USER
-        save_state(state)
+            # Step 2: Apply to queue
+            _apply_events_to_store(store, [event])
+
+            # Step 3: Close session state
+            sess.status = SessionStatus.COMPLETED
+            sess.completed_at = datetime.now(UTC)
+            if sess.completed_reason is None:
+                sess.completed_reason = CompletionReason.USER
+            save_state(state)
 
     # Advance cursor after lock (advance_cursor uses inbox lock — safe)
     advance_cursor(_DISPATCH_CONSUMER, event.id)
