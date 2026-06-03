@@ -26,7 +26,7 @@ from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
 from cw.spawn import _write_hook_context
-from cw.worktree import create_worktree, remove_worktree
+from cw.worktree import check_not_main_checkout, create_worktree, remove_worktree
 
 # Purposes that receive worktree cwd (impl works on the feature branch,
 # idea brainstorms within it; debt stays on the main workspace).
@@ -110,12 +110,14 @@ def start_session(
             raise CwError(msg)
         click.echo(f"Creating worktree for branch '{branch}'...")
         worktree_path = create_worktree(client, branch)
+        check_not_main_checkout(worktree_path, client)
         worktree_branch = branch
         client = client.model_copy(update={"workspace_path": worktree_path})
         click.echo(f"Worktree ready: {worktree_path}")
     elif worktree:
         click.echo(f"Creating worktree for branch '{worktree}'...")
         worktree_path = create_worktree(client, worktree)
+        check_not_main_checkout(worktree_path, client)
         click.echo(f"Worktree ready: {worktree_path}")
 
     # Check for existing backgrounded session — resume it rather than spawning.

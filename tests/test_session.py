@@ -1597,3 +1597,81 @@ class TestStartSessionParentLinkage:
             )
 
         assert create_worktree_calls == []
+
+
+# ---------------------------------------------------------------------------
+# TestStartSessionIsolationGuard (#428)
+# ---------------------------------------------------------------------------
+
+
+class TestStartSessionIsolationGuard:
+    """start_session must call check_not_main_checkout after create_worktree (#428)."""
+
+    def _write_clients_file(
+        self, tmp_config_dir: Path, sample_client: ClientConfig
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+
+    def test_start_with_worktree_raises_when_worktree_is_main_checkout(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """cw start --worktree raises WorktreeError when create_worktree returns
+        the main checkout path (#428)."""
+        from cw.exceptions import WorktreeError
+
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._write_hook_context", _noop)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        # Simulate degenerate create_worktree returning the workspace itself.
+        monkeypatch.setattr(
+            "cw.session.create_worktree",
+            lambda _client, _branch: sample_client.workspace_path,
+        )
+        # check_not_main_checkout is NOT mocked — it must fire for real.
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            start_session(
+                "test-client",
+                "impl",
+                worktree="feat/x",
+                native_daemon=mock_native_daemon,
+            )
+
+    def test_worktree_client_raises_when_worktree_is_main_checkout(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """cw start (worktree-mode client) raises WorktreeError when create_worktree
+        returns the main checkout path (#428)."""
+        from cw.exceptions import WorktreeError
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n  wt-client:\n    repo_path: {repo}\n    branch: wt-client\n"
+        )
+
+        # Simulate degenerate create_worktree returning repo itself.
+        monkeypatch.setattr(
+            "cw.session.create_worktree",
+            lambda _client, _branch: repo,
+        )
+        monkeypatch.setattr("cw.session._write_hook_context", _noop)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        with pytest.raises(WorktreeError, match="main checkout"):
+            start_session("wt-client", "impl", native_daemon=mock_native_daemon)
