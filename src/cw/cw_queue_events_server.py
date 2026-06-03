@@ -82,6 +82,7 @@ def _append_event(notification: dict[str, Any]) -> None:
         with path.open("a") as f:
             f.write(json.dumps(record) + "\n")
             f.flush()
+            os.fsync(f.fileno())
         _event_offset[0] += 1
 
 
@@ -147,11 +148,23 @@ def _load_offset_from_file() -> int:
 
 
 def subscribe_with_cursor(client_id: str) -> queue.SimpleQueue[dict[str, Any]]:
-    """Subscribe and replay any missed events since the client's last cursor."""
-    q = subscribe()  # acquires+releases _lock (FIRST)
-    with _file_lock:  # acquires+releases _file_lock (AFTER)
+    """Subscribe and replay any missed events since the client's last cursor.
+
+    TOCTOU fix: snapshot both cursor and current offset under _file_lock BEFORE
+    calling subscribe(). Replay is bounded to [cursor, replay_bound) so events
+    appended after the snapshot are delivered only via the live fan-out path,
+    never replayed.
+    """
+    with _file_lock:
         cursor = _cursors.get(client_id, 0)
-    missed = _read_events_from_offset(cursor)
+        replay_bound = _event_offset[0]  # snapshot bound: replay only < this offset
+    # Events appended after snapshot go via live fan-out, not replay
+    q = subscribe()
+    missed = [
+        r
+        for r in _read_events_from_offset(cursor)
+        if r.get("offset", -1) < replay_bound
+    ]
     for record in missed:
         q.put_nowait(record)
     return q
@@ -343,23 +356,22 @@ def _run_poller() -> None:
     """Background polling thread. Runs as daemon."""
     import time
 
-    snapshot = _load_snapshot()
     while True:
         time.sleep(POLL_INTERVAL_SECONDS)
         try:
-            new_snap, events = _poll_once(snapshot)
+            # Guard load→compute→save with _file_lock: prevents concurrent poll
+            # cycles from reading the same stale snapshot and emitting duplicate
+            # queue.* events (#433 fix 4).
+            with _file_lock:
+                current_snap = _load_snapshot()
+                new_snap, events = _poll_once(current_snap)
+                if events or (
+                    new_snap.task_statuses != current_snap.task_statuses
+                    or new_snap.session_statuses != current_snap.session_statuses
+                ):
+                    _save_snapshot(new_snap)
             for event in events:
                 broadcast(_build_queue_notification(event))
-            if events:
-                _save_snapshot(new_snap)
-                snapshot = new_snap
-            elif (
-                new_snap.task_statuses != snapshot.task_statuses
-                or new_snap.session_statuses != snapshot.session_statuses
-            ):
-                # State changed but no events — update snapshot silently
-                _save_snapshot(new_snap)
-                snapshot = new_snap
         except Exception:
             logger.exception("poller error")
 
