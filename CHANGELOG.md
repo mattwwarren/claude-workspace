@@ -6,6 +6,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.2] — 2026-06-03
+
+Reliability-hardening release: a wave of concurrency, atomicity, and
+crash-safety fixes across the state store, config writes, worktree lifecycle,
+event history, and the reconcile/daemon loops — closing torn-read, TOCTOU, and
+lost-update windows that surface under parallel dispatch.
+
+### Fixed
+
+- **`sessions.json` read-modify-write locking** (#424 → PR #437): the state
+  file is now locked across the full read-modify-write, closing a lost-update
+  window when concurrent session operations raced.
+- **Atomic + locked `clients.yaml` write** (#429 → PR #442): config writes go
+  through an atomic, locked replace so a crash or concurrent writer can't leave
+  a truncated `clients.yaml`.
+- **Atomic hook-context writes + live-session guard** (#427 → PR #440): spawn
+  writes hook context atomically and refuses to overwrite a live session's
+  context.
+- **Event-history hardening** (#433 → PR #449): torn-read, TOCTOU, fsync, and
+  poll-lock fixes in `history.py` and the channel servers.
+- **Worktree dirty-state guards** (#425 → PR #439, #426 → PR #441): dirty-check
+  before force-removing a stale/timed-out worktree, and refuse dirty-worktree
+  reuse in `create_worktree`.
+- **Interactive-start isolation guard** (#428 → PR #448): guard interactive
+  `start` isolation and `fast_forward_main` so an interactive session can't
+  clobber in-flight work.
+- **Reconcile salvage + parked-session skip** (#431 → PR #446): reconcile
+  salvages all terminal statuses and skips parked sessions instead of
+  re-flagging them.
+- **Malformed-roster tolerance + `idle_watchdog=0`** (#432 → PR #443):
+  reconcile tolerates malformed roster JSON and honors `idle_watchdog=0` as
+  "disabled".
+- **Daemon tick guards** (#390 → PR #444): per-client and whole-tick guards in
+  `run_watcher_tick` so one client's failure can't abort the tick.
+- **Sparse sentinel coercion** (#430 → PR #445): legitimate-but-sparse
+  `AutoDevResult` sentinels are coerced rather than rejected.
+- **Dispatch stdout visibility** (#420 → PR #435): operator-visible stdout for
+  `cw dev-queue run`.
+- **Logging handler at entrypoint** (#423 → PR #434): the logging handler is
+  configured once at the CLI entrypoint.
+- **dispatch-guard workflow YAML** (PR #450): repair invalid YAML in the
+  dispatch-guard workflow.
+
+### Documentation
+
+- **Full CI gate set documented** (#436 → PR #447): the quality-gate docs now
+  cover format, `mypy --strict`, pre-commit, coverage thresholds, and
+  diff-cover.
+- **Two-branch model + stale comment** (PR #414): correct the two-branch model
+  in `headless-contract.md` and a stale cmux comment in `worktree.py`.
+
+### Operations
+
+- **Dispatch-critical drift guard + release closer** (PR #415): CI guard for
+  dispatch-critical drift, plus auto-close of `dispatch-drift` issues on
+  release.
+
 ## [0.14.1] — 2026-05-30
 
 Bug-fix release closing dispatch-reliability gaps surfaced by the 2026-05-30
