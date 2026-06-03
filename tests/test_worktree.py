@@ -190,8 +190,23 @@ class TestCreateWorktree:
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
             calls.append(args)
-            # _checked_out_branch queries the current branch; it matches.
-            return MagicMock(returncode=0, stdout="feat/search\n", stderr="")
+            result = MagicMock(returncode=0, stderr="")
+            if "branch" in args and "--show-current" in args:
+                # _checked_out_branch: branch matches.
+                result.stdout = "feat/search\n"
+            elif "status" in args:
+                # worktree_has_unsaved_work: clean working tree.
+                result.stdout = ""
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                # origin/<branch> exists.
+                result.returncode = 0
+                result.stdout = "abc1234\n"
+            elif "log" in args:
+                # No unpushed commits.
+                result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         result = create_worktree(client, "feat/search")
@@ -405,6 +420,102 @@ class TestCreateWorktree:
 
         with pytest.raises(WorktreeError, match="main checkout"):
             create_worktree(client, "auto-dev-300")
+
+    def test_idempotent_clean_reuse_returns_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Clean reused worktree (no unsaved work) returns the path (#426)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "feat-clean"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "branch" in args and "--show-current" in args:
+                result.stdout = "feat/clean\n"
+            elif "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 0
+                result.stdout = "abc1234\n"
+            elif "log" in args:
+                result.stdout = ""  # no unpushed commits
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        result = create_worktree(client, "feat/clean")
+        assert result == wt_path
+
+    def test_dirty_reuse_raises_stale_worktree_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dirty reused worktree (uncommitted changes) raises StaleWorktreeError (#426).
+
+        See: #426."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "feat-dirty"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "branch" in args and "--show-current" in args:
+                result.stdout = "feat/dirty\n"
+            elif "status" in args:
+                result.stdout = " M modified_file.py\n"  # uncommitted changes
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(StaleWorktreeError, match="unsaved work"):
+            create_worktree(client, "feat/dirty")
+
+    def test_unpushed_commits_reuse_raises_stale_worktree_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dirty reused worktree (unpushed commits) raises StaleWorktreeError (#426)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "feat-unpushed"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "branch" in args and "--show-current" in args:
+                result.stdout = "feat/unpushed\n"
+            elif "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 0
+                result.stdout = "abc1234\n"
+            elif "log" in args:
+                result.stdout = "abc1234 add feature\n"  # unpushed commit
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(StaleWorktreeError, match="unsaved work"):
+            create_worktree(client, "feat/unpushed")
 
 
 class TestCheckNotMainCheckout:
