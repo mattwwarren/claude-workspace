@@ -7,9 +7,10 @@ import os
 import subprocess
 from typing import TYPE_CHECKING
 
+from cw.atomic import atomic_write_text
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import CwError, HookContextConflictError, WorktreeError
-from cw.models import Session, SessionOrigin, SessionPurpose
+from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus
 from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
@@ -100,10 +101,22 @@ def _write_hook_context(
     Phase C wires the typed error into a clean failure path so interactive
     ``claude --bg`` sessions surface the conflict instead of trampling the
     user's settings.
+
+    Both files are written atomically (temp file + rename) so a concurrent
+    reader (the Stop hook reads ``cw-context.json`` every turn) never
+    observes an empty or partial file (issue #427 fix 1).
+
+    For ``SessionOrigin.DAEMON``: before overwriting, check whether an
+    existing ``cw-context.json`` references a session that is still live in
+    cw state. If so, raise :class:`HookContextConflictError` rather than
+    clobbering — the prior session has not finished and we must not steal
+    its hook context (issue #427 fix 2).
     """
     claude_dir = worktree / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_path = claude_dir / "settings.local.json"
+    context_path = claude_dir / "cw-context.json"
+
     if origin is SessionOrigin.USER and settings_path.exists():
         msg = (
             "Cannot inject Stop hook: "
@@ -111,7 +124,31 @@ def _write_hook_context(
             "Refusing to overwrite user-managed settings."
         )
         raise HookContextConflictError(msg)
-    settings_path.write_text(
+
+    if origin is SessionOrigin.DAEMON and context_path.exists():
+        try:
+            prior = json.loads(context_path.read_text(encoding="utf-8"))
+            prior_session_id: str | None = prior.get("session_id")
+        except (OSError, json.JSONDecodeError):
+            prior_session_id = None
+
+        if prior_session_id is not None:
+            state = load_state()
+            prior_sess = state.find_by_name_or_id(prior_session_id)
+            if prior_sess is not None and prior_sess.status not in (
+                SessionStatus.COMPLETED,
+                SessionStatus.TIMED_OUT,
+            ):
+                msg = (
+                    f"Cannot overwrite hook context: {context_path} references "
+                    f"live session {prior_session_id!r} "
+                    f"(status: {prior_sess.status}). "
+                    "Complete or close that session before reusing this worktree."
+                )
+                raise HookContextConflictError(msg)
+
+    atomic_write_text(
+        settings_path,
         json.dumps(_HOOK_SETTINGS_TEMPLATE, indent=2) + "\n",
     )
     context = {
@@ -122,7 +159,7 @@ def _write_hook_context(
         "ticket_id": ticket_id,
         "headless": headless,
     }
-    (claude_dir / "cw-context.json").write_text(json.dumps(context, indent=2) + "\n")
+    atomic_write_text(context_path, json.dumps(context, indent=2) + "\n")
 
 
 def spawn_create_impl(
