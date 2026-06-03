@@ -4637,3 +4637,69 @@ class TestWatchCommand:
         result = runner.invoke(main, ["watch"])
         assert result.exit_code == 0
         assert called
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueRunQuiet
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueRunQuiet:
+    """--quiet flag for cw dev-queue run suppresses operator stdout."""
+
+    def test_quiet_flag_suppresses_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With --quiet, run_dispatch_loop is called with emit=None."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        captured_emit: list[object] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+        ) -> None:
+            captured_emit.append(emit)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "run", "--once", "--quiet"])
+        assert result.exit_code == 0, result.output
+        assert captured_emit == [None], (
+            f"Expected emit=None for --quiet but got: {captured_emit!r}"
+        )
+
+    def test_verbose_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without --quiet, run_dispatch_loop is called with a non-None emit."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        captured_emit: list[object] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+        ) -> None:
+            captured_emit.append(emit)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "run", "--once"])
+        assert result.exit_code == 0, result.output
+        assert len(captured_emit) == 1
+        assert callable(captured_emit[0]), (
+            f"Expected callable emit but got: {captured_emit[0]!r}"
+        )

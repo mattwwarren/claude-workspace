@@ -29,6 +29,8 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cw.models import (
         DevQueueStore,
         OrchestratorConfig,
@@ -88,6 +90,8 @@ def dispatch_tick(
     use_plan: bool = False,
     parent: str | None = None,
     native_daemon: NativeDaemonClient | None = None,
+    emit: Callable[[str], None] | None = None,
+    warned_stale: set[tuple[str, str]] | None = None,
 ) -> int:
     """Run one dispatch tick.
 
@@ -104,6 +108,13 @@ def dispatch_tick(
             bidirectional ``worker_session_ids``) so ``cw orchestrate
             workers`` can list dispatched workers as first-class
             sessions.
+        emit: Optional callable for operator-facing stdout lines.
+            When None, all human-readable output is suppressed (quiet
+            mode).  Typically ``click.echo`` in CLI context.
+        warned_stale: Mutable set of ``(client, ticket_id)`` pairs that
+            have already received a "main behind origin" warning during
+            this dispatcher run.  Prevents repeated spam across ticks.
+            Caller owns the set; mutated in-place.
 
     Returns:
         Number of sessions spawned during this tick.
@@ -164,6 +175,15 @@ def dispatch_tick(
                 ]
             for payload in stale_tasks:
                 record_event(OrchestratorEventType.TICKET_NEEDS_SYNC, payload)
+                if emit is not None:
+                    ticket_key = (client.name, payload["ticket_id"])
+                    if warned_stale is None or ticket_key not in warned_stale:
+                        emit(
+                            f"WARN {client.name}/{payload['ticket_id']}:"
+                            " main behind origin, ticket skipped"
+                        )
+                        if warned_stale is not None:
+                            warned_stale.add(ticket_key)
             continue
 
         # Count running daemon sessions for this client
@@ -180,6 +200,8 @@ def dispatch_tick(
         )
 
         priority_ids = plan_order_by_client.get(client.name)
+        client_spawned = 0
+        cap_full = running_count >= cap
         while running_count < cap:
             task: TicketTask | None = _claim_next_pending(
                 client.name,
@@ -256,8 +278,16 @@ def dispatch_tick(
                     },
                 )
 
+                if emit is not None:
+                    emit(
+                        f"SPAWN {client.name}/{task.ticket_id}"
+                        f" session={session_id}"
+                        f" worktree={worktree_path}"
+                    )
+
                 running_count += 1
                 spawned += 1
+                client_spawned += 1
             except Exception:  # noqa: BLE001
                 # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
                 # Paired tests: TestDispatchTickSpawnErrors in
@@ -293,6 +323,9 @@ def dispatch_tick(
                             break
                     save_dev_queue(store)
                 break
+
+        if emit is not None:
+            emit(f"{client.name}: spawned={client_spawned} cap_full={int(cap_full)}")
 
     return spawned
 
@@ -463,6 +496,7 @@ def run_dispatch_loop(
     use_plan: bool = False,
     parent: str | None = None,
     native_daemon: NativeDaemonClient | None = None,
+    emit: Callable[[str], None] | None = None,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -478,6 +512,10 @@ def run_dispatch_loop(
         native_daemon: Optional NativeDaemonClient for testing. Defaults
             to ``get_native_daemon_client()`` at call time. Used for
             spawning dispatched workers.
+        emit: Optional callable for operator-facing stdout lines.
+            When None, all human-readable output is suppressed (quiet
+            mode for cron/scripted use).  Typically ``click.echo`` in
+            CLI context.
     """
     config = load_orchestrator_config()
 
@@ -487,6 +525,8 @@ def run_dispatch_loop(
         config = config.model_copy(update={"per_client_max_parallel": overridden})
 
     resolved_native_daemon = native_daemon or get_native_daemon_client()
+    # Track stale-warn deduplication across all ticks within this run.
+    warned_stale: set[tuple[str, str]] = set()
 
     while True:
         consume_completed_sessions()
@@ -495,6 +535,8 @@ def run_dispatch_loop(
             use_plan=use_plan,
             parent=parent,
             native_daemon=resolved_native_daemon,
+            emit=emit,
+            warned_stale=warned_stale,
         )
 
         if once:
