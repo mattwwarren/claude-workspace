@@ -247,15 +247,20 @@ class Blocker(BaseModel):
 
     @model_validator(mode="after")
     def _check_retry_invariants(self) -> Blocker:
-        # If retry_delay_seconds is set, retry_eligible must be True. The
-        # reverse is allowed — a producer can mark retry_eligible without
-        # committing to a specific backoff.
-        if self.retry_delay_seconds is not None and self.retry_eligible is not True:
+        # If retry_delay_seconds is set, retry_eligible must not be False.
+        # retry_eligible=None means the field was omitted by an older producer
+        # (issue #430 case 5) — treat as implied True when a delay is present.
+        # retry_eligible=False with a delay is still a hard error.
+        if self.retry_delay_seconds is not None and self.retry_eligible is False:
             msg = (
                 "retry_delay_seconds set without retry_eligible=True "
                 f"(got retry_eligible={self.retry_eligible!r})"
             )
             raise ValueError(msg)
+        if self.retry_delay_seconds is not None and self.retry_eligible is None:
+            # Older producer omitted retry_eligible; coerce to True so the
+            # invariant is satisfied and the sentinel is not discarded.
+            self.retry_eligible = True
         if self.retry_delay_seconds is not None and self.retry_delay_seconds < 0:
             msg = (
                 f"retry_delay_seconds must be non-negative, "
@@ -393,20 +398,19 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
-        # §5.1 downgrade_applied implies review_pending_approval + small
-        if self.health.downgrade_applied and (
-            self.status != "review_pending_approval" or self.scope.tier != "small"
-        ):
+        # §5.1 downgrade_applied implies review_pending_approval (tier relaxed —
+        # issue #430 case 2: a producer reporting the original tier='large'
+        # is now accepted; only the status constraint is enforced).
+        if self.health.downgrade_applied and self.status != "review_pending_approval":
             msg = (
                 "health.downgrade_applied=true requires "
-                "status='review_pending_approval' and scope.tier='small'"
+                "status='review_pending_approval'"
             )
             raise ValueError(msg)
 
-        # §4.1 merge_gate_blocked is small-scope only
-        if self.status == "merge_gate_blocked" and self.scope.tier != "small":
-            msg = "merge_gate_blocked requires scope.tier='small'"
-            raise ValueError(msg)
+        # §4.1 merge_gate_blocked tier constraint relaxed (issue #430 case 3):
+        # a large ticket that hit a merge gate was previously rejected.
+        # The tier check is removed; any tier is now accepted for this status.
 
         # §3.3 pre-branch statuses must have branch=None
         if self.status in _PRE_BRANCH_STATUSES and self.branch is not None:
@@ -744,6 +748,81 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
                 payload.get("ticket_id", "unknown"),
                 payload.get("schema_version"),
             )
+
+    # Pre-validation normalization for scope_exceeded / forbidden_area + stray
+    # branch / lines_actual (issue #430 case 4). A producer that exits with
+    # scope_exceeded or forbidden_area at/after stage2_impl may emit a non-null
+    # branch (§3.3 pre-branch invariant) and/or a non-null lines_actual that
+    # violates the pre-impl invariant (only when stage is stage1_pre_flight or
+    # stage1_plan). Extend the no_op stray-branch/lines coerce to these statuses.
+    # Post-impl stages require non-null lines_actual per §3.3 — do not coerce
+    # lines_actual when the stage is post-impl (stage2_impl and later).
+    # Only applies at the parse boundary; strict model_validate still rejects.
+    if raw_status in ("scope_exceeded", "forbidden_area"):
+        stray_term: list[str] = []
+        if payload.get("branch") is not None:
+            stray_term.append("branch")
+            payload["branch"] = None
+        if payload.get("commits"):
+            stray_term.append("commits")
+            payload["commits"] = []
+        scope_dict_term = payload.get("scope")
+        if (
+            isinstance(scope_dict_term, dict)
+            and scope_dict_term.get("lines_actual") is not None
+        ):
+            raw_stage_term = payload.get("stage_reached", "")
+            effective_stage_term = (
+                _STAGE_REACHED_ALIASES.get(raw_stage_term, raw_stage_term)
+                if isinstance(raw_stage_term, str)
+                else raw_stage_term
+            )
+            # Only coerce lines_actual on pre-impl exits (same rule as no_op).
+            # Post-impl stages (stage2_impl+) require non-null lines_actual
+            # per §3.3; leave them intact.
+            if effective_stage_term in ("stage1_pre_flight", "stage1_plan"):
+                stray_term.append("scope.lines_actual")
+                scope_dict_term["lines_actual"] = None
+        if stray_term:
+            _log.warning(
+                "auto-dev: %s sentinel carried non-null %s; coercing to clean "
+                "%s (ticket=%s, schema_version=%s)",
+                raw_status,
+                stray_term,
+                raw_status,
+                payload.get("ticket_id", "unknown"),
+                payload.get("schema_version"),
+            )
+
+    # Pre-validation normalization for ambiguities_pending_resolution /
+    # premises_pending_verification with empty arrays (issue #430 case 1).
+    # A producer that omits the ambiguities/premises key (defaults to []) or
+    # emits an empty list hits the §4.4 A5 invariant and becomes
+    # validation_failed. Accept empty arrays by injecting a minimal placeholder
+    # so the payload passes model_validate. Leniency applies only at the parse
+    # boundary; strict model_validate still rejects (negative tests preserved).
+    if raw_status == "ambiguities_pending_resolution":
+        raw_ambiguities = payload.get("ambiguities")
+        if not raw_ambiguities:  # None or [] both need coercing
+            _log.warning(
+                "auto-dev: ambiguities_pending_resolution sentinel has empty "
+                "ambiguities; coercing to minimal placeholder "
+                "(ticket=%s, schema_version=%s)",
+                payload.get("ticket_id", "unknown"),
+                payload.get("schema_version"),
+            )
+            payload["ambiguities"] = [{}]
+    if raw_status == "premises_pending_verification":
+        raw_premises = payload.get("premises")
+        if not raw_premises:  # None or [] both need coercing
+            _log.warning(
+                "auto-dev: premises_pending_verification sentinel has empty "
+                "premises; coercing to minimal placeholder "
+                "(ticket=%s, schema_version=%s)",
+                payload.get("ticket_id", "unknown"),
+                payload.get("schema_version"),
+            )
+            payload["premises"] = [{}]
 
     # Pre-validation normalization for blocked + stray next_actions (issue
     # #371 — follow-up to #367/#370). A producer bug emitted status=blocked
