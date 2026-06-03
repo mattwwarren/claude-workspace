@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import subprocess
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +68,7 @@ DEV_PLAN_FILE = STATE_DIR / "dev_plan.json"
 DEV_PLAN_LOCK = STATE_DIR / ".dev_plan.lock"
 DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
+CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30
@@ -146,6 +148,10 @@ def sessions_lock_file() -> Path:
     return SESSIONS_LOCK
 
 
+def clients_lock_file() -> Path:
+    return CLIENTS_LOCK
+
+
 @contextlib.contextmanager
 def sessions_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the sessions.json write window.
@@ -159,6 +165,28 @@ def sessions_lock() -> Iterator[None]:
     """
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = sessions_lock_file()
+    fd = lock_path.open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+@contextlib.contextmanager
+def clients_lock() -> Iterator[None]:
+    """Acquire an exclusive file lock over the clients.yaml write window.
+
+    Mirror of ``sessions_lock``. Hold this across every load→mutate→write
+    sequence in ``init_client`` (and any future client-mutating command) so
+    concurrent ``cw client add`` processes cannot clobber each other's edits
+    (last-writer-wins data loss). The lock is advisory (``fcntl.flock``) and
+    per-open-fd, so sequential re-acquisitions in the same process are safe.
+    Do NOT nest: acquiring while already holding will deadlock.
+    """
+    config_dir().mkdir(parents=True, exist_ok=True)
+    lock_path = clients_lock_file()
     fd = lock_path.open("w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -461,40 +489,42 @@ def init_client(
     config_dir().mkdir(parents=True, exist_ok=True)
     clients_path = clients_file()
 
-    # Round-trip parse-modify-write with ruamel.yaml (preserves comments)
-    rt = YAML(typ="rt")
-    rt.default_flow_style = False
+    with clients_lock():
+        # Round-trip parse-modify-write with ruamel.yaml (preserves comments)
+        rt = YAML(typ="rt")
+        rt.default_flow_style = False
 
-    if clients_path.exists():
-        content = clients_path.read_text()
-        doc = rt.load(content) if content.strip() else rt.load(_EMPTY_CLIENTS_DOC)
-    else:
-        doc = rt.load(_EMPTY_CLIENTS_DOC)
+        if clients_path.exists():
+            content = clients_path.read_text()
+            doc = rt.load(content) if content.strip() else rt.load(_EMPTY_CLIENTS_DOC)
+        else:
+            doc = rt.load(_EMPTY_CLIENTS_DOC)
 
-    if not isinstance(doc, dict) or "clients" not in doc:
-        msg = (
-            f"{clients_path} exists but has no 'clients:' key."
-            " Add 'clients:' manually or delete the file to recreate."
-        )
-        raise CwError(msg)
+        if not isinstance(doc, dict) or "clients" not in doc:
+            msg = (
+                f"{clients_path} exists but has no 'clients:' key."
+                " Add 'clients:' manually or delete the file to recreate."
+            )
+            raise CwError(msg)
 
-    clients_map = doc["clients"]
-    if clients_map is None:
-        clients_map = CommentedMap()
-        doc["clients"] = clients_map
+        clients_map = doc["clients"]
+        if clients_map is None:
+            clients_map = CommentedMap()
+            doc["clients"] = clients_map
 
-    if name in clients_map:
-        msg = f"Client '{name}' already exists in {clients_path}"
-        raise CwError(msg)
+        if name in clients_map:
+            msg = f"Client '{name}' already exists in {clients_path}"
+            raise CwError(msg)
 
-    # Build the new client entry
-    entry = CommentedMap()
-    entry["workspace_path"] = str(workspace_path)
-    entry["default_branch"] = default_branch
-    if auto_purposes:
-        entry["auto_purposes"] = auto_purposes
+        # Build the new client entry
+        entry = CommentedMap()
+        entry["workspace_path"] = str(workspace_path)
+        entry["default_branch"] = default_branch
+        if auto_purposes:
+            entry["auto_purposes"] = auto_purposes
 
-    clients_map[name] = entry
+        clients_map[name] = entry
 
-    with clients_path.open("w") as f:
-        rt.dump(doc, f)
+        buf = StringIO()
+        rt.dump(doc, buf)
+        atomic_write_text(clients_path, buf.getvalue())
