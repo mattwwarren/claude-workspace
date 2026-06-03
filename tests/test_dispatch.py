@@ -2024,9 +2024,7 @@ class TestRunDispatchLoopVerbose:
             native_daemon=daemon,
         )
 
-        summary_lines = [
-            ln for ln in lines if "test-client" in ln and "spawned=" in ln
-        ]
+        summary_lines = [ln for ln in lines if "test-client" in ln and "spawned=" in ln]
         assert summary_lines, f"Expected per-client summary but got: {lines!r}"
 
     def test_no_emit_when_emit_is_none(

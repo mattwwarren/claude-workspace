@@ -325,10 +325,7 @@ def dispatch_tick(
                 break
 
         if emit is not None:
-            emit(
-                f"{client.name}: spawned={client_spawned}"
-                f" cap_full={int(cap_full)}"
-            )
+            emit(f"{client.name}: spawned={client_spawned} cap_full={int(cap_full)}")
 
     return spawned
 
