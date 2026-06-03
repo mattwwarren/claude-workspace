@@ -1637,12 +1637,19 @@ def dev_queue_status(client: str | None) -> None:
         "parent_session_id + worker_session_ids."
     ),
 )
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress per-tick operator output (for cron/scripted use).",
+)
 @handle_errors
 def dev_queue_run(
     max_parallel: int | None,
     once: bool,
     use_plan: bool,
     parent: str | None,
+    quiet: bool,
 ) -> None:
     """Run the dispatch loop, spawning sessions for pending tickets."""
     run_dispatch_loop(
@@ -1650,6 +1657,7 @@ def dev_queue_run(
         once=once,
         use_plan=use_plan,
         parent=parent,
+        emit=None if quiet else click.echo,
     )
 
 
