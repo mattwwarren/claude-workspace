@@ -892,6 +892,315 @@ class TestWriteHookContext:
         assert context_path.exists()
 
 
+class TestWriteHookContextAtomicAndLiveSession:
+    """Tests for issue #427 fixes: atomic writes + DAEMON live-session guard.
+
+    Covers:
+    - Both hook files are written via atomic_write_text (no O_TRUNC window).
+    - DAEMON overwrite when cw-context.json references a LIVE session → raises.
+    - DAEMON overwrite when cw-context.json references a non-live session → ok.
+    - DAEMON overwrite when cw-context.json is absent → ok.
+    """
+
+    def _call(
+        self,
+        worktree: Path,
+        *,
+        origin: SessionOrigin,
+        session_id: str = "sess-atomic-427",
+        session_name: str = "test-client/auto-dev/427",
+        client: str = "test-client",
+        purpose: str = "impl",
+        ticket_id: str | None = "427",
+    ) -> None:
+        from cw.spawn import _write_hook_context
+
+        _write_hook_context(
+            worktree,
+            session_id=session_id,
+            session_name=session_name,
+            client=client,
+            purpose=purpose,
+            ticket_id=ticket_id,
+            origin=origin,
+        )
+
+    def test_settings_written_via_atomic_write(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """settings.local.json is written through atomic_write_text, not write_text.
+
+        Verifies that atomic_write_text is called for the settings file so a
+        concurrent reader never observes an empty/partial file (no O_TRUNC window).
+        """
+        import cw.spawn as spawn_mod
+
+        calls: list[tuple[Path, str]] = []
+        real_atomic = spawn_mod.atomic_write_text
+
+        def tracking_atomic(path: Path, text: str) -> None:
+            calls.append((path, text))
+            real_atomic(path, text)
+
+        monkeypatch.setattr(spawn_mod, "atomic_write_text", tracking_atomic)
+
+        worktree = tmp_path / "worktree-atomic-settings"
+        worktree.mkdir(parents=True)
+
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        settings_path = worktree / ".claude" / "settings.local.json"
+        assert any(p == settings_path for p, _ in calls), (
+            "settings.local.json must be written via atomic_write_text"
+        )
+
+    def test_context_written_via_atomic_write(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """cw-context.json is written through atomic_write_text, not write_text.
+
+        Verifies that the concurrent-reader (Stop hook reads cw-context.json
+        every turn) never observes an empty/partial file.
+        """
+        import cw.spawn as spawn_mod
+
+        calls: list[tuple[Path, str]] = []
+        real_atomic = spawn_mod.atomic_write_text
+
+        def tracking_atomic(path: Path, text: str) -> None:
+            calls.append((path, text))
+            real_atomic(path, text)
+
+        monkeypatch.setattr(spawn_mod, "atomic_write_text", tracking_atomic)
+
+        worktree = tmp_path / "worktree-atomic-context"
+        worktree.mkdir(parents=True)
+
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        context_path = worktree / ".claude" / "cw-context.json"
+        assert any(p == context_path for p, _ in calls), (
+            "cw-context.json must be written via atomic_write_text"
+        )
+
+    def test_daemon_overwrite_proceeds_when_existing_context_is_corrupt(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON origin: an unparseable existing cw-context.json is ignored.
+
+        A corrupt/partial cw-context.json (e.g. left by a crash mid-write)
+        must not block reuse: the read raises JSONDecodeError, the prior
+        session id stays None, and the overwrite proceeds normally.
+        """
+        worktree = tmp_path / "worktree-corrupt-context"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        context_path = claude_dir / "cw-context.json"
+        context_path.write_text("{ this is not valid json")
+
+        # Must not raise despite the corrupt prior context.
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        # The corrupt content was replaced with a well-formed context.
+        rewritten = json.loads(context_path.read_text())
+        assert rewritten["session_id"] == "sess-atomic-427"
+
+    def test_daemon_overwrite_raises_when_context_references_live_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON origin: existing cw-context.json with a LIVE session_id → raises.
+
+        When create_worktree returns an EXISTING worktree (idempotent path), the
+        prior session's hook state must NOT be silently overwritten if that session
+        is still live in cw state.
+        """
+        from cw.config import save_state
+        from cw.exceptions import HookContextConflictError
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        # Seed a live (ACTIVE) session in state.
+        workspace = tmp_path / "workspace" / "test-client"
+        workspace.mkdir(parents=True)
+        live_sess = Session(
+            id="live1234",
+            name="test-client/auto-dev/LIVE-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=workspace,
+        )
+        save_state(CwState(sessions=[live_sess]))
+
+        # Pre-write a cw-context.json that references the live session.
+        worktree = tmp_path / "worktree-live-guard"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        prior_context = {
+            "session_id": "live1234",
+            "session_name": "test-client/auto-dev/LIVE-1",
+            "client": "test-client",
+            "purpose": "impl",
+            "ticket_id": "LIVE-1",
+            "headless": False,
+        }
+        (claude_dir / "cw-context.json").write_text(json.dumps(prior_context))
+
+        with pytest.raises(HookContextConflictError, match="live"):
+            self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        # cw-context.json must NOT have been overwritten.
+        remaining = json.loads((claude_dir / "cw-context.json").read_text())
+        assert remaining["session_id"] == "live1234"
+
+    def test_daemon_overwrite_allowed_when_context_references_completed_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON origin: existing cw-context.json with a COMPLETED session_id → ok.
+
+        The prior session is done; overwriting its hook state is safe.
+        """
+        from cw.config import save_state
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        workspace = tmp_path / "workspace" / "test-client"
+        workspace.mkdir(parents=True)
+        dead_sess = Session(
+            id="dead5678",
+            name="test-client/auto-dev/DEAD-2",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.COMPLETED,
+            workspace_path=workspace,
+        )
+        save_state(CwState(sessions=[dead_sess]))
+
+        worktree = tmp_path / "worktree-dead-ok"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        prior_context = {
+            "session_id": "dead5678",
+            "session_name": "test-client/auto-dev/DEAD-2",
+            "client": "test-client",
+            "purpose": "impl",
+            "ticket_id": "DEAD-2",
+            "headless": False,
+        }
+        (claude_dir / "cw-context.json").write_text(json.dumps(prior_context))
+
+        # Should NOT raise — COMPLETED session means safe to overwrite.
+        self._call(worktree, origin=SessionOrigin.DAEMON, session_id="new-sess-id")
+
+        # cw-context.json updated with new session id.
+        updated = json.loads((claude_dir / "cw-context.json").read_text())
+        assert updated["session_id"] == "new-sess-id"
+
+    def test_daemon_overwrite_allowed_when_no_context_file(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON origin: no prior cw-context.json → overwrite proceeds as before."""
+        worktree = tmp_path / "worktree-no-ctx"
+        worktree.mkdir(parents=True)
+
+        # No pre-existing cw-context.json — must succeed.
+        self._call(worktree, origin=SessionOrigin.DAEMON, session_id="brand-new")
+
+        context_path = worktree / ".claude" / "cw-context.json"
+        assert context_path.exists()
+        ctx = json.loads(context_path.read_text())
+        assert ctx["session_id"] == "brand-new"
+
+    def test_daemon_overwrite_allowed_when_context_session_not_in_state(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON origin: cw-context.json references unknown session_id → ok.
+
+        The session may have been pruned from state; treating it as non-live is
+        correct — safe to overwrite.
+        """
+        # State is empty (no sessions saved).
+        worktree = tmp_path / "worktree-unknown-sess"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "ghost-id",
+                    "session_name": "x",
+                    "client": "x",
+                    "purpose": "impl",
+                    "ticket_id": None,
+                    "headless": False,
+                }
+            )
+        )
+
+        # Must not raise — ghost-id is not in state.
+        self._call(worktree, origin=SessionOrigin.DAEMON, session_id="replacement")
+
+        ctx = json.loads((claude_dir / "cw-context.json").read_text())
+        assert ctx["session_id"] == "replacement"
+
+    def test_daemon_overwrite_raises_for_idle_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON origin with IDLE (non-terminal) session in context raises."""
+        from cw.config import save_state
+        from cw.exceptions import HookContextConflictError
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        workspace = tmp_path / "workspace" / "test-client"
+        workspace.mkdir(parents=True)
+        idle_sess = Session(
+            id="idle9999",
+            name="test-client/auto-dev/IDLE-3",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.IDLE,
+            workspace_path=workspace,
+        )
+        save_state(CwState(sessions=[idle_sess]))
+
+        worktree = tmp_path / "worktree-idle-guard"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "idle9999",
+                    "session_name": "test-client/auto-dev/IDLE-3",
+                    "client": "test-client",
+                    "purpose": "impl",
+                    "ticket_id": "IDLE-3",
+                    "headless": False,
+                }
+            )
+        )
+
+        with pytest.raises(HookContextConflictError, match="live"):
+            self._call(worktree, origin=SessionOrigin.DAEMON)
+
+
 class TestSpawnClose:
     """Tests for the spawn close business logic."""
 
