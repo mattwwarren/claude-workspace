@@ -13,11 +13,13 @@ from cw.daemon import (
     ThrottleStore,
     WatcherSnapshot,
     _post_to_channel,
+    run_watcher_tick,
     watch_prs_for_client,
 )
 from cw.models import (
     ClientConfig,
     CwState,
+    OrchestratorConfig,
     OrchestratorEventType,
     Session,
     SessionPurpose,
@@ -562,3 +564,197 @@ def test_run_watcher_tick_does_not_call_respond_to_pr_events() -> None:
         "respond_to_pr_events must not be imported in cw.daemon — "
         "the orchestrator skill replaced its dispatch role"
     )
+
+
+# ---------------------------------------------------------------------------
+# run_watcher_tick per-client guard tests (#390)
+# ---------------------------------------------------------------------------
+
+
+class TestRunWatcherTickPerClientGuard:
+    """Per-client exception isolation and whole-tick guard in run_watcher_tick."""
+
+    def _base_patches(
+        self,
+        tmp_path: Path,
+        clients: dict[str, ClientConfig],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Patch config accessors so run_watcher_tick(once=True) can run."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        events_dir = state_dir / "events"
+        events_dir.mkdir()
+        watcher_dir = tmp_path / "pr_watcher"
+        watcher_dir.mkdir()
+        monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
+        monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
+        monkeypatch.setattr("cw.config.PR_WATCHER_DIR", watcher_dir)
+        monitor_dir = tmp_path / "review-monitor"
+        monitor_dir.mkdir()
+        monkeypatch.setattr("cw.config.REVIEW_MONITOR_DIR", monitor_dir)
+
+    def test_one_bad_client_others_still_watched(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """watch_prs_for_client raising for one client must not skip others.
+
+        Acceptance: a client whose watch raises does NOT stop the tick;
+        the other clients still get watched.
+        """
+        workspace_a = tmp_path / "ws_a"
+        workspace_a.mkdir()
+        workspace_b = tmp_path / "ws_b"
+        workspace_b.mkdir()
+        client_a = ClientConfig(
+            name="client-a", workspace_path=workspace_a, default_branch="main"
+        )
+        client_b = ClientConfig(
+            name="client-b", workspace_path=workspace_b, default_branch="main"
+        )
+        clients = {"client-a": client_a, "client-b": client_b}
+        self._base_patches(tmp_path, clients, monkeypatch)
+
+        watched: list[str] = []
+
+        def fake_watch(
+            client: ClientConfig, snapshot: WatcherSnapshot
+        ) -> tuple[list[Any], WatcherSnapshot]:
+            watched.append(client.name)
+            if client.name == "client-a":
+                msg = "boom from client-a"
+                raise RuntimeError(msg)
+            return [], snapshot
+
+        with (
+            patch("cw.daemon.load_clients", return_value=clients),
+            patch("cw.daemon.load_state", return_value=CwState()),
+            patch(
+                "cw.daemon.load_orchestrator_config", return_value=OrchestratorConfig()
+            ),
+            patch("cw.daemon.watch_prs_for_client", side_effect=fake_watch),
+            patch("cw.daemon.clear_completed_pr_sessions"),
+            patch("cw.daemon.retire_merged_prs"),
+            patch("cw.daemon._load_snapshot", return_value=WatcherSnapshot()),
+            patch("cw.daemon._save_snapshot"),
+            patch("cw.daemon._load_throttle", return_value=ThrottleStore()),
+            patch("cw.daemon._save_throttle"),
+        ):
+            run_watcher_tick(once=True)
+
+        assert "client-a" in watched
+        assert "client-b" in watched
+
+    def test_bad_client_error_is_logged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Exception from watch_prs_for_client must be logged with the client name.
+
+        Acceptance: the error is logged (not silently dropped).
+        """
+        import logging
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        client = ClientConfig(
+            name="bad-client", workspace_path=workspace, default_branch="main"
+        )
+        clients = {"bad-client": client}
+        self._base_patches(tmp_path, clients, monkeypatch)
+
+        def bad_watch(
+            _client: ClientConfig, _snapshot: WatcherSnapshot
+        ) -> tuple[list[Any], WatcherSnapshot]:
+            msg = "simulated watch failure"
+            raise ValueError(msg)
+
+        with (
+            patch("cw.daemon.load_clients", return_value=clients),
+            patch("cw.daemon.load_state", return_value=CwState()),
+            patch(
+                "cw.daemon.load_orchestrator_config", return_value=OrchestratorConfig()
+            ),
+            patch("cw.daemon.watch_prs_for_client", side_effect=bad_watch),
+            patch("cw.daemon.clear_completed_pr_sessions"),
+            patch("cw.daemon.retire_merged_prs"),
+            patch("cw.daemon._load_snapshot", return_value=WatcherSnapshot()),
+            patch("cw.daemon._save_snapshot"),
+            patch("cw.daemon._load_throttle", return_value=ThrottleStore()),
+            patch("cw.daemon._save_throttle"),
+            caplog.at_level(logging.ERROR, logger="cw.daemon"),
+        ):
+            run_watcher_tick(once=True)
+
+        # Error must be logged and include the client name
+        assert any("bad-client" in r.getMessage() for r in caplog.records), (
+            "Expected a log record mentioning 'bad-client'"
+        )
+
+    def test_whole_tick_guard_sleeps_and_retries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unexpected outer-tick error must sleep and retry, not exit the loop.
+
+        Acceptance: the whole-tick guard sleeps + retries rather than letting
+        an unhandled exception propagate out of the while True loop.
+        The loop must still be running (i.e. reach a second tick) after the error.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        client = ClientConfig(
+            name="client-x", workspace_path=workspace, default_branch="main"
+        )
+        clients = {"client-x": client}
+        self._base_patches(tmp_path, clients, monkeypatch)
+
+        call_count = 0
+
+        def load_clients_side_effect() -> dict[str, ClientConfig]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First tick: simulate an unexpected error in the tick body.
+                msg = "unexpected outer tick error"
+                raise RuntimeError(msg)
+            if call_count >= 3:
+                # Stop the loop after the second successful tick by raising
+                # KeyboardInterrupt (exits while True without being caught by the
+                # whole-tick guard, which only catches Exception).
+                raise KeyboardInterrupt
+            return clients
+
+        sleep_calls: list[float] = []
+
+        with (
+            patch("cw.daemon.load_clients", side_effect=load_clients_side_effect),
+            patch("cw.daemon.load_state", return_value=CwState()),
+            patch(
+                "cw.daemon.load_orchestrator_config", return_value=OrchestratorConfig()
+            ),
+            patch(
+                "cw.daemon.watch_prs_for_client", return_value=([], WatcherSnapshot())
+            ),
+            patch("cw.daemon.clear_completed_pr_sessions"),
+            patch("cw.daemon.retire_merged_prs"),
+            patch("cw.daemon._load_snapshot", return_value=WatcherSnapshot()),
+            patch("cw.daemon._save_snapshot"),
+            patch("cw.daemon._load_throttle", return_value=ThrottleStore()),
+            patch("cw.daemon._save_throttle"),
+            patch("cw.daemon.time.sleep", side_effect=sleep_calls.append),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            run_watcher_tick()
+
+        # The guard slept at least once (the error recovery sleep after call_count==1)
+        assert len(sleep_calls) >= 1, "Expected at least one sleep call from tick guard"
+        # The loop reached a second tick (call_count progressed to at least 2)
+        assert call_count >= 2, (
+            "Loop must retry after the whole-tick guard catches error"
+        )

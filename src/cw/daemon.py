@@ -359,31 +359,56 @@ def run_watcher_tick(*, once: bool = False) -> None:
     interval = config.tick_interval_seconds
 
     while True:
-        clients = load_clients()
-        state = load_state()
-        throttle = _load_throttle()
-        throttle.clear_completed(state)
-        _save_throttle(throttle)
-
-        for client_name, client in clients.items():
-            snapshot = _load_snapshot(client_name)
-            _events, updated_snapshot = watch_prs_for_client(client, snapshot)
-            _save_snapshot(client_name, updated_snapshot)
-
-        # As of 2026-05-26 the orchestrator skill
-        # (see .claude/agents/cw-orchestrator.md) replaces the in-daemon
-        # dispatch role of pr_responder.respond_to_pr_events().
-        # The watcher loop continues to detect PRs and post events into the
-        # cw-pr-events channel; the orchestrator session (spawn with
-        # `cw orchestrator-start`) consumes the channel and routes spawns.
-        state = load_state()
-        clear_completed_pr_sessions(state)
-
-        # Retire merged PRs: close sessions, drop dispatch entries, emit events.
         try:
-            retire_merged_prs()
-        except Exception:  # pragma: no cover - defensive in long-running loop
-            logger.exception("retire_merged_prs failed")
+            clients = load_clients()
+            state = load_state()
+            throttle = _load_throttle()
+            throttle.clear_completed(state)
+            _save_throttle(throttle)
+
+            for client_name, client in clients.items():
+                try:
+                    snapshot = _load_snapshot(client_name)
+                    _events, updated_snapshot = watch_prs_for_client(client, snapshot)
+                    _save_snapshot(client_name, updated_snapshot)
+                except Exception:
+                    # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
+                    # One failing client must not stop PR watching for all others.
+                    # Failure modes: monitor file I/O, JSON decode, HTTP errors.
+                    # Paired tests: TestRunWatcherTickPerClientGuard.
+                    logger.exception(
+                        "run_watcher_tick: watch_prs_for_client failed for %s;"
+                        " continuing to next client",
+                        client_name,
+                    )
+
+            # As of 2026-05-26 the orchestrator skill
+            # (see .claude/agents/cw-orchestrator.md) replaces the in-daemon
+            # dispatch role of pr_responder.respond_to_pr_events().
+            # The watcher loop continues to detect PRs and post events into the
+            # cw-pr-events channel; the orchestrator session (spawn with
+            # `cw orchestrator-start`) consumes the channel and routes spawns.
+            state = load_state()
+            clear_completed_pr_sessions(state)
+
+            # Retire merged PRs: close sessions, drop dispatch entries, emit events.
+            try:
+                retire_merged_prs()
+            except Exception:  # pragma: no cover - defensive in long-running loop
+                logger.exception("retire_merged_prs failed")
+
+        except Exception:
+            # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331:
+            # 1. Tick body calls config I/O, state loading, and network helpers —
+            #    failure modes include OSError, JSON decode errors, and bugs.
+            # 2. Logging: logger.exception captures full traceback.
+            # 3. Non-critical: a bad tick must not exit the daemon; the next
+            #    tick retries all clients fresh from disk.
+            # 4. Paired test: TestRunWatcherTickPerClientGuard.test_whole_tick_guard_*.
+            logger.exception(
+                "run_watcher_tick: unexpected error in tick; sleeping before retry"
+            )
+            time.sleep(interval)
 
         if once:
             return
