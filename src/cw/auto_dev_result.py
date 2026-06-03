@@ -85,6 +85,28 @@ _V4_STATUSES: frozenset[str] = frozenset(
 # session is paused waiting for human input (issue #129).
 PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES
 
+# AutoDevResult statuses that represent terminal outcomes the dev-queue should
+# never auto-retry. A phantom or stalled session that emitted one of these
+# before crashing must be salvaged (dispositioned by the sentinel) rather than
+# mislabeled crashed/timed-out and re-dispatched.
+#
+# This is the single source of truth; both reconcile.py and cli.py import it
+# so the two cannot drift apart. See GitHub issues #372 and #431.
+SALVAGE_TERMINAL_STATUSES: frozenset[str] = (
+    frozenset(
+        {
+            "shipped",
+            "no_op",
+            "plan_pending_approval",
+            "review_pending_approval",
+            "merge_gate_blocked",
+            "scope_exceeded",
+            "forbidden_area",
+        }
+    )
+    | PAUSED_FOR_USER_INPUT_STATUSES
+)
+
 # BlockedResult reason codes produced by parse_stdout.  Exported so consumers
 # (e.g. cli.py) can reference them without duplicating the literal strings.
 BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS = "multiple_result_blocks"

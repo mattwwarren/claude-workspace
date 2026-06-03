@@ -19,7 +19,7 @@ from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
     BLOCKER_REASON_VALIDATION_FAILED,
-    PAUSED_FOR_USER_INPUT_STATUSES,
+    SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     BlockedResult,
     Status,
@@ -965,20 +965,10 @@ _TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
 # event — causing no_op and similar outcomes to trigger infinite re-dispatch.
 # Also covers ambiguities_pending_resolution and premises_pending_verification
 # (issue #316): these are terminal-pending-user, not retry candidates.
-_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = (
-    frozenset(
-        {
-            "shipped",
-            "no_op",
-            "plan_pending_approval",
-            "review_pending_approval",
-            "merge_gate_blocked",
-            "scope_exceeded",
-            "forbidden_area",
-        }
-    )
-    | PAUSED_FOR_USER_INPUT_STATUSES
-)
+#
+# Defined in auto_dev_result.py as SALVAGE_TERMINAL_STATUSES; imported here
+# so reconcile.py and cli.py share a single source of truth. See #431.
+_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
 def _apply_sentinel_to_task(

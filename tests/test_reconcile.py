@@ -7,13 +7,12 @@ import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import freezegun
+import pytest
 
-if TYPE_CHECKING:
-    import pytest
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -3484,4 +3483,273 @@ def test_resolve_idle_watchdog_honors_zero(
     assert budget == 0, (
         f"idle_watchdog_seconds=0 should be honoured as 0, got {budget} "
         f"(likely silently fell back to IDLE_WATCHDOG_SECONDS={IDLE_WATCHDOG_SECONDS})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# GitHub issue #431: salvage all terminal-no-retry statuses + skip parked sessions
+# ---------------------------------------------------------------------------
+
+
+def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
+    """Build a minimal valid AutoDevResult payload for the given terminal status."""
+    # Base shape shared by most statuses.
+    base: dict[str, Any] = {
+        "schema_version": 4,
+        "ticket_id": ticket_id,
+        "status": status,
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": [],
+    }
+    if status == "plan_pending_approval":
+        base["next_actions"] = ["user_approve_plan"]
+    elif status == "review_pending_approval":
+        # review_pending has a branch + impl stage
+        base["stage_reached"] = "stage3_review"
+        base["scope"]["lines_actual"] = 8
+        base["branch"] = f"dev/{ticket_id}"
+        base["fork_point_sha"] = "abc123"
+        base["commits"] = ["sha1"]
+        base["next_actions"] = ["user_approve_review"]
+    elif status == "merge_gate_blocked":
+        # merge_gate_blocked requires small tier (already set), branch, impl stage
+        base["stage_reached"] = "stage4a_merge_gate"
+        base["scope"]["lines_actual"] = 8
+        base["branch"] = f"dev/{ticket_id}"
+        base["fork_point_sha"] = "abc123"
+        base["commits"] = ["sha1"]
+        base["next_actions"] = ["resolve_merge_gate"]
+    elif status == "ambiguities_pending_resolution":
+        base["ambiguities"] = [{"question": "Open or closed enum?"}]
+        base["next_actions"] = ["user_resolve_ambiguities"]
+    elif status == "premises_pending_verification":
+        base["premises"] = [{"claim": "PR #42 codified a deliberate decision"}]
+        base["next_actions"] = ["user_verify_premises"]
+    return base
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "scope_exceeded",
+        "forbidden_area",
+        "plan_pending_approval",
+        "review_pending_approval",
+        "merge_gate_blocked",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    ],
+)
+def test_salvage_all_terminal_statuses_from_phantom(
+    status: str,
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom session whose transcript emits each non-retry terminal status must be
+    salvaged (COMPLETED), NOT reverted to PENDING (#431).
+
+    Covers the bug where _SALVAGE_TERMINAL_STATUSES was {"shipped", "no_op"} and
+    missed scope_exceeded, forbidden_area, plan_pending_approval,
+    review_pending_approval, merge_gate_blocked, and the PAUSED_FOR_USER_INPUT
+    statuses.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    ticket_id = f"431-{status}"
+    worktree = tmp_path / f"wt-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # Past the spawn grace window but well under headless budget (phantom path).
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        ticket_id, worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(home, worktree, f"uuid-{status}", payload)
+
+    alive = _mk_session("alive-431", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert ticket_id not in report.reverted_ticket_ids, (
+        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged terminal)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        f"status={status!r}: session must be COMPLETED after salvage"
+    )
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.COMPLETED, (
+        f"status={status!r}: queue task must be COMPLETED, not re-dispatched"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "scope_exceeded",
+        "forbidden_area",
+        "plan_pending_approval",
+        "review_pending_approval",
+        "merge_gate_blocked",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    ],
+)
+def test_salvage_all_terminal_statuses_from_stalled(
+    status: str,
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stalled (wall-clock expired) headless session with each non-retry terminal
+    status in transcript must be salvaged, NOT reverted to PENDING (#431)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    ticket_id = f"431s-{status}"
+    worktree = tmp_path / f"wts-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(home, worktree, f"uuid-s-{status}", payload)
+
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=OrchestratorConfig()
+    )
+
+    assert ticket_id not in reverted, (
+        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged terminal)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        f"status={status!r}: session must be COMPLETED after salvage"
+    )
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.COMPLETED, (
+        f"status={status!r}: queue task must be COMPLETED, not re-dispatched"
+    )
+
+
+def test_salvage_terminal_statuses_constant_is_single_source_of_truth() -> None:
+    """Drift guard: _SALVAGE_TERMINAL_STATUSES in reconcile.py must equal
+    SALVAGE_TERMINAL_STATUSES from auto_dev_result.py (#431).
+
+    This test exists purely to catch future drift between the two references.
+    The implementation makes _SALVAGE_TERMINAL_STATUSES an alias, but this
+    assertion ensures no one accidentally re-inlines a narrower set.
+    """
+    from cw.auto_dev_result import SALVAGE_TERMINAL_STATUSES as _SHARED
+    from cw.reconcile import _SALVAGE_TERMINAL_STATUSES as _RECONCILE
+
+    assert _RECONCILE == _SHARED, (
+        "_SALVAGE_TERMINAL_STATUSES in reconcile.py drifted from "
+        "SALVAGE_TERMINAL_STATUSES in auto_dev_result.py. "
+        f"reconcile has {_RECONCILE!r}, shared has {_SHARED!r}"
+    )
+
+
+def test_revert_stalled_skips_parked_silently_idle_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session parked by flag_silently_idle_daemon_sessions (last_result has
+    paused_status=silently_idle) must NOT be reverted to PENDING by the
+    wall-clock timeout sweep, even when past the headless budget (#431).
+    """
+    worktree = tmp_path / "wt-parked"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("parked-idle", worktree, started_at)
+    # Simulate a session parked by flag_silently_idle_daemon_sessions.
+    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="parked-idle",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        session_id="parked-idle",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reverted = revert_stalled_headless_sessions(
+        state=state, now=now, config=OrchestratorConfig()
+    )
+
+    assert reverted == [], "Parked (silently_idle) session must NOT be reverted"
+    assert sess.status == SessionStatus.ACTIVE, (
+        "Parked session status must remain ACTIVE (flag-only park)"
+    )
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "parked-idle")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER, (
+        "Queue task must remain BLOCKED_ON_USER, not re-dispatched to PENDING"
     )
