@@ -34,18 +34,30 @@ uv run pytest tests/ --cov=cw      # Coverage report
 
 ## Quality Gates
 
-Before committing, run all three checks:
+Before committing, run **every** gate CI enforces (`.github/workflows/ci.yml`),
+in order. The first four mirror CI exactly; passing only a subset is the #1
+cause of a green local run that fails CI (see #436):
 
 ```bash
-uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest tests/ -v
+uv run ruff check src/ tests/                                    # 1. Lint
+uv run ruff format --check src/ tests/                           # 2. Format
+uv run mypy --strict src/                                        # 3. Type check
+uv run pre-commit run --all-files                                # 4. Hooks
+uv run pytest tests/ -m 'not integration' \
+  --cov=cw --cov-report=xml --cov-fail-under=88                  # 5. Unit + total cov ≥88%
+uv run pytest tests/ -m integration                              # 6. tmux integration
+uv run diff-cover coverage.xml --compare-branch=origin/main \
+  --fail-under=90                                                # 7. Patch coverage ≥90%
 ```
 
-Pre-commit hooks enforce this automatically (`uv run pre-commit install`).
+Pre-commit hooks enforce gates 1–4 automatically (`uv run pre-commit install`).
 
 **Requirements:**
 - `ruff check` - **ZERO violations allowed**
-- `mypy` - **ZERO type errors allowed**
+- `ruff format --check` - **ZERO reformats** (run `ruff format` to fix; `ruff check` does NOT enforce formatting)
+- `mypy --strict` - **ZERO type errors allowed**
 - Test suite - **100% pass rate required**
+- Total coverage **≥88%**; new/changed lines (patch coverage) **≥90%** — cover every new branch, including `except`/error paths
 - No suppressions (`# noqa`, `# type: ignore`) without explicit user approval
 
 Report format: Only actionable problems. Zero praise, zero summaries.

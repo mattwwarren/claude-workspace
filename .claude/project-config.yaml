@@ -14,13 +14,23 @@ tracking:
     auto_close_on_complete: true
 
 quality_gates:
-  # Run in order; all must pass before commit/PR. Mirrors CLAUDE.md.
+  # Run in order; all must pass before commit/PR. Mirrors CLAUDE.md AND
+  # .github/workflows/ci.yml exactly — a subset passing locally but CI failing
+  # (e.g. on format or patch coverage) is the failure mode #436 fixes.
   - name: lint
     command: "uv run ruff check src/ tests/"
+  - name: format
+    command: "uv run ruff format --check src/ tests/"
   - name: typecheck
-    command: "uv run mypy src/"
+    command: "uv run mypy --strict src/"
+  - name: hooks
+    command: "uv run pre-commit run --all-files"
   - name: test
-    command: "uv run pytest tests/ -q"
+    command: "uv run pytest tests/ -m 'not integration' --cov=cw --cov-report=xml --cov-fail-under=88"
+  - name: test-integration
+    command: "uv run pytest tests/ -m integration"
+  - name: patch-coverage
+    command: "uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90"
 
 review:
   self_review: true
