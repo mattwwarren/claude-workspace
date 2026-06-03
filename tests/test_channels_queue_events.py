@@ -343,6 +343,21 @@ class TestReadEventsFromOffsetQueueChannel:
         result = _read_events_from_offset(0)
         assert len(result) == 2
 
+    def test_skips_malformed_line_without_raising(self) -> None:
+        """A torn/partial JSONL line is skipped, not raised (#433)."""
+        from cw.config import state_dir
+        from cw.cw_queue_events_server import _EVENTS_FILE, _read_events_from_offset
+
+        path = state_dir() / _EVENTS_FILE
+        path.write_text(
+            json.dumps({"notification_type": _NOTIFICATION_TYPE, "offset": 0})
+            + "\n"
+            + "\n"  # blank line (also skipped)
+            + "{ partial torn line\n"  # malformed: no closing brace
+        )
+        result = _read_events_from_offset(0)
+        assert len(result) == 1  # blank + malformed lines skipped, valid one kept
+
     def test_respects_offset_filter(self) -> None:
         from cw.cw_queue_events_server import (
             _append_event,
