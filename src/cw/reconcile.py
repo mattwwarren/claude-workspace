@@ -34,7 +34,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import AutoDevResult, parse_stdout
+from cw.auto_dev_result import (
+    SALVAGE_TERMINAL_STATUSES,
+    AutoDevResult,
+    parse_stdout,
+)
 from cw.config import (
     get_client,
     load_orchestrator_config,
@@ -279,13 +283,11 @@ def _is_headless(session: Session) -> bool:
         return False
 
 
-# AUTO_DEV_RESULT statuses for which a stalled/crashed session must NOT be
-# re-dispatched: the work either shipped (a PR exists) or no work was needed.
-# Salvaging these recovers the real disposition instead of mislabeling the
-# session timed_out/crashed and re-running already-finished work. Non-success
-# statuses (blocked, *_pending_*) keep the existing retry-on-timeout behavior.
-# See GitHub issue #372.
-_SALVAGE_TERMINAL_STATUSES: frozenset[str] = frozenset({"shipped", "no_op"})
+# Alias so _salvage_terminal_result can reference the shared constant by the
+# private-looking name used throughout this module. The real definition lives
+# in auto_dev_result.py as SALVAGE_TERMINAL_STATUSES — single source of truth
+# so reconcile.py and cli.py cannot drift apart. See GitHub issues #372, #431.
+_SALVAGE_TERMINAL_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
 def _assistant_text_from_transcript(path: Path) -> str:
@@ -605,6 +607,15 @@ def revert_stalled_headless_sessions(
         if session.origin is not SessionOrigin.DAEMON:
             continue
         if not _is_headless(session):
+            continue
+        # Skip sessions that were parked by flag_silently_idle_daemon_sessions
+        # (#431). Their last_result is {"paused_status": _SILENTLY_IDLE_REASON}
+        # and they are BLOCKED_ON_USER in the queue already; wall-clock revert
+        # would re-dispatch already-parked work.
+        if (
+            isinstance(session.last_result, dict)
+            and session.last_result.get("paused_status") == _SILENTLY_IDLE_REASON
+        ):
             continue
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
