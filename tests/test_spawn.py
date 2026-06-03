@@ -983,6 +983,28 @@ class TestWriteHookContextAtomicAndLiveSession:
             "cw-context.json must be written via atomic_write_text"
         )
 
+    def test_daemon_overwrite_proceeds_when_existing_context_is_corrupt(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """DAEMON origin: an unparseable existing cw-context.json is ignored.
+
+        A corrupt/partial cw-context.json (e.g. left by a crash mid-write)
+        must not block reuse: the read raises JSONDecodeError, the prior
+        session id stays None, and the overwrite proceeds normally.
+        """
+        worktree = tmp_path / "worktree-corrupt-context"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        context_path = claude_dir / "cw-context.json"
+        context_path.write_text("{ this is not valid json")
+
+        # Must not raise despite the corrupt prior context.
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        # The corrupt content was replaced with a well-formed context.
+        rewritten = json.loads(context_path.read_text())
+        assert rewritten["session_id"] == "sess-atomic-427"
+
     def test_daemon_overwrite_raises_when_context_references_live_session(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
