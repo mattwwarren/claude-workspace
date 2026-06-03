@@ -198,6 +198,13 @@ def create_worktree(
                 f"`git worktree remove --force {wt_path}`, then re-dispatch."
             )
             raise StaleWorktreeError(msg)
+        if worktree_has_unsaved_work(client, branch):
+            msg = (
+                f"Refusing to reuse worktree at {wt_path} for branch {branch!r}: "
+                f"it has unsaved work (uncommitted changes or unpushed commits). "
+                f"Commit or push the work, then re-dispatch."
+            )
+            raise StaleWorktreeError(msg)
         return wt_path
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)
