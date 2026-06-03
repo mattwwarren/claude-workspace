@@ -1239,6 +1239,88 @@ class TestDispatchTickSpawnErrors:
         assert queue.tasks[0].status == QueueItemStatus.PENDING
         assert queue.tasks[0].session_id is None
 
+    def test_stale_worktree_dirty_blocks_task_and_skips_removal(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """StaleWorktreeError + dirty worktree: removal SKIPPED, task →
+        BLOCKED_ON_USER (#425)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-425D", client="test-client"))
+
+        def _stale(*_args: object, **_kwargs: object) -> Path:
+            msg = "Refusing to reuse stale worktree"
+            raise StaleWorktreeError(msg)
+
+        removed: list[str] = []
+
+        def _record_remove(
+            _client: object, branch: str, *, force: bool = False
+        ) -> None:
+            removed.append(branch)
+
+        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.remove_worktree", _record_remove)
+        monkeypatch.setattr(
+            "cw.dispatch.worktree_has_unsaved_work", lambda _c, _b: True
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        # Removal must NOT have been called
+        assert removed == []
+        # Task must be BLOCKED_ON_USER, not PENDING
+        queue = load_dev_queue()
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.session_id is None
+
+    def test_stale_worktree_clean_removes_and_reverts(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """StaleWorktreeError + clean worktree: removal proceeds, task → PENDING
+        (#425)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-425C", client="test-client"))
+
+        def _stale(*_args: object, **_kwargs: object) -> Path:
+            msg = "Refusing to reuse stale worktree"
+            raise StaleWorktreeError(msg)
+
+        removed: list[tuple[str, bool]] = []
+
+        def _record_remove(
+            _client: object, branch: str, *, force: bool = False
+        ) -> None:
+            removed.append((branch, force))
+
+        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.remove_worktree", _record_remove)
+        monkeypatch.setattr(
+            "cw.dispatch.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert spawned == 0
+        # Removal with force=True must have been called
+        assert removed == [("auto-dev/GEN-425C", True)]
+        # Task reverted to PENDING (existing behaviour)
+        queue = load_dev_queue()
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
 
 # ---------------------------------------------------------------------------
 # TestDispatchTickFreshnessGate
