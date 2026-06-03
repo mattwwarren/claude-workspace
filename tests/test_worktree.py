@@ -1048,6 +1048,40 @@ class TestIsMainBehindOrigin:
 class TestFastForwardMain:
     """Tests for fast_forward_main."""
 
+    @staticmethod
+    def _clean_on_branch_mock(
+        default_branch: str,
+        old_sha: str,
+        new_sha: str | None = None,
+    ) -> object:
+        """Return a _run_git mock for a clean, on-branch checkout.
+
+        Handles symbolic-ref, status --porcelain, rev-parse (before/after),
+        and pull in the correct order.
+        """
+        _pull_called = [False]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = default_branch + "\n"
+            elif "status" in args and "--porcelain" in args:
+                result.stdout = ""  # clean
+            elif "pull" in args:
+                _pull_called[0] = True
+                result.stdout = ""
+            elif "rev-parse" in args:
+                # first rev-parse = before, second = after
+                result.stdout = (
+                    old_sha if not _pull_called[0] else (new_sha or old_sha)
+                ) + "\n"
+            else:
+                result.stdout = ""
+            return result
+
+        return mock_run
+
     def test_already_up_to_date_returns_same_sha(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1061,13 +1095,10 @@ class TestFastForwardMain:
         )
         sha = "abc123def456abc123def456abc123def456abc1"
 
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            result = MagicMock()
-            result.stdout = sha + "\n"
-            result.stderr = ""
-            return result
-
-        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._clean_on_branch_mock("main", sha),
+        )
 
         before, after = fast_forward_main(client)
         assert before == sha
@@ -1086,22 +1117,11 @@ class TestFastForwardMain:
         )
         old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         new_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        call_count = 0
 
-        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            nonlocal call_count
-            call_count += 1
-            result = MagicMock()
-            result.stderr = ""
-            if "rev-parse" in args and call_count == 1:
-                result.stdout = old_sha + "\n"
-            elif "pull" in args:
-                result.stdout = ""
-            else:
-                result.stdout = new_sha + "\n"
-            return result
-
-        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._clean_on_branch_mock("main", old_sha, new_sha),
+        )
 
         before, after = fast_forward_main(client)
         assert before == old_sha
@@ -1121,18 +1141,22 @@ class TestFastForwardMain:
             default_branch="main",
         )
         old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        call_count = 0
 
         def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                result = MagicMock()
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = "main\n"
+            elif "status" in args and "--porcelain" in args:
+                result.stdout = ""  # clean
+            elif "rev-parse" in args:
                 result.stdout = old_sha + "\n"
-                result.stderr = ""
-                return result
-            msg = "would clobber existing tag"
-            raise _WorktreeError(msg)
+            elif "pull" in args:
+                msg = "would clobber existing tag"
+                raise _WorktreeError(msg)
+            else:
+                result.stdout = ""
+            return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
 
@@ -1156,6 +1180,116 @@ class TestFastForwardMain:
 
         with pytest.raises(MissingWorkspaceError, match="absent-client"):
             fast_forward_main(client)
+
+    def test_off_branch_skips_pull_and_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ff on wrong branch skips pull and raises WorktreeError.
+
+        No mutation must occur: pull must NOT be called (#428).
+        """
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        pull_called = [False]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "pull" in args:
+                pull_called[0] = True
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = "feature/topic\n"  # wrong branch
+            elif "status" in args and "--porcelain" in args:
+                result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with pytest.raises(WorktreeError, match="main"):
+            fast_forward_main(client)
+
+        assert not pull_called[0], "pull must NOT be called when off-branch"
+
+    def test_dirty_checkout_skips_pull_and_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ff on a dirty main checkout skips pull and raises WorktreeError.
+
+        No mutation must occur: pull must NOT be called (#428).
+        """
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        pull_called = [False]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "pull" in args:
+                pull_called[0] = True
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = "main\n"  # correct branch
+            elif "status" in args and "--porcelain" in args:
+                result.stdout = " M modified_file.py\n"  # dirty
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with pytest.raises(WorktreeError, match="dirty"):
+            fast_forward_main(client)
+
+        assert not pull_called[0], "pull must NOT be called when checkout is dirty"
+
+    def test_clean_on_branch_fast_forwards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clean, on-branch checkout fast-forwards as before (#428 regression guard)."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        old_sha = "cccccccccccccccccccccccccccccccccccccccc"
+        new_sha = "dddddddddddddddddddddddddddddddddddddddd"
+        pull_called = [False]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = "main\n"
+            elif "status" in args and "--porcelain" in args:
+                result.stdout = ""  # clean
+            elif "pull" in args:
+                pull_called[0] = True
+                result.stdout = ""
+            elif "rev-parse" in args:
+                result.stdout = (old_sha if not pull_called[0] else new_sha) + "\n"
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        before, after = fast_forward_main(client)
+        assert before == old_sha
+        assert after == new_sha
+        assert pull_called[0], "pull MUST be called for clean on-branch checkout"
 
 
 class TestFetchDefaultBranch:

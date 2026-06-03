@@ -435,7 +435,9 @@ def fast_forward_main(client: ClientConfig) -> tuple[str, str]:
 
     Runs ``git pull --ff-only origin <default_branch>`` in the client's git
     directory.  Raises :exc:`MissingWorkspaceError` if the workspace directory
-    does not exist, or :exc:`WorktreeError` if the pull fails (non-zero exit).
+    does not exist, or :exc:`WorktreeError` if the pull fails (non-zero exit)
+    or if the checkout is not on ``default_branch`` or has uncommitted changes
+    — both conditions risk mutating the index unexpectedly (#428).
 
     Returns:
         ``(before_sha, after_sha)`` — the SHA before and after the pull.
@@ -446,6 +448,29 @@ def fast_forward_main(client: ClientConfig) -> tuple[str, str]:
         msg = f"workspace missing for {client.name} ({git_dir})"
         raise MissingWorkspaceError(msg)
     default_branch = client.default_branch
+
+    # Guard 1: ensure the checkout is on the expected default branch.
+    current_branch = _run_git(
+        "symbolic-ref", "--short", "HEAD", cwd=git_dir
+    ).stdout.strip()
+    if current_branch != default_branch:
+        msg = (
+            f"Refusing to fast-forward {client.name}: HEAD is on "
+            f"'{current_branch}', expected '{default_branch}'. "
+            f"Switch to '{default_branch}' before refreshing."
+        )
+        raise WorktreeError(msg)
+
+    # Guard 2: ensure the working tree is clean.
+    status_out = _run_git("status", "--porcelain", cwd=git_dir).stdout.strip()
+    if status_out:
+        msg = (
+            f"Refusing to fast-forward {client.name}: working tree is dirty "
+            f"(git status --porcelain reported changes). "
+            f"Commit or stash changes before refreshing."
+        )
+        raise WorktreeError(msg)
+
     before_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
     _run_git("pull", "--ff-only", "origin", default_branch, cwd=git_dir)
     after_sha = _run_git("rev-parse", default_branch, cwd=git_dir).stdout.strip()
