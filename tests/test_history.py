@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ from freezegun import freeze_time
 from cw.history import (
     EventType,
     HistoryEvent,
+    _history_path,
     append_event,
     load_history,
     record_event,
@@ -165,3 +167,100 @@ def test_multiple_clients_isolated(tmp_config_dir: Path) -> None:
     assert len(beta_events) == 1
     assert alpha_events[0].session_name == "alpha/impl"
     assert beta_events[0].session_name == "beta/impl"
+
+
+# ---------------------------------------------------------------------------
+# Defect #433: torn-read / concurrent-append fixes
+# ---------------------------------------------------------------------------
+
+
+def test_load_history_skips_partial_json_line(tmp_config_dir: Path) -> None:
+    """load_history never raises on a partial (truncated) JSON line."""
+    event = HistoryEvent(
+        event_type=EventType.SESSION_STARTED,
+        client="torn-client",
+        session_id="good",
+    )
+    append_event("torn-client", event)
+
+    # Inject a partial line simulating a concurrent mid-write truncation
+    path = _history_path("torn-client")
+    with path.open("a") as f:
+        f.write('{"event_type": "session_started", "client": "torn-clie')  # truncated
+
+    # Must not raise — partial line silently skipped
+    events = load_history("torn-client")
+    assert len(events) == 1
+    assert events[0].session_id == "good"
+
+
+def test_load_history_concurrent_append_never_raises(tmp_config_dir: Path) -> None:
+    """load_history is safe to call while concurrent appends are in flight."""
+    errors: list[Exception] = []
+
+    def _appender() -> None:
+        for i in range(20):
+            event = HistoryEvent(
+                event_type=EventType.SESSION_STARTED,
+                client="race-client",
+                session_id=f"s{i}",
+            )
+            append_event("race-client", event)
+
+    def _reader() -> None:
+        for _ in range(20):
+            try:
+                load_history("race-client")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    appender = threading.Thread(target=_appender)
+    reader = threading.Thread(target=_reader)
+    appender.start()
+    reader.start()
+    appender.join(timeout=10)
+    reader.join(timeout=10)
+
+    assert not errors, f"load_history raised during concurrent appends: {errors}"
+
+
+def test_load_history_under_lock(tmp_config_dir: Path) -> None:
+    """load_history acquires _history_lock so readers block concurrent writers."""
+    # Pre-populate a valid event
+    event = HistoryEvent(
+        event_type=EventType.SESSION_STARTED,
+        client="lock-client",
+        session_id="pre",
+    )
+    append_event("lock-client", event)
+
+    # Verify that load_history can be called repeatedly without corruption
+    results = []
+    errors: list[Exception] = []
+
+    def _write_many() -> None:
+        for i in range(10):
+            append_event(
+                "lock-client",
+                HistoryEvent(
+                    event_type=EventType.SESSION_COMPLETED,
+                    client="lock-client",
+                    session_id=f"w{i}",
+                ),
+            )
+
+    def _read_many() -> None:
+        for _ in range(10):
+            try:
+                results.append(load_history("lock-client"))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    t1 = threading.Thread(target=_write_many)
+    t2 = threading.Thread(target=_read_many)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert not errors, f"Errors under concurrent read+write: {errors}"

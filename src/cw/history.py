@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -12,6 +13,8 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from cw.config import history_dir
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -90,6 +93,7 @@ def load_history(
     Reads and parses the entire JSONL file on each call. Acceptable for
     current scale (lifecycle events are infrequent, files stay small).
     If history files grow large, consider tail-based reading or an index.
+    # TODO(#433): rotation deferred
 
     Args:
         client: Client name.
@@ -102,12 +106,23 @@ def load_history(
         return []
 
     events: list[HistoryEvent] = []
-    for raw_line in path.read_text().splitlines():
+    with _history_lock(client):
+        lines = path.read_text().splitlines()
+
+    for raw_line in lines:
         stripped = raw_line.strip()
         if not stripped:
             continue
-        raw = json.loads(stripped)
-        event = HistoryEvent.model_validate(raw)
+        try:
+            raw = json.loads(stripped)
+            event = HistoryEvent.model_validate(raw)
+        except (json.JSONDecodeError, ValueError):
+            _logger.warning(
+                "history: skipping malformed line for client %r: %r",
+                client,
+                stripped[:80],
+            )
+            continue
 
         if since and event.timestamp < since:
             continue

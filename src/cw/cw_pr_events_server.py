@@ -87,30 +87,41 @@ def _append_event(notification: dict[str, Any]) -> None:
         with path.open("a") as f:
             f.write(json.dumps(record) + "\n")
             f.flush()
+            os.fsync(f.fileno())
         _event_offset[0] += 1
+
+
+def _read_events_from_offset_locked(from_offset: int) -> list[dict[str, Any]]:
+    """Read events with offset >= from_offset. Caller MUST hold ``_file_lock``.
+
+    The non-re-entrant read core. ``subscribe_with_cursor`` calls this while
+    already holding ``_file_lock`` (the public wrapper below would deadlock —
+    ``_file_lock`` is a plain, non-reentrant ``threading.Lock``).
+    """
+    path = state_dir() / "channel-events.jsonl"
+    if not path.exists():
+        return []
+    results: list[dict[str, Any]] = []
+    for raw_line in path.read_text().splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        try:
+            record: dict[str, Any] = json.loads(stripped)
+        except json.JSONDecodeError:
+            logger.warning(
+                "channel-events.jsonl: skipping malformed line: %r", stripped
+            )
+            continue
+        if record.get("offset", -1) >= from_offset:
+            results.append(record)
+    return results
 
 
 def _read_events_from_offset(from_offset: int) -> list[dict[str, Any]]:
     """Read all events with offset >= from_offset from channel-events.jsonl."""
     with _file_lock:
-        path = state_dir() / "channel-events.jsonl"
-        if not path.exists():
-            return []
-        results: list[dict[str, Any]] = []
-        for raw_line in path.read_text().splitlines():
-            stripped = raw_line.strip()
-            if not stripped:
-                continue
-            try:
-                record: dict[str, Any] = json.loads(stripped)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "channel-events.jsonl: skipping malformed line: %r", stripped
-                )
-                continue
-            if record.get("offset", -1) >= from_offset:
-                results.append(record)
-        return results
+        return _read_events_from_offset_locked(from_offset)
 
 
 def _load_cursors() -> dict[str, int]:
@@ -152,13 +163,22 @@ def _load_offset_from_file() -> int:
 
 
 def subscribe_with_cursor(client_id: str) -> queue.SimpleQueue[dict[str, Any]]:
-    """Subscribe and replay any missed events since the client's last cursor."""
-    q = subscribe()  # acquires+releases _lock (FIRST)
-    with _file_lock:  # acquires+releases _file_lock (AFTER)
+    """Subscribe and replay any missed events since the client's last cursor.
+
+    TOCTOU fix (#433): register the subscriber AND read the replay backlog while
+    holding ``_file_lock``, so no ``broadcast()`` can append+fan-out in the gap.
+    ``_append_event`` takes ``_file_lock`` to persist, so while we hold it no new
+    event can be appended; any event appended after we release is therefore
+    delivered exactly once via the live fan-out path to the now-registered queue
+    — never lost (the earlier snapshot-then-subscribe ordering could drop the
+    boundary event) and never duplicated (it is not in the backlog we replay).
+    """
+    with _file_lock:
         cursor = _cursors.get(client_id, 0)
-    missed = _read_events_from_offset(cursor)
-    for record in missed:
-        q.put_nowait(record)
+        q = subscribe()
+        missed = _read_events_from_offset_locked(cursor)
+        for record in missed:
+            q.put_nowait(record)
     return q
 
 

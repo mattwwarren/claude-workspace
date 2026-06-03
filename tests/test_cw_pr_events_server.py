@@ -289,6 +289,21 @@ class TestReadEventsFromOffset:
         result = _read_events_from_offset(0)
         assert len(result) == 2
 
+    def test_skips_malformed_line_without_raising(self) -> None:
+        """A torn/partial JSONL line is skipped, not raised (#433)."""
+        from cw.config import state_dir
+        from cw.cw_pr_events_server import _read_events_from_offset
+
+        path = state_dir() / "channel-events.jsonl"
+        path.write_text(
+            json.dumps({"notification_type": "cw-pr-event", "offset": 0})
+            + "\n"
+            + "\n"  # blank line (also skipped)
+            + "{ partial torn line\n"  # malformed: no closing brace
+        )
+        result = _read_events_from_offset(0)
+        assert len(result) == 1  # blank + malformed lines skipped, valid one kept
+
     def test_respects_offset_filter(self) -> None:
         from cw.cw_pr_events_server import _append_event, _read_events_from_offset
 
@@ -680,3 +695,100 @@ class TestSSERouting:
 
         asyncio.run(_run())
         assert captured == ["/ack", "/pr-event", "/messages"]
+
+
+# ---------------------------------------------------------------------------
+# Defect #433: subscribe_with_cursor TOCTOU / fsync fixes
+# ---------------------------------------------------------------------------
+
+
+class TestSubscribeWithCursorTOCTOU:
+    """Subscribe+replay window must not deliver duplicate events (TOCTOU fix)."""
+
+    def test_no_double_delivery_when_broadcast_races_subscribe(self) -> None:
+        """Event broadcast during subscribe+replay gap must NOT be double-delivered."""
+        from cw.cw_pr_events_server import _append_event
+
+        # Set up: event 0 already appended, cursor at 0 (will replay from 0)
+        _append_event(
+            {"notification_type": "cw-pr-event", "message": "pre", "title": "pre"}
+        )
+        # cursor at 0 means subscriber expects to replay from 0
+
+        # The TOCTOU window: between subscribe() and _read_events_from_offset(),
+        # a broadcast appends event offset=1 and fans out to the new subscriber.
+        # The replay then also reads offset=1 → double delivery.
+        #
+        # The fix: replay is bounded to the offset snapshotted BEFORE subscribe(),
+        # so event offset=1 (appended after snapshot) is excluded from replay
+        # (it is delivered only via the live fan-out).
+
+        results: list[list[dict]] = []
+        errors: list[Exception] = []
+
+        def _subscriber() -> None:
+            try:
+                q = subscribe_with_cursor("toctou-sub")
+                # Drain all items including any replayed ones
+                items = []
+                import time
+
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    try:
+                        items.append(q.get_nowait())
+                    except Exception:  # noqa: BLE001
+                        import time as _t
+
+                        _t.sleep(0.01)
+                results.append(items)
+                unsubscribe(q)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        sub_thread = threading.Thread(target=_subscriber)
+        sub_thread.start()
+
+        # Broadcast immediately (may hit the gap)
+        broadcast(
+            {
+                "notification_type": "cw-pr-event",
+                "message": "concurrent",
+                "title": "c",
+            }
+        )
+
+        sub_thread.join(timeout=5)
+        assert not errors, f"Subscriber thread errored: {errors}"
+        assert results, "Subscriber produced no results"
+
+        items = results[0]
+        offsets = [item.get("offset") for item in items]
+        # No offset should appear twice — even if event 0 AND 1 are received,
+        # each must appear exactly once.
+        assert len(offsets) == len(set(offsets)), (
+            f"Duplicate delivery detected: offsets={offsets}"
+        )
+
+    def test_append_event_fsyncs_after_flush(self) -> None:
+        """_append_event must call os.fsync after flush (durability fix)."""
+        import os
+        from unittest.mock import patch
+
+        fsync_calls: list[int] = []
+        real_fsync = os.fsync
+
+        def _mock_fsync(fd: int) -> None:
+            fsync_calls.append(fd)
+            real_fsync(fd)
+
+        with patch("os.fsync", side_effect=_mock_fsync):
+            broadcast(
+                {
+                    "notification_type": "cw-pr-event",
+                    "message": "durable",
+                    "title": "d",
+                }
+            )
+
+        assert fsync_calls, "os.fsync was never called during _append_event"

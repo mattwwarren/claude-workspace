@@ -343,6 +343,21 @@ class TestReadEventsFromOffsetQueueChannel:
         result = _read_events_from_offset(0)
         assert len(result) == 2
 
+    def test_skips_malformed_line_without_raising(self) -> None:
+        """A torn/partial JSONL line is skipped, not raised (#433)."""
+        from cw.config import state_dir
+        from cw.cw_queue_events_server import _EVENTS_FILE, _read_events_from_offset
+
+        path = state_dir() / _EVENTS_FILE
+        path.write_text(
+            json.dumps({"notification_type": _NOTIFICATION_TYPE, "offset": 0})
+            + "\n"
+            + "\n"  # blank line (also skipped)
+            + "{ partial torn line\n"  # malformed: no closing brace
+        )
+        result = _read_events_from_offset(0)
+        assert len(result) == 1  # blank + malformed lines skipped, valid one kept
+
     def test_respects_offset_filter(self) -> None:
         from cw.cw_queue_events_server import (
             _append_event,
@@ -948,3 +963,155 @@ class TestLoadOffsetFromFile:
         ]
         path.write_text("\n".join(lines) + "\n")
         assert _load_offset_from_file() == 5
+
+
+# ---------------------------------------------------------------------------
+# Defect #433: TOCTOU / fsync / poll-lock fixes (queue channel)
+# ---------------------------------------------------------------------------
+
+
+class TestSubscribeWithCursorTOCTOUQueueChannel:
+    """Subscribe+replay window must not double-deliver in-flight events."""
+
+    def test_no_double_delivery_when_broadcast_races_subscribe(self) -> None:
+        """Event broadcast during subscribe+replay gap must NOT be double-delivered."""
+        from cw.cw_queue_events_server import _append_event
+
+        # Pre-append one event at offset 0; cursor starts at 0 (full replay)
+        _append_event(
+            {
+                "notification_type": _NOTIFICATION_TYPE,
+                "message": "pre",
+                "title": "pre",
+            }
+        )
+
+        results: list[list[dict[str, Any]]] = []
+        errors: list[Exception] = []
+
+        def _subscriber() -> None:
+            import time
+
+            try:
+                q = subscribe_with_cursor("toctou-queue-sub")
+                items = []
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    try:
+                        items.append(q.get_nowait())
+                    except Exception:  # noqa: BLE001
+                        time.sleep(0.01)
+                results.append(items)
+                unsubscribe(q)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        sub_thread = threading.Thread(target=_subscriber)
+        sub_thread.start()
+
+        broadcast(
+            {
+                "notification_type": _NOTIFICATION_TYPE,
+                "message": "concurrent",
+                "title": "c",
+            }
+        )
+
+        sub_thread.join(timeout=5)
+        assert not errors, f"Subscriber thread errored: {errors}"
+        assert results, "Subscriber produced no results"
+
+        items = results[0]
+        offsets = [item.get("offset") for item in items]
+        assert len(offsets) == len(set(offsets)), (
+            f"Duplicate delivery detected: offsets={offsets}"
+        )
+
+    def test_append_event_fsyncs_after_flush(self) -> None:
+        """_append_event must call os.fsync after flush (durability fix)."""
+        import os
+        from unittest.mock import patch
+
+        fsync_calls: list[int] = []
+        real_fsync = os.fsync
+
+        def _mock_fsync(fd: int) -> None:
+            fsync_calls.append(fd)
+            real_fsync(fd)
+
+        with patch("os.fsync", side_effect=_mock_fsync):
+            broadcast(
+                {
+                    "notification_type": _NOTIFICATION_TYPE,
+                    "message": "durable",
+                    "title": "d",
+                }
+            )
+
+        assert fsync_calls, "os.fsync was never called during _append_event"
+
+
+class TestPollOnceLockGuard:
+    """_poll_once load→save must be guarded by _file_lock (no duplicate events)."""
+
+    def test_concurrent_poll_does_not_emit_duplicate_events(self) -> None:
+        """Two concurrent _poll_once calls must not produce duplicate broadcasts."""
+        import cw.cw_queue_events_server as _qmod
+        from cw.cw_queue_events_server import (
+            QueueSnapshot,
+            _compute_queue_deltas,
+            _compute_session_deltas,
+        )
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+
+        # Build a state with one new task (will produce one ticket_enqueued event)
+        task = TicketTask(
+            ticket_id="T-concurrent",
+            client="acme",
+            status=QueueItemStatus.PENDING,
+        )
+        store = DevQueueStore(tasks=[task])
+        state = CwState()
+
+        broadcast_calls: list[dict[str, Any]] = []
+
+        def _fake_broadcast(notif: dict[str, Any]) -> None:
+            broadcast_calls.append(notif)
+
+        # Simulate two threads both calling the lock-guarded load→compute→save cycle.
+        # Without the lock: both see the same empty snapshot, both compute the same
+        # ticket_enqueued delta, both broadcast → duplicate delivery.
+        # With _file_lock: the second caller sees the already-updated snapshot → no
+        # delta, no duplicate.
+        def _run_poll() -> None:
+            with _qmod._file_lock:
+                loaded = _load_snapshot()
+                new_snap = QueueSnapshot(
+                    task_statuses={t.ticket_id: str(t.status) for t in store.tasks},
+                    task_session_ids={t.ticket_id: t.session_id for t in store.tasks},
+                    session_statuses={},
+                )
+                events = _compute_queue_deltas(
+                    loaded, store, state
+                ) + _compute_session_deltas(loaded, state)
+                if events:
+                    _save_snapshot(new_snap)
+            for ev in events:
+                _fake_broadcast(ev)
+
+        t1 = threading.Thread(target=_run_poll)
+        t2 = threading.Thread(target=_run_poll)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        # With lock guard: only ONE ticket_enqueued event for T-concurrent
+        enqueued = [
+            e
+            for e in broadcast_calls
+            if isinstance(e, dict) and e.get("ticket_id") == "T-concurrent"
+        ]
+        assert len(enqueued) == 1, (
+            f"Expected 1 enqueued event, got {len(enqueued)}: {broadcast_calls}"
+        )
