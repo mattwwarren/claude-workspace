@@ -3395,3 +3395,93 @@ def test_flag_silently_idle_recover_skips_non_running_task(
     store = load_dev_queue()
     assert store.tasks[0].status == QueueItemStatus.PENDING
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# GitHub issue #432: malformed roster JSON + FileNotFoundError must not
+# crash reconcile; idle_watchdog_seconds=0 must be honored (not 900 fallback).
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_tolerates_malformed_json_from_claude_agents(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """json.JSONDecodeError from _claude_agents_json → daemon_errored semantics.
+
+    reconcile() must NOT raise; with live ACTIVE sessions present the outage
+    guard fires and state is left unchanged (#432).
+    """
+    state = CwState(
+        sessions=[
+            _mk_session("s-json", "ref-json"),
+        ]
+    )
+    save_state(state)
+
+    def _bad_json() -> list[dict[str, object]]:
+        msg = "bad json"
+        raise json.JSONDecodeError(msg, "", 0)
+
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", _bad_json)
+
+    # Must not raise
+    report = reconcile()
+
+    assert report.phantom_session_ids == []
+    assert report.phantom_session_names == []
+    # State must be unchanged — no session reaped
+    reloaded = load_state()
+    s = reloaded.find_by_name_or_id("s-json")
+    assert s is not None
+    assert s.status == SessionStatus.ACTIVE
+
+
+def test_reconcile_tolerates_file_not_found_from_claude_agents(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FileNotFoundError (claude not on PATH) → daemon_errored semantics.
+
+    reconcile() must NOT raise; with live ACTIVE sessions present the outage
+    guard fires and state is left unchanged (#432).
+    """
+    state = CwState(
+        sessions=[
+            _mk_session("s-fnf", "ref-fnf"),
+        ]
+    )
+    save_state(state)
+
+    def _no_binary() -> list[dict[str, object]]:
+        msg = "No such file or directory: 'claude'"
+        raise FileNotFoundError(msg)
+
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", _no_binary)
+
+    # Must not raise
+    report = reconcile()
+
+    assert report.phantom_session_ids == []
+    assert report.phantom_session_names == []
+    # State must be unchanged — no session reaped
+    reloaded = load_state()
+    s = reloaded.find_by_name_or_id("s-fnf")
+    assert s is not None
+    assert s.status == SessionStatus.ACTIVE
+
+
+def test_resolve_idle_watchdog_honors_zero(
+    tmp_config_dir: Path,
+) -> None:
+    """idle_watchdog_seconds=0 is honored as 0, not silently replaced by 900.
+
+    The `or` operator treats 0 as falsy and falls back to the constant.
+    The fix uses an explicit None check so 0 passes through (#432).
+    """
+    config = OrchestratorConfig(idle_watchdog_seconds=0)
+    budget = resolve_idle_watchdog_budget(task=None, config=config)
+    assert budget == 0, (
+        f"idle_watchdog_seconds=0 should be honoured as 0, got {budget} "
+        f"(likely silently fell back to IDLE_WATCHDOG_SECONDS={IDLE_WATCHDOG_SECONDS})"
+    )
