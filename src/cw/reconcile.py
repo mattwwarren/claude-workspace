@@ -992,7 +992,21 @@ def reconcile() -> ReconcileReport:
     tradeoff for a file-based, single-user tool.
     """
     with sessions_lock():
-        return _reconcile_locked()
+        locked_report = _reconcile_locked()
+
+    # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
+    # executes under the session lock (liveness — #485 SHOULD_FIX 4).
+    completed_ticket_ids = complete_timed_out_merged_tasks()
+
+    if not completed_ticket_ids:
+        return locked_report
+
+    return ReconcileReport(
+        phantom_session_ids=locked_report.phantom_session_ids,
+        phantom_session_names=locked_report.phantom_session_names,
+        reverted_ticket_ids=locked_report.reverted_ticket_ids,
+        completed_ticket_ids=completed_ticket_ids,
+    )
 
 
 def _reconcile_locked() -> ReconcileReport:
