@@ -283,7 +283,17 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
     # 1. Uncommitted changes check
     try:
         status = _run_git("status", "--porcelain", cwd=wt_path, check=False)
-        if status.stdout.strip():
+        # Filter out cw's own artifacts (.claude/) — these are written fresh
+        # each session and would otherwise trip the dirty check on every retry.
+        # Porcelain format: "XY path" (2-char status + space + path). Rename
+        # entries ("R  old -> new") pass through unchanged; cw artifacts never
+        # appear as renames so they will still be caught by path check.
+        lines = [
+            line
+            for line in status.stdout.splitlines()
+            if not (len(line) > 3 and line[3:].startswith(".claude/"))
+        ]
+        if lines:
             return True
     except (WorktreeError, OSError) as exc:
         _log.warning(
@@ -296,8 +306,12 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
         return True
 
     # 2. Unpushed commits check — compare HEAD against origin/<branch>.
-    # First verify that origin/<branch> exists; if not, every HEAD commit is
-    # "unpushed" (conservative).
+    # Three-level fallback when the remote tracking branch is absent:
+    #   1. origin/<branch> present  → git log origin/<branch>..HEAD
+    #   2. origin/<branch> absent   → git log origin/<default_branch>..HEAD
+    #   3. origin/<default_branch> absent (offline) → git log <default_branch>..HEAD
+    # returncode != 0 from a log call means the ref is unknown — fall through
+    # to the next level. The except handler fires on subprocess-level failures.
     try:
         ref_check = _run_git(
             "rev-parse",
@@ -306,20 +320,40 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
             cwd=wt_path,
             check=False,
         )
-        if ref_check.returncode != 0:
-            # origin/<branch> unknown — check whether HEAD has any commits
-            head_check = _run_git(
-                "rev-parse", "--verify", "HEAD", cwd=wt_path, check=False
+        if ref_check.returncode == 0:
+            # Level 1: origin/<branch> exists — canonical happy path.
+            log_result = _run_git(
+                "log",
+                f"origin/{branch}..HEAD",
+                "--oneline",
+                cwd=wt_path,
+                check=False,
             )
-            return head_check.returncode == 0 and bool(head_check.stdout.strip())
+            return bool(log_result.stdout.strip())
+
+        # Level 2: origin/<branch> absent — compare against origin/<default_branch>.
+        default_base = f"origin/{client.default_branch}"
         log_result = _run_git(
             "log",
-            f"origin/{branch}..HEAD",
+            f"{default_base}..HEAD",
             "--oneline",
             cwd=wt_path,
             check=False,
         )
-        return bool(log_result.stdout.strip())
+        if log_result.returncode == 0:
+            return bool(log_result.stdout.strip())
+
+        # Level 3: origin/<default_branch> also absent (offline / bare clone) —
+        # fall back to local default branch ref.
+        log_result = _run_git(
+            "log",
+            f"{client.default_branch}..HEAD",
+            "--oneline",
+            cwd=wt_path,
+            check=False,
+        )
+        if log_result.returncode == 0:
+            return bool(log_result.stdout.strip())
     except (WorktreeError, OSError) as exc:
         _log.warning(
             "worktree_has_unsaved_work: log check failed for %s/%s: %s",
@@ -329,6 +363,8 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
         )
         # Fail-safe: treat as having unsaved work.
         return True
+    # All refs unresolvable — conservative fail-safe.
+    return True
 
 
 def _fetch_default_branch(client_name: str, default_branch: str, git_dir: Path) -> bool:
