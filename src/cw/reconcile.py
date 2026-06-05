@@ -170,11 +170,15 @@ class ReconcileReport:
     ``reverted_ticket_ids`` — ticket IDs whose TicketTasks got reverted
     from RUNNING to PENDING. Populated by :func:`reconcile`; empty after
     :func:`compute_drift`.
+    ``completed_ticket_ids`` — ticket IDs whose PENDING TicketTasks were
+    auto-completed because their TIMED_OUT session's PR merged. Populated
+    by :func:`reconcile` via :func:`complete_timed_out_merged_tasks`.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
     phantom_session_names: list[str] = field(default_factory=list)
     reverted_ticket_ids: list[str] = field(default_factory=list)
+    completed_ticket_ids: list[str] = field(default_factory=list)
 
 
 def compute_drift(
