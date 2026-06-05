@@ -72,6 +72,7 @@ from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
     WorkerEntry,
+    latest_tick_summary_by_client,
     orchestrator_parent,
     orchestrator_status,
     orchestrator_workers,
@@ -1607,6 +1608,19 @@ def dev_queue_status(client: str | None) -> None:
             f"  {len(completed_tasks):>9}  {len(cancelled_tasks):>9}  {ticket_ids}"
         )
 
+    tick_data = latest_tick_summary_by_client()
+    if tick_data:
+        click.echo("")
+        click.echo("Last dispatch tick per client:")
+        for client_name in clients_seen:
+            if client_name in tick_data:
+                tick = tick_data[client_name]
+                click.echo(
+                    f"  {client_name}: claimed={tick.claimed}  pending={tick.pending}"
+                    f"  running={tick.running}/{tick.cap}"
+                    f"  skip={tick.skip_reason}"
+                )
+
 
 @dev_queue.command(name="run")
 @click.option(
@@ -1779,16 +1793,34 @@ def _format_status_human(status: OrchestratorStatus) -> str:
         for t in status.pending_tickets
     )
 
+    lines.extend(("", "Last dispatch tick:"))
+    if status.last_tick_by_client:
+        for client, tick in sorted(status.last_tick_by_client.items()):
+            lines.append(
+                f"  - {client}  claimed={tick.claimed}  pending={tick.pending}"
+                f"  running={tick.running}/{tick.cap}"
+                f"  skip={tick.skip_reason}"
+                f"  at={tick.tick_at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            )
+    else:
+        lines.append("  (no dispatch ticks recorded)")
+
     lines.extend(("", f"Running sessions:  {len(status.running_sessions)}"))
     for s in status.running_sessions:
         line = f"  - {s.id}  {s.name}  status={s.status}"
         if s.last_stage:
             line += f"  last_stage={s.last_stage}"
+        else:
+            _stage_unknown = (
+                "  last_stage=(unknown"
+                " — global auto-dev.md not yet emitting stage events)"
+            )
+            line += _stage_unknown
         lines.append(line)
 
     lines.extend(("", f"Monitored PRs:     {len(status.monitored_prs)}"))
     lines.extend(
-        f"  - {pr.repo}#{pr.pr_number}  status={pr.status}"
+        f"  - {pr.repo}#{pr.pr_number}  role={pr.role}  status={pr.status}"
         f"  unresolved={pr.unresolved_threads}"
         for pr in status.monitored_prs
     )

@@ -448,25 +448,6 @@ class TestOrchestratorStatus:
         assert pr.unresolved_threads == 1
         assert pr.status == "watching"
 
-    def test_load_monitored_prs_uses_monitored_key(
-        self,
-        tmp_orchestrate_dirs: Path,
-    ) -> None:
-        """_load_monitored_prs reads the 'monitored' key (not 'active')."""
-        review_dir = tmp_orchestrate_dirs / "review-monitor"
-        _write_monitor_file(
-            review_dir,
-            "owner/repo",
-            99,
-            status="watching",
-            role="author",
-        )
-        # After _write_monitor_file update, file uses 'monitored' key.
-        # _load_monitored_prs must read it.
-        snapshot = orchestrator_status()
-        assert len(snapshot.monitored_prs) == 1
-        assert snapshot.monitored_prs[0].pr_number == 99
-
     def test_recent_events_capped(
         self,
         tmp_orchestrate_dirs: Path,
@@ -604,6 +585,25 @@ class TestOrchestratorStatus:
         snapshot = orchestrator_status()
         # Skipped due to ValueError — bad-client absent from map.
         assert "bad-client" not in snapshot.last_tick_by_client
+
+    def test_load_monitored_prs_uses_monitored_key(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """_load_monitored_prs reads the 'monitored' key (not 'active')."""
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        _write_monitor_file(
+            review_dir,
+            "owner/repo",
+            99,
+            status="watching",
+            role="author",
+        )
+        # After _write_monitor_file update, file uses 'monitored' key.
+        # _load_monitored_prs must read it.
+        snapshot = orchestrator_status()
+        assert len(snapshot.monitored_prs) == 1
+        assert snapshot.monitored_prs[0].pr_number == 99
 
     def test_serialises_to_json(
         self,
@@ -1220,7 +1220,7 @@ class TestCliOrchestrateStatusLastStage:
         tmp_orchestrate_dirs: Path,
         workspace: Path,
     ) -> None:
-        """No last_stage token when the session has no stage events."""
+        """Sessions with no stage events show placeholder in last_stage field."""
         save_state(
             CwState(
                 sessions=[
@@ -1232,7 +1232,8 @@ class TestCliOrchestrateStatusLastStage:
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrate", "status"])
         assert result.exit_code == 0, result.output
-        assert "last_stage=" not in result.output
+        expected = "(unknown — global auto-dev.md not yet emitting stage events)"
+        assert expected in result.output
 
 
 # ---------------------------------------------------------------------------
