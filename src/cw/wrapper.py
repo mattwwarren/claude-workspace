@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
     USER_DIRECTED_PREFIXES,
@@ -75,11 +76,10 @@ def _detect_claude_session_id(workspace_path: str) -> str | None:
     """Detect the Claude session ID from the most recently modified session file.
 
     Claude stores sessions at ``~/.claude/projects/<encoded-path>/<uuid>.jsonl``
-    where the path encoding replaces ``/`` with ``-`` (e.g. ``/home/foo/bar``
-    becomes ``-home-foo-bar``).
+    where the path encoding replaces both ``/`` and ``.`` with ``-``
+    (e.g. ``/home/foo/.bar`` becomes ``-home-foo--bar``).
     """
-    encoded = workspace_path.replace("/", "-")
-    project_dir = Path.home() / ".claude" / "projects" / encoded
+    project_dir = claude_project_dir(workspace_path)
     if not project_dir.is_dir():
         return None
     candidates = sorted(

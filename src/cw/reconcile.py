@@ -31,9 +31,9 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
@@ -63,6 +63,8 @@ from cw.notify import fire_push_notification
 from cw.worktree import remove_worktree, worktree_has_unsaved_work, worktree_path_for
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import CwState, Session
 
 _log = logging.getLogger(__name__)
@@ -370,7 +372,7 @@ def _session_project_dir(session: Session) -> Path | None:
     worktree = session.worktree_path
     if worktree is None:
         return None
-    return Path.home() / ".claude" / "projects" / str(worktree).replace("/", "-")
+    return claude_project_dir(worktree)
 
 
 def _transcript_recently_active(

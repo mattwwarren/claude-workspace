@@ -15,6 +15,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
+from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
@@ -1071,10 +1072,7 @@ def _parse_sentinel_from_transcript(
     """
     if not claude_session_id:
         return None
-    encoded = cwd.replace("/", "-").replace(".", "-")
-    transcript_path = (
-        Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
-    )
+    transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
     if not transcript_path.is_file():
         return None
     try:

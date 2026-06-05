@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import freezegun
 import pytest
 
+from cw._util import claude_project_dir
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -1334,9 +1335,10 @@ def _write_salvage_transcript(
     """Write a transcript jsonl under ``home`` carrying a wrapped sentinel.
 
     Mirrors Claude's on-disk layout: ``<home>/.claude/projects/<encoded>/
-    <uuid>.jsonl`` with the encoded path replacing ``/`` with ``-``.
+    <uuid>.jsonl`` with the encoded path replacing both ``/`` and ``.``
+    with ``-`` (matching Claude Code's actual encoding).
     """
-    encoded = str(worktree).replace("/", "-")
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
     project_dir.mkdir(parents=True, exist_ok=True)
     body = json.dumps(payload)
@@ -1467,8 +1469,7 @@ def test_revert_stalled_no_salvage_without_sentinel_times_out(
 
     sess = _mk_headless_daemon_session("salv-none", worktree, started_at)
     # Transcript exists but carries no AUTO_DEV_RESULT block.
-    encoded = str(worktree).replace("/", "-")
-    proj = home / ".claude" / "projects" / encoded
+    proj = claude_project_dir(worktree)
     proj.mkdir(parents=True, exist_ok=True)
     (proj / "claude-uuid-3.jsonl").write_text(
         json.dumps(
@@ -2493,7 +2494,7 @@ def _write_idle_transcript(
     home: Path, worktree: Path, filename: str = "sess.jsonl"
 ) -> Path:
     """Write a minimal transcript .jsonl under the project dir for *worktree*."""
-    encoded = str(worktree).replace("/", "-")
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
     project_dir.mkdir(parents=True, exist_ok=True)
     path = project_dir / filename
@@ -2597,7 +2598,7 @@ def test_flag_silently_idle_fires_when_session_id_file_missing(
     sess.surface_ref = "live-ref"
     sess.claude_session_id = "missing-uuid"
     # Create project dir but NOT the expected .jsonl.
-    encoded = str(worktree).replace("/", "-")
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
     (home / ".claude" / "projects" / encoded).mkdir(parents=True, exist_ok=True)
 
     save_dev_queue(
@@ -2736,7 +2737,7 @@ def test_flag_silently_idle_fires_when_no_transcript_in_project_dir(
     sess = _mk_headless_daemon_session("no-tx-1", worktree, started_at)
     sess.surface_ref = "live-ref"
     # Create project dir but write no .jsonl files
-    encoded = str(worktree).replace("/", "-")
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
     (home / ".claude" / "projects" / encoded).mkdir(parents=True, exist_ok=True)
 
     save_dev_queue(
@@ -3752,4 +3753,176 @@ def test_revert_stalled_skips_parked_silently_idle_session(
     t = next(t for t in store.tasks if t.ticket_id == "parked-idle")
     assert t.status == QueueItemStatus.BLOCKED_ON_USER, (
         "Queue task must remain BLOCKED_ON_USER, not re-dispatched to PENDING"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dot-encoding regression tests (GitHub issue #463)
+# Worktrees under ~/.cw/ contain a dot in the path segment; Claude Code
+# encodes BOTH '/' and '.' as '-'.  The old single-replace produced a
+# path mismatch that caused all transcript liveness checks to return False,
+# letting the idle watchdog falsely reap actively-working sessions.
+# ---------------------------------------------------------------------------
+
+
+def test_claude_project_dir_encodes_dots_as_dashes() -> None:
+    """claude_project_dir replaces both '/' and '.' with '-' (Issue #463).
+
+    For a worktree at /home/u/.cw/wt/abc/auto-dev-1 the encoded segment
+    must be '-home-u--cw-wt-abc-auto-dev-1' (double dash for '.cw').
+    """
+    from cw._util import claude_project_dir as _cpd
+
+    result = _cpd("/home/u/.cw/wt/abc/auto-dev-1")
+    assert result.name == "-home-u--cw-wt-abc-auto-dev-1", (
+        f"Expected double-dash for .cw segment; got {result.name!r}"
+    )
+
+
+def test_claude_project_dir_matches_verified_real_path() -> None:
+    """Exact encoding match for the worktree documented in GitHub issue #463.
+
+    Real worktree: /home/matthew/.cw/wt/7dc983e2/auto-dev-463
+    Wrong (single replace): -home-matthew-.cw-wt-7dc983e2-auto-dev-463
+    Correct (double replace): -home-matthew--cw-wt-7dc983e2-auto-dev-463
+    """
+    from cw._util import claude_project_dir as _cpd
+
+    result = _cpd("/home/matthew/.cw/wt/7dc983e2/auto-dev-463")
+    assert result.name == "-home-matthew--cw-wt-7dc983e2-auto-dev-463"
+    # Confirm the old single-replace encoding is different (would not exist)
+    wrong = "/home/matthew/.cw/wt/7dc983e2/auto-dev-463".replace("/", "-")
+    assert wrong != result.name
+
+
+def test_transcript_recently_active_finds_dotted_worktree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_transcript_recently_active returns True for a ~/.cw/-style worktree.
+
+    Regression for Issue #463: the old single-replace produced a path that
+    didn't exist on disk, so the guard always returned False and the watchdog
+    would reap active sessions.
+
+    The worktree path contains a dot segment ('dot-cw') to reproduce the
+    encoding mismatch without depending on the real ~/.cw directory.
+    """
+    from cw.reconcile import _transcript_recently_active
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    # Worktree path with a dot-prefixed segment, mirroring ~/.cw/wt/...
+    worktree = tmp_path / ".dot-cw" / "wt" / "abc123" / "auto-dev-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    # Build the project dir using the CORRECT double-replace encoding.
+    project_dir = claude_project_dir(worktree)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write a transcript that is "recent" (mtime = now).
+    session_uuid = "test-uuid-dotted"
+    transcript = project_dir / f"{session_uuid}.jsonl"
+    record = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "still working"}],
+            },
+        }
+    )
+    transcript.write_text(record + "\n")
+
+    sess = Session(
+        id="dotted-wt-sess",
+        name="client-a/auto-dev/DOTTED-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=tmp_path / "ws"
+        ).workspace_path,
+        worktree_path=worktree,
+        surface_ref="live-ref",
+        started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        claude_session_id=session_uuid,
+    )
+
+    now = datetime.now(tz=UTC)
+    # With the correct encoding the transcript is found → recently active.
+    assert _transcript_recently_active(sess, now, window_seconds=60), (
+        "Expected transcript to be found for dotted worktree path; "
+        f"project_dir={project_dir!r} exists={project_dir.is_dir()}"
+    )
+
+
+def test_awaiting_subagent_finds_dotted_worktree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_awaiting_subagent returns True for a ~/.cw/-style worktree with pending
+    tool_use.
+
+    Regression for Issue #463: single-replace caused _awaiting_subagent to hit
+    its early-exit (project_dir not found), returning False and letting the
+    watchdog fire on a session mid-subagent.
+    """
+    from cw.reconcile import _awaiting_subagent
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / ".dot-cw" / "wt" / "def456" / "auto-dev-2"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    project_dir = claude_project_dir(worktree)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    session_uuid = "test-uuid-subagent"
+    transcript = project_dir / f"{session_uuid}.jsonl"
+
+    # Transcript ends with a tool_use with no following tool_result → awaiting.
+    tool_use_ts = datetime(2026, 1, 1, 0, 15, 0, tzinfo=UTC).isoformat()
+    record = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": tool_use_ts,
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "Task", "input": {}}
+                ],
+            },
+        }
+    )
+    transcript.write_text(record + "\n")
+
+    sess = Session(
+        id="dotted-subagent-sess",
+        name="client-a/auto-dev/DOTTED-2",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=tmp_path / "ws"
+        ).workspace_path,
+        worktree_path=worktree,
+        surface_ref="live-ref",
+        started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        claude_session_id=session_uuid,
+    )
+
+    # now is within SUBAGENT_LIVENESS_WINDOW_SECONDS of the tool_use timestamp
+    now = datetime(2026, 1, 1, 0, 16, 0, tzinfo=UTC)
+    assert _awaiting_subagent(sess, now), (
+        "Expected _awaiting_subagent=True for dotted worktree path; "
+        f"project_dir={project_dir!r} exists={project_dir.is_dir()}"
     )
