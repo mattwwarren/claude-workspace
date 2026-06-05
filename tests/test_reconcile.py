@@ -3562,8 +3562,6 @@ def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
         "plan_pending_approval",
         "review_pending_approval",
         "merge_gate_blocked",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
     ],
 )
 def test_salvage_all_terminal_statuses_from_phantom(
@@ -3635,13 +3633,80 @@ def test_salvage_all_terminal_statuses_from_phantom(
 @pytest.mark.parametrize(
     "status",
     [
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    ],
+)
+def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
+    status: str,
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom session whose transcript emits a paused status must be salvaged and
+    the queue task must be set to BLOCKED_ON_USER (not COMPLETED), so downstream
+    operators know the session requires human input before re-dispatch (#471).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    ticket_id = f"471p-{status}"
+    worktree = tmp_path / f"wt-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # Past the spawn grace window but well under headless budget (phantom path).
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        ticket_id, worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(home, worktree, f"uuid-{status}", payload)
+
+    alive = _mk_session("alive-471", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert ticket_id not in report.reverted_ticket_ids, (
+        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged paused)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        f"status={status!r}: session must be COMPLETED after salvage"
+    )
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        f"status={status!r}: queue task must be BLOCKED_ON_USER for paused status"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
         "scope_exceeded",
         "forbidden_area",
         "plan_pending_approval",
         "review_pending_approval",
         "merge_gate_blocked",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
     ],
 )
 def test_salvage_all_terminal_statuses_from_stalled(
@@ -3694,6 +3759,66 @@ def test_salvage_all_terminal_statuses_from_stalled(
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
     assert task.status == QueueItemStatus.COMPLETED, (
         f"status={status!r}: queue task must be COMPLETED, not re-dispatched"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    ],
+)
+def test_salvage_paused_statuses_from_stalled_route_to_blocked_on_user(
+    status: str,
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stalled headless session with a paused status in transcript must be salvaged
+    and the queue task set to BLOCKED_ON_USER, not COMPLETED (#471)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    ticket_id = f"471s-{status}"
+    worktree = tmp_path / f"wts-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(home, worktree, f"uuid-s-{status}", payload)
+
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=OrchestratorConfig()
+    )
+
+    assert ticket_id not in reverted, (
+        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged paused)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        f"status={status!r}: session must be COMPLETED after salvage"
+    )
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        f"status={status!r}: queue task must be BLOCKED_ON_USER for paused status"
     )
 
 

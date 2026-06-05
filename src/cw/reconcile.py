@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     parse_stdout,
@@ -114,7 +115,6 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
 _SILENTLY_IDLE_REASON = "silently_idle"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 
-
 # Grace window for a newly-spawned session to register with the daemon
 # (`claude agents --json`). `claude --bg` spawn → daemon roster registration
 # is async; reconciliation that runs in the same dispatch tick as the spawn
@@ -149,6 +149,13 @@ def _claude_agents_json() -> list[dict[str, object]]:
     )
     data = json.loads(proc.stdout)
     return data if isinstance(data, list) else []
+
+
+def _queue_status_for_salvaged(result: AutoDevResult) -> QueueItemStatus:
+    """Map a salvaged AutoDevResult to the appropriate QueueItemStatus."""
+    if result.status in PAUSED_FOR_USER_INPUT_STATUSES:
+        return QueueItemStatus.BLOCKED_ON_USER
+    return QueueItemStatus.COMPLETED
 
 
 @dataclass(frozen=True)
@@ -676,6 +683,7 @@ def revert_stalled_headless_sessions(
 
     timed_out_ticket_ids = {tid for _, tid in pending if tid}
     salvaged_ticket_ids = {tid for _, tid, _ in salvaged if tid}
+    salvaged_result_by_ticket = {tid: result for _, tid, result in salvaged if tid}
     reverted: list[str] = []
     if timed_out_ticket_ids or salvaged_ticket_ids:
         with dev_queue_lock():
@@ -693,7 +701,11 @@ def revert_stalled_headless_sessions(
                     # Terminal-success salvage: retire the task so the
                     # COMPLETED-silent backstop does not revert it to PENDING
                     # and re-dispatch already-finished work (#372).
-                    task.status = QueueItemStatus.COMPLETED
+                    # Paused statuses (ambiguities_pending_resolution,
+                    # premises_pending_verification) route to BLOCKED_ON_USER
+                    # so downstream operators know human input is needed (#471).
+                    result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(result)
                     changed = True
             if changed:
                 save_dev_queue(store)
@@ -869,6 +881,7 @@ def flag_silently_idle_daemon_sessions(
     recovered_ids = {tid for _, tid in recover if tid}
     parked_ids = {tid for _, tid in park if tid}
     salvaged_ticket_ids = {tid for _, tid, _ in salvaged if tid}
+    salvaged_result_by_ticket = {tid: result for _, tid, result in salvaged if tid}
     blocked: list[str] = []
     if recovered_ids or parked_ids or salvaged_ticket_ids:
         with dev_queue_lock():
@@ -886,7 +899,8 @@ def flag_silently_idle_daemon_sessions(
                     blocked.append(task.ticket_id)
                     changed = True
                 elif task.ticket_id in salvaged_ticket_ids:
-                    task.status = QueueItemStatus.COMPLETED
+                    result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(result)
                     changed = True
             if changed:
                 save_dev_queue(store)
@@ -1042,6 +1056,7 @@ def _reconcile_locked() -> ReconcileReport:
     phantom_set = set(drift.phantom_session_ids)
     ticket_ids_to_revert: list[str] = []
     salvaged_ticket_ids: list[str] = []
+    salvaged_result_by_ticket: dict[str, AutoDevResult] = {}
     pending_events: list[dict[str, object]] = []
     phantom_names: list[str] = []
     # Accumulate data for session.phantom_reverted events (DAEMON-origin only).
@@ -1066,6 +1081,7 @@ def _reconcile_locked() -> ReconcileReport:
             phantom_names.append(session.name)
             if ticket_id:
                 salvaged_ticket_ids.append(ticket_id)
+                salvaged_result_by_ticket[ticket_id] = result
             salvaged_payload: dict[str, object] = {
                 "session_id": session.id,
                 "session_name": session.name,
@@ -1141,7 +1157,9 @@ def _reconcile_locked() -> ReconcileReport:
                 elif task.ticket_id in salvaged_set:
                     # Terminal-success salvage: retire the task instead of
                     # reverting, so shipped/no_op work is not re-dispatched (#372).
-                    task.status = QueueItemStatus.COMPLETED
+                    # Paused statuses route to BLOCKED_ON_USER instead (#471).
+                    salvaged_result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(salvaged_result)
                     changed = True
             if changed:
                 save_dev_queue(store)
