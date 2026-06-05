@@ -51,6 +51,7 @@ from cw.config import (
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
+from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
     CompletionReason,
     OrchestratorConfig,
@@ -114,6 +115,9 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
 _SILENTLY_IDLE_REASON = "silently_idle"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
+# Reason tag written to SESSION_COMPLETED events when a TIMED_OUT session's PR
+# was found MERGED via issue-linkage (timed_out-merged auto-complete, #488).
+_TIMED_OUT_MERGED_REASON = "timed_out_merged"
 
 # Grace window for a newly-spawned session to register with the daemon
 # (`claude agents --json`). `claude --bg` spawn → daemon roster registration
@@ -1216,6 +1220,107 @@ def _revert_running_tasks_for_sessions(session_ids: set[str]) -> list[str]:
         if reverted:
             save_dev_queue(store)
     return reverted
+
+
+def complete_timed_out_merged_tasks() -> list[str]:
+    """Upgrade PENDING TicketTasks to COMPLETED when their TIMED_OUT session's PR merged.
+
+    Post-pass over TIMED_OUT DAEMON sessions in the lookback window. For each
+    whose dev-queue task is still PENDING and whose linked PR is MERGED (via
+    issue-linkage), upgrades the task to COMPLETED and emits SESSION_COMPLETED
+    with reason="timed_out_merged".
+
+    Called from reconcile() AFTER sessions_lock is released — no gh subprocess
+    runs under the session lock (liveness requirement, #485 SHOULD_FIX 4).
+
+    Returns the list of ticket IDs auto-completed.
+    """
+    state = load_state()
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=TIMED_OUT_MERGED_LOOKBACK_DAYS)
+
+    # Build a cheap lookup: ticket_id → task (for PENDING filter before gh call).
+    task_by_ticket: dict[str, TicketTask] = {
+        t.ticket_id: t for t in load_dev_queue().tasks
+    }
+
+    # Phase 1: Cheap filters before any gh subprocess call.
+    # session.branch is None for all DAEMON sessions (spawn.py never sets it).
+    candidates: list[tuple[Session, str]] = []
+    for session in state.sessions:
+        if session.status != SessionStatus.TIMED_OUT:
+            continue
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        # Guard: completed_at may be None in legacy state files.
+        if session.completed_at is None:
+            continue
+        if session.completed_at < cutoff:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        if ticket_id is None:
+            continue
+        # Idempotency gate: only PENDING tasks are safe to auto-complete.
+        # RUNNING means a new session already picked it up; terminal means done.
+        task = task_by_ticket.get(ticket_id)
+        if task is None or task.status != QueueItemStatus.PENDING:
+            continue
+        candidates.append((session, ticket_id))
+
+    if not candidates:
+        return []
+
+    # Phase 2: One gh call per surviving candidate (outside any lock).
+    to_complete: list[tuple[Session, str]] = []
+    for session, ticket_id in candidates:
+        merged, gh_available = pr_is_merged_for_ticket(ticket_id)
+        if not gh_available:
+            # gh binary absent — skip all remaining candidates.
+            break
+        if merged is None:
+            # Transient error — skip this session only.
+            continue
+        if merged:
+            to_complete.append((session, ticket_id))
+        # merged is False → leave PENDING.
+
+    if not to_complete:
+        return []
+
+    # Phase 3: Acquire only dev_queue_lock for the PENDING→COMPLETED write.
+    completed_ids: list[str] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        changed = False
+        for _, ticket_id in to_complete:
+            for task in store.tasks:
+                if task.ticket_id == ticket_id and task.status == QueueItemStatus.PENDING:
+                    task.status = QueueItemStatus.COMPLETED
+                    completed_ids.append(ticket_id)
+                    changed = True
+                    break
+        if changed:
+            save_dev_queue(store)
+
+    # Phase 4: Emit decision-trace events after the lock releases.
+    for session, ticket_id in to_complete:
+        if ticket_id in completed_ids:
+            record_event(
+                OrchestratorEventType.SESSION_COMPLETED,
+                {
+                    "session_id": session.id,
+                    "session_name": session.name,
+                    "client": session.client,
+                    "ticket_id": ticket_id,
+                    "claude_session_id": session.claude_session_id,
+                    "crashed": False,
+                    "salvaged": True,
+                    "reason": _TIMED_OUT_MERGED_REASON,
+                },
+                correlation_id=ticket_id,
+            )
+
+    return completed_ids
 
 
 def revert_timed_out_tasks() -> list[str]:
