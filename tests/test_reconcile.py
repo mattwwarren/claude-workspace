@@ -34,6 +34,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _SALVAGE_SKIP_REASON,
     _SILENTLY_IDLE_REASON,
     HEADLESS_TIMEOUT_SECONDS,
     IDLE_WATCHDOG_SECONDS,
@@ -3974,6 +3975,7 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
     assert p["ticket_id"] == "TICK-PD"
     assert p["client"] == "client-a"
     assert p["worktree_dirty"] is True
+    assert "worktree_path" in p
     assert events[0].correlation_id == "TICK-PD"
 
 
@@ -4014,7 +4016,12 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     )
     assert len(events) == 1
     p = events[0].payload
+    assert p["session_id"] == "phantom-clean"
+    assert p["ticket_id"] == "TICK-PC"
+    assert p["client"] == "client-a"
     assert p["worktree_dirty"] is False
+    assert "worktree_path" in p
+    assert events[0].correlation_id == "TICK-PC"
 
 
 def test_phantom_reverted_not_emitted_for_user_origin(
@@ -4077,7 +4084,7 @@ def test_salvage_skipped_emitted_for_park_marker(
     assert len(events) == 1
     p = events[0].payload
     assert p["session_id"] == "salvage-skip-1"
-    assert p["reason"] == "park_marker_blocks_salvage"
+    assert p["reason"] == _SALVAGE_SKIP_REASON
     assert p["paused_status"] == _SILENTLY_IDLE_REASON
     assert events[0].correlation_id == "salvage-skip-1"
 
@@ -4136,3 +4143,48 @@ def test_compute_worktree_dirty_returns_false_when_get_client_raises(
         lambda _name: (_ for _ in ()).throw(ValueError("no such client")),
     )
     assert _compute_worktree_dirty("missing-client", "some-branch") is False
+
+
+def test_salvage_skipped_emitted_with_null_ticket_id(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Park-marked session without auto-dev/ prefix: salvage_skipped, ticket_id=None."""
+    worktree = tmp_path / "wt-no-tid"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)
+
+    # Session name without auto-dev/ prefix → ticket_id_for_session returns None.
+    # _is_headless requires a cw-context.json with "headless": true.
+    context_dir = worktree / ".claude"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "cw-context.json").write_text(
+        '{"headless": true, "session_id": "no-tid-sess"}'
+    )
+    sess = Session(
+        id="no-tid-sess",
+        name="client-a/impl",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=tmp_path / "ws",
+        worktree_path=worktree,
+        started_at=started_at,
+        last_result={"paused_status": _SILENTLY_IDLE_REASON},
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-salvage-skip-null-tid",
+        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+    )
+    assert len(events) == 1
+    p = events[0].payload
+    assert p["ticket_id"] is None
+    assert p["reason"] == _SALVAGE_SKIP_REASON
+    assert events[0].correlation_id is None

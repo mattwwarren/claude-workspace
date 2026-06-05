@@ -193,7 +193,7 @@ worker may recover and continue. Visible in `cw event tail` and
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "none | freshness_gate | cap_full | spawn_error | no_pending"
+  "skip_reason": "freshness_gate | cap_full | spawn_error | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of

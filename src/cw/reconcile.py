@@ -112,6 +112,7 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
 _SILENTLY_IDLE_REASON = "silently_idle"
+_SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 
 
 # Grace window for a newly-spawned session to register with the daemon
@@ -569,8 +570,9 @@ def _cleanup_timed_out_worktree(
 def _compute_worktree_dirty(client_name: str, branch: str | None) -> bool:
     """Return True when the worktree has unpushed commits or uncommitted changes.
 
-    Fail-safe: returns False when branch is None, the client config is absent,
-    or any other error occurs — mirrors _cleanup_timed_out_worktree's pattern.
+    Fail-safe: returns False when branch is None or empty, the client config is
+    absent, or any other error occurs — mirrors _cleanup_timed_out_worktree's
+    pattern.
     """
     if not branch:
         return False
@@ -634,16 +636,16 @@ def revert_stalled_headless_sessions(
             isinstance(session.last_result, dict)
             and session.last_result.get("paused_status") == _SILENTLY_IDLE_REASON
         ):
-            _salvage_skip_ticket_id = ticket_id_for_session(session.name)
+            salvage_skip_ticket_id = ticket_id_for_session(session.name)
             record_event(
                 OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
                 {
                     "session_id": session.id,
-                    "ticket_id": _salvage_skip_ticket_id,
-                    "reason": "park_marker_blocks_salvage",
-                    "paused_status": session.last_result.get("paused_status"),
+                    "ticket_id": salvage_skip_ticket_id,
+                    "reason": _SALVAGE_SKIP_REASON,
+                    "paused_status": _SILENTLY_IDLE_REASON,
                 },
-                correlation_id=_salvage_skip_ticket_id,
+                correlation_id=salvage_skip_ticket_id,
             )
             continue
         ticket_id = ticket_id_for_session(session.name)

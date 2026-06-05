@@ -26,6 +26,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     DispatchPlan,
+    DispatchSkipReason,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -2157,7 +2158,7 @@ class TestDispatchTickEvents:
         )
         assert len(events) == 1
         p = events[0].payload
-        assert p["skip_reason"] == "none"
+        assert p["skip_reason"] == DispatchSkipReason.NONE
         assert p["claimed"] == 1
         assert p["client"] == "test-client"
         assert p["cap"] == 1
@@ -2182,7 +2183,7 @@ class TestDispatchTickEvents:
         )
         assert len(events) == 1
         p = events[0].payload
-        assert p["skip_reason"] == "no_pending"
+        assert p["skip_reason"] == DispatchSkipReason.NO_PENDING
         assert p["claimed"] == 0
         assert p["pending"] == 0
 
@@ -2217,7 +2218,7 @@ class TestDispatchTickEvents:
         )
         assert len(events) == 1
         p = events[0].payload
-        assert p["skip_reason"] == "cap_full"
+        assert p["skip_reason"] == DispatchSkipReason.CAP_FULL
         assert p["claimed"] == 0
         assert p["running"] == 1
         assert p["cap"] == 1
@@ -2248,7 +2249,7 @@ class TestDispatchTickEvents:
         )
         assert len(events) == 1
         p = events[0].payload
-        assert p["skip_reason"] == "freshness_gate"
+        assert p["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         assert p["claimed"] == 0
         assert p["pending"] == 2  # both tasks were pending pre-claim
 
@@ -2258,7 +2259,7 @@ class TestDispatchTickEvents:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """Spawn failure → skip_reason='spawn_error'; claimed=partial success."""
+        """Spawn failure → skip_reason='spawn_error', claimed=0."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-SE", client="test-client"))
 
@@ -2273,7 +2274,7 @@ class TestDispatchTickEvents:
         )
         assert len(events) == 1
         p = events[0].payload
-        assert p["skip_reason"] == "spawn_error"
+        assert p["skip_reason"] == DispatchSkipReason.SPAWN_ERROR
         assert p["claimed"] == 0
 
     def test_pending_is_pre_claim_count(

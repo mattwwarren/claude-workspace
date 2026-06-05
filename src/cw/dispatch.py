@@ -19,6 +19,7 @@ from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_que
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
+    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -187,23 +188,23 @@ def dispatch_tick(
             client.name, config.default_max_parallel
         )
 
-        # Pre-claim pending count for dispatch.tick payload.
+        # Pre-claim pending count for dispatch.tick payload. Single lock
+        # acquisition — reused for stale_tasks when stale=True (avoids a
+        # second load on the freshness-gate path).
         with dev_queue_lock():
-            _queue_snapshot = load_dev_queue()
+            queue_snapshot = load_dev_queue()
         pending_count = sum(
             1
-            for t in _queue_snapshot.tasks
+            for t in queue_snapshot.tasks
             if t.client == client.name and t.status == QueueItemStatus.PENDING
         )
 
         if stale:
-            with dev_queue_lock():
-                queue_store = load_dev_queue()
-                stale_tasks = [
-                    {"ticket_id": t.ticket_id, "client": client.name}
-                    for t in queue_store.tasks
-                    if t.client == client.name and t.status == QueueItemStatus.PENDING
-                ]
+            stale_tasks = [
+                {"ticket_id": t.ticket_id, "client": client.name}
+                for t in queue_snapshot.tasks
+                if t.client == client.name and t.status == QueueItemStatus.PENDING
+            ]
             for payload in stale_tasks:
                 record_event(OrchestratorEventType.TICKET_NEEDS_SYNC, payload)
                 if emit is not None:
@@ -223,7 +224,7 @@ def dispatch_tick(
                     "pending": pending_count,
                     "running": running_count,
                     "cap": cap,
-                    "skip_reason": "freshness_gate",
+                    "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
                 },
             )
             continue
@@ -393,13 +394,13 @@ def dispatch_tick(
         # 4. no_pending — loop exited with zero claims and no spawn error
         # 5. none — at least one session spawned
         if cap_full:
-            skip_reason = "cap_full"
+            skip_reason = DispatchSkipReason.CAP_FULL
         elif spawn_error:
-            skip_reason = "spawn_error"
+            skip_reason = DispatchSkipReason.SPAWN_ERROR
         elif client_spawned == 0:
-            skip_reason = "no_pending"
+            skip_reason = DispatchSkipReason.NO_PENDING
         else:
-            skip_reason = "none"
+            skip_reason = DispatchSkipReason.NONE
 
         record_event(
             OrchestratorEventType.DISPATCH_TICK,
