@@ -37,6 +37,7 @@ from cw.config import (
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
+from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
     CompletionReason,
     DispatchSkipReason,
@@ -114,11 +115,6 @@ _CW_PACKAGE_NAME = "claude-workspace"
 # Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
 _LOOP_STALL_CONSECUTIVE_TICKS = 3
 
-# Lookback window (days) for timed_out-merged detection.
-_TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
-
-# GitHub PR state string for a merged PR.
-_GH_PR_STATE_MERGED = "MERGED"
 
 # Seconds of worktree inactivity (no non-.git file modified) before a pane
 # showing an idle shell is considered wedged.
@@ -732,34 +728,16 @@ def _gh_pr_states(branch: str) -> tuple[list[dict[str, Any]], bool]:
         return prs, False
 
 
-def _timed_out_merged_result(
-    session: Session,
-    prs: list[dict[str, Any]],
-    branch: str,
-) -> CheckResult | None:
-    """Return a warn CheckResult if session's PR is MERGED, else None."""
-    if prs and prs[0].get("state") == _GH_PR_STATE_MERGED:
-        return CheckResult(
-            f"timed_out-merged/{session.id}",
-            ok=True,
-            warn=True,
-            detail=(
-                f"session {session.id} is TIMED_OUT but PR for {branch}"
-                " is MERGED — see #315."
-            ),
-        )
-    return None
-
-
 def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
-    """Detect TIMED_OUT sessions whose PR has since merged.
+    """Detect TIMED_OUT sessions whose linked PR has since merged.
 
     Scans TIMED_OUT DAEMON sessions whose completed_at falls within
-    _TIMED_OUT_MERGED_LOOKBACK_DAYS, infers their branch name, and queries
-    ``gh pr list`` to see whether the PR is MERGED. Emits a warn=True result
+    TIMED_OUT_MERGED_LOOKBACK_DAYS, extracts the ticket id from the
+    session name, and uses ``gh issue view`` + ``gh pr view`` to
+    determine whether a linked PR is MERGED. Emits a warn=True result
     per session when a merged PR is found.
     """
-    cutoff = datetime.now(UTC) - timedelta(days=_TIMED_OUT_MERGED_LOOKBACK_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=TIMED_OUT_MERGED_LOOKBACK_DAYS)
     results: list[CheckResult] = []
     gh_missing = False
 
@@ -771,15 +749,12 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
         if session.completed_at is None or session.completed_at < cutoff:
             continue
 
-        branch = session.branch
-        if branch is None:
-            ticket_id = ticket_id_for_session(session.name)
-            branch = f"auto-dev/{ticket_id}" if ticket_id is not None else None
-        if branch is None:
+        ticket_id = ticket_id_for_session(session.name)
+        if ticket_id is None:
             continue
 
-        prs, missing = _gh_pr_states(branch)
-        if missing and not gh_missing:
+        merged, gh_available = pr_is_merged_for_ticket(ticket_id)
+        if not gh_available and not gh_missing:
             results.append(
                 CheckResult(
                     "timed_out-merged",
@@ -791,9 +766,18 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
             gh_missing = True
             continue
 
-        result = _timed_out_merged_result(session, prs, branch)
-        if result is not None:
-            results.append(result)
+        if merged:
+            results.append(
+                CheckResult(
+                    f"timed_out-merged/{session.id}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"session {session.id} is TIMED_OUT but linked PR"
+                        f" for ticket {ticket_id} is MERGED — see #315."
+                    ),
+                )
+            )
 
     return results
 
