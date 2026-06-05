@@ -4826,3 +4826,271 @@ class TestDevQueueStatusWithTick:
         assert "tick-client" in result.output
         assert "claimed=1" in result.output
         assert "skip=cap_full" in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueWait (GitHub issue #474)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueWait:
+    """Tests for ``cw dev-queue wait``."""
+
+    def _seed_task(
+        self,
+        tmp_config_dir: Path,
+        ticket_id: str,
+        status: "QueueItemStatus",
+        session_id: str | None = "sess-wait",
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, TicketTask
+
+        store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="genhealth",
+                    status=status,
+                    session_id=session_id,
+                )
+            ]
+        )
+        save_dev_queue(store)
+
+    def test_wait_completed_exit_0(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """COMPLETED ticket → exit 0."""
+        from cw.cli import _WAIT_EXIT_FAILED
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-10",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            session_id="sess-10",
+        )
+        monkeypatch.setattr(
+            "cw.cli.wait_for_terminal",
+            lambda ticket_id, client, timeout: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-10", "--client", "genhealth"]
+        )
+        assert result.exit_code == 0, result.output
+        assert _WAIT_EXIT_FAILED != 0  # sanity: 0 is distinct from FAILED
+
+    def test_wait_failed_exit_1(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILED ticket → exit _WAIT_EXIT_FAILED (1)."""
+        from cw.cli import _WAIT_EXIT_FAILED
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-11",
+            client="genhealth",
+            status=QueueItemStatus.FAILED,
+        )
+        monkeypatch.setattr(
+            "cw.cli.wait_for_terminal",
+            lambda ticket_id, client, timeout: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-11", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_FAILED
+
+    def test_wait_cancelled_exit_1(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CANCELLED ticket → exit _WAIT_EXIT_FAILED (1)."""
+        from cw.cli import _WAIT_EXIT_FAILED
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-12",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+        )
+        monkeypatch.setattr(
+            "cw.cli.wait_for_terminal",
+            lambda ticket_id, client, timeout: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-12", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_FAILED
+
+    def test_wait_blocked_on_user_exit_2(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BLOCKED_ON_USER ticket → exit _WAIT_EXIT_BLOCKED (2)."""
+        from cw.cli import _WAIT_EXIT_BLOCKED
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-13",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        monkeypatch.setattr(
+            "cw.cli.wait_for_terminal",
+            lambda ticket_id, client, timeout: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-13", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_BLOCKED
+
+    def test_wait_timeout_exit_124(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TimeoutError from wait_for_terminal → exit _WAIT_EXIT_TIMEOUT (124)."""
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+
+        def _raise_timeout(ticket_id: str, client: str, timeout: float) -> None:
+            raise TimeoutError
+
+        monkeypatch.setattr("cw.cli.wait_for_terminal", _raise_timeout)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-14", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT
+
+    def test_wait_json_output_shape(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--json emits all 4 required keys with correct values."""
+        import json as _json
+
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-15",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            session_id="sess-15",
+        )
+        monkeypatch.setattr(
+            "cw.cli.wait_for_terminal",
+            lambda ticket_id, client, timeout: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-15", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["ticket_id"] == "GEN-15"
+        assert payload["client"] == "genhealth"
+        assert payload["status"] == "completed"
+        assert payload["session_id"] == "sess-15"
+
+    def test_wait_json_session_id_null(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--json emits session_id: null (not omitted) when session_id is None."""
+        import json as _json
+
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-16",
+            client="genhealth",
+            status=QueueItemStatus.FAILED,
+            session_id=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.wait_for_terminal",
+            lambda ticket_id, client, timeout: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-16", "--client", "genhealth", "--json"],
+        )
+        from cw.cli import _WAIT_EXIT_FAILED
+
+        assert result.exit_code == _WAIT_EXIT_FAILED
+        payload = _json.loads(result.output.strip())
+        assert "session_id" in payload
+        assert payload["session_id"] is None
+
+    def test_wait_json_timeout(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--json on timeout emits status=timeout with session_id: null."""
+        import json as _json
+
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+
+        def _raise_timeout(ticket_id: str, client: str, timeout: float) -> None:
+            raise TimeoutError
+
+        monkeypatch.setattr("cw.cli.wait_for_terminal", _raise_timeout)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "wait",
+                "GEN-17",
+                "--client",
+                "genhealth",
+                "--json",
+            ],
+        )
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT
+        payload = _json.loads(result.output.strip())
+        assert payload["status"] == "timeout"
+        assert payload["session_id"] is None
+
+    def test_wait_timeout_option_wiring(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--timeout value is forwarded to wait_for_terminal."""
+        from cw.models import QueueItemStatus, TicketTask
+
+        captured: list[float] = []
+        task = TicketTask(
+            ticket_id="GEN-18",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+        )
+
+        def _capture(ticket_id: str, client: str, timeout: float) -> TicketTask:
+            captured.append(timeout)
+            return task
+
+        monkeypatch.setattr("cw.cli.wait_for_terminal", _capture)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "wait",
+                "GEN-18",
+                "--client",
+                "genhealth",
+                "--timeout",
+                "42",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert captured == [42.0]
+
+    def test_wait_exit_codes_match_constants(self) -> None:
+        """Named exit-code constants have the expected integer values."""
+        from cw.cli import _WAIT_EXIT_BLOCKED, _WAIT_EXIT_FAILED, _WAIT_EXIT_TIMEOUT
+
+        assert _WAIT_EXIT_FAILED == 1
+        assert _WAIT_EXIT_BLOCKED == 2
+        assert _WAIT_EXIT_TIMEOUT == 124

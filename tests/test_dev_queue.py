@@ -25,6 +25,7 @@ from cw.dev_queue import (
     resolve_client,
     save_dev_queue,
     save_plan,
+    wait_for_terminal,
 )
 from cw.exceptions import CwError
 from cw.models import (
@@ -1134,3 +1135,158 @@ class TestMigrateDevQueue:
         raw: dict[str, object] = {"schema_version": 1}
         migrated = migrate_dev_queue(raw)
         assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# TestWaitForTerminal
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForTerminal:
+    """Tests for wait_for_terminal()."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_consume(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub consume_completed_sessions so tests don't touch event cursor."""
+        monkeypatch.setattr(
+            "cw.dev_queue.consume_completed_sessions", lambda: 0
+        )
+
+    def test_wait_completed_returns_immediately(self, tmp_config_dir: Path) -> None:
+        """COMPLETED ticket returns on the first load, no polling."""
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            session_id="sess-1",
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        result = wait_for_terminal("GEN-1", "genhealth", timeout=5, poll_interval=0)
+        assert result.status == QueueItemStatus.COMPLETED
+        assert result.session_id == "sess-1"
+
+    def test_wait_failed_returns_immediately(self, tmp_config_dir: Path) -> None:
+        """FAILED ticket returns immediately."""
+        task = TicketTask(
+            ticket_id="GEN-2",
+            client="genhealth",
+            status=QueueItemStatus.FAILED,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        result = wait_for_terminal("GEN-2", "genhealth", timeout=5, poll_interval=0)
+        assert result.status == QueueItemStatus.FAILED
+
+    def test_wait_cancelled_returns_immediately(self, tmp_config_dir: Path) -> None:
+        """CANCELLED ticket returns immediately."""
+        task = TicketTask(
+            ticket_id="GEN-3",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        result = wait_for_terminal("GEN-3", "genhealth", timeout=5, poll_interval=0)
+        assert result.status == QueueItemStatus.CANCELLED
+
+    def test_wait_blocked_on_user_returns_immediately(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """BLOCKED_ON_USER ticket returns immediately."""
+        task = TicketTask(
+            ticket_id="GEN-4",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        result = wait_for_terminal("GEN-4", "genhealth", timeout=5, poll_interval=0)
+        assert result.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_wait_already_terminal_at_start(self, tmp_config_dir: Path) -> None:
+        """Already-COMPLETED ticket never enters the polling loop."""
+        task = TicketTask(
+            ticket_id="GEN-5",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        # timeout=0 — would immediately time out if polling were entered
+        result = wait_for_terminal("GEN-5", "genhealth", timeout=0, poll_interval=0)
+        assert result.status == QueueItemStatus.COMPLETED
+
+    def test_wait_running_then_completed(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RUNNING on first tick, COMPLETED on second tick."""
+        task = TicketTask(
+            ticket_id="GEN-6",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-6",
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        call_count = 0
+
+        def _side_effect() -> int:
+            nonlocal call_count
+            call_count += 1
+            # On the second consume call, transition the task to COMPLETED
+            if call_count >= 2:
+                updated = load_dev_queue()
+                for t in updated.tasks:
+                    if t.ticket_id == "GEN-6":
+                        t.status = QueueItemStatus.COMPLETED
+                save_dev_queue(updated)
+            return 0
+
+        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", _side_effect)
+
+        result = wait_for_terminal("GEN-6", "genhealth", timeout=60, poll_interval=0)
+        assert result.status == QueueItemStatus.COMPLETED
+        assert call_count >= 2
+
+    def test_wait_timeout_raises(self, tmp_config_dir: Path) -> None:
+        """Stays RUNNING past timeout → raises TimeoutError."""
+        task = TicketTask(
+            ticket_id="GEN-7",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        with pytest.raises(TimeoutError):
+            wait_for_terminal("GEN-7", "genhealth", timeout=0, poll_interval=0)
+
+    def test_wait_not_found_raises_cw_error(self, tmp_config_dir: Path) -> None:
+        """Ticket not in queue raises CwError."""
+        store = DevQueueStore(tasks=[])
+        save_dev_queue(store)
+
+        with pytest.raises(CwError, match="No dev-queue task found"):
+            wait_for_terminal("GEN-999", "genhealth", timeout=5, poll_interval=0)
+
+    def test_wait_session_id_none(self, tmp_config_dir: Path) -> None:
+        """session_id=None on a terminal task does not cause errors."""
+        task = TicketTask(
+            ticket_id="GEN-8",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            session_id=None,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        result = wait_for_terminal("GEN-8", "genhealth", timeout=5, poll_interval=0)
+        assert result.status == QueueItemStatus.COMPLETED
+        assert result.session_id is None
