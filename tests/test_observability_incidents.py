@@ -15,6 +15,7 @@ Incidents covered:
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +29,7 @@ from cw.config import save_state
 from cw.dev_queue import save_dev_queue
 from cw.events import read_events, record_event
 from cw.models import (
+    ClientConfig,
     CwState,
     DevQueueStore,
     DispatchSkipReason,
@@ -58,8 +60,6 @@ def _make_daemon_session(
     status: SessionStatus = SessionStatus.ACTIVE,
 ) -> Session:
     """Build a minimal DAEMON-origin session for replay fixtures."""
-    from cw.models import ClientConfig
-
     return Session(
         id=sid,
         name=f"{client}/auto-dev/{ticket_id}",
@@ -170,6 +170,7 @@ def test_incident_421_phantom_dirty_worktree(
 # ---------------------------------------------------------------------------
 
 _FROZEN_418 = "2026-06-05T12:00:00Z"
+_NOW_418 = datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC)
 _STARTED_LONG_AGO = datetime(2026, 6, 5, 0, 0, 0, tzinfo=UTC)  # 12 h before frozen now
 
 
@@ -192,7 +193,7 @@ def test_incident_418_silently_idle_emits_salvage_skipped(
     state = CwState(sessions=[sess])
     monkeypatch.setattr("cw.reconcile._is_headless", lambda *_: True)
 
-    now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC)
+    now = _NOW_418
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
 
     events = read_events(
@@ -224,7 +225,7 @@ def test_incident_418_terminal_sentinel_no_salvage_skip(
     state = CwState(sessions=[sess])
     monkeypatch.setattr("cw.reconcile._is_headless", lambda *_: True)
 
-    now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC)
+    now = _NOW_418
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
 
     events = read_events(
@@ -266,9 +267,9 @@ def test_incident_315_timed_out_merged_warns(
 
     monkeypatch.setattr(
         "cw.doctor._sp.run",
-        lambda *_args, **_kwargs: type(
-            "R", (), {"returncode": 0, "stdout": '[{"state":"MERGED"}]'}
-        )(),
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='[{"state":"MERGED"}]', stderr=""
+        ),
     )
 
     results = _check_timed_out_merged(state)
