@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from cw.atomic import atomic_write_text
@@ -29,6 +30,17 @@ from cw.models import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+_WAIT_POLL_INTERVAL: int = 5
+
+_TERMINAL_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [
+        QueueItemStatus.COMPLETED,
+        QueueItemStatus.FAILED,
+        QueueItemStatus.CANCELLED,
+        QueueItemStatus.BLOCKED_ON_USER,
+    ]
+)
 
 
 @contextlib.contextmanager
@@ -284,3 +296,63 @@ def list_tickets(client: str | None = None) -> list[TicketTask]:
     if client is None:
         return list(store.tasks)
     return [t for t in store.tasks if t.client == client]
+
+
+def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask:
+    """Return the TicketTask matching (ticket_id, client) or raise CwError."""
+    matches = [
+        t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+    ]
+    if not matches:
+        msg = f"No dev-queue task found for ticket '{ticket_id}' in client '{client}'."
+        raise CwError(msg)
+    return matches[0]
+
+
+def consume_completed_sessions() -> int:
+    """Thin wrapper around dispatch.consume_completed_sessions.
+
+    Exists as a named module-level function so that tests can monkeypatch
+    ``cw.dev_queue.consume_completed_sessions`` without depending on a
+    module-level circular import.  The real import is deferred to call time
+    to break the dev_queue ↔ dispatch circular dependency.
+    """
+    from cw.dispatch import consume_completed_sessions as _impl
+
+    return _impl()
+
+
+def wait_for_terminal(
+    ticket_id: str,
+    client: str,
+    *,
+    timeout: float,
+    poll_interval: float = _WAIT_POLL_INTERVAL,
+) -> TicketTask:
+    """Block until the given ticket reaches a terminal status.
+
+    Calls consume_completed_sessions() once per poll tick before reading the
+    queue, so it works whether or not a dispatch loop is active.
+
+    # Why: before #471 merges, TIMED_OUT-but-PR-merged tickets may stay PENDING;
+    # wait will then hit --timeout (exit 124) rather than returning COMPLETED.
+
+    Terminal statuses: COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER.
+    Raises CwError if the ticket is not found.
+    Raises TimeoutError if *timeout* seconds elapse before a terminal status.
+    """
+    store = load_dev_queue()
+    task = _find_ticket(store, ticket_id, client)
+    if task.status in _TERMINAL_STATUSES:
+        return task
+
+    deadline = time.monotonic() + timeout
+    while True:
+        consume_completed_sessions()
+        store = load_dev_queue()
+        task = _find_ticket(store, ticket_id, client)
+        if task.status in _TERMINAL_STATUSES:
+            return task
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        time.sleep(poll_interval)
