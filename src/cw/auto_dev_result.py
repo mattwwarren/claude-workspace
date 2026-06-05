@@ -169,7 +169,7 @@ PlanSource = Literal[
 
 
 class Scope(BaseModel):
-    tier: ScopeTier
+    tier: ScopeTier | None = None
     files: int
     lines_estimate: int
     lines_actual: int | None = None
@@ -228,7 +228,7 @@ class AgentHealthEntry(BaseModel):
 
 
 class Health(BaseModel):
-    lowest_agent_confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    lowest_agent_confidence: Literal["HIGH", "MEDIUM", "LOW"] | None = None
     any_incomplete_risk: bool
     shortcuts: list[str] = Field(default_factory=list)
     recommendation: Literal["PROCEED", "EXIT_FOR_HUMAN_REVIEW"]
@@ -451,6 +451,20 @@ class AutoDevResult(BaseModel):
         if not exited_pre_impl and self.scope.lines_actual is None:
             msg = (
                 "scope.lines_actual must be non-null when "
+                f"stage_reached={self.stage_reached!r}"
+            )
+            raise ValueError(msg)
+
+        # §3.3 scope.tier and health.lowest_agent_confidence are required at
+        # post-impl stages but null-allowed at pre-impl exits (issue #416).
+        if not exited_pre_impl and self.scope.tier is None:
+            msg = (
+                f"scope.tier must be non-null when stage_reached={self.stage_reached!r}"
+            )
+            raise ValueError(msg)
+        if not exited_pre_impl and self.health.lowest_agent_confidence is None:
+            msg = (
+                "health.lowest_agent_confidence must be non-null when "
                 f"stage_reached={self.stage_reached!r}"
             )
             raise ValueError(msg)
@@ -874,6 +888,46 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
                     payload.get("schema_version"),
                 )
                 payload["next_actions"] = []
+
+    # Pre-validation normalization for pre-impl stages + lines_actual=0
+    # (issue #416, follow-up from #399). Workers sometimes emit lines_actual=0
+    # instead of null at pre-impl stages. Only integer 0 is coerced; any other
+    # non-null value stays intact (hard error per §3.3 invariant). Applies to
+    # all statuses (distinct from the no_op coerce above which is status-gated).
+    _scope_gen = payload.get("scope")
+    if isinstance(_scope_gen, dict):
+        _raw_stage_gen = payload.get("stage_reached", "")
+        _eff_stage_gen = (
+            _STAGE_REACHED_ALIASES.get(_raw_stage_gen, _raw_stage_gen)
+            if isinstance(_raw_stage_gen, str)
+            else _raw_stage_gen
+        )
+        if (
+            _eff_stage_gen in ("stage1_pre_flight", "stage1_plan")
+            and _scope_gen.get("lines_actual") == 0
+        ):
+            _log.warning(
+                "auto-dev: pre-impl sentinel had lines_actual=0; coercing to null "
+                "(ticket=%s, schema_version=%s)",
+                payload.get("ticket_id", "unknown"),
+                payload.get("schema_version"),
+            )
+            _scope_gen["lines_actual"] = None
+
+    # Pre-validation normalization for shipped + missing wait_for_ci (issue
+    # #417). An already-auto-merged PR legitimately exits without wait_for_ci.
+    # The §4.3 model_validator rejects this; coerce at the parse boundary.
+    # The strict model_validator rule is preserved — this covers producer drift.
+    if raw_status == "shipped":
+        _na = payload.get("next_actions")
+        if isinstance(_na, list) and "wait_for_ci" not in _na:
+            _log.warning(
+                "auto-dev: shipped sentinel missing wait_for_ci; injecting "
+                "(ticket=%s, schema_version=%s)",
+                payload.get("ticket_id", "unknown"),
+                payload.get("schema_version"),
+            )
+            payload["next_actions"] = [*_na, "wait_for_ci"]
 
     try:
         return AutoDevResult.model_validate(payload)
