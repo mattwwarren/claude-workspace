@@ -41,6 +41,7 @@ from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _claude_agents_json,
+    complete_timed_out_merged_tasks,
     compute_drift,
     flag_silently_idle_daemon_sessions,
     reconcile,
@@ -3562,8 +3563,9 @@ def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
         "plan_pending_approval",
         "review_pending_approval",
         "merge_gate_blocked",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
+        "blocked",
+        "shipped",
+        "no_op",
     ],
 )
 def test_salvage_all_terminal_statuses_from_phantom(
@@ -3635,13 +3637,83 @@ def test_salvage_all_terminal_statuses_from_phantom(
 @pytest.mark.parametrize(
     "status",
     [
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    ],
+)
+def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
+    status: str,
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom session whose transcript emits a paused status must be salvaged and
+    the queue task must be set to BLOCKED_ON_USER (not COMPLETED), so downstream
+    operators know the session requires human input before re-dispatch (#471).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    ticket_id = f"471p-{status}"
+    worktree = tmp_path / f"wt-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # Past the spawn grace window but well under headless budget (phantom path).
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        ticket_id, worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(home, worktree, f"uuid-{status}", payload)
+
+    alive = _mk_session("alive-471", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert ticket_id not in report.reverted_ticket_ids, (
+        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged paused)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        f"status={status!r}: session must be COMPLETED after salvage"
+    )
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        f"status={status!r}: queue task must be BLOCKED_ON_USER for paused status"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
         "scope_exceeded",
         "forbidden_area",
         "plan_pending_approval",
         "review_pending_approval",
         "merge_gate_blocked",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
+        "blocked",
+        "shipped",
+        "no_op",
     ],
 )
 def test_salvage_all_terminal_statuses_from_stalled(
@@ -3694,6 +3766,66 @@ def test_salvage_all_terminal_statuses_from_stalled(
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
     assert task.status == QueueItemStatus.COMPLETED, (
         f"status={status!r}: queue task must be COMPLETED, not re-dispatched"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    ],
+)
+def test_salvage_paused_statuses_from_stalled_route_to_blocked_on_user(
+    status: str,
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stalled headless session with a paused status in transcript must be salvaged
+    and the queue task set to BLOCKED_ON_USER, not COMPLETED (#471)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    ticket_id = f"471s-{status}"
+    worktree = tmp_path / f"wts-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(home, worktree, f"uuid-s-{status}", payload)
+
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=OrchestratorConfig()
+    )
+
+    assert ticket_id not in reverted, (
+        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged paused)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        f"status={status!r}: session must be COMPLETED after salvage"
+    )
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        f"status={status!r}: queue task must be BLOCKED_ON_USER for paused status"
     )
 
 
@@ -4188,3 +4320,202 @@ def test_salvage_skipped_emitted_with_null_ticket_id(
     assert p["ticket_id"] is None
     assert p["reason"] == _SALVAGE_SKIP_REASON
     assert events[0].correlation_id is None
+
+
+# ---------------------------------------------------------------------------
+# complete_timed_out_merged_tasks tests (#471)
+# ---------------------------------------------------------------------------
+
+
+def _mk_timed_out_daemon_session(
+    ticket_id: str,
+    completed_at: datetime,
+    branch: str | None = None,
+) -> Session:
+    """Build a TIMED_OUT DAEMON session for complete_timed_out_merged_tasks tests."""
+    return Session(
+        id=ticket_id,
+        name=f"client-a/auto-dev/{ticket_id}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=None,
+        started_at=completed_at - timedelta(hours=1),
+        completed_at=completed_at,
+        completed_reason=CompletionReason.TIMED_OUT,
+        branch=branch,
+    )
+
+
+def test_complete_timed_out_merged_tasks_pr_merged(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT DAEMON session within 7 days, PR merged → task set to COMPLETED."""
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    completed_at = now - timedelta(days=2)  # within 7-day lookback
+
+    sess = _mk_timed_out_daemon_session(
+        "471m-1", completed_at, branch="auto-dev/471m-1"
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="471m-1",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id=None,
+                )
+            ]
+        )
+    )
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        class _Result:
+            returncode = 0
+            stdout = json.dumps([{"state": "MERGED"}])
+
+        return _Result()
+
+    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+
+    with freezegun.freeze_time(now):
+        completed = complete_timed_out_merged_tasks()
+
+    assert "471m-1" in completed
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "471m-1")
+    assert task.status == QueueItemStatus.COMPLETED
+
+
+def test_complete_timed_out_merged_tasks_pr_not_merged(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT DAEMON session within 7 days, PR not merged → task stays PENDING."""
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    completed_at = now - timedelta(days=2)
+
+    sess = _mk_timed_out_daemon_session(
+        "471m-2", completed_at, branch="auto-dev/471m-2"
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="471m-2",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id=None,
+                )
+            ]
+        )
+    )
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        class _Result:
+            returncode = 0
+            stdout = json.dumps([{"state": "OPEN"}])
+
+        return _Result()
+
+    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+
+    with freezegun.freeze_time(now):
+        completed = complete_timed_out_merged_tasks()
+
+    assert completed == []
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "471m-2")
+    assert task.status == QueueItemStatus.PENDING
+
+
+def test_complete_timed_out_merged_tasks_gh_unavailable(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT DAEMON session, gh raises FileNotFoundError → no change to task."""
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    completed_at = now - timedelta(days=2)
+
+    sess = _mk_timed_out_daemon_session(
+        "471m-3", completed_at, branch="auto-dev/471m-3"
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="471m-3",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id=None,
+                )
+            ]
+        )
+    )
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        raise FileNotFoundError("gh not found")
+
+    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+
+    with freezegun.freeze_time(now):
+        completed = complete_timed_out_merged_tasks()
+
+    assert completed == []
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "471m-3")
+    assert task.status == QueueItemStatus.PENDING
+
+
+def test_complete_timed_out_merged_tasks_outside_lookback(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT DAEMON session older than 7 days → no change (outside lookback)."""
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    completed_at = now - timedelta(days=8)  # outside 7-day lookback
+
+    sess = _mk_timed_out_daemon_session(
+        "471m-4", completed_at, branch="auto-dev/471m-4"
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="471m-4",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id=None,
+                )
+            ]
+        )
+    )
+
+    called: list[bool] = []
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        called.append(True)
+
+        class _Result:
+            returncode = 0
+            stdout = json.dumps([{"state": "MERGED"}])
+
+        return _Result()
+
+    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+
+    with freezegun.freeze_time(now):
+        completed = complete_timed_out_merged_tasks()
+
+    assert completed == []
+    # gh should not have been called at all (skipped before branch lookup).
+    assert called == []
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "471m-4")
+    assert task.status == QueueItemStatus.PENDING
