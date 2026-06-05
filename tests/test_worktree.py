@@ -1715,3 +1715,71 @@ class TestWorktreeHasUnsavedWork:
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert worktree_has_unsaved_work(client, "auto-dev/offline") is True
+
+    def test_returns_true_when_origin_absent_and_local_default_has_commits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Level 3: origin absent, local default present, has commits → True."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-level3"
+        wt_path.mkdir(parents=True)
+
+        call_count: list[int] = [0]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args:
+                result.returncode = 128  # origin/<branch> does NOT exist
+                result.stdout = ""
+            elif "log" in args:
+                call_count[0] += 1
+                if call_count[0] <= 1:
+                    # Level 2: origin/main absent
+                    result.returncode = 128
+                    result.stdout = ""
+                else:
+                    # Level 3: local main present, commits beyond it
+                    result.returncode = 0
+                    result.stdout = "abc1234 local commit\n"
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/level3") is True
+
+    def test_returns_false_when_origin_absent_and_local_default_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Level 3: origin absent, local default present, no commits → False."""
+        client = self._client(tmp_path)
+        wt_path = tmp_path / "wt" / "auto-dev-level3-clean"
+        wt_path.mkdir(parents=True)
+
+        call_count: list[int] = [0]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "status" in args:
+                result.stdout = ""  # clean working tree
+            elif "rev-parse" in args:
+                result.returncode = 128  # origin/<branch> does NOT exist
+                result.stdout = ""
+            elif "log" in args:
+                call_count[0] += 1
+                if call_count[0] <= 1:
+                    # Level 2: origin/main absent
+                    result.returncode = 128
+                    result.stdout = ""
+                else:
+                    # Level 3: local main present, no commits beyond it
+                    result.returncode = 0
+                    result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert worktree_has_unsaved_work(client, "auto-dev/level3-clean") is False
