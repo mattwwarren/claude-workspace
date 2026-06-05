@@ -484,6 +484,10 @@ def _apply_events_to_store(
         for task in store.tasks:
             if task.ticket_id != ticket_id:
                 continue
+            # Why: reconcile may have already set this task to BLOCKED_ON_USER
+            # (salvaged paused-status session). The task is no longer RUNNING,
+            # so this event is harmlessly skipped — overwriting with COMPLETED
+            # would shadow BLOCKED_ON_USER, which downstream operators need.
             if task.status != QueueItemStatus.RUNNING:
                 continue
             # Disambiguate stale events: when the event carries a
