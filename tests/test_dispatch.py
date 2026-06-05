@@ -2128,3 +2128,175 @@ class TestRunDispatchLoopVerbose:
 
         # Should not raise; output is silently discarded
         run_dispatch_loop(once=True, emit=None)
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchTickEvents — dispatch.tick event emission (#459)
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchTickEvents:
+    """dispatch.tick emitted once per client per tick with accurate payload."""
+
+    def test_skip_reason_none_on_successful_spawn(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Successful spawn → skip_reason='none', claimed≥1."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-1", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-none",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == "none"
+        assert p["claimed"] == 1
+        assert p["client"] == "test-client"
+        assert p["cap"] == 1
+        assert events[0].correlation_id is None
+
+    def test_skip_reason_no_pending_when_queue_empty(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """No pending tasks → skip_reason='no_pending', claimed=0."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # No tickets added — queue is empty
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-no-pending",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == "no_pending"
+        assert p["claimed"] == 0
+        assert p["pending"] == 0
+
+    def test_skip_reason_cap_full_when_running_at_cap(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Running session at cap → skip_reason='cap_full', claimed=0."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-CF", client="test-client"))
+
+        # Put an active DAEMON session in state so running_count == cap (1)
+        sess = Session(
+            id="running-sess",
+            name="test-client/auto-dev/OTHER-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-cap-full",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == "cap_full"
+        assert p["claimed"] == 0
+        assert p["running"] == 1
+        assert p["cap"] == 1
+
+    def test_skip_reason_freshness_gate_on_stale_main(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stale main → skip_reason='freshness_gate', claimed=0, pending=pre-claim count."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-FG-1", client="test-client"))
+        add_ticket(TicketTask(ticket_id="TICK-FG-2", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 3),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-freshness",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == "freshness_gate"
+        assert p["claimed"] == 0
+        assert p["pending"] == 2  # both tasks were pending pre-claim
+
+    def test_skip_reason_spawn_error_on_spawn_failure(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Spawn failure → skip_reason='spawn_error'; claimed reflects partial success."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-SE", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(
+            RuntimeError("backend outage"),
+        )
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-spawn-error",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == "spawn_error"
+        assert p["claimed"] == 0
+
+    def test_pending_is_pre_claim_count(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """pending in event payload reflects pre-claim count, not post-claim."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-PRE-1", client="test-client"))
+        add_ticket(TicketTask(ticket_id="TICK-PRE-2", client="test-client"))
+        # cap=1, so only one will be claimed
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-pre-claim",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        # Pre-claim: 2 pending. Post-claim: 1 pending. Event must show 2.
+        assert p["pending"] == 2
+        assert p["claimed"] == 1
