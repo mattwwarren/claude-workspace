@@ -1102,6 +1102,199 @@ class TestNoOpStrayLinesActualCoerce:
 
 
 # ---------------------------------------------------------------------------
+# Issue #416 — pre-impl blocked sentinels with null tier/confidence
+# scope.tier and health.lowest_agent_confidence are Optional for pre-impl exits.
+# When auto-dev exits before scope classification (Stage 0/1), these are
+# legitimately null, but the model previously rejected them with validation_failed.
+# ---------------------------------------------------------------------------
+
+
+class TestPreImplNullTierAndConfidence:
+    """scope.tier and health.lowest_agent_confidence are Optional for pre-impl exits.
+
+    Issue #416: pre-impl blocked sentinels legitimately carry null tier/confidence
+    (no scope was classified). Previously these failed as validation_failed.
+    """
+
+    def test_pre_impl_blocked_null_tier_and_confidence_parses(self) -> None:
+        """blocked at stage1_plan with null tier + confidence parses cleanly."""
+        p = _blocked_payload()
+        p["stage_reached"] = "stage1_plan"
+        p["scope"]["tier"] = None
+        p["scope"]["lines_actual"] = None
+        p["health"]["lowest_agent_confidence"] = None
+        p["branch"] = None
+        p["worktree_path"] = None
+        p["fork_point_sha"] = None
+        p["commits"] = []
+        result = AutoDevResult.model_validate(p)
+        assert result.scope.tier is None
+        assert result.health.lowest_agent_confidence is None
+
+    def test_pre_impl_ambiguities_null_tier_and_confidence_parses(self) -> None:
+        """ambiguities_pending_resolution with null tier/confidence parses."""
+        p = _ambiguities_pending_payload()
+        p["scope"]["tier"] = None
+        result = AutoDevResult.model_validate(p)
+        assert result.scope.tier is None
+
+    def test_post_impl_null_tier_rejected(self) -> None:
+        """scope.tier must be non-null at post-impl stages (stage2_impl+)."""
+        p = _blocked_payload()  # stage2_impl
+        p["scope"]["tier"] = None
+        with pytest.raises(ValidationError, match="scope.tier"):
+            AutoDevResult.model_validate(p)
+
+    def test_post_impl_null_confidence_rejected(self) -> None:
+        """lowest_agent_confidence must be non-null at post-impl stages."""
+        p = _blocked_payload()  # stage2_impl
+        p["health"]["lowest_agent_confidence"] = None
+        with pytest.raises(ValidationError, match="lowest_agent_confidence"):
+            AutoDevResult.model_validate(p)
+
+    def test_regression_gc22_pre_impl_blocked_payload(self) -> None:
+        """Regression: gc#22 shape that triggered validation_failed on valid blocked."""
+        payload = {
+            "schema_version": 4,
+            "ticket_id": "22",
+            "status": "blocked",
+            "stage_reached": "stage1_plan",
+            "scope": {
+                "tier": None,
+                "files": 0,
+                "lines_estimate": 0,
+                "lines_actual": None,
+                "forbidden_touched": False,
+            },
+            "plan_source": "none",
+            "branch": None,
+            "worktree_path": None,
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": None,
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": {
+                "stage": "stage1_plan",
+                "reason": "plan_unsound",
+                "details": "plan direction contradicts architecture",
+            },
+            "next_actions": [],
+        }
+        result = parse_stdout(f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>")
+        assert isinstance(result, AutoDevResult), f"Expected AutoDevResult, got {result}"
+        assert result.status == "blocked"
+        assert result.scope.tier is None
+        assert result.health.lowest_agent_confidence is None
+
+
+class TestShippedWaitForCiInject:
+    """parse_stdout injects wait_for_ci for shipped sentinels missing it.
+
+    Issue #417: an already-auto-merged PR legitimately omits wait_for_ci.
+    """
+
+    def test_parse_stdout_shipped_missing_wait_for_ci_injected(self) -> None:
+        """parse_stdout injects wait_for_ci when shipped + empty next_actions."""
+        p = _shipped_payload()
+        p["next_actions"] = []
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+        assert "wait_for_ci" in result.next_actions
+
+    def test_strict_model_validate_shipped_missing_wait_for_ci_still_rejects(
+        self,
+    ) -> None:
+        """Strict model_validate still rejects shipped without wait_for_ci."""
+        p = _shipped_payload()
+        p["next_actions"] = []
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
+    def test_parse_stdout_shipped_with_wait_for_ci_not_duplicated(self) -> None:
+        """wait_for_ci already present must not be duplicated."""
+        p = _shipped_payload()
+        assert "wait_for_ci" in p["next_actions"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.next_actions.count("wait_for_ci") == 1
+
+
+class TestPreImplLinesActualZeroCoerce:
+    """parse_stdout coerces lines_actual=0 to None at pre-impl stages (all statuses).
+
+    Issue #416: workers emit lines_actual=0 instead of null at pre-impl stages.
+    """
+
+    def test_blocked_stage1_plan_lines_actual_zero_coerced(self) -> None:
+        """Regression: #411 fanout — ambiguities_pending_resolution with lines_actual=0."""
+        payload = {
+            "schema_version": 4,
+            "ticket_id": "411",
+            "status": "ambiguities_pending_resolution",
+            "stage_reached": "stage1_plan",
+            "scope": {
+                "tier": "small",
+                "files": 2,
+                "lines_estimate": 80,
+                "lines_actual": 0,
+                "forbidden_touched": False,
+            },
+            "plan_source": "github_issue_existing",
+            "branch": None,
+            "worktree_path": None,
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "ambiguities": [{"question": "Should this be closed-enum?"}],
+            "premises": [],
+            "next_actions": ["user_resolve_ambiguities"],
+        }
+        result = parse_stdout(f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>")
+        assert isinstance(result, AutoDevResult), f"Expected AutoDevResult, got {result}"
+        assert result.status == "ambiguities_pending_resolution"
+        assert result.scope.lines_actual is None
+
+    def test_pre_impl_lines_actual_nonzero_still_rejects(self) -> None:
+        """lines_actual=50 at stage1_plan → BlockedResult (hard error)."""
+        p = _ambiguities_pending_payload()
+        p["scope"]["lines_actual"] = 50
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+
+    def test_post_impl_lines_actual_zero_not_coerced(self) -> None:
+        """lines_actual=0 at stage2_impl is NOT coerced — post-impl, passes as-is."""
+        p = _blocked_payload()  # stage2_impl
+        p["scope"]["lines_actual"] = 0  # 0 at post-impl is valid (just zero lines)
+        result = parse_stdout(_wrap_sentinel(p))
+        # Either parses or fails, but NOT because of the pre-impl coerce
+        # (the coerce guard should not fire at stage2_impl)
+        # In fact lines_actual=0 is valid at post-impl (non-null, just zero changed)
+        assert isinstance(result, AutoDevResult)
+        assert result.scope.lines_actual == 0
+
+
+# ---------------------------------------------------------------------------
 # blocked + stray next_actions coerce (issue #371 — follow-up to #367/#370)
 # A producer bug emits status=blocked alongside next_actions=['redispatch_ticket']
 # (or other non-user-directed verbs). The §4.3 terminal-reject invariant then
