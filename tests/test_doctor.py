@@ -3236,13 +3236,14 @@ class TestCheckCwVersion:
         source_dir = tmp_path / "claude-workspace"
         source_dir.mkdir()
         (source_dir / "pyproject.toml").write_text(
-            '[project]\nname = "claude-workspace"\nversion = "dev"\n'
+            '[project]\nname = "claude-workspace"\nversion = "0.14.dev1"\n'
         )
         self._patch_dist(
             monkeypatch,
             direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
         )
-        monkeypatch.setattr(importlib.metadata, "version", lambda _pkg: "dev")
+        # "0.14.dev1" → 3 parts but "dev1" is non-numeric → ValueError in _parse_version
+        monkeypatch.setattr(importlib.metadata, "version", lambda _pkg: "0.14.dev1")
         result = _check_cw_version()
         assert result.ok is True
         assert result.warn is True

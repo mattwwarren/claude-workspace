@@ -108,6 +108,9 @@ _CW_VERSION_CHECK_NAME = "cw-version"
 # Reinstall command surfaced in warnings when the installed cw is stale.
 _CW_REINSTALL_CMD = "uv tool install --reinstall claude-workspace"
 
+# Package name used for importlib.metadata lookups.
+_CW_PACKAGE_NAME = "claude-workspace"
+
 # Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
 _LOOP_STALL_CONSECUTIVE_TICKS = 3
 
@@ -881,6 +884,21 @@ def _check_bypass_disclaimer() -> CheckResult:
     )
 
 
+def _parse_version(v: str) -> tuple[int, ...]:
+    """Parse a 'X.Y.Z' version string into a comparable int tuple.
+
+    Returns an empty tuple when the string is absent, too short, or
+    non-numeric — callers treat an empty return as "unparseable".
+    """
+    parts = v.split(".")
+    if len(parts) < _VERSION_PARTS:
+        return ()
+    try:
+        return tuple(int(p) for p in parts[:_VERSION_PARTS])
+    except ValueError:
+        return ()
+
+
 def _check_claude_version() -> CheckResult:
     """Check that the claude binary is reachable and return its version.
 
@@ -916,17 +934,8 @@ def _check_claude_version() -> CheckResult:
 
     # Parse the leading X.Y.Z token from the version line.
     first_token = version_line.split()[0] if version_line else ""
-    parts = first_token.split(".")
-    if len(parts) < _VERSION_PARTS:
-        return CheckResult(
-            "claude-version",
-            ok=True,
-            warn=True,
-            detail=f"could not parse version: {version_line}",
-        )
-    try:
-        parsed = tuple(int(p) for p in parts[:3])
-    except (ValueError, AttributeError):
+    parsed = _parse_version(first_token)
+    if not parsed:
         return CheckResult(
             "claude-version",
             ok=True,
@@ -957,7 +966,7 @@ def _check_cw_version() -> CheckResult:
     source or when the source path is stale/unreadable.
     """
     try:
-        dist = importlib.metadata.distribution("claude-workspace")
+        dist = importlib.metadata.distribution(_CW_PACKAGE_NAME)
     except importlib.metadata.PackageNotFoundError:
         return CheckResult(
             _CW_VERSION_CHECK_NAME,
@@ -982,7 +991,7 @@ def _check_cw_version() -> CheckResult:
             _CW_VERSION_CHECK_NAME,
             ok=True,
             warn=False,
-            detail="installed from registry; skipping source check",
+            detail="malformed direct_url.json; skipping source check",
         )
 
     url = direct_url.get("url", "")
@@ -1020,17 +1029,10 @@ def _check_cw_version() -> CheckResult:
             detail=f"could not read source version from {pyproject_path}",
         )
 
-    installed_version_str = importlib.metadata.version("claude-workspace")
+    installed_version_str = importlib.metadata.version(_CW_PACKAGE_NAME)
 
-    def _parse(v: str) -> tuple[int, ...]:
-        parts = v.split(".")
-        try:
-            return tuple(int(p) for p in parts[:_VERSION_PARTS])
-        except ValueError:
-            return ()
-
-    installed_ver = _parse(installed_version_str)
-    source_ver = _parse(source_version_str)
+    installed_ver = _parse_version(installed_version_str)
+    source_ver = _parse_version(source_version_str)
 
     if not installed_ver or not source_ver:
         return CheckResult(
