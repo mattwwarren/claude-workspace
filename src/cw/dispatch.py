@@ -172,6 +172,30 @@ def dispatch_tick(
             )
             stale = False
 
+        # Count running daemon sessions and cap — hoisted above freshness gate
+        # so all four numeric fields (claimed, pending, running, cap) are
+        # available when emitting dispatch.tick with skip_reason=freshness_gate.
+        running_count = sum(
+            1
+            for s in state.sessions
+            if s.client == client.name
+            and s.origin == SessionOrigin.DAEMON
+            and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+        )
+
+        cap = config.per_client_max_parallel.get(
+            client.name, config.default_max_parallel
+        )
+
+        # Pre-claim pending count for dispatch.tick payload.
+        with dev_queue_lock():
+            _queue_snapshot = load_dev_queue()
+        pending_count = sum(
+            1
+            for t in _queue_snapshot.tasks
+            if t.client == client.name and t.status == QueueItemStatus.PENDING
+        )
+
         if stale:
             with dev_queue_lock():
                 queue_store = load_dev_queue()
@@ -191,24 +215,23 @@ def dispatch_tick(
                         )
                         if warned_stale is not None:
                             warned_stale.add(ticket_key)
+            record_event(
+                OrchestratorEventType.DISPATCH_TICK,
+                {
+                    "client": client.name,
+                    "claimed": 0,
+                    "pending": pending_count,
+                    "running": running_count,
+                    "cap": cap,
+                    "skip_reason": "freshness_gate",
+                },
+            )
             continue
-
-        # Count running daemon sessions for this client
-        running_count = sum(
-            1
-            for s in state.sessions
-            if s.client == client.name
-            and s.origin == SessionOrigin.DAEMON
-            and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
-        )
-
-        cap = config.per_client_max_parallel.get(
-            client.name, config.default_max_parallel
-        )
 
         priority_ids = plan_order_by_client.get(client.name)
         client_spawned = 0
         cap_full = running_count >= cap
+        spawn_error = False
         while running_count < cap:
             task: TicketTask | None = _claim_next_pending(
                 client.name,
@@ -340,6 +363,7 @@ def dispatch_tick(
                 # remaining slots this tick — re-trying the same failing
                 # backend immediately would just spin. See GitHub issue
                 # #149.
+                spawn_error = True
                 _log.exception(
                     "dispatch_tick: spawn failed for %s/%s; reverting task to PENDING",
                     client.name,
@@ -361,6 +385,33 @@ def dispatch_tick(
 
         if emit is not None:
             emit(f"{client.name}: spawned={client_spawned} cap_full={int(cap_full)}")
+
+        # skip_reason: first-match precedence (see operator resolution, issue #459)
+        # 1. freshness_gate — handled by early-continue above
+        # 2. cap_full — running_count >= cap before loop entered
+        # 3. spawn_error — exception broke the loop (regardless of client_spawned)
+        # 4. no_pending — loop exited with zero claims and no spawn error
+        # 5. none — at least one session spawned
+        if cap_full:
+            skip_reason = "cap_full"
+        elif spawn_error:
+            skip_reason = "spawn_error"
+        elif client_spawned == 0:
+            skip_reason = "no_pending"
+        else:
+            skip_reason = "none"
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": client.name,
+                "claimed": client_spawned,
+                "pending": pending_count,
+                "running": running_count,
+                "cap": cap,
+                "skip_reason": skip_reason,
+            },
+        )
 
     return spawned
 
