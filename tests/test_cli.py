@@ -2642,8 +2642,10 @@ _SENTINEL_251_NO_OP = (
 
 _SENTINEL_251_VALIDATION_FAILED = (
     # Valid JSON that fails Pydantic cross-field validation: status=shipped
-    # requires next_actions=["wait_for_ci"] but the list is empty.  Produces
-    # BlockedResult(reason="validation_failed") from parse_stdout §6 (5).
+    # requires pr non-null but pr is null here. Using pr=null instead of the
+    # former wait_for_ci violation because parse_stdout now coerces missing
+    # wait_for_ci on shipped sentinels (issue #417). The pr=null invariant has
+    # no coerce path, so it still produces BlockedResult(reason="validation_failed").
     "<<<AUTO_DEV_RESULT\n"
     "{\n"
     '  "schema_version": 2,\n'
@@ -2657,9 +2659,7 @@ _SENTINEL_251_VALIDATION_FAILED = (
     '  "worktree_path": null,\n'
     '  "fork_point_sha": "abc123",\n'
     '  "commits": ["def456"],\n'
-    '  "pr": {"number": 1, '
-    '"url": "https://github.com/foo/bar/pull/1", '
-    '"auto_merge": true, "base": "main"},\n'
+    '  "pr": null,\n'
     '  "review": {"must_fix_initial": 0, "should_fix": 0, '
     '"fix_cycles_used": 0},\n'
     '  "health": {"lowest_agent_confidence": "HIGH", '
@@ -2668,7 +2668,7 @@ _SENTINEL_251_VALIDATION_FAILED = (
     '"downgrade_applied": false, "fix_loop_escalated": false},\n'
     '  "friction_highlights": [],\n'
     '  "blocker": null,\n'
-    '  "next_actions": []\n'
+    '  "next_actions": ["wait_for_ci"]\n'
     "}\n"
     "AUTO_DEV_RESULT>>>"
 )

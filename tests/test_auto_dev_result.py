@@ -1142,7 +1142,7 @@ class TestPreImplNullTierAndConfidence:
         """scope.tier must be non-null at post-impl stages (stage2_impl+)."""
         p = _blocked_payload()  # stage2_impl
         p["scope"]["tier"] = None
-        with pytest.raises(ValidationError, match="scope.tier"):
+        with pytest.raises(ValidationError, match=r"scope\.tier"):
             AutoDevResult.model_validate(p)
 
     def test_post_impl_null_confidence_rejected(self) -> None:
@@ -1189,8 +1189,11 @@ class TestPreImplNullTierAndConfidence:
             },
             "next_actions": [],
         }
-        result = parse_stdout(f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>")
-        assert isinstance(result, AutoDevResult), f"Expected AutoDevResult, got {result}"
+        sentinel = f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>"
+        result = parse_stdout(sentinel)
+        assert isinstance(result, AutoDevResult), (
+            f"Expected AutoDevResult, got {result}"
+        )
         assert result.status == "blocked"
         assert result.scope.tier is None
         assert result.health.lowest_agent_confidence is None
@@ -1236,7 +1239,7 @@ class TestPreImplLinesActualZeroCoerce:
     """
 
     def test_blocked_stage1_plan_lines_actual_zero_coerced(self) -> None:
-        """Regression: #411 fanout — ambiguities_pending_resolution with lines_actual=0."""
+        """Regression: #411 fanout — ambiguities_pending with lines_actual=0."""
         payload = {
             "schema_version": 4,
             "ticket_id": "411",
@@ -1270,8 +1273,11 @@ class TestPreImplLinesActualZeroCoerce:
             "premises": [],
             "next_actions": ["user_resolve_ambiguities"],
         }
-        result = parse_stdout(f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>")
-        assert isinstance(result, AutoDevResult), f"Expected AutoDevResult, got {result}"
+        sentinel = f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>"
+        result = parse_stdout(sentinel)
+        assert isinstance(result, AutoDevResult), (
+            f"Expected AutoDevResult, got {result}"
+        )
         assert result.status == "ambiguities_pending_resolution"
         assert result.scope.lines_actual is None
 
