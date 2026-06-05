@@ -10,9 +10,12 @@ assert on specific checks.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess as _sp
+import tomllib
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -98,6 +101,12 @@ _MIN_CLAUDE_VERSION = (2, 1, 139)
 
 # Number of components (major.minor.patch) required in a version string.
 _VERSION_PARTS = 3
+
+# Check name for the installed-vs-source cw version drift detector.
+_CW_VERSION_CHECK_NAME = "cw-version"
+
+# Reinstall command surfaced in warnings when the installed cw is stale.
+_CW_REINSTALL_CMD = "uv tool install --reinstall claude-workspace"
 
 # Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
 _LOOP_STALL_CONSECUTIVE_TICKS = 3
@@ -812,6 +821,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
 
     report.checks.append(_check_bypass_disclaimer())
     report.checks.append(_check_claude_version())
+    report.checks.append(_check_cw_version())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_workspace_paths())
@@ -936,6 +946,120 @@ def _check_claude_version() -> CheckResult:
         )
 
     return CheckResult("claude-version", ok=True, detail=version_line)
+
+
+def _check_cw_version() -> CheckResult:
+    """Check whether the installed cw matches the source repo's pyproject.toml version.
+
+    Silent-skips (ok=True, warn=False) for registry/PyPI installs and when
+    package metadata is absent — source-version comparison only makes sense
+    for local installs. Warns (ok=True, warn=True) when installed is behind
+    source or when the source path is stale/unreadable.
+    """
+    try:
+        dist = importlib.metadata.distribution("claude-workspace")
+    except importlib.metadata.PackageNotFoundError:
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=False,
+            detail="installed from registry; skipping source check",
+        )
+
+    direct_url_text = dist.read_text("direct_url.json")
+    if direct_url_text is None:
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=False,
+            detail="installed from registry; skipping source check",
+        )
+
+    try:
+        direct_url: dict[str, object] = json.loads(direct_url_text)
+    except json.JSONDecodeError:
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=False,
+            detail="installed from registry; skipping source check",
+        )
+
+    url = direct_url.get("url", "")
+    if not isinstance(url, str) or not url.startswith("file://"):
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=False,
+            detail="installed from registry; skipping source check",
+        )
+
+    source_path = Path(urllib.parse.urlparse(url).path)
+
+    if not source_path.exists():
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=(
+                f"source path {source_path} no longer exists"
+                f" — run `{_CW_REINSTALL_CMD}`"
+            ),
+        )
+
+    pyproject_path = source_path / "pyproject.toml"
+    try:
+        with pyproject_path.open("rb") as fh:
+            pyproject = tomllib.load(fh)
+        source_version_str: str = pyproject["project"]["version"]
+    except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError, OSError):
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=f"could not read source version from {pyproject_path}",
+        )
+
+    installed_version_str = importlib.metadata.version("claude-workspace")
+
+    def _parse(v: str) -> tuple[int, ...]:
+        parts = v.split(".")
+        try:
+            return tuple(int(p) for p in parts[:_VERSION_PARTS])
+        except ValueError:
+            return ()
+
+    installed_ver = _parse(installed_version_str)
+    source_ver = _parse(source_version_str)
+
+    if not installed_ver or not source_ver:
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=(
+                f"could not compare versions:"
+                f" installed={installed_version_str} source={source_version_str}"
+            ),
+        )
+
+    if installed_ver < source_ver:
+        return CheckResult(
+            _CW_VERSION_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=(
+                f"installed {installed_version_str} < source {source_version_str}"
+                f" — run `{_CW_REINSTALL_CMD}`"
+            ),
+        )
+
+    return CheckResult(
+        _CW_VERSION_CHECK_NAME,
+        ok=True,
+        warn=False,
+        detail=f"installed {installed_version_str} matches source",
+    )
 
 
 def _check_daemon_reachable() -> CheckResult:
