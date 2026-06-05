@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,7 +17,7 @@ from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
 if TYPE_CHECKING:
     import pytest
 
-    from cw.models import ClientConfig, Session, TicketTask
+    from cw.models import ClientConfig, OrchestratorEvent, Session, TicketTask
 
 
 def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2727,3 +2728,166 @@ class TestCheckWorktreePathsSessions:
         report = run_doctor()
         names = [c.name for c in report.checks]
         assert "worktree/summary" in names
+
+
+# ---------------------------------------------------------------------------
+# TestCheckLoopHealth
+# ---------------------------------------------------------------------------
+
+
+class TestCheckLoopHealth:
+    """Tests for _check_loop_health."""
+
+    def _write_dispatch_tick_events(
+        self,
+        ticks: list[dict],  # type: ignore[type-arg]
+        tmp_config_dir: Path,
+    ) -> None:
+        """Write DISPATCH_TICK events to the inbox for testing."""
+        from cw.events import record_event
+        from cw.models import OrchestratorEventType
+
+        for tick in ticks:
+            record_event(OrchestratorEventType.DISPATCH_TICK, tick)
+
+    def test_stall_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """3 consecutive freshness_gate ticks with pending>0, running==0 → warn."""
+        from cw.doctor import _check_loop_health
+        from cw.models import DispatchSkipReason
+
+        ticks = [
+            {
+                "client": "client-a",
+                "pending": 1,
+                "running": 0,
+                "claimed": 0,
+                "cap": 2,
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+            }
+        ] * 3
+        self._write_dispatch_tick_events(ticks, tmp_config_dir)
+        results = _check_loop_health()
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "client-a" in warn_results[0].name
+        assert "stalled" in warn_results[0].detail
+
+    def test_healthy_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Ticks showing normal progress (no_pending) → no warn."""
+        from cw.doctor import _check_loop_health
+        from cw.models import DispatchSkipReason
+
+        ticks = [
+            {
+                "client": "client-b",
+                "pending": 0,
+                "running": 0,
+                "claimed": 0,
+                "cap": 2,
+                "skip_reason": DispatchSkipReason.NO_PENDING,
+            }
+        ] * 3
+        self._write_dispatch_tick_events(ticks, tmp_config_dir)
+        results = _check_loop_health()
+        assert not any(r.warn for r in results)
+
+    def test_fewer_than_n_events_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Fewer than 3 freshness_gate ticks → no warn (insufficient data)."""
+        from cw.doctor import _check_loop_health
+        from cw.models import DispatchSkipReason
+
+        ticks = [
+            {
+                "client": "client-c",
+                "pending": 2,
+                "running": 0,
+                "claimed": 0,
+                "cap": 2,
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+            }
+        ] * 2
+        self._write_dispatch_tick_events(ticks, tmp_config_dir)
+        results = _check_loop_health()
+        assert not any(r.warn for r in results)
+
+
+# ---------------------------------------------------------------------------
+# TestCheckTimedOutMerged
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTimedOutMerged:
+    """Tests for _check_timed_out_merged."""
+
+    def _make_timed_out_session(
+        self, tmp_path: Path, sid: str = "to-sess"
+    ) -> "Session":
+        """Return a TIMED_OUT DAEMON session with completed_at within 7 days."""
+        from datetime import timedelta
+
+        from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus
+
+        return Session(
+            id=sid,
+            name=f"client-a/auto-dev/{sid}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=1),
+        )
+
+    def test_timed_out_merged_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """TIMED_OUT session + MERGED PR → warn=True."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-merged")
+        state = CwState(sessions=[session])
+
+        # Stub gh to return a MERGED PR.
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *args, **kwargs: type(
+                "R", (), {"returncode": 0, "stdout": '[{"state":"MERGED"}]'}
+            )(),
+        )
+        results = _check_timed_out_merged(state)
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "to-merged" in warn_results[0].detail
+
+    def test_timed_out_open_no_warn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """TIMED_OUT session + OPEN PR → no warn."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-open")
+        state = CwState(sessions=[session])
+
+        # Stub gh to return an OPEN PR.
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *args, **kwargs: type(
+                "R", (), {"returncode": 0, "stdout": '[{"state":"OPEN"}]'}
+            )(),
+        )
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
