@@ -3031,3 +3031,231 @@ class TestCheckTimedOutMerged:
         monkeypatch.setattr("cw.doctor._sp.run", _raise_timeout)
         results = _check_timed_out_merged(state)
         assert not any(r.warn for r in results)
+
+
+# ---------------------------------------------------------------------------
+# _check_cw_version: installed-vs-source version drift detector
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCwVersion:
+    """Direct tests for _check_cw_version via monkeypatched importlib.metadata."""
+
+    def _patch_dist(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        direct_url_text: str | None,
+    ) -> None:
+        import importlib.metadata
+
+        class FakeDist:
+            def read_text(self, filename: str) -> str | None:
+                if filename == "direct_url.json":
+                    return direct_url_text
+                return None
+
+        monkeypatch.setattr(importlib.metadata, "distribution", lambda _pkg: FakeDist())
+
+    def test_package_not_found_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PackageNotFoundError → ok=True, warn=False (registry/unknown install)."""
+        import importlib.metadata
+
+        from cw.doctor import _check_cw_version
+
+        def _raise(_pkg: str) -> object:
+            raise importlib.metadata.PackageNotFoundError(_pkg)
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _raise)
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is False
+        assert "registry" in result.detail
+
+    def test_registry_install_no_direct_url_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """direct_url.json absent (None) → ok=True, warn=False."""
+        from cw.doctor import _check_cw_version
+
+        self._patch_dist(monkeypatch, direct_url_text=None)
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_registry_install_https_url_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """direct_url.json with https:// URL → ok=True, warn=False."""
+        import json
+
+        from cw.doctor import _check_cw_version
+
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps(
+                {
+                    "url": "https://files.pythonhosted.org/packages/claude-workspace-0.14.2.tar.gz"
+                }
+            ),
+        )
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_stale_source_path_warns_with_reinstall(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-existent source path → ok=True, warn=True, detail names path."""
+        import json
+
+        from cw.doctor import _CW_REINSTALL_CMD, _check_cw_version
+
+        missing_path = "/nonexistent/path/to/claude-workspace"
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{missing_path}"}),
+        )
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert missing_path in result.detail
+        assert _CW_REINSTALL_CMD in result.detail
+
+    def test_missing_pyproject_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Source path exists but pyproject.toml missing → ok=True, warn=True."""
+        import json
+
+        from cw.doctor import _check_cw_version
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
+        )
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is True
+
+    def test_installed_behind_source_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """installed 0.13.0 < source 0.14.2 → ok=True, warn=True with reinstall cmd."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _CW_REINSTALL_CMD, _check_cw_version
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+        )
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
+        )
+        monkeypatch.setattr(importlib.metadata, "version", lambda _pkg: "0.13.0")
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "0.13.0" in result.detail
+        assert "0.14.2" in result.detail
+        assert _CW_REINSTALL_CMD in result.detail
+
+    def test_installed_matches_source_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """installed 0.14.2 == source 0.14.2 → ok=True, warn=False."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _check_cw_version
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+        )
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
+        )
+        monkeypatch.setattr(importlib.metadata, "version", lambda _pkg: "0.14.2")
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_installed_ahead_of_source_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """installed 0.14.3 > source 0.14.2 → ok=True, warn=False (dev scenario)."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _check_cw_version
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+        )
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
+        )
+        monkeypatch.setattr(importlib.metadata, "version", lambda _pkg: "0.14.3")
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_invalid_json_in_direct_url_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Malformed direct_url.json → ok=True, warn=False (silent skip)."""
+        from cw.doctor import _check_cw_version
+
+        self._patch_dist(monkeypatch, direct_url_text="not-valid-json{")
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_unparseable_version_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Non-numeric version strings → ok=True, warn=True with 'could not compare'."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _check_cw_version
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.dev1"\n'
+        )
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
+        )
+        # "0.14.dev1" → 3 parts but "dev1" is non-numeric → ValueError in _parse_version
+        monkeypatch.setattr(importlib.metadata, "version", lambda _pkg: "0.14.dev1")
+        result = _check_cw_version()
+        assert result.ok is True
+        assert result.warn is True
+        assert "could not compare" in result.detail
+
+    def test_check_included_in_run_doctor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """_check_cw_version is wired into run_doctor output."""
+        from cw.doctor import _CW_VERSION_CHECK_NAME, run_doctor
+
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        check_names = [c.name for c in report.checks]
+        assert _CW_VERSION_CHECK_NAME in check_names
