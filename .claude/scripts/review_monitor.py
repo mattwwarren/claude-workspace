@@ -16,16 +16,17 @@ import argparse
 import functools
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -81,12 +82,25 @@ DM_ESCALATION_COOLDOWN = timedelta(hours=4)
 # GitHub login suffixes that identify automated accounts
 BOT_LOGIN_SUFFIXES: tuple[str, ...] = ("[bot]", "-ai", "-bot")
 KNOWN_BOT_LOGINS: frozenset[str] = frozenset(
-    {"sourcery-ai", "coderabbitai", "dependabot", "renovate", "github-actions", "codecov-commenter"}
+    {
+        "sourcery-ai",
+        "coderabbitai",
+        "dependabot",
+        "renovate",
+        "github-actions",
+        "codecov-commenter",
+    }
 )
 # Bots whose findings BLOCK merge — must be treated as human-equivalent for
 # auto-fix purposes even though the login matches a bot pattern.
 MERGE_BLOCKING_BOT_LOGINS: frozenset[str] = frozenset(
-    {"sonarqubecloud", "sonarcloud", "sonarqube", "sonarcloud[bot]", "sonarqubecloud[bot]"}
+    {
+        "sonarqubecloud",
+        "sonarcloud",
+        "sonarqube",
+        "sonarcloud[bot]",
+        "sonarqubecloud[bot]",
+    }
 )
 
 # Patterns in review comments that indicate the author is deferring work
@@ -165,7 +179,9 @@ class CommentReviewRef:
     author: str
     submitted_at: str  # ISO-8601 from GitHub
     body: str  # truncated to bound state file size
-    classification: str = "unclassified"  # "unclassified" | "requests_changes" | "neutral"
+    classification: str = (
+        "unclassified"  # "unclassified" | "requests_changes" | "neutral"
+    )
     classified_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -263,7 +279,8 @@ class MonitoredPR:
     """Most recent thread message ts already surfaced; drives incremental reads."""
 
     last_notified_state: str | None = None
-    """The author-attention state most recently local-pinged for (e.g. 'ready_to_approve')."""
+    """The author-attention state most recently local-pinged for
+    (e.g. 'ready_to_approve')."""
 
     last_notified_at: str | None = None
     """ISO-8601 timestamp of the most recent local ping fired."""
@@ -275,7 +292,8 @@ class MonitoredPR:
     """
 
     escalation_count: int = 0
-    """Total DM escalations actually sent for this PR (incremented by ``mark-escalated``)."""
+    """Total DM escalations actually sent for this PR
+    (incremented by ``mark-escalated``)."""
 
     auto_fix_attempts_today: int = 0
     """Count of agent auto-fix dispatches today (resets on date change)."""
@@ -298,7 +316,8 @@ class MonitoredPR:
     actually sent. Set by ``record-channel-bump`` at Desktop *drain* time."""
 
     channel_bump_count: int = 0
-    """Total channel bumps actually sent for this PR (incremented by ``record-channel-bump``)."""
+    """Total channel bumps actually sent for this PR
+    (incremented by ``record-channel-bump``)."""
 
     state_entered_at: str | None = None
     """ISO-8601 timestamp when the current attention_state was first observed."""
@@ -354,7 +373,9 @@ class MonitoredPR:
             "nudge_count": self.nudge_count,
             "our_review_id": self.our_review_id,
             "our_threads": self.our_threads,
-            "thread_status": {tid: ts.to_dict() for tid, ts in self.thread_status.items()},
+            "thread_status": {
+                tid: ts.to_dict() for tid, ts in self.thread_status.items()
+            },
             "delta_findings": self.delta_findings,
             "status": self.status,
             "slack_channel": self.slack_channel,
@@ -370,7 +391,9 @@ class MonitoredPR:
             "last_channel_bump_at": self.last_channel_bump_at,
             "channel_bump_count": self.channel_bump_count,
             "state_entered_at": self.state_entered_at,
-            "comment_reviews": {rid: ref.to_dict() for rid, ref in self.comment_reviews.items()},
+            "comment_reviews": {
+                rid: ref.to_dict() for rid, ref in self.comment_reviews.items()
+            },
             "awaiting_rereview": self.awaiting_rereview,
         }
 
@@ -378,9 +401,13 @@ class MonitoredPR:
     def from_dict(cls, data: dict[str, Any]) -> MonitoredPR:
         """Deserialize from a dictionary."""
         thread_status_raw: dict[str, Any] = data.get("thread_status", {})
-        thread_status = {tid: ThreadStatus.from_dict(ts) for tid, ts in thread_status_raw.items()}
+        thread_status = {
+            tid: ThreadStatus.from_dict(ts) for tid, ts in thread_status_raw.items()
+        }
         comment_reviews_raw: dict[str, Any] = data.get("comment_reviews", {})
-        comment_reviews = {rid: CommentReviewRef.from_dict(d) for rid, d in comment_reviews_raw.items()}
+        comment_reviews = {
+            rid: CommentReviewRef.from_dict(d) for rid, d in comment_reviews_raw.items()
+        }
         return cls(
             role=data["role"],
             repo=data["repo"],
@@ -500,7 +527,9 @@ def load_state(repo: str) -> MonitorState:
             data = json.loads(state_file.read_text())
             central_state = MonitorState.from_dict(data)
         except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
-            logger.warning("Corrupt monitor state file %s, starting fresh: %s", state_file, e)
+            logger.warning(
+                "Corrupt monitor state file %s, starting fresh: %s", state_file, e
+            )
             central_state = MonitorState(monitored={}, completed={})
 
     # Legacy migration: check for old per-project state file
@@ -509,18 +538,31 @@ def load_state(repo: str) -> MonitorState:
             legacy_data = json.loads(LEGACY_STATE_FILE.read_text())
             legacy_state = MonitorState.from_dict(legacy_data)
         except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
-            logger.warning("Corrupt legacy state file %s, skipping migration: %s", LEGACY_STATE_FILE, e)
+            logger.warning(
+                "Corrupt legacy state file %s, skipping migration: %s",
+                LEGACY_STATE_FILE,
+                e,
+            )
             legacy_state = None
 
         if legacy_state is not None:
-            central_state = legacy_state if central_state is None else _merge_states(central_state, legacy_state)
+            central_state = (
+                legacy_state
+                if central_state is None
+                else _merge_states(central_state, legacy_state)
+            )
             # Persist merged state and remove legacy file
             save_state(central_state, repo)
             try:
                 LEGACY_STATE_FILE.unlink()
-                logger.info("Migrated legacy state from %s to central directory", LEGACY_STATE_FILE)
+                logger.info(
+                    "Migrated legacy state from %s to central directory",
+                    LEGACY_STATE_FILE,
+                )
             except OSError as e:
-                logger.warning("Could not delete legacy state file %s: %s", LEGACY_STATE_FILE, e)
+                logger.warning(
+                    "Could not delete legacy state file %s: %s", LEGACY_STATE_FILE, e
+                )
 
     if central_state is None:
         return MonitorState(monitored={}, completed={})
@@ -551,7 +593,7 @@ def _run_gh(args: list[str], repo: str | None = None) -> str:
     if repo is not None:
         cmd = ["gh", "-R", repo, *args]
     try:
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -576,7 +618,7 @@ def _run_git(args: list[str], cwd: str | None = None) -> str:
     if cwd is not None:
         cmd = ["git", "-C", cwd, *args]
     try:
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -801,7 +843,10 @@ def cmd_drop(pr_number: int, repo: str) -> None:
 
 
 def cmd_complete(pr_number: int, repo: str, reason: str) -> None:
-    """Mark a PR as complete and move it out of active monitoring. No-op if not found."""
+    """Mark a PR as complete and move it out of active monitoring.
+
+    No-op if not found.
+    """
     state = load_state(repo)
     key = f"{repo}#{pr_number}"
     if key not in state.monitored:
@@ -818,7 +863,9 @@ def _nudge_activity_check(pr_number: int, repo: str) -> dict[str, Any] | None:
     unreachable or unparseable gh response blocks the nudge rather than risking
     a premature one. Returns ``None`` when a nudge is not blocked on this basis.
     """
-    updated_raw = _run_gh(["pr", "view", str(pr_number), "--json", "updatedAt"], repo=repo)
+    updated_raw = _run_gh(
+        ["pr", "view", str(pr_number), "--json", "updatedAt"], repo=repo
+    )
     if not updated_raw:
         return {
             "allowed": False,
@@ -826,7 +873,7 @@ def _nudge_activity_check(pr_number: int, repo: str) -> dict[str, Any] | None:
         }
     try:
         updated_at_str: str = json.loads(updated_raw)["updatedAt"]
-        updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+        updated_at = datetime.fromisoformat(updated_at_str)
     except (json.JSONDecodeError, ValueError, KeyError):
         return {
             "allowed": False,
@@ -863,7 +910,10 @@ def cmd_nudge_ok(pr_number: int, repo: str) -> dict[str, Any]:
         elapsed = datetime.now(UTC) - last
         if elapsed < NUDGE_COOLDOWN:
             remaining = NUDGE_COOLDOWN - elapsed
-            return {"allowed": False, "reason": f"cooldown active, {remaining} remaining"}
+            return {
+                "allowed": False,
+                "reason": f"cooldown active, {remaining} remaining",
+            }
 
     # Grace period — never nudge before the author has had a fair chance to
     # respond. registered_at ~= when our review was posted; a nudge 43 min after
@@ -909,7 +959,9 @@ def cmd_record_nudge(pr_number: int, repo: str) -> None:
 
 
 # States that indicate the author (user) needs to take action on their own PR.
-USER_ATTENTION_STATES: frozenset[str] = frozenset({"ready_to_approve", "ci_failing", "merge_blocked"})
+USER_ATTENTION_STATES: frozenset[str] = frozenset(
+    {"ready_to_approve", "ci_failing", "merge_blocked"}
+)
 
 # Minimum gap between local ping and Slack escalation for the same state.
 ESCALATION_GRACE = timedelta(minutes=15)
@@ -946,9 +998,11 @@ def cmd_mark_escalated(pr_number: int, repo: str) -> None:
 
 
 def cmd_slack_thread_cursor(pr_number: int, repo: str) -> dict[str, Any]:
-    """Return Slack thread cursor info so a session can call the Slack MCP read_thread tool.
+    """Return Slack thread cursor info so a session can call the Slack MCP
+    read_thread tool.
 
-    Returns ``{"slack_channel": str|None, "slack_ts": str|None, "slack_last_seen_ts": str|None}``.
+    Returns ``{"slack_channel": str|None, "slack_ts": str|None,
+    "slack_last_seen_ts": str|None}``.
     """
     state = load_state(repo)
     key = f"{repo}#{pr_number}"
@@ -974,7 +1028,9 @@ PENDING_STALE_AFTER = timedelta(hours=24)
 # external message — nudge, channel bump, DM escalation, cron-failure alert — is
 # written here as one JSON file for Desktop to pick up and send.
 DESKTOP_QUEUE_DIR = desktop_queue_dir()
-DESKTOP_ACTION_TYPES = frozenset({"nudge", "channel_bump", "dm_escalation", "cron_failure"})
+DESKTOP_ACTION_TYPES = frozenset(
+    {"nudge", "channel_bump", "dm_escalation", "cron_failure"}
+)
 # Per-PR actions get one file per (repo, pr); the rest are batched singletons.
 _PER_PR_ACTIONS = frozenset({"nudge", "dm_escalation"})
 
@@ -983,7 +1039,8 @@ def cmd_consume_pending() -> dict[str, Any]:
     """Scan the pending-inbox directory and register each PR via cmd_register.
 
     Returns a summary dict:
-      {"consumed": [...keys...], "skipped": [...filenames...], "purged": [...filenames...]}
+      {"consumed": [...keys...], "skipped": [...filenames...],
+      "purged": [...filenames...]}
 
     Successfully-registered files are deleted. Files that fail validation are
     kept until PENDING_STALE_AFTER and then purged without registering.
@@ -1044,7 +1101,9 @@ def _file_is_stale(path: Path, now: datetime) -> bool:
     return now - mtime >= PENDING_STALE_AFTER
 
 
-def _desktop_queue_filename(action: str, repo: str | None, pr_number: int | None) -> str:
+def _desktop_queue_filename(
+    action: str, repo: str | None, pr_number: int | None
+) -> str:
     """Deterministic filename — one pending file per (repo, pr, action).
 
     Per-PR actions key on repo+pr; batched/singleton actions (channel_bump,
@@ -1073,7 +1132,10 @@ def cmd_enqueue_action(
     real cooldowns advance only when the consumer calls ``record-*`` at drain.
     """
     if action not in DESKTOP_ACTION_TYPES:
-        msg = f"unknown action type {action!r}; expected one of {sorted(DESKTOP_ACTION_TYPES)}"
+        msg = (
+            f"unknown action type {action!r};"
+            f" expected one of {sorted(DESKTOP_ACTION_TYPES)}"
+        )
         raise ValueError(msg)
     if action in _PER_PR_ACTIONS and (not repo or pr_number is None):
         msg = f"action {action!r} requires both --repo and --pr"
@@ -1189,7 +1251,9 @@ def cmd_confirm_thread(pr_number: int, repo: str, thread_id: str) -> None:
         return
     ts = pr.thread_status.get(thread_id)
     if ts is None:
-        logger.warning("cmd_confirm_thread: thread %r not tracked on %r", thread_id, key)
+        logger.warning(
+            "cmd_confirm_thread: thread %r not tracked on %r", thread_id, key
+        )
         return
     ts.code_changed = True
     _apply_status_transitions(pr, changed=False)
@@ -1206,7 +1270,9 @@ def cmd_confirm_thread(pr_number: int, repo: str, thread_id: str) -> None:
     )
 
 
-def cmd_mark_comment_review(pr_number: int, repo: str, review_id: str, classification: str) -> dict[str, Any]:
+def cmd_mark_comment_review(
+    pr_number: int, repo: str, review_id: str, classification: str
+) -> dict[str, Any]:
     """Persist the skill classifier's verdict on a tracked comment review.
 
     ``classification`` must be either ``"requests_changes"`` or ``"neutral"``.
@@ -1279,7 +1345,9 @@ def _discover_author_threads(
                 )
 
 
-def _collect_deferred_threads_for_followup(pr: MonitoredPR, pr_number: int) -> list[dict[str, Any]]:
+def _collect_deferred_threads_for_followup(
+    pr: MonitoredPR, pr_number: int
+) -> list[dict[str, Any]]:
     """Return deferred-thread metadata suitable for follow-up ticket creation.
 
     Called from ``cmd_check`` when a monitored PR transitions to MERGED.
@@ -1373,14 +1441,21 @@ def _apply_code_changes(
     """
     diff_output = _run_git(["diff", f"{base_sha}..{new_sha}"], cwd=pr.repo_path)
     changed_lines = parse_diff_changed_lines(diff_output)
-    touched = [tid for tid, ts in pr.thread_status.items() if check_code_changed(ts.file, ts.line, changed_lines)]
+    touched = [
+        tid
+        for tid, ts in pr.thread_status.items()
+        if check_code_changed(ts.file, ts.line, changed_lines)
+    ]
     if pr.role == "reviewer" and diff_output:
         return True, diff_output, touched
     return False, None, touched
 
 
-def _apply_status_transitions(pr: MonitoredPR, changed: bool, is_draft: bool = False) -> None:
-    """Apply lifecycle status transitions to *pr* based on thread state and commit changes.
+def _apply_status_transitions(
+    pr: MonitoredPR, changed: bool, is_draft: bool = False
+) -> None:
+    """Apply lifecycle status transitions to *pr* based on thread state and
+    commit changes.
 
     Transitions:
     - ``watching`` → ``ready_to_approve`` when all threads are addressed.
@@ -1402,7 +1477,9 @@ def _apply_status_transitions(pr: MonitoredPR, changed: bool, is_draft: bool = F
         pr.status = "watching"
 
 
-def _refresh_comment_reviews(pr: MonitoredPR, repo: str, pr_number: int, sha_changed: bool, our_username: str) -> bool:
+def _refresh_comment_reviews(
+    pr: MonitoredPR, repo: str, pr_number: int, sha_changed: bool, our_username: str
+) -> bool:
     """Refresh ``pr.comment_reviews`` from GitHub.
 
     A tracked entry is a non-bot ``COMMENTED`` review submitted *after* the
@@ -1442,13 +1519,19 @@ def _refresh_comment_reviews(pr: MonitoredPR, repo: str, pr_number: int, sha_cha
             formal_cutoff = max(formal_cutoff, ts)
 
     if formal_cutoff:
-        pr.comment_reviews = {rid: ref for rid, ref in pr.comment_reviews.items() if ref.submitted_at > formal_cutoff}
+        pr.comment_reviews = {
+            rid: ref
+            for rid, ref in pr.comment_reviews.items()
+            if ref.submitted_at > formal_cutoff
+        }
 
     _collect_new_comment_reviews(pr, reviews, formal_cutoff)
     return _has_engaged_human_reviewer(reviews, our_username)
 
 
-def _collect_new_comment_reviews(pr: MonitoredPR, reviews: list[dict[str, Any]], formal_cutoff: str) -> None:
+def _collect_new_comment_reviews(
+    pr: MonitoredPR, reviews: list[dict[str, Any]], formal_cutoff: str
+) -> None:
     """Insert untracked non-bot ``COMMENTED`` reviews into ``pr.comment_reviews``.
 
     Skips bot authors, bodies emptied to carry only inline file comments, and
@@ -1480,7 +1563,9 @@ def _collect_new_comment_reviews(pr: MonitoredPR, reviews: list[dict[str, Any]],
         )
 
 
-def _has_engaged_human_reviewer(reviews: list[dict[str, Any]], our_username: str) -> bool:
+def _has_engaged_human_reviewer(
+    reviews: list[dict[str, Any]], our_username: str
+) -> bool:
     """Return True when a non-bot reviewer other than us left a non-APPROVED review.
 
     A human reviewer has engaged if anyone non-bot (other than us) left a
@@ -1499,7 +1584,9 @@ def _has_engaged_human_reviewer(reviews: list[dict[str, Any]], our_username: str
 _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
     {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 )
-_PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset({"IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"})
+_PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
+    {"IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"}
+)
 _BLOCKING_MERGE_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND", "BLOCKED"})
 
 
@@ -1587,9 +1674,15 @@ def _collect_pending_comment_reviews(
     ready_to_approve (waiting on required reviews). Only DIRTY/BEHIND beats the
     fallback path.
     """
-    code_fixable_merge_block = merge_blocked and merge_state_status in ("DIRTY", "BEHIND")
+    code_fixable_merge_block = merge_blocked and merge_state_status in (
+        "DIRTY",
+        "BEHIND",
+    )
     no_other_signal = (
-        not code_fixable_merge_block and ci_ok and unaddressed_count == 0 and review_decision != "CHANGES_REQUESTED"
+        not code_fixable_merge_block
+        and ci_ok
+        and unaddressed_count == 0
+        and review_decision != "CHANGES_REQUESTED"
     )
     if pr.role != "author" or not no_other_signal:
         return []
@@ -1606,7 +1699,12 @@ def _collect_pending_comment_reviews(
 
 
 def _complete_terminal_pr(
-    state: MonitorState, key: str, pr: MonitoredPR, pr_number: int, pr_state: str, repo: str
+    state: MonitorState,
+    key: str,
+    pr: MonitoredPR,
+    pr_number: int,
+    pr_state: str,
+    repo: str,
 ) -> dict[str, Any]:
     """Complete a MERGED/CLOSED PR and return its terminal check result."""
     deferred_threads_out: list[dict[str, Any]] = []
@@ -1625,7 +1723,9 @@ def _complete_terminal_pr(
     }
 
 
-def _refresh_threads(pr: MonitoredPR, pr_number: int, our_username: str) -> dict[str, dict[str, Any]]:
+def _refresh_threads(
+    pr: MonitoredPR, pr_number: int, our_username: str
+) -> dict[str, dict[str, Any]]:
     """Fetch review threads from GitHub and update each tracked thread's status.
 
     For author-role PRs, also discovers new threads opened by others. Returns
@@ -1670,13 +1770,17 @@ def _detect_touched_threads(
     repo_path (e.g. a cleaned-up worktree) is skipped, not fatal — the cycle
     still completes; delta detection resumes once the path is valid again.
     """
-    if delta_base_sha != new_sha and pr.repo_path and os.path.isdir(pr.repo_path):
+    if delta_base_sha != new_sha and pr.repo_path and Path(pr.repo_path).is_dir():
         return _apply_code_changes(pr, delta_base_sha, new_sha)
     return False, None, []
 
 
 def _derive_check_signals(
-    pr: MonitoredPR, pr_view: dict[str, Any], *, is_draft: bool, has_prior_human_review: bool
+    pr: MonitoredPR,
+    pr_view: dict[str, Any],
+    *,
+    is_draft: bool,
+    has_prior_human_review: bool,
 ) -> dict[str, Any]:
     """Compute the attention/escalation signals for a live (non-terminal) PR.
 
@@ -1691,7 +1795,9 @@ def _derive_check_signals(
     review_decision: str = pr_view.get("reviewDecision") or ""
 
     unaddressed_count = len(pr.unaddressed_threads())
-    has_actionable_comment_review = any(ref.classification == "requests_changes" for ref in pr.comment_reviews.values())
+    has_actionable_comment_review = any(
+        ref.classification == "requests_changes" for ref in pr.comment_reviews.values()
+    )
     reviewer_count = len(pr_view.get("reviewRequests") or [])
     attention_state = _compute_attention_state(
         role=pr.role,
@@ -1708,12 +1814,16 @@ def _derive_check_signals(
 
     # "Awaiting re-review" only applies once the PR is otherwise mergeable and
     # just waiting on review — not while CI / threads still need author work.
-    pr.awaiting_rereview = has_prior_human_review and attention_state == "ready_to_approve"
+    pr.awaiting_rereview = (
+        has_prior_human_review and attention_state == "ready_to_approve"
+    )
     _ensure_state_entered_at(pr, attention_state)
     _reset_auto_fix_counter_if_stale(pr)
 
     base_ref_name: str = pr_view.get("baseRefName") or ""
-    auto_fix_ok, auto_fix_blocked_reason = _compute_auto_fix_ok(pr, is_draft, base_ref_name)
+    auto_fix_ok, auto_fix_blocked_reason = _compute_auto_fix_ok(
+        pr, is_draft, base_ref_name
+    )
     return {
         "failing_checks": ci_summary["failing"],
         "pending_checks_count": ci_summary["pending_count"],
@@ -1723,17 +1833,23 @@ def _derive_check_signals(
         "attention_state": attention_state,
         "awaiting_rereview": pr.awaiting_rereview,
         "reviewer_count": reviewer_count,
-        "needs_local_ping": attention_state is not None and pr.last_notified_state != attention_state,
+        "needs_local_ping": attention_state is not None
+        and pr.last_notified_state != attention_state,
         "needs_escalation": _compute_needs_escalation(pr, attention_state),
         "auto_fix_ok": auto_fix_ok,
         "auto_fix_blocked_reason": auto_fix_blocked_reason,
-        "business_minutes_in_state": _business_minutes_in_state(pr) if attention_state else 0,
+        "business_minutes_in_state": _business_minutes_in_state(pr)
+        if attention_state
+        else 0,
         "needs_channel_bump": _needs_channel_bump(pr, attention_state),
         "dm_escalation_reason": _dm_escalation_reason(pr, attention_state),
         "head_ref_name": pr_view.get("headRefName") or "",
         "base_ref_name": base_ref_name,
         "change_request_source": _resolve_change_request_source(
-            attention_state, unaddressed_count, review_decision, has_actionable_comment_review
+            attention_state,
+            unaddressed_count,
+            review_decision,
+            has_actionable_comment_review,
         ),
         "pending_comment_reviews": _collect_pending_comment_reviews(
             pr,
@@ -1825,7 +1941,9 @@ def cmd_check(pr_number: int, repo: str) -> dict[str, Any]:
     save_state(state, repo)
 
     # 10. Build result dict
-    signals = _derive_check_signals(pr, pr_view, is_draft=is_draft, has_prior_human_review=has_prior_human_review)
+    signals = _derive_check_signals(
+        pr, pr_view, is_draft=is_draft, has_prior_human_review=has_prior_human_review
+    )
     save_state(state, repo)
 
     result: dict[str, Any] = {
@@ -1907,7 +2025,10 @@ def _compute_attention_state(
     precedence: list[tuple[bool, str]] = [
         (merge_blocked and merge_state_status in ("DIRTY", "BEHIND"), "merge_blocked"),
         (not ci_ok, "ci_failing"),
-        (unaddressed_count > 0 or review_decision == "CHANGES_REQUESTED", "changes_requested"),
+        (
+            unaddressed_count > 0 or review_decision == "CHANGES_REQUESTED",
+            "changes_requested",
+        ),
         (has_actionable_comment_review, "changes_requested"),
         (review_decision == "REVIEW_REQUIRED" and reviewer_count == 0, "no_reviewer"),
         (merge_state_status == "BLOCKED", "ready_to_approve"),
@@ -1924,7 +2045,8 @@ def _compute_needs_escalation(pr: MonitoredPR, attention_state: str | None) -> b
 
     Rules:
       - No attention state → never.
-      - Immediate-escalation states (ci_failing, merge_blocked) → fire once per state transition.
+      - Immediate-escalation states (ci_failing, merge_blocked) → fire once per
+        state transition.
       - ready_to_approve → fire once the 15-min grace elapses after local ping,
         and only if we haven't already escalated for this state.
     """
@@ -1972,7 +2094,10 @@ def cmd_status(repo: str, as_json: bool = False) -> None:
             addressed = sum(1 for ts in pr.thread_status.values() if ts.is_addressed)
             threads_col = f"{addressed}/{total}" if total else "n/a"
             review_col = "re-review" if pr.awaiting_rereview else ""
-            print(f"{key:<20} {pr.role:<10} {pr.status:<12} {threads_col:<10} {review_col}")
+            print(
+                f"{key:<20} {pr.role:<10} {pr.status:<12}"
+                f" {threads_col:<10} {review_col}"
+            )
 
     print(f"\n{len(state.completed)} completed PR(s) in history.")
 
@@ -2025,7 +2150,8 @@ def is_bot_login(login: str) -> bool:
 
 
 def _business_minutes_between(start: datetime, end: datetime) -> int:
-    """Return whole minutes inside Mon-Fri ``BUSINESS_START_HOUR``..``BUSINESS_END_HOUR`` ET."""
+    """Return whole minutes inside Mon-Fri
+    ``BUSINESS_START_HOUR``..``BUSINESS_END_HOUR`` ET."""
     if end <= start:
         return 0
     start_local = start.astimezone(BUSINESS_TZ)
@@ -2033,14 +2159,20 @@ def _business_minutes_between(start: datetime, end: datetime) -> int:
     total = 0
     cursor = start_local
     while cursor < end_local:
-        day_start = cursor.replace(hour=BUSINESS_START_HOUR, minute=0, second=0, microsecond=0)
-        day_end = cursor.replace(hour=BUSINESS_END_HOUR, minute=0, second=0, microsecond=0)
+        day_start = cursor.replace(
+            hour=BUSINESS_START_HOUR, minute=0, second=0, microsecond=0
+        )
+        day_end = cursor.replace(
+            hour=BUSINESS_END_HOUR, minute=0, second=0, microsecond=0
+        )
         if cursor.weekday() < FIRST_WEEKEND_WEEKDAY:
             window_start = max(cursor, day_start)
             window_end = min(end_local, day_end)
             if window_end > window_start:
                 total += int((window_end - window_start).total_seconds() // 60)
-        next_day = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        next_day = (cursor + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         cursor = next_day
     return total
 
@@ -2069,7 +2201,9 @@ def _auto_fix_attempts_today(pr: MonitoredPR) -> int:
     return pr.auto_fix_attempts_today
 
 
-def _compute_auto_fix_ok(pr: MonitoredPR, is_draft: bool, base_ref_name: str) -> tuple[bool, str | None]:
+def _compute_auto_fix_ok(
+    pr: MonitoredPR, is_draft: bool, base_ref_name: str
+) -> tuple[bool, str | None]:
     """Decide whether auto-fix is allowed for the given PR right now.
 
     Returns ``(ok, blocked_reason)``. ``blocked_reason`` is a short string
@@ -2098,7 +2232,8 @@ def _compute_auto_fix_ok(pr: MonitoredPR, is_draft: bool, base_ref_name: str) ->
 
 
 def _auto_fix_already_addressed_state(pr: MonitoredPR) -> bool:
-    """Return True if we have already dispatched auto-fix for the current state instance.
+    """Return True if we have already dispatched auto-fix for the current state
+    instance.
 
     The attention_state has a ``state_entered_at`` timestamp that bumps on every
     transition. If we recorded an auto-fix after that bump, the current state
@@ -2174,9 +2309,11 @@ def _dm_escalation_reason(pr: MonitoredPR, attention_state: str | None) -> str |
 
 
 def cmd_discover(repo: str, days: int, repo_path: str) -> dict[str, Any]:
-    """Find open PRs authored by the current user in *repo* and register them as author-role.
+    """Find open PRs authored by the current user in *repo* and register them
+    as author-role.
 
-    Already-monitored PRs are skipped (idempotent). Returns ``{registered, skipped, errors}``.
+    Already-monitored PRs are skipped (idempotent).
+    Returns ``{registered, skipped, errors}``.
     """
     state = load_state(repo)
     since = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -2214,7 +2351,15 @@ def cmd_discover(repo: str, days: int, repo_path: str) -> dict[str, Any]:
             skipped.append(pr_number)
             continue
         sha_raw = _run_gh(
-            ["pr", "view", str(pr_number), "--json", "headRefOid", "--jq", ".headRefOid"],
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "headRefOid",
+                "--jq",
+                ".headRefOid",
+            ],
             repo=repo,
         )
         sha = sha_raw.strip()
@@ -2268,7 +2413,8 @@ def _search_reviewed_prs(repo: str, days: int, our_username: str) -> list[int]:
     return [
         p["number"]
         for p in prs
-        if isinstance(p.get("number"), int) and (p.get("author") or {}).get("login") != our_username
+        if isinstance(p.get("number"), int)
+        and (p.get("author") or {}).get("login") != our_username
     ]
 
 
@@ -2289,8 +2435,11 @@ def _our_reviews(pr_number: int, repo: str, our_username: str) -> list[dict[str,
     return result
 
 
-def _our_unresolved_threads(pr_number: int, repo: str, our_username: str) -> list[dict[str, Any]]:
-    """Return unresolved review threads on a PR whose first comment is the current user's.
+def _our_unresolved_threads(
+    pr_number: int, repo: str, our_username: str
+) -> list[dict[str, Any]]:
+    """Return unresolved review threads on a PR whose first comment is the
+    current user's.
 
     Resolved threads, and threads opened by other reviewers, are excluded — only
     our own still-open review points are returned.
@@ -2314,7 +2463,9 @@ def _our_unresolved_threads(pr_number: int, repo: str, our_username: str) -> lis
     return out
 
 
-def _recover_one_review(pr_number: int, repo: str, repo_path: str, our_username: str) -> str:
+def _recover_one_review(
+    pr_number: int, repo: str, repo_path: str, our_username: str
+) -> str:
     """Register one reviewed-but-unmonitored PR if it still needs watching.
 
     Returns the verdict ``"recovered"``, ``"already_approved"``, or
@@ -2337,7 +2488,15 @@ def _recover_one_review(pr_number: int, repo: str, repo_path: str, our_username:
     sha = (our_reviews[-1].get("commit_id") or "").strip() if our_reviews else ""
     if not sha:
         sha = _run_gh(
-            ["pr", "view", str(pr_number), "--json", "headRefOid", "--jq", ".headRefOid"],
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "headRefOid",
+                "--jq",
+                ".headRefOid",
+            ],
             repo=repo,
         ).strip()
 
@@ -2349,7 +2508,10 @@ def _recover_one_review(pr_number: int, repo: str, repo_path: str, our_username:
         sha=sha,
         review_id=None,
         threads=[t["id"] for t in open_threads],
-        thread_details=[{"id": t["id"], "file": t.get("path", ""), "line": t.get("line")} for t in open_threads],
+        thread_details=[
+            {"id": t["id"], "file": t.get("path", ""), "line": t.get("line")}
+            for t in open_threads
+        ],
         slack_channel=None,
         slack_ts=None,
     )
@@ -2474,7 +2636,9 @@ def cmd_pending_channel_bumps() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _add_lifecycle_subparsers(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def _add_lifecycle_subparsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Register subcommands that create or change a PR's monitored lifecycle."""
     p_reg = subparsers.add_parser("register", help="Start monitoring a PR")
     p_reg.add_argument("pr_number", type=int)
@@ -2485,7 +2649,9 @@ def _add_lifecycle_subparsers(subparsers: argparse._SubParsersAction[argparse.Ar
     p_reg.add_argument("--review-id")
     p_reg.add_argument("--threads", nargs="*", default=[])
     p_reg.add_argument("--thread-details", help="JSON list of {id,file,line} objects")
-    p_reg.add_argument("--slack-channel", help="Slack channel ID for PR announcement thread")
+    p_reg.add_argument(
+        "--slack-channel", help="Slack channel ID for PR announcement thread"
+    )
     p_reg.add_argument("--slack-ts", help="Parent ts for PR announcement thread")
 
     p_drop = subparsers.add_parser("drop", help="Stop monitoring a PR")
@@ -2497,7 +2663,9 @@ def _add_lifecycle_subparsers(subparsers: argparse._SubParsersAction[argparse.Ar
     p_complete.add_argument("--repo", required=True)
     p_complete.add_argument("--reason", default="merged")
 
-    p_set_status = subparsers.add_parser("set-status", help="Set lifecycle status for a PR")
+    p_set_status = subparsers.add_parser(
+        "set-status", help="Set lifecycle status for a PR"
+    )
     p_set_status.add_argument("pr_number", type=int)
     p_set_status.add_argument("--repo", required=True)
     p_set_status.add_argument(
@@ -2516,20 +2684,27 @@ def _add_lifecycle_subparsers(subparsers: argparse._SubParsersAction[argparse.Ar
 
     p_ack_delta = subparsers.add_parser(
         "ack-delta",
-        help="Acknowledge the reviewer delta through --sha has been processed (Step 3 close)",
+        help=(
+            "Acknowledge the reviewer delta through --sha has been processed"
+            " (Step 3 close)"
+        ),
     )
     p_ack_delta.add_argument("pr_number", type=int)
     p_ack_delta.add_argument("--repo", required=True)
     p_ack_delta.add_argument("--sha", required=True)
 
 
-def _add_signal_subparsers(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def _add_signal_subparsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Register subcommands that record nudges, notifications, and cursors."""
     p_nudge_ok = subparsers.add_parser("nudge-ok", help="Check if a nudge is allowed")
     p_nudge_ok.add_argument("pr_number", type=int)
     p_nudge_ok.add_argument("--repo", required=True)
 
-    p_record_nudge = subparsers.add_parser("record-nudge", help="Record a nudge was sent")
+    p_record_nudge = subparsers.add_parser(
+        "record-nudge", help="Record a nudge was sent"
+    )
     p_record_nudge.add_argument("pr_number", type=int)
     p_record_nudge.add_argument("--repo", required=True)
 
@@ -2546,20 +2721,28 @@ def _add_signal_subparsers(subparsers: argparse._SubParsersAction[argparse.Argum
         choices=["requests_changes", "neutral"],
     )
 
-    p_mark_notified = subparsers.add_parser("mark-notified", help="Record that a local ping fired for a state")
+    p_mark_notified = subparsers.add_parser(
+        "mark-notified", help="Record that a local ping fired for a state"
+    )
     p_mark_notified.add_argument("pr_number", type=int)
     p_mark_notified.add_argument("--repo", required=True)
     p_mark_notified.add_argument("--state", required=True, dest="state_value")
 
-    p_mark_escalated = subparsers.add_parser("mark-escalated", help="Record that a Slack-bot escalation fired")
+    p_mark_escalated = subparsers.add_parser(
+        "mark-escalated", help="Record that a Slack-bot escalation fired"
+    )
     p_mark_escalated.add_argument("pr_number", type=int)
     p_mark_escalated.add_argument("--repo", required=True)
 
-    p_slack_cursor = subparsers.add_parser("slack-thread-cursor", help="Print Slack channel+ts+last_seen for a PR")
+    p_slack_cursor = subparsers.add_parser(
+        "slack-thread-cursor", help="Print Slack channel+ts+last_seen for a PR"
+    )
     p_slack_cursor.add_argument("pr_number", type=int)
     p_slack_cursor.add_argument("--repo", required=True)
 
-    p_update_cursor = subparsers.add_parser("update-slack-cursor", help="Advance the slack_last_seen_ts cursor")
+    p_update_cursor = subparsers.add_parser(
+        "update-slack-cursor", help="Advance the slack_last_seen_ts cursor"
+    )
     p_update_cursor.add_argument("pr_number", type=int)
     p_update_cursor.add_argument("--repo", required=True)
     p_update_cursor.add_argument("--last-seen-ts", required=True)
@@ -2579,7 +2762,9 @@ def _add_signal_subparsers(subparsers: argparse._SubParsersAction[argparse.Argum
     p_record_bump.add_argument("--repo", required=True)
 
 
-def _add_query_subparsers(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def _add_query_subparsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Register read-only query, discovery, and queue subcommands."""
     p_status = subparsers.add_parser("status", help="Show current monitor state")
     p_status.add_argument("--repo")
@@ -2599,7 +2784,10 @@ def _add_query_subparsers(subparsers: argparse._SubParsersAction[argparse.Argume
     )
     subparsers.add_parser(
         "catchup",
-        help="Mark every existing author-role attention PR as already notified (no pings fired)",
+        help=(
+            "Mark every existing author-role attention PR as already notified"
+            " (no pings fired)"
+        ),
     )
     subparsers.add_parser(
         "pending-channel-bumps",
@@ -2616,7 +2804,10 @@ def _add_query_subparsers(subparsers: argparse._SubParsersAction[argparse.Argume
 
     p_recover = subparsers.add_parser(
         "recover-reviews",
-        help="Auto-register open PRs reviewed by you in the past N days that were never monitored",
+        help=(
+            "Auto-register open PRs reviewed by you in the past N days"
+            " that were never monitored"
+        ),
     )
     p_recover.add_argument("--repo", required=True)
     p_recover.add_argument("--repo-path", required=True)
@@ -2626,10 +2817,17 @@ def _add_query_subparsers(subparsers: argparse._SubParsersAction[argparse.Argume
         "enqueue-action",
         help="Write one outbound action to the Desktop action queue",
     )
-    p_enqueue.add_argument("--type", required=True, dest="action_type", choices=sorted(DESKTOP_ACTION_TYPES))
+    p_enqueue.add_argument(
+        "--type",
+        required=True,
+        dest="action_type",
+        choices=sorted(DESKTOP_ACTION_TYPES),
+    )
     p_enqueue.add_argument("--repo")
     p_enqueue.add_argument("--pr", type=int, dest="pr_number")
-    p_enqueue.add_argument("--payload", required=True, help="JSON object with the action's message data")
+    p_enqueue.add_argument(
+        "--payload", required=True, help="JSON object with the action's message data"
+    )
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -2664,17 +2862,24 @@ def _dispatch_status_all(as_json: bool) -> None:
 
 
 def _dispatch_pr_state_mutation(args: argparse.Namespace) -> None:
-    """Dispatch the single-PR state mutations (set-status/confirm-thread/mark-*/cursor)."""
+    """Dispatch the single-PR state mutations
+    (set-status/confirm-thread/mark-*/cursor)."""
     if args.command == "set-status":
         cmd_set_status(pr_number=args.pr_number, repo=args.repo, status=args.status)
     elif args.command == "confirm-thread":
-        cmd_confirm_thread(pr_number=args.pr_number, repo=args.repo, thread_id=args.thread_id)
+        cmd_confirm_thread(
+            pr_number=args.pr_number, repo=args.repo, thread_id=args.thread_id
+        )
     elif args.command == "mark-notified":
-        cmd_mark_notified(pr_number=args.pr_number, repo=args.repo, state_value=args.state_value)
+        cmd_mark_notified(
+            pr_number=args.pr_number, repo=args.repo, state_value=args.state_value
+        )
     elif args.command == "mark-escalated":
         cmd_mark_escalated(pr_number=args.pr_number, repo=args.repo)
     elif args.command == "update-slack-cursor":
-        cmd_update_slack_cursor(pr_number=args.pr_number, repo=args.repo, last_seen_ts=args.last_seen_ts)
+        cmd_update_slack_cursor(
+            pr_number=args.pr_number, repo=args.repo, last_seen_ts=args.last_seen_ts
+        )
 
 
 def _dispatch_discovery(args: argparse.Namespace) -> None:
@@ -2682,12 +2887,15 @@ def _dispatch_discovery(args: argparse.Namespace) -> None:
     if args.command == "discover":
         result = cmd_discover(repo=args.repo, days=args.days, repo_path=args.repo_path)
     else:
-        result = cmd_recover_reviews(repo=args.repo, days=args.days, repo_path=args.repo_path)
+        result = cmd_recover_reviews(
+            repo=args.repo, days=args.days, repo_path=args.repo_path
+        )
     print(json.dumps(result, indent=2))
 
 
 def _dispatch_mutation(args: argparse.Namespace) -> None:
-    """Dispatch register/drop/complete/nudge-ok/record-nudge/set-status/confirm-thread commands."""
+    """Dispatch register/drop/complete/nudge-ok/record-nudge/set-status/
+    confirm-thread commands."""
     if args.command == "register":
         td = json.loads(args.thread_details) if args.thread_details else None
         cmd_register(
@@ -2707,7 +2915,9 @@ def _dispatch_mutation(args: argparse.Namespace) -> None:
     elif args.command == "complete":
         cmd_complete(pr_number=args.pr_number, repo=args.repo, reason=args.reason)
     elif args.command == "nudge-ok":
-        print(json.dumps(cmd_nudge_ok(pr_number=args.pr_number, repo=args.repo), indent=2))
+        print(
+            json.dumps(cmd_nudge_ok(pr_number=args.pr_number, repo=args.repo), indent=2)
+        )
     elif args.command == "record-nudge":
         cmd_record_nudge(pr_number=args.pr_number, repo=args.repo)
     elif args.command == "enqueue-action":
@@ -2743,13 +2953,22 @@ _MUTATION_COMMANDS: frozenset[str] = frozenset(
 # are handled separately.
 _QUERY_COMMANDS: dict[str, Callable[[argparse.Namespace], Any]] = {
     "check": lambda a: cmd_check(pr_number=a.pr_number, repo=a.repo),
-    "slack-thread-cursor": lambda a: cmd_slack_thread_cursor(pr_number=a.pr_number, repo=a.repo),
+    "slack-thread-cursor": lambda a: cmd_slack_thread_cursor(
+        pr_number=a.pr_number, repo=a.repo
+    ),
     "consume-pending": lambda _: cmd_consume_pending(),
-    "record-auto-fix": lambda a: cmd_record_auto_fix(pr_number=a.pr_number, repo=a.repo),
-    "record-channel-bump": lambda a: cmd_record_channel_bump(pr_number=a.pr_number, repo=a.repo),
+    "record-auto-fix": lambda a: cmd_record_auto_fix(
+        pr_number=a.pr_number, repo=a.repo
+    ),
+    "record-channel-bump": lambda a: cmd_record_channel_bump(
+        pr_number=a.pr_number, repo=a.repo
+    ),
     "pending-channel-bumps": lambda _: cmd_pending_channel_bumps(),
     "mark-comment-review": lambda a: cmd_mark_comment_review(
-        pr_number=a.pr_number, repo=a.repo, review_id=a.review_id, classification=a.classification
+        pr_number=a.pr_number,
+        repo=a.repo,
+        review_id=a.review_id,
+        classification=a.classification,
     ),
     "catchup": lambda _: cmd_catchup(),
     "ack-delta": lambda a: cmd_ack_delta(pr_number=a.pr_number, repo=a.repo, sha=a.sha),
@@ -2776,7 +2995,9 @@ def _dispatch_status_command(args: argparse.Namespace) -> None:
     if args.all_repos:
         _dispatch_status_all(as_json=args.as_json)
         return
-    repo = args.repo or _run_gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
+    repo = args.repo or _run_gh(
+        ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]
+    )
     if not repo:
         print(
             "Error: --repo is required when --all is not set "

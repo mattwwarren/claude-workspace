@@ -10,13 +10,16 @@ Replaces the fragile pattern of building JSON heredocs in bash. Handles:
 
 Usage:
   # Post from stdin
-  echo '[{"path":"foo.py","line":42,"body":"issue here"}]' | python3 post_review.py 123 --event COMMENT --body "Summary"
+  echo '[{"path":"foo.py","line":42,"body":"issue here"}]' |
+    python3 post_review.py 123 --event COMMENT --body "Summary"
 
   # Post from file
-  python3 post_review.py 123 --event REQUEST_CHANGES --body "Found issues" --comments-file /tmp/comments.json
+  python3 post_review.py 123 --event REQUEST_CHANGES --body "Found issues"
+    --comments-file /tmp/comments.json
 
   # Dry run (print payload, don't post)
-  python3 post_review.py 123 --event COMMENT --body "Summary" --comments-file /tmp/comments.json --dry-run
+  python3 post_review.py 123 --event COMMENT --body "Summary"
+    --comments-file /tmp/comments.json --dry-run
 
 Comment JSON format (array of objects):
   - path (required): file path relative to repo root
@@ -55,6 +58,7 @@ def gh_api_post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         input=json.dumps(payload),
         capture_output=True,
         text=True,
+        check=False,
     )
 
     if result.returncode != 0:
@@ -62,9 +66,18 @@ def gh_api_post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         error_body = result.stdout or result.stderr
         try:
             err = json.loads(error_body)
-            return {"error": True, "status": result.returncode, "message": err.get("message", ""), "details": err}
+            return {
+                "error": True,
+                "status": result.returncode,
+                "message": err.get("message", ""),
+                "details": err,
+            }
         except json.JSONDecodeError:
-            return {"error": True, "status": result.returncode, "message": error_body.strip()}
+            return {
+                "error": True,
+                "status": result.returncode,
+                "message": error_body.strip(),
+            }
 
     try:
         return json.loads(result.stdout)
@@ -98,7 +111,9 @@ def validate_comment(c: dict[str, Any]) -> tuple[dict[str, Any] | None, str | No
     return comment, None
 
 
-def validate_comments(raw: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def validate_comments(
+    raw: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate all comments. Returns (valid, invalid)."""
     valid = []
     invalid = []
@@ -177,7 +192,9 @@ def post_with_fallback(
     if body_result.get("error"):
         return {
             "error": True,
-            "message": f"Even body-only review failed: {body_result.get('message', '')}",
+            "message": (
+                f"Even body-only review failed: {body_result.get('message', '')}"
+            ),
             "batch_error": batch_error,
         }
 
@@ -208,10 +225,17 @@ def post_with_fallback(
         cr = gh_api_post(f"repos/{repo}/pulls/{pr_number}/comments", payload)
         if cr.get("error"):
             failed.append({**comment, "_error": cr.get("message", "unknown")})
-            print(f"  FAILED: {comment['path']}:{comment.get('line', 'file')} — {cr.get('message', '')}", file=sys.stderr)
+            print(
+                f"  FAILED: {comment['path']}:{comment.get('line', 'file')}"
+                f" — {cr.get('message', '')}",
+                file=sys.stderr,
+            )
         else:
             posted.append(comment)
-            print(f"  OK: {comment['path']}:{comment.get('line', 'file')}", file=sys.stderr)
+            print(
+                f"  OK: {comment['path']}:{comment.get('line', 'file')}",
+                file=sys.stderr,
+            )
 
     return {
         "success": True,
@@ -220,7 +244,9 @@ def post_with_fallback(
         "comments_posted": len(posted),
         "comments_failed": len(failed),
         "failed": failed,
-        "note": "Batch post failed; comments posted individually (not grouped in review)",
+        "note": (
+            "Batch post failed; comments posted individually (not grouped in review)"
+        ),
     }
 
 
@@ -231,16 +257,33 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument("pr_number", type=int, help="PR number")
-    parser.add_argument("--event", choices=["APPROVE", "REQUEST_CHANGES", "COMMENT"],
-                        default="COMMENT", help="Review event type (default: COMMENT)")
+    parser.add_argument(
+        "--event",
+        choices=["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+        default="COMMENT",
+        help="Review event type (default: COMMENT)",
+    )
     parser.add_argument("--body", default="", help="Top-level review body text")
-    parser.add_argument("--body-file", type=Path, help="Read review body from file instead of --body")
-    parser.add_argument("--comments-file", type=Path, help="Read comments JSON from file (default: stdin)")
+    parser.add_argument(
+        "--body-file", type=Path, help="Read review body from file instead of --body"
+    )
+    parser.add_argument(
+        "--comments-file",
+        type=Path,
+        help="Read comments JSON from file (default: stdin)",
+    )
     parser.add_argument("--commit", help="Pin review to a specific commit SHA")
-    parser.add_argument("--repo", help="owner/repo (default: auto-detect from current directory)")
-    parser.add_argument("--dry-run", action="store_true", help="Print payload as JSON without posting")
-    parser.add_argument("--no-fallback", action="store_true",
-                        help="Don't retry individual comments on batch failure")
+    parser.add_argument(
+        "--repo", help="owner/repo (default: auto-detect from current directory)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print payload as JSON without posting"
+    )
+    parser.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="Don't retry individual comments on batch failure",
+    )
 
     args = parser.parse_args()
 
@@ -272,7 +315,11 @@ def main() -> None:
     if invalid:
         print(f"Skipped {len(invalid)} invalid comments:", file=sys.stderr)
         for inv in invalid:
-            print(f"  {inv.get('path', '?')}:{inv.get('line', '?')} — {inv.get('_error', '?')}", file=sys.stderr)
+            print(
+                f"  {inv.get('path', '?')}:{inv.get('line', '?')}"
+                f" — {inv.get('_error', '?')}",
+                file=sys.stderr,
+            )
 
     # Resolve repo
     repo = args.repo or get_repo_nwo()
@@ -283,7 +330,11 @@ def main() -> None:
             payload["comments"] = valid
         if args.commit:
             payload["commit_id"] = args.commit
-        print(json.dumps({"repo": repo, "pr": args.pr_number, "payload": payload}, indent=2))
+        print(
+            json.dumps(
+                {"repo": repo, "pr": args.pr_number, "payload": payload}, indent=2
+            )
+        )
         if invalid:
             print(f"\n# {len(invalid)} comments would be skipped", file=sys.stderr)
         return
@@ -300,7 +351,9 @@ def main() -> None:
                 "comments_failed": len(invalid),
             }
     else:
-        result = post_with_fallback(repo, args.pr_number, args.event, body, valid, args.commit)
+        result = post_with_fallback(
+            repo, args.pr_number, args.event, body, valid, args.commit
+        )
 
     print(json.dumps(result, indent=2))
 

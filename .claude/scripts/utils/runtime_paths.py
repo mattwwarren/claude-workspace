@@ -13,7 +13,9 @@ def repo_root() -> Path:
 
 def claude_home() -> Path:
     """Return the Claude config home, honoring local overrides."""
-    override = os.environ.get("GLOBAL_CLAUDE_HOME") or os.environ.get("CLAUDE_CONFIG_DIR")
+    override = os.environ.get("GLOBAL_CLAUDE_HOME") or os.environ.get(
+        "CLAUDE_CONFIG_DIR"
+    )
     if override:
         return Path(override).expanduser()
     return Path.home() / ".claude"

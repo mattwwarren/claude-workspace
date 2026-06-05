@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Post-ship validation: verify a PR was actually created and emit a structured ship summary.
+Post-ship validation: verify a PR was actually created and emit a structured
+ship summary.
 
 Used by /prep-pr (Step 8/10) and /auto-dev (Step 4c) to enforce that the project
 ship-it command actually produced a PR. Without this, Claude can claim "shipped"
@@ -82,14 +83,15 @@ class ShipSummary:
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        return d
+        return asdict(self)
 
 
 # --- Shell helpers ---
 
 
-def run(cmd: list[str], check: bool = False, capture: bool = True) -> subprocess.CompletedProcess:
+def run(
+    cmd: list[str], check: bool = False, capture: bool = True
+) -> subprocess.CompletedProcess:
     """Run a shell command. Default: capture, do not raise."""
     return subprocess.run(
         cmd,
@@ -116,12 +118,15 @@ def detect_branch() -> str:
     return branch
 
 
-def check_not_protected(branch: str, summary: ShipSummary) -> CheckResult:
+def check_not_protected(branch: str, _summary: ShipSummary) -> CheckResult:
     if branch in PROTECTED_BRANCHES:
         return CheckResult(
             name="not-protected-branch",
             passed=False,
-            detail=f"on protected branch '{branch}' — finalize must run from a feature branch",
+            detail=(
+                f"on protected branch '{branch}'"
+                " — finalize must run from a feature branch"
+            ),
         )
     return CheckResult(name="not-protected-branch", passed=True, detail=branch)
 
@@ -148,7 +153,7 @@ def check_branch_pushed(branch: str, summary: ShipSummary) -> CheckResult:
     return CheckResult(name="branch-pushed", passed=True, detail=summary.head_sha[:8])
 
 
-def check_pr_exists(branch: str, summary: ShipSummary) -> CheckResult:
+def check_pr_exists(_branch: str, summary: ShipSummary) -> CheckResult:
     fields = "number,url,headRefOid,state,title,autoMergeRequest"
     result = run(["gh", "pr", "view", "--json", fields])
     if result.returncode != 0:
@@ -198,7 +203,9 @@ def check_pr_sha_matches(summary: ShipSummary) -> CheckResult:
                 f"local HEAD ({summary.head_sha[:8]}) — push and PR are out of sync"
             ),
         )
-    return CheckResult(name="pr-sha-matches", passed=True, detail=summary.pr_head_sha[:8])
+    return CheckResult(
+        name="pr-sha-matches", passed=True, detail=summary.pr_head_sha[:8]
+    )
 
 
 def check_automerge(summary: ShipSummary, required: bool) -> CheckResult:
@@ -232,7 +239,9 @@ def check_monitor_registered(summary: ShipSummary, required: bool) -> CheckResul
             detail="no PR number to check monitor against",
             required=required,
         )
-    repo_result = run(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
+    repo_result = run(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]
+    )
     repo = repo_result.stdout.strip()
     if repo_result.returncode != 0 or not repo:
         return CheckResult(
@@ -319,23 +328,34 @@ def render_markdown(summary: ShipSummary) -> str:
     lines.append("")
 
     if summary.pr_number is not None:
-        lines.append(f"- **PR:** [#{summary.pr_number}]({summary.pr_url}) — {summary.pr_title}")
+        lines.append(
+            f"- **PR:** [#{summary.pr_number}]({summary.pr_url}) — {summary.pr_title}"
+        )
         lines.append(f"- **State:** {summary.pr_state}")
     else:
         lines.append("- **PR:** (none — see failed checks below)")
     lines.append(f"- **Branch:** `{summary.branch}` @ `{summary.head_sha[:8]}`")
     if summary.origin_sha:
-        lines.append(f"- **Origin SHA:** `{summary.origin_sha[:8]}` (matches HEAD: {summary.origin_sha == summary.head_sha})")
+        lines.append(
+            f"- **Origin SHA:** `{summary.origin_sha[:8]}`"
+            f" (matches HEAD: {summary.origin_sha == summary.head_sha})"
+        )
     lines.append(
         "- **Auto-merge:** "
-        + (f"enabled ({summary.automerge_method})" if summary.automerge_enabled else "disabled")
+        + (
+            f"enabled ({summary.automerge_method})"
+            if summary.automerge_enabled
+            else "disabled"
+        )
     )
     lines.append(
-        "- **Monitor:** " + ("registered" if summary.monitor_registered else "not registered")
+        "- **Monitor:** "
+        + ("registered" if summary.monitor_registered else "not registered")
     )
     if summary.files_changed:
         lines.append(
-            f"- **Diff:** {summary.files_changed} files, +{summary.additions} / -{summary.deletions}"
+            f"- **Diff:** {summary.files_changed} files,"
+            f" +{summary.additions} / -{summary.deletions}"
         )
 
     lines.append("")
@@ -349,8 +369,7 @@ def render_markdown(summary: ShipSummary) -> str:
     if summary.warnings:
         lines.append("")
         lines.append("### Warnings")
-        for w in summary.warnings:
-            lines.append(f"- {w}")
+        lines.extend(f"- {w}" for w in summary.warnings)
 
     return "\n".join(lines) + "\n"
 
@@ -377,7 +396,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if pr_check.passed:
         summary.checks.append(check_pr_sha_matches(summary))
         summary.checks.append(check_automerge(summary, required=args.require_automerge))
-        summary.checks.append(check_monitor_registered(summary, required=args.require_monitor))
+        summary.checks.append(
+            check_monitor_registered(summary, required=args.require_monitor)
+        )
     else:
         # No PR means downstream checks are all skipped/failed.
         for name, required in [
@@ -386,7 +407,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
             ("monitor-registered", args.require_monitor),
         ]:
             summary.checks.append(
-                CheckResult(name=name, passed=False, detail="skipped — no PR", required=required)
+                CheckResult(
+                    name=name, passed=False, detail="skipped — no PR", required=required
+                )
             )
 
     collect_diff_stats(summary, args.base)
@@ -408,7 +431,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = sub.add_parser("verify", help="Verify PR exists and emit ship summary")
     verify.add_argument("--branch", help="Branch to check (default: current branch)")
-    verify.add_argument("--base", default="main", help="Base branch for diff stats (default: main)")
+    verify.add_argument(
+        "--base", default="main", help="Base branch for diff stats (default: main)"
+    )
     verify.add_argument(
         "--require-automerge",
         action="store_true",
@@ -419,7 +444,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Treat monitor-not-registered as a required failure",
     )
-    verify.add_argument("--json", action="store_true", help="Emit JSON instead of markdown")
+    verify.add_argument(
+        "--json", action="store_true", help="Emit JSON instead of markdown"
+    )
     verify.set_defaults(func=cmd_verify)
 
     return parser

@@ -135,7 +135,9 @@ class PrepPrState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PrepPrState:
         """Create state from dictionary."""
-        data["snapshots"] = [ScopeSnapshot.from_dict(s) for s in data.get("snapshots", [])]
+        data["snapshots"] = [
+            ScopeSnapshot.from_dict(s) for s in data.get("snapshots", [])
+        ]
         data["gates"] = [Gate.from_dict(g) for g in data.get("gates", [])]
         return cls(**data)
 
@@ -193,7 +195,7 @@ def _run_git(args: list[str]) -> str:
     """
     cmd = ["git", *args]
     try:
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -214,7 +216,11 @@ def _run_git(args: list[str]) -> str:
 # Default gate commands per ecosystem marker file
 ECOSYSTEM_GATES: dict[str, list[Gate]] = {
     "pyproject.toml": [
-        Gate(name="ruff", command="uv run ruff check .", autofix="uv run ruff check --fix ."),
+        Gate(
+            name="ruff",
+            command="uv run ruff check .",
+            autofix="uv run ruff check --fix .",
+        ),
         Gate(name="mypy", command="uv run mypy ."),
         Gate(name="pytest", command="uv run pytest"),
     ],
@@ -272,7 +278,13 @@ def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
 
             if " | " in rest:
                 command, autofix = rest.split(" | ", 1)
-                gates.append(Gate(name=name.strip(), command=command.strip(), autofix=autofix.strip()))
+                gates.append(
+                    Gate(
+                        name=name.strip(),
+                        command=command.strip(),
+                        autofix=autofix.strip(),
+                    )
+                )
             else:
                 gates.append(Gate(name=name.strip(), command=rest.strip()))
 
@@ -330,7 +342,9 @@ def _resolve_base_ref(base: str, fork_point: str | None = None) -> str:
         # Validate the SHA exists in the local object store
         if _run_git(["rev-parse", "--verify", f"{fork_point}^{{commit}}"]):
             return fork_point
-        logger.warning("fork-point %s not found locally, falling back to branch ref", fork_point)
+        logger.warning(
+            "fork-point %s not found locally, falling back to branch ref", fork_point
+        )
 
     remote_ref = f"origin/{base}"
     # Check if the remote ref exists
@@ -438,7 +452,12 @@ def _is_test_file(filepath: str) -> bool:
     """Check if a file path looks like a test file."""
     parts = Path(filepath).parts
     name = parts[-1] if parts else ""
-    return name.startswith("test_") or name.endswith("_test.py") or "tests" in parts or "test" in parts
+    return (
+        name.startswith("test_")
+        or name.endswith("_test.py")
+        or "tests" in parts
+        or "test" in parts
+    )
 
 
 # --- CLI Subcommands ---
@@ -517,16 +536,25 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # detect-gates
-    gates_parser = subparsers.add_parser("detect-gates", help="Auto-detect quality gates")
-    gates_parser.add_argument("--claude-md", help="Path to CLAUDE.md (default: ./CLAUDE.md)")
+    gates_parser = subparsers.add_parser(
+        "detect-gates", help="Auto-detect quality gates"
+    )
+    gates_parser.add_argument(
+        "--claude-md", help="Path to CLAUDE.md (default: ./CLAUDE.md)"
+    )
 
     # snapshot
     snap_parser = subparsers.add_parser("snapshot", help="Capture diff metrics")
-    snap_parser.add_argument("--base", default="main", help="Base branch (default: main)")
+    snap_parser.add_argument(
+        "--base", default="main", help="Base branch (default: main)"
+    )
     snap_parser.add_argument(
         "--fork-point",
         default=None,
-        help="Exact commit SHA the feature branch diverged from (overrides --base for diff)",
+        help=(
+            "Exact commit SHA the feature branch diverged from"
+            " (overrides --base for diff)"
+        ),
     )
     snap_parser.add_argument("--max-cycles", type=int, help="Max review cycles")
 
