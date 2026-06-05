@@ -1138,6 +1138,30 @@ class TestMigrateDevQueue:
 
 
 # ---------------------------------------------------------------------------
+# TestConsumeCompletedSessionsWrapper
+# ---------------------------------------------------------------------------
+
+
+class TestConsumeCompletedSessionsWrapper:
+    """Tests for the consume_completed_sessions wrapper in dev_queue."""
+
+    def test_wrapper_delegates_to_dispatch(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """consume_completed_sessions() delegates to dispatch implementation."""
+        from cw.dev_queue import consume_completed_sessions
+
+        called: list[int] = []
+        monkeypatch.setattr(
+            "cw.dispatch.consume_completed_sessions",
+            lambda: called.append(1) or 3,
+        )
+        result = consume_completed_sessions()
+        assert result == 3
+        assert called == [1]
+
+
+# ---------------------------------------------------------------------------
 # TestWaitForTerminal
 # ---------------------------------------------------------------------------
 
