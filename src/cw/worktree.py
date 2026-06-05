@@ -25,6 +25,8 @@ _log = logging.getLogger(__name__)
 # (``~/.cw/wt/``) is used in practice — keeping paths short and predictable.
 _WORKTREE_NAME_CAP = 64
 _HASH_BASE_SEGMENTS = (".cw", "wt")
+# Git porcelain v1 format: "XY path" — 2-char status prefix + 1 space = 3 chars.
+_GIT_PORCELAIN_PATH_OFFSET = 3
 # 8 hex chars = 32 bits. For a single-user tool with a handful of
 # clients the collision probability is negligible; raising this value
 # pushes the hashed base closer to _WORKTREE_NAME_CAP and reduces
@@ -262,56 +264,15 @@ def remove_worktree(
     _run_git(*args, cwd=_git_dir(client))
 
 
-def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
-    """Return True if the worktree for *branch* has unsaved work.
+def _has_unpushed_commits(client: ClientConfig, branch: str, wt_path: Path) -> bool:
+    """Return True if *branch* has commits not on any known base ref.
 
-    "Unsaved" means either:
-    - uncommitted changes (``git status --porcelain`` is non-empty), OR
-    - unpushed commits (``git log origin/<branch>..HEAD`` is non-empty).
-
-    Returns False when the worktree path does not exist (nothing to lose).
-    When ``origin/<branch>`` does not exist, treats all HEAD commits as
-    unpushed (conservative: assume they would be lost).
-
-    Never raises — every git error is swallowed and logged at WARNING level
-    so that a git failure cannot block a cleanup sweep.
+    Three-level fallback:
+    1. ``origin/<branch>`` — canonical; used when the branch was pushed.
+    2. ``origin/<default_branch>`` — fallback when branch has no remote yet.
+    3. Local ``<default_branch>`` — offline / bare-clone fallback.
+    Returns True conservatively on subprocess failure or all-refs-absent.
     """
-    wt_path = worktree_path_for(client, branch)
-    if not wt_path.exists():
-        return False
-
-    # 1. Uncommitted changes check
-    try:
-        status = _run_git("status", "--porcelain", cwd=wt_path, check=False)
-        # Filter out cw's own artifacts (.claude/) — these are written fresh
-        # each session and would otherwise trip the dirty check on every retry.
-        # Porcelain format: "XY path" (2-char status + space + path). Rename
-        # entries ("R  old -> new") pass through unchanged; cw artifacts never
-        # appear as renames so they will still be caught by path check.
-        lines = [
-            line
-            for line in status.stdout.splitlines()
-            if not (len(line) > 3 and line[3:].startswith(".claude/"))
-        ]
-        if lines:
-            return True
-    except (WorktreeError, OSError) as exc:
-        _log.warning(
-            "worktree_has_unsaved_work: status check failed for %s/%s: %s",
-            client.name,
-            branch,
-            exc,
-        )
-        # Fail-safe: treat as having unsaved work so we don't silently destroy.
-        return True
-
-    # 2. Unpushed commits check — compare HEAD against origin/<branch>.
-    # Three-level fallback when the remote tracking branch is absent:
-    #   1. origin/<branch> present  → git log origin/<branch>..HEAD
-    #   2. origin/<branch> absent   → git log origin/<default_branch>..HEAD
-    #   3. origin/<default_branch> absent (offline) → git log <default_branch>..HEAD
-    # returncode != 0 from a log call means the ref is unknown — fall through
-    # to the next level. The except handler fires on subprocess-level failures.
     try:
         ref_check = _run_git(
             "rev-parse",
@@ -365,6 +326,58 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
         return True
     # All refs unresolvable — conservative fail-safe.
     return True
+
+
+def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
+    """Return True if the worktree for *branch* has unsaved work.
+
+    "Unsaved" means either:
+    - uncommitted changes (``git status --porcelain`` is non-empty), OR
+    - unpushed commits (``git log origin/<branch>..HEAD`` is non-empty).
+
+    Returns False when the worktree path does not exist (nothing to lose).
+    When ``origin/<branch>`` does not exist, falls back to comparing against
+    ``origin/<default_branch>`` then the local ``<default_branch>`` ref. If
+    all refs are unresolvable (e.g. offline), returns True conservatively.
+
+    Never raises — every git error is swallowed and logged at WARNING level
+    so that a git failure cannot block a cleanup sweep.
+    """
+    wt_path = worktree_path_for(client, branch)
+    if not wt_path.exists():
+        return False
+
+    # 1. Uncommitted changes check
+    try:
+        status = _run_git("status", "--porcelain", cwd=wt_path, check=False)
+        # Filter out cw's own artifacts (.claude/) — these are written fresh
+        # each session and would otherwise trip the dirty check on every retry.
+        # Porcelain format: "XY path" (2-char status + space + path). Rename
+        # entries ("R  old -> new") pass through unchanged; cw artifacts never
+        # appear as renames so they will still be caught by path check.
+        lines = [
+            line
+            for line in status.stdout.splitlines()
+            if not (
+                len(line) > _GIT_PORCELAIN_PATH_OFFSET
+                and line[_GIT_PORCELAIN_PATH_OFFSET:].startswith(".claude/")
+            )
+        ]
+        if lines:
+            return True
+    except (WorktreeError, OSError) as exc:
+        _log.warning(
+            "worktree_has_unsaved_work: status check failed for %s/%s: %s",
+            client.name,
+            branch,
+            exc,
+        )
+        # Fail-safe: treat as having unsaved work so we don't silently destroy.
+        return True
+
+    # 2. Unpushed commits check — three-level fallback when remote tracking
+    # branch is absent (see _has_unpushed_commits for the strategy).
+    return _has_unpushed_commits(client, branch, wt_path)
 
 
 def _fetch_default_branch(client_name: str, default_branch: str, git_dir: Path) -> bool:
