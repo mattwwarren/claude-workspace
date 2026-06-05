@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import subprocess as _sp
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -105,6 +104,9 @@ _LOOP_STALL_CONSECUTIVE_TICKS = 3
 
 # Lookback window (days) for timed_out-merged detection.
 _TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
+
+# GitHub PR state string for a merged PR.
+_GH_PR_STATE_MERGED = "MERGED"
 
 # Seconds of worktree inactivity (no non-.git file modified) before a pane
 # showing an idle shell is considered wedged.
@@ -544,27 +546,7 @@ def _check_wedge_repo_ahead(
             continue
         # Check PR status via gh CLI
         recipe: str
-        try:
-            pr_result = _sp.run(
-                [
-                    "gh",
-                    "pr",
-                    "list",
-                    "--head",
-                    branch,
-                    "--json",
-                    "state",
-                    "--limit",
-                    "1",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-            prs = json.loads(pr_result.stdout) if pr_result.returncode == 0 else []
-        except (OSError, ValueError, _sp.TimeoutExpired):
-            prs = []
+        prs, _ = _gh_pr_states(branch)
         if not prs:
             recipe = (
                 f"Branch {branch} is ahead of main with no open PR. "
@@ -677,7 +659,7 @@ def _check_loop_health() -> list[CheckResult]:
 
     per_client: dict[str, list[dict[str, Any]]] = {}
     for ev in events:
-        client = str(ev.payload.get("client", ""))
+        client = ev.payload.get("client", "")
         per_client.setdefault(client, []).append(ev.payload)
 
     results: list[CheckResult] = []
@@ -706,8 +688,55 @@ def _check_loop_health() -> list[CheckResult]:
             )
 
     if not results:
-        results.append(CheckResult("loop-health", ok=True, warn=False, detail=""))
+        results.append(
+            CheckResult("loop-health", ok=True, warn=False, detail="no stall detected")
+        )
     return results
+
+
+def _gh_pr_states(branch: str) -> tuple[list[dict[str, Any]], bool]:
+    """Return (pr_list, gh_missing) for the given branch.
+
+    Returns ([], False) on empty result or non-zero exit.
+    Returns ([], True) if gh binary is not found.
+    Swallows OSError, ValueError, TimeoutExpired.
+    """
+    try:
+        pr_result = _sp.run(
+            ["gh", "pr", "list", "--head", branch, "--json", "state", "--limit", "1"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        prs: list[dict[str, Any]] = (
+            json.loads(pr_result.stdout) if pr_result.returncode == 0 else []
+        )
+    except FileNotFoundError:
+        return [], True
+    except (OSError, ValueError, _sp.TimeoutExpired):
+        return [], False
+    else:
+        return prs, False
+
+
+def _timed_out_merged_result(
+    session: Session,
+    prs: list[dict[str, Any]],
+    branch: str,
+) -> CheckResult | None:
+    """Return a warn CheckResult if session's PR is MERGED, else None."""
+    if prs and prs[0].get("state") == _GH_PR_STATE_MERGED:
+        return CheckResult(
+            f"timed_out-merged/{session.id}",
+            ok=True,
+            warn=True,
+            detail=(
+                f"session {session.id} is TIMED_OUT but PR for {branch}"
+                " is MERGED — see #315."
+            ),
+        )
+    return None
 
 
 def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
@@ -737,54 +766,22 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
         if branch is None:
             continue
 
-        try:
-            pr_result = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "list",
-                    "--head",
-                    branch,
-                    "--json",
-                    "state",
-                    "--limit",
-                    "1",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-            prs: list[dict[str, Any]] = (
-                json.loads(pr_result.stdout) if pr_result.returncode == 0 else []
-            )
-        except FileNotFoundError:
-            if not gh_missing:
-                results.append(
-                    CheckResult(
-                        "timed_out-merged",
-                        ok=True,
-                        warn=True,
-                        detail="gh unavailable; skipping timed_out-merged check",
-                    )
-                )
-                gh_missing = True
-            continue
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            continue
-
-        if prs and prs[0].get("state") == "MERGED":
+        prs, missing = _gh_pr_states(branch)
+        if missing and not gh_missing:
             results.append(
                 CheckResult(
-                    f"timed_out-merged/{session.id}",
+                    "timed_out-merged",
                     ok=True,
                     warn=True,
-                    detail=(
-                        f"session {session.id} is TIMED_OUT but PR for {branch}"
-                        " is MERGED — see #315."
-                    ),
+                    detail="gh unavailable; skipping timed_out-merged check",
                 )
             )
+            gh_missing = True
+            continue
+
+        result = _timed_out_merged_result(session, prs, branch)
+        if result is not None:
+            results.append(result)
 
     return results
 
@@ -882,7 +879,7 @@ def _check_claude_version() -> CheckResult:
     required for native-daemon dispatch.
     """
     try:
-        proc = subprocess.run(
+        proc = _sp.run(
             ["claude", "--version"],
             capture_output=True,
             text=True,
@@ -891,7 +888,7 @@ def _check_claude_version() -> CheckResult:
         )
     except FileNotFoundError:
         return CheckResult("claude-version", ok=False, detail="claude binary not found")
-    except subprocess.TimeoutExpired:
+    except _sp.TimeoutExpired:
         return CheckResult(
             "claude-version", ok=False, detail="claude --version timed out (10s)"
         )

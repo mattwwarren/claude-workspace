@@ -856,10 +856,10 @@ class TestRunDoctor10Checks:
         monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
 
         if fake_run is not None:
-            monkeypatch.setattr("cw.doctor.subprocess.run", fake_run)
+            monkeypatch.setattr("cw.doctor._sp.run", fake_run)
         else:
             monkeypatch.setattr(
-                "cw.doctor.subprocess.run",
+                "cw.doctor._sp.run",
                 _make_fake_run_version(),
             )
         return settings_path, roster_path
@@ -879,7 +879,7 @@ class TestRunDoctor10Checks:
 
         monkeypatch.setattr("cw.doctor._CLAUDE_SETTINGS_PATH", settings_path)
         monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
-        monkeypatch.setattr("cw.doctor.subprocess.run", _make_fake_run_version())
+        monkeypatch.setattr("cw.doctor._sp.run", _make_fake_run_version())
 
         report = run_doctor()
         names = {c.name for c in report.checks}
@@ -1092,7 +1092,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.1.150 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1107,7 +1107,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.1.139 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1121,7 +1121,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.0.0 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1136,7 +1136,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("not-a-version\n"),
         )
         result = _check_claude_version()
@@ -1151,7 +1151,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("some output\n", returncode=1),
         )
         result = _check_claude_version()
@@ -2857,7 +2857,7 @@ class TestCheckTimedOutMerged:
 
         # Stub gh to return a MERGED PR.
         monkeypatch.setattr(
-            "subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_args, **_kwargs: type(
                 "R", (), {"returncode": 0, "stdout": '[{"state":"MERGED"}]'}
             )(),
@@ -2882,7 +2882,7 @@ class TestCheckTimedOutMerged:
 
         # Stub gh to return an OPEN PR.
         monkeypatch.setattr(
-            "subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_args, **_kwargs: type(
                 "R", (), {"returncode": 0, "stdout": '[{"state":"OPEN"}]'}
             )(),
@@ -3002,7 +3002,7 @@ class TestCheckTimedOutMerged:
         state = CwState(sessions=[session])
 
         monkeypatch.setattr(
-            "subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("gh")),
         )
         results = _check_timed_out_merged(state)
@@ -3028,6 +3028,6 @@ class TestCheckTimedOutMerged:
         def _raise_timeout(*_args: object, **_kwargs: object) -> None:
             raise _subprocess.TimeoutExpired(["gh"], 10)
 
-        monkeypatch.setattr("subprocess.run", _raise_timeout)
+        monkeypatch.setattr("cw.doctor._sp.run", _raise_timeout)
         results = _check_timed_out_merged(state)
         assert not any(r.warn for r in results)
