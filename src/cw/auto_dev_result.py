@@ -169,7 +169,7 @@ PlanSource = Literal[
 
 
 class Scope(BaseModel):
-    tier: ScopeTier
+    tier: ScopeTier | None = None
     files: int
     lines_estimate: int
     lines_actual: int | None = None
@@ -228,7 +228,7 @@ class AgentHealthEntry(BaseModel):
 
 
 class Health(BaseModel):
-    lowest_agent_confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    lowest_agent_confidence: Literal["HIGH", "MEDIUM", "LOW"] | None = None
     any_incomplete_risk: bool
     shortcuts: list[str] = Field(default_factory=list)
     recommendation: Literal["PROCEED", "EXIT_FOR_HUMAN_REVIEW"]
@@ -451,6 +451,21 @@ class AutoDevResult(BaseModel):
         if not exited_pre_impl and self.scope.lines_actual is None:
             msg = (
                 "scope.lines_actual must be non-null when "
+                f"stage_reached={self.stage_reached!r}"
+            )
+            raise ValueError(msg)
+
+        # §3.3 scope.tier and health.lowest_agent_confidence are required at
+        # post-impl stages but null-allowed at pre-impl exits (issue #416).
+        if not exited_pre_impl and self.scope.tier is None:
+            msg = (
+                "scope.tier must be non-null when "
+                f"stage_reached={self.stage_reached!r}"
+            )
+            raise ValueError(msg)
+        if not exited_pre_impl and self.health.lowest_agent_confidence is None:
+            msg = (
+                "health.lowest_agent_confidence must be non-null when "
                 f"stage_reached={self.stage_reached!r}"
             )
             raise ValueError(msg)
