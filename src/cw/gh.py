@@ -51,6 +51,8 @@ def _fetch_pr_state(pr_number: int, timeout: int) -> str | None:
             check=False,
             timeout=timeout,
         )
+    except FileNotFoundError:
+        raise
     except (OSError, _sp.TimeoutExpired):
         return None
 
@@ -75,7 +77,7 @@ def pr_is_merged_for_ticket(
       None   — transient error (timeout, non-zero exit, JSON parse failure)
 
     gh_available:
-      False  — gh binary not found (FileNotFoundError / OSError on exec)
+      False  — gh binary not found (FileNotFoundError)
       True   — binary present (even if the call failed transiently)
     """
     try:
@@ -90,7 +92,10 @@ def pr_is_merged_for_ticket(
         pr_number = ref.get("number")
         if pr_number is None:
             continue
-        state = _fetch_pr_state(int(pr_number), timeout)
+        try:
+            state = _fetch_pr_state(int(pr_number), timeout)
+        except FileNotFoundError:
+            return None, False
         if state == _GH_PR_STATE_MERGED:
             return True, True
 
