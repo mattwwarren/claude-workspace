@@ -484,6 +484,127 @@ class TestOrchestratorStatus:
         assert snapshot.recent_events[0].payload["ticket_id"] == "GEN-5"
         assert snapshot.recent_events[-1].payload["ticket_id"] == "GEN-24"
 
+    def test_last_tick_by_client_from_dispatch_tick_event(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """dispatch.tick event populates last_tick_by_client in the snapshot."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "test-client",
+                "claimed": 1,
+                "pending": 2,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert "test-client" in snapshot.last_tick_by_client
+        tick = snapshot.last_tick_by_client["test-client"]
+        assert tick.claimed == 1
+        assert tick.pending == 2
+        assert tick.running == 1
+        assert tick.cap == 2
+        assert tick.skip_reason == "none"
+        assert tick.tick_at is not None
+
+    def test_last_tick_by_client_multiple_clients(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """Each client gets its own last_tick_by_client entry; latest event wins."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "client-a",
+                "claimed": 1,
+                "pending": 0,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "client-b",
+                "claimed": 0,
+                "pending": 3,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "no_pending",
+            },
+        )
+        # Second event for client-a — should overwrite the first
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "client-a",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "cap_full",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert "client-a" in snapshot.last_tick_by_client
+        assert "client-b" in snapshot.last_tick_by_client
+        # Latest event for client-a wins
+        assert snapshot.last_tick_by_client["client-a"].skip_reason == "cap_full"
+        assert snapshot.last_tick_by_client["client-b"].skip_reason == "no_pending"
+
+    def test_last_tick_by_client_empty_when_no_events(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """No DISPATCH_TICK events → last_tick_by_client is empty."""
+        snapshot = orchestrator_status()
+        assert snapshot.last_tick_by_client == {}
+
+    def test_last_tick_skips_non_string_client(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK events with non-string client are ignored."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": 123,  # non-string — should be skipped
+                "claimed": 1,
+                "pending": 0,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert snapshot.last_tick_by_client == {}
+
+    def test_last_tick_skips_bad_numeric_payload(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK events with non-castable numeric fields are skipped."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "bad-client",
+                "claimed": "not-a-number",
+                "pending": "also-not-a-number",
+                "running": "nope",
+                "cap": "nope",
+                "skip_reason": "none",
+            },
+        )
+        # The event has a valid client but bad numeric fields — raises
+        # ValueError from int() which we catch and skip.
+        snapshot = orchestrator_status()
+        # Skipped due to ValueError — bad-client absent from map.
+        assert "bad-client" not in snapshot.last_tick_by_client
+
     def test_serialises_to_json(
         self,
         tmp_orchestrate_dirs: Path,
