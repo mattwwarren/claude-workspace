@@ -6,10 +6,62 @@ import json
 import subprocess as _sp
 from typing import Any
 
-# Lookback window (days) for timed_out-merged detection.
-TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
-
 _GH_PR_STATE_MERGED = "MERGED"
+
+
+def _fetch_issue_pr_refs(ticket_id: str, timeout: int) -> list[dict[str, Any]] | None:
+    """Return the list of PR refs linked to ticket_id, or None on any error."""
+    try:
+        result = _sp.run(
+            [
+                "gh",
+                "issue",
+                "view",
+                ticket_id,
+                "--json",
+                "closedByPullRequestsReferences",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        raise
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data: dict[str, Any] = json.loads(result.stdout)
+        return data.get("closedByPullRequestsReferences") or []
+    except (ValueError, AttributeError):
+        return None
+
+
+def _fetch_pr_state(pr_number: int, timeout: int) -> str | None:
+    """Return the state string for the given PR number, or None on any error."""
+    try:
+        result = _sp.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "state"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        pr_data: dict[str, Any] = json.loads(result.stdout)
+        return str(pr_data.get("state", ""))
+    except ValueError:
+        return None
 
 
 def pr_is_merged_for_ticket(
@@ -27,55 +79,19 @@ def pr_is_merged_for_ticket(
       True   — binary present (even if the call failed transiently)
     """
     try:
-        issue_result = _sp.run(
-            [
-                "gh",
-                "issue",
-                "view",
-                ticket_id,
-                "--json",
-                "closedByPullRequestsReferences",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
+        refs = _fetch_issue_pr_refs(ticket_id, timeout)
     except FileNotFoundError:
         return None, False
-    except (OSError, _sp.TimeoutExpired):
+
+    if refs is None:
         return None, True
 
-    if issue_result.returncode != 0:
-        return None, True
-
-    try:
-        data: dict[str, Any] = json.loads(issue_result.stdout)
-        pr_refs: list[dict[str, Any]] = data.get("closedByPullRequestsReferences") or []
-    except (ValueError, AttributeError):
-        return None, True
-
-    for ref in pr_refs:
+    for ref in refs:
         pr_number = ref.get("number")
         if pr_number is None:
             continue
-        try:
-            pr_result = _sp.run(
-                ["gh", "pr", "view", str(pr_number), "--json", "state"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout,
-            )
-        except (OSError, _sp.TimeoutExpired):
-            continue
-        if pr_result.returncode != 0:
-            continue
-        try:
-            pr_data: dict[str, Any] = json.loads(pr_result.stdout)
-        except ValueError:
-            continue
-        if pr_data.get("state") == _GH_PR_STATE_MERGED:
+        state = _fetch_pr_state(int(pr_number), timeout)
+        if state == _GH_PR_STATE_MERGED:
             return True, True
 
     return False, True

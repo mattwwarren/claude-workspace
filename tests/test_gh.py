@@ -6,7 +6,7 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
+from cw.gh import pr_is_merged_for_ticket
 
 if TYPE_CHECKING:
     import pytest
@@ -215,8 +215,3 @@ class TestPrIsMergedForTicket:
         merged, gh_available = pr_is_merged_for_ticket("487")
         assert merged is False
         assert gh_available is True
-
-
-def test_constant_value() -> None:
-    """TIMED_OUT_MERGED_LOOKBACK_DAYS is 7 days."""
-    assert TIMED_OUT_MERGED_LOOKBACK_DAYS == 7
