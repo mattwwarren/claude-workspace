@@ -32,10 +32,11 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     parse_stdout,
@@ -114,6 +115,11 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
 _SILENTLY_IDLE_REASON = "silently_idle"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 
+# Lookback window for complete_timed_out_merged_tasks: only consider TIMED_OUT
+# sessions whose completed_at falls within this many days of now. Older sessions
+# are unlikely to have freshly merged PRs and add unnecessary gh API calls.
+_TIMED_OUT_MERGED_LOOKBACK_DAYS: int = 7
+
 
 # Grace window for a newly-spawned session to register with the daemon
 # (`claude agents --json`). `claude --bg` spawn → daemon roster registration
@@ -149,6 +155,33 @@ def _claude_agents_json() -> list[dict[str, object]]:
     )
     data = json.loads(proc.stdout)
     return data if isinstance(data, list) else []
+
+
+def _pr_is_merged(branch: str) -> bool | None:
+    """True=merged, False=not-merged, None=gh-unavailable/error."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--json", "state", "--limit", "1"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        prs: list[dict[str, Any]] = (
+            json.loads(result.stdout) if result.returncode == 0 else []
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return bool(prs and prs[0].get("state") == "MERGED")
+
+
+def _queue_status_for_salvaged(result: AutoDevResult) -> QueueItemStatus:
+    """Map a salvaged AutoDevResult to the appropriate QueueItemStatus."""
+    if result.status in PAUSED_FOR_USER_INPUT_STATUSES:
+        return QueueItemStatus.BLOCKED_ON_USER
+    return QueueItemStatus.COMPLETED
 
 
 @dataclass(frozen=True)
@@ -676,6 +709,7 @@ def revert_stalled_headless_sessions(
 
     timed_out_ticket_ids = {tid for _, tid in pending if tid}
     salvaged_ticket_ids = {tid for _, tid, _ in salvaged if tid}
+    salvaged_result_by_ticket = {tid: result for _, tid, result in salvaged if tid}
     reverted: list[str] = []
     if timed_out_ticket_ids or salvaged_ticket_ids:
         with dev_queue_lock():
@@ -693,7 +727,11 @@ def revert_stalled_headless_sessions(
                     # Terminal-success salvage: retire the task so the
                     # COMPLETED-silent backstop does not revert it to PENDING
                     # and re-dispatch already-finished work (#372).
-                    task.status = QueueItemStatus.COMPLETED
+                    # Paused statuses (ambiguities_pending_resolution,
+                    # premises_pending_verification) route to BLOCKED_ON_USER
+                    # so downstream operators know human input is needed (#471).
+                    result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(result)
                     changed = True
             if changed:
                 save_dev_queue(store)
@@ -869,6 +907,7 @@ def flag_silently_idle_daemon_sessions(
     recovered_ids = {tid for _, tid in recover if tid}
     parked_ids = {tid for _, tid in park if tid}
     salvaged_ticket_ids = {tid for _, tid, _ in salvaged if tid}
+    salvaged_result_by_ticket = {tid: result for _, tid, result in salvaged if tid}
     blocked: list[str] = []
     if recovered_ids or parked_ids or salvaged_ticket_ids:
         with dev_queue_lock():
@@ -886,7 +925,8 @@ def flag_silently_idle_daemon_sessions(
                     blocked.append(task.ticket_id)
                     changed = True
                 elif task.ticket_id in salvaged_ticket_ids:
-                    task.status = QueueItemStatus.COMPLETED
+                    result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(result)
                     changed = True
             if changed:
                 save_dev_queue(store)
@@ -1028,12 +1068,14 @@ def _reconcile_locked() -> ReconcileReport:
         # COMPLETED-silent sweeps so any tasks whose sessions completed or
         # timed out without reverting their queue task are recovered.
         timed_out_ticket_ids = revert_timed_out_tasks()
+        timed_out_merged_ids = complete_timed_out_merged_tasks()
         completed_silent_ticket_ids = revert_completed_silent_tasks()
         all_reverted = list(
             dict.fromkeys(
                 stalled_reverted
                 + silently_idle_ticket_ids
                 + timed_out_ticket_ids
+                + timed_out_merged_ids
                 + completed_silent_ticket_ids
             )
         )
@@ -1042,6 +1084,7 @@ def _reconcile_locked() -> ReconcileReport:
     phantom_set = set(drift.phantom_session_ids)
     ticket_ids_to_revert: list[str] = []
     salvaged_ticket_ids: list[str] = []
+    salvaged_result_by_ticket: dict[str, AutoDevResult] = {}
     pending_events: list[dict[str, object]] = []
     phantom_names: list[str] = []
     # Accumulate data for session.phantom_reverted events (DAEMON-origin only).
@@ -1066,6 +1109,7 @@ def _reconcile_locked() -> ReconcileReport:
             phantom_names.append(session.name)
             if ticket_id:
                 salvaged_ticket_ids.append(ticket_id)
+                salvaged_result_by_ticket[ticket_id] = result
             salvaged_payload: dict[str, object] = {
                 "session_id": session.id,
                 "session_name": session.name,
@@ -1141,7 +1185,9 @@ def _reconcile_locked() -> ReconcileReport:
                 elif task.ticket_id in salvaged_set:
                     # Terminal-success salvage: retire the task instead of
                     # reverting, so shipped/no_op work is not re-dispatched (#372).
-                    task.status = QueueItemStatus.COMPLETED
+                    # Paused statuses route to BLOCKED_ON_USER instead (#471).
+                    salvaged_result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(salvaged_result)
                     changed = True
             if changed:
                 save_dev_queue(store)
@@ -1152,6 +1198,7 @@ def _reconcile_locked() -> ReconcileReport:
     # the dispatch consumer processing it). TIMED_OUT/COMPLETED sessions are
     # already terminal so no state mutation is needed — queue revert only.
     timed_out_ticket_ids = revert_timed_out_tasks()
+    timed_out_merged_ids = complete_timed_out_merged_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     all_reverted = list(
         dict.fromkeys(
@@ -1159,6 +1206,7 @@ def _reconcile_locked() -> ReconcileReport:
             + silently_idle_ticket_ids
             + reverted
             + timed_out_ticket_ids
+            + timed_out_merged_ids
             + completed_silent_ticket_ids
         )
     )
@@ -1210,6 +1258,74 @@ def revert_timed_out_tasks() -> list[str]:
         if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
     }
     return _revert_running_tasks_for_sessions(session_ids)
+
+
+def complete_timed_out_merged_tasks() -> list[str]:
+    """Upgrade PENDING tasks whose TIMED_OUT session's PR has since merged.
+
+    Runs after revert_timed_out_tasks() in _reconcile_locked.
+    """
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=_TIMED_OUT_MERGED_LOOKBACK_DAYS)
+    state = load_state()
+    completed_ticket_ids: list[str] = []
+
+    for session in state.sessions:
+        if session.status != SessionStatus.TIMED_OUT:
+            continue
+        if session.origin != SessionOrigin.DAEMON:
+            continue
+        if session.completed_at is None or session.completed_at < cutoff:
+            continue
+
+        # Branch inference: prefer session.branch, fall back to ticket-id-based name.
+        branch = session.branch
+        if branch is None:
+            tid = ticket_id_for_session(session.name)
+            branch = f"auto-dev/{tid}" if tid is not None else None
+        if branch is None:
+            continue
+
+        merged = _pr_is_merged(branch)
+        if merged is None:
+            continue  # gh unavailable; skip, not an error
+        if not merged:
+            continue
+
+        ticket_id = ticket_id_for_session(session.name)
+        if not ticket_id:
+            continue
+
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if task.ticket_id != ticket_id:
+                    continue
+                if task.status != QueueItemStatus.PENDING:
+                    continue
+                task.status = QueueItemStatus.COMPLETED
+                save_dev_queue(store)
+                completed_ticket_ids.append(ticket_id)
+                payload: dict[str, object] = {
+                    "session_id": session.id,
+                    "session_name": session.name,
+                    "client": session.client,
+                    "ticket_id": ticket_id,
+                    "branch": branch,
+                    "reason": "timed_out_merged",
+                    "crashed": False,
+                    "salvaged": True,
+                }
+                record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+                _log.warning(
+                    "reconcile: task %s upgraded PENDING→COMPLETED"
+                    " (timed_out_merged, branch=%s)",
+                    ticket_id,
+                    branch,
+                )
+                break
+
+    return completed_ticket_ids
 
 
 def revert_completed_silent_tasks() -> list[str]:
