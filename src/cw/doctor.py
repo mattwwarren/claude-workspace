@@ -37,7 +37,7 @@ from cw.config import (
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
-from cw.gh import pr_is_merged_for_ticket
+from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
     CompletionReason,
     DispatchSkipReason,
@@ -114,10 +114,6 @@ _CW_PACKAGE_NAME = "claude-workspace"
 
 # Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
 _LOOP_STALL_CONSECUTIVE_TICKS = 3
-
-# Lookback window (days) for timed_out-merged detection.
-_TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
-
 
 # Seconds of worktree inactivity (no non-.git file modified) before a pane
 # showing an idle shell is considered wedged.
@@ -740,7 +736,7 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
     determine whether a linked PR is MERGED. Emits a warn=True result
     per session when a merged PR is found.
     """
-    cutoff = datetime.now(UTC) - timedelta(days=_TIMED_OUT_MERGED_LOOKBACK_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=TIMED_OUT_MERGED_LOOKBACK_DAYS)
     results: list[CheckResult] = []
     gh_missing = False
 
