@@ -4703,3 +4703,126 @@ class TestDevQueueRunQuiet:
         assert callable(captured_emit[0]), (
             f"Expected callable emit but got: {captured_emit[0]!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: _format_status_human
+# ---------------------------------------------------------------------------
+
+
+class TestFormatStatusHuman:
+    def test_format_status_human_shows_last_tick_section(self) -> None:
+        """_format_status_human renders last-tick section when data present."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import OrchestratorStatus, TickSummary
+
+        tick = TickSummary(
+            claimed=2,
+            pending=1,
+            running=2,
+            cap=3,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+            last_tick_by_client={"my-client": tick},
+        )
+        output = _format_status_human(status)
+        assert "Last dispatch tick" in output
+        assert "my-client" in output
+        assert "claimed=2" in output
+        assert "skip=none" in output
+
+    def test_format_status_human_no_last_tick_when_empty(self) -> None:
+        """_format_status_human shows 'no dispatch ticks' when empty."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import OrchestratorStatus
+
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+        )
+        output = _format_status_human(status)
+        assert "no dispatch ticks recorded" in output
+
+    def test_format_status_human_last_stage_placeholder(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Sessions with no stage events show placeholder text."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import OrchestratorStatus, SessionSummary
+
+        sess = SessionSummary(
+            id="s1",
+            name="test/impl/s1",
+            client="test",
+            status="active",
+            purpose="impl",
+            started_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+            last_stage=None,
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+            running_sessions=[sess],
+        )
+        output = _format_status_human(status)
+        assert "(unknown — global auto-dev.md not yet emitting stage events)" in output
+
+    def test_format_status_human_monitored_pr_shows_role(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """MonitoredPR line in _format_status_human includes role field."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import MonitoredPR, OrchestratorStatus
+
+        pr = MonitoredPR(
+            repo="owner/repo",
+            pr_number=42,
+            role="author",
+            status="watching",
+            unresolved_threads=0,
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+            monitored_prs=[pr],
+        )
+        output = _format_status_human(status)
+        assert "role=author" in output
+
+
+class TestDevQueueStatusWithTick:
+    def test_dev_queue_status_shows_last_tick(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """dev-queue status renders last-tick section when tick data present."""
+        from cw.dev_queue import add_ticket
+        from cw.events import record_event
+        from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-999",
+                client="tick-client",
+                priority=5,
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "tick-client",
+                "claimed": 1,
+                "pending": 0,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "cap_full",
+            },
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "Last dispatch tick per client:" in result.output
+        assert "tick-client" in result.output
+        assert "claimed=1" in result.output
+        assert "skip=cap_full" in result.output

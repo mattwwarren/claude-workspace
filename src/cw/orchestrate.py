@@ -369,6 +369,17 @@ class EventSummary(BaseModel):
     created_at: datetime
 
 
+class TickSummary(BaseModel):
+    """Most recent dispatch.tick summary for one client."""
+
+    claimed: int
+    pending: int
+    running: int
+    cap: int
+    skip_reason: str
+    tick_at: datetime
+
+
 class OrchestratorStatus(BaseModel):
     """Snapshot of the orchestrator subsystem.
 
@@ -382,6 +393,7 @@ class OrchestratorStatus(BaseModel):
     monitored_prs: list[MonitoredPR] = Field(default_factory=list)
     recent_events: list[EventSummary] = Field(default_factory=list)
     total_cost_by_client: dict[str, float] = Field(default_factory=dict)
+    last_tick_by_client: dict[str, TickSummary] = Field(default_factory=dict)
 
 
 def _summarise_ticket(task: TicketTask) -> TicketSummary:
@@ -444,6 +456,33 @@ def _summarise_event(event: OrchestratorEvent) -> EventSummary:
     )
 
 
+def _latest_tick_by_client(
+    events: list[OrchestratorEvent],
+) -> dict[str, TickSummary]:
+    """Derive the most recent dispatch.tick per client from an event list."""
+    result: dict[str, TickSummary] = {}
+    for ev in events:
+        if ev.type is not OrchestratorEventType.DISPATCH_TICK:
+            continue
+        client = ev.payload.get("client")
+        if not isinstance(client, str):
+            continue
+        existing = result.get(client)
+        if existing is None or ev.created_at > existing.tick_at:
+            try:
+                result[client] = TickSummary(
+                    claimed=int(ev.payload.get("claimed", 0)),
+                    pending=int(ev.payload.get("pending", 0)),
+                    running=int(ev.payload.get("running", 0)),
+                    cap=int(ev.payload.get("cap", 0)),
+                    skip_reason=str(ev.payload.get("skip_reason", "none")),
+                    tick_at=ev.created_at,
+                )
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
 def _count_unresolved(thread_status: dict[str, Any]) -> int:
     """Return the number of unresolved threads in a thread_status dict."""
     count = 0
@@ -467,7 +506,7 @@ def _load_monitored_prs() -> list[MonitoredPR]:
             raw: dict[str, Any] = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        active: dict[str, Any] = raw.get("active", {})
+        active: dict[str, Any] = raw.get("monitored", {})
         for pr_data in active.values():
             if not isinstance(pr_data, dict):
                 continue
@@ -488,6 +527,15 @@ def _load_monitored_prs() -> list[MonitoredPR]:
     return monitored
 
 
+def latest_tick_summary_by_client() -> dict[str, TickSummary]:
+    """Return the most recent dispatch.tick summary per client.
+
+    Uses only DISPATCH_TICK events — no full orchestrator_status() overhead.
+    """
+    events = read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])
+    return _latest_tick_by_client(events)
+
+
 def orchestrator_status() -> OrchestratorStatus:
     """Build a snapshot of pending tickets, running sessions, PRs, events."""
     queue = load_dev_queue()
@@ -499,6 +547,7 @@ def orchestrator_status() -> OrchestratorStatus:
     # summarising the running list.
     all_events = read_events()
     last_stage_by_session = _derive_last_stage_by_session(all_events)
+    last_tick = _latest_tick_by_client(all_events)
 
     state = load_state()
     running = [
@@ -525,6 +574,7 @@ def orchestrator_status() -> OrchestratorStatus:
         monitored_prs=monitored,
         recent_events=recent,
         total_cost_by_client=total_cost,
+        last_tick_by_client=last_tick,
     )
 
 

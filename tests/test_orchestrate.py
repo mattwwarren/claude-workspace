@@ -155,7 +155,7 @@ def _write_monitor_file(
         "thread_status": thread_status or {},
         "delta_findings": [],
     }
-    payload = {"active": {pr_key: pr_data}, "completed": {}}
+    payload = {"monitored": {pr_key: pr_data}, "completed": {}}
     filename = repo.replace("/", "--") + ".json"
     path = review_monitor_dir / filename
     path.write_text(json.dumps(payload, indent=2))
@@ -464,6 +464,146 @@ class TestOrchestratorStatus:
         # Should be the LAST 20, so first should be GEN-5.
         assert snapshot.recent_events[0].payload["ticket_id"] == "GEN-5"
         assert snapshot.recent_events[-1].payload["ticket_id"] == "GEN-24"
+
+    def test_last_tick_by_client_from_dispatch_tick_event(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """dispatch.tick event populates last_tick_by_client in the snapshot."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "test-client",
+                "claimed": 1,
+                "pending": 2,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert "test-client" in snapshot.last_tick_by_client
+        tick = snapshot.last_tick_by_client["test-client"]
+        assert tick.claimed == 1
+        assert tick.pending == 2
+        assert tick.running == 1
+        assert tick.cap == 2
+        assert tick.skip_reason == "none"
+        assert tick.tick_at is not None
+
+    def test_last_tick_by_client_multiple_clients(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """Each client gets its own last_tick_by_client entry; latest event wins."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "client-a",
+                "claimed": 1,
+                "pending": 0,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "client-b",
+                "claimed": 0,
+                "pending": 3,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "no_pending",
+            },
+        )
+        # Second event for client-a — should overwrite the first
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "client-a",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "cap_full",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert "client-a" in snapshot.last_tick_by_client
+        assert "client-b" in snapshot.last_tick_by_client
+        # Latest event for client-a wins
+        assert snapshot.last_tick_by_client["client-a"].skip_reason == "cap_full"
+        assert snapshot.last_tick_by_client["client-b"].skip_reason == "no_pending"
+
+    def test_last_tick_by_client_empty_when_no_events(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """No DISPATCH_TICK events → last_tick_by_client is empty."""
+        snapshot = orchestrator_status()
+        assert snapshot.last_tick_by_client == {}
+
+    def test_last_tick_skips_non_string_client(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK events with non-string client are ignored."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": 123,  # non-string — should be skipped
+                "claimed": 1,
+                "pending": 0,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert snapshot.last_tick_by_client == {}
+
+    def test_last_tick_skips_bad_numeric_payload(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK events with non-castable numeric fields are skipped."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "bad-client",
+                "claimed": "not-a-number",
+                "pending": "also-not-a-number",
+                "running": "nope",
+                "cap": "nope",
+                "skip_reason": "none",
+            },
+        )
+        # The event has a valid client but bad numeric fields — raises
+        # ValueError from int() which we catch and skip.
+        snapshot = orchestrator_status()
+        # Skipped due to ValueError — bad-client absent from map.
+        assert "bad-client" not in snapshot.last_tick_by_client
+
+    def test_load_monitored_prs_uses_monitored_key(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """_load_monitored_prs reads the 'monitored' key (not 'active')."""
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        _write_monitor_file(
+            review_dir,
+            "owner/repo",
+            99,
+            status="watching",
+            role="author",
+        )
+        # After _write_monitor_file update, file uses 'monitored' key.
+        # _load_monitored_prs must read it.
+        snapshot = orchestrator_status()
+        assert len(snapshot.monitored_prs) == 1
+        assert snapshot.monitored_prs[0].pr_number == 99
 
     def test_serialises_to_json(
         self,
@@ -1080,7 +1220,7 @@ class TestCliOrchestrateStatusLastStage:
         tmp_orchestrate_dirs: Path,
         workspace: Path,
     ) -> None:
-        """No last_stage token when the session has no stage events."""
+        """Sessions with no stage events show placeholder in last_stage field."""
         save_state(
             CwState(
                 sessions=[
@@ -1092,7 +1232,8 @@ class TestCliOrchestrateStatusLastStage:
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrate", "status"])
         assert result.exit_code == 0, result.output
-        assert "last_stage=" not in result.output
+        expected = "(unknown — global auto-dev.md not yet emitting stage events)"
+        assert expected in result.output
 
 
 # ---------------------------------------------------------------------------
