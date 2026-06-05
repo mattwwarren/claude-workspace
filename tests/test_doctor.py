@@ -2855,12 +2855,9 @@ class TestCheckTimedOutMerged:
         session = self._make_timed_out_session(tmp_path, sid="to-merged")
         state = CwState(sessions=[session])
 
-        # Stub gh to return a MERGED PR.
         monkeypatch.setattr(
-            "cw.doctor._sp.run",
-            lambda *_args, **_kwargs: type(
-                "R", (), {"returncode": 0, "stdout": '[{"state":"MERGED"}]'}
-            )(),
+            "cw.doctor.pr_is_merged_for_ticket",
+            lambda *_args, **_kwargs: (True, True),
         )
         results = _check_timed_out_merged(state)
         warn_results = [r for r in results if r.warn]
@@ -2880,12 +2877,9 @@ class TestCheckTimedOutMerged:
         session = self._make_timed_out_session(tmp_path, sid="to-open")
         state = CwState(sessions=[session])
 
-        # Stub gh to return an OPEN PR.
         monkeypatch.setattr(
-            "cw.doctor._sp.run",
-            lambda *_args, **_kwargs: type(
-                "R", (), {"returncode": 0, "stdout": '[{"state":"OPEN"}]'}
-            )(),
+            "cw.doctor.pr_is_merged_for_ticket",
+            lambda *_args, **_kwargs: (False, True),
         )
         results = _check_timed_out_merged(state)
         assert not any(r.warn for r in results)
@@ -2994,7 +2988,7 @@ class TestCheckTimedOutMerged:
         tmp_path: Path,
         tmp_config_dir: Path,
     ) -> None:
-        """FileNotFoundError (gh not installed) → single warn=True about gh missing."""
+        """gh binary absent (gh_available=False) → single warn=True about gh missing."""
         from cw.doctor import _check_timed_out_merged
         from cw.models import CwState
 
@@ -3002,8 +2996,8 @@ class TestCheckTimedOutMerged:
         state = CwState(sessions=[session])
 
         monkeypatch.setattr(
-            "cw.doctor._sp.run",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("gh")),
+            "cw.doctor.pr_is_merged_for_ticket",
+            lambda *_args, **_kwargs: (None, False),
         )
         results = _check_timed_out_merged(state)
         warn_results = [r for r in results if r.warn]
@@ -3016,19 +3010,17 @@ class TestCheckTimedOutMerged:
         tmp_path: Path,
         tmp_config_dir: Path,
     ) -> None:
-        """subprocess.TimeoutExpired is silently swallowed (no warn)."""
-        import subprocess as _subprocess
-
+        """Transient gh error (merged=None, gh_available=True) is silently swallowed."""
         from cw.doctor import _check_timed_out_merged
         from cw.models import CwState
 
         session = self._make_timed_out_session(tmp_path, sid="to-timeout")
         state = CwState(sessions=[session])
 
-        def _raise_timeout(*_args: object, **_kwargs: object) -> None:
-            raise _subprocess.TimeoutExpired(["gh"], 10)
-
-        monkeypatch.setattr("cw.doctor._sp.run", _raise_timeout)
+        monkeypatch.setattr(
+            "cw.doctor.pr_is_merged_for_ticket",
+            lambda *_args, **_kwargs: (None, True),
+        )
         results = _check_timed_out_merged(state)
         assert not any(r.warn for r in results)
 

@@ -15,7 +15,6 @@ Incidents covered:
 
 from __future__ import annotations
 
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -266,10 +265,8 @@ def test_incident_315_timed_out_merged_warns(
     state = CwState(sessions=[sess])
 
     monkeypatch.setattr(
-        "cw.doctor._sp.run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout='[{"state":"MERGED"}]', stderr=""
-        ),
+        "cw.doctor.pr_is_merged_for_ticket",
+        lambda *_args, **_kwargs: (True, True),
     )
 
     results = _check_timed_out_merged(state)

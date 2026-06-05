@@ -51,9 +51,7 @@ def pr_is_merged_for_ticket(
 
     try:
         data: dict[str, Any] = json.loads(issue_result.stdout)
-        pr_refs: list[dict[str, Any]] = (
-            data.get("closedByPullRequestsReferences") or []
-        )
+        pr_refs: list[dict[str, Any]] = data.get("closedByPullRequestsReferences") or []
     except (ValueError, AttributeError):
         return None, True
 
