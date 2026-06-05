@@ -230,7 +230,7 @@ def watch_prs_for_client(
     )
 
     for file_data in monitor_files:
-        active_prs: dict[str, Any] = file_data.get("active", {})
+        active_prs: dict[str, Any] = file_data.get("monitored", {})
         for pr_data in active_prs.values():
             if not isinstance(pr_data, dict):
                 continue

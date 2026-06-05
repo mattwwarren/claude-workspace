@@ -55,7 +55,7 @@ def _make_monitor_file(
         "delta_findings": delta_findings or [],
     }
     state: dict[str, Any] = {
-        "active": {pr_key: pr_data},
+        "monitored": {pr_key: pr_data},
         "completed": {},
     }
     # filename: owner--repo.json
