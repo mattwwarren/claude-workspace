@@ -4345,10 +4345,10 @@ def _mk_timed_out_daemon_session(
 
 
 class TestCompleteTimedOutMergedTasks:
-    """complete_timed_out_merged_tasks() auto-completes PENDING tasks whose PR merged."""
+    """complete_timed_out_merged_tasks() auto-completes PENDING tasks on merged PR."""
 
     def _pending_task(self, ticket_id: str) -> TicketTask:
-        return TicketTask(ticket_id=ticket_id, title=f"Task {ticket_id}")
+        return TicketTask(ticket_id=ticket_id, client="client-a")
 
     def test_happy_path(
         self,
@@ -4442,7 +4442,7 @@ class TestCompleteTimedOutMergedTasks:
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """(None, True) for session A, (True, True) for session B → A skipped, B completed."""
+        """(None, True) for A, (True, True) for B → A skipped, B completed."""
         now = datetime.now(UTC)
         session_a = _mk_timed_out_daemon_session(
             "sess-a", "TKT-A", completed_at=now - timedelta(hours=1)
@@ -4655,8 +4655,9 @@ class TestCompleteTimedOutMergedTasks:
         )
         save_state(CwState(sessions=[session]))
 
-        running_task = TicketTask(ticket_id=ticket_id, title="Running task")
-        running_task.status = QueueItemStatus.RUNNING
+        running_task = TicketTask(
+            ticket_id=ticket_id, client="client-a", status=QueueItemStatus.RUNNING
+        )
         save_dev_queue(DevQueueStore(tasks=[running_task]))
 
         call_count = 0

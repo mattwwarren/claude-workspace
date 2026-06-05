@@ -1237,7 +1237,9 @@ def _revert_running_tasks_for_sessions(session_ids: set[str]) -> list[str]:
 
 
 def complete_timed_out_merged_tasks() -> list[str]:
-    """Upgrade PENDING TicketTasks to COMPLETED when their TIMED_OUT session's PR merged.
+    """Upgrade PENDING TicketTasks to COMPLETED when their PR merged.
+
+    Targets TIMED_OUT DAEMON sessions in the lookback window whose PR merged.
 
     Post-pass over TIMED_OUT DAEMON sessions in the lookback window. For each
     whose dev-queue task is still PENDING and whose linked PR is MERGED (via
@@ -1308,7 +1310,10 @@ def complete_timed_out_merged_tasks() -> list[str]:
         changed = False
         for _, ticket_id in to_complete:
             for task in store.tasks:
-                if task.ticket_id == ticket_id and task.status == QueueItemStatus.PENDING:
+                if (
+                    task.ticket_id == ticket_id
+                    and task.status == QueueItemStatus.PENDING
+                ):
                     task.status = QueueItemStatus.COMPLETED
                     completed_ids.append(ticket_id)
                     changed = True
