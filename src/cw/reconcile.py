@@ -26,6 +26,7 @@ called outside ``reconcile``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import subprocess
@@ -1044,7 +1045,8 @@ def _reconcile_locked() -> ReconcileReport:
     # Accumulate data for session.phantom_reverted events (DAEMON-origin only).
     # Emitted after save_state but before dev_queue_lock — see operator resolution
     # in issue #459 for lock-ordering rationale.
-    phantom_reverted_data: list[tuple[str, str, str, str | None]] = []  # (id, ticket, client, branch)
+    # (session_id, ticket_id, client, branch)
+    phantom_reverted_data: list[tuple[str, str, str, str | None]] = []
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
@@ -1101,10 +1103,8 @@ def _reconcile_locked() -> ReconcileReport:
         wt_dirty = _compute_worktree_dirty(rev_client, rev_branch)
         wt_path: str | None = None
         if rev_branch:
-            try:
+            with contextlib.suppress(Exception):
                 wt_path = str(worktree_path_for(get_client(rev_client), rev_branch))
-            except Exception:  # noqa: BLE001
-                pass
         record_event(
             OrchestratorEventType.SESSION_PHANTOM_REVERTED,
             {

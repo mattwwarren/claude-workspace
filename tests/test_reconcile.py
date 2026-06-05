@@ -3982,7 +3982,7 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DAEMON phantom revert emits session.phantom_reverted with worktree_dirty=False."""
+    """DAEMON phantom revert emits session.phantom_reverted with dirty=False."""
     sess = _mk_session("phantom-clean", "dead-ref-2")
     sess.origin = SessionOrigin.DAEMON
     sess.name = "client-a/auto-dev/TICK-PC"
@@ -4068,9 +4068,7 @@ def test_salvage_skipped_emitted_for_park_marker(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    revert_stalled_headless_sessions(
-        state=state, now=now, config=OrchestratorConfig()
-    )
+    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
 
     events = read_events(
         consumer="test-salvage-skipped",
@@ -4117,12 +4115,24 @@ def test_salvage_skipped_not_emitted_for_terminal_sentinel(
         lambda *_args, **_kwargs: (fake_result, "fake-claude-id"),
     )
 
-    revert_stalled_headless_sessions(
-        state=state, now=now, config=OrchestratorConfig()
-    )
+    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
 
     events = read_events(
         consumer="test-no-salvage-skip",
         event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
     )
     assert len(events) == 0
+
+
+def test_compute_worktree_dirty_returns_false_when_get_client_raises(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_compute_worktree_dirty returns False when get_client raises (fail-safe)."""
+    from cw.reconcile import _compute_worktree_dirty
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda _name: (_ for _ in ()).throw(ValueError("no such client")),
+    )
+    assert _compute_worktree_dirty("missing-client", "some-branch") is False

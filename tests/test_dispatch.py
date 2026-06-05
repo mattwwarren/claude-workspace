@@ -2229,7 +2229,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Stale main → skip_reason='freshness_gate', claimed=0, pending=pre-claim count."""
+        """Stale main → skip_reason='freshness_gate', claimed=0, pending=pre-claim."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-FG-1", client="test-client"))
         add_ticket(TicketTask(ticket_id="TICK-FG-2", client="test-client"))
@@ -2258,7 +2258,7 @@ class TestDispatchTickEvents:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """Spawn failure → skip_reason='spawn_error'; claimed reflects partial success."""
+        """Spawn failure → skip_reason='spawn_error'; claimed=partial success."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-SE", client="test-client"))
 
