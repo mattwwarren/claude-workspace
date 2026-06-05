@@ -1172,9 +1172,7 @@ class TestWaitForTerminal:
     @pytest.fixture(autouse=True)
     def _patch_consume(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stub consume_completed_sessions so tests don't touch event cursor."""
-        monkeypatch.setattr(
-            "cw.dev_queue.consume_completed_sessions", lambda: 0
-        )
+        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
 
     def test_wait_completed_returns_immediately(self, tmp_config_dir: Path) -> None:
         """COMPLETED ticket returns on the first load, no polling."""

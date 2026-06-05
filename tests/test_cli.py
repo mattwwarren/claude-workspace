@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     import pytest
 
     from cw.cmux import FakeCmuxAdapter
+    from cw.models import QueueItemStatus
 
 
 class TestCli:
@@ -4840,7 +4841,7 @@ class TestDevQueueWait:
         self,
         tmp_config_dir: Path,
         ticket_id: str,
-        status: "QueueItemStatus",
+        status: QueueItemStatus,
         session_id: str | None = "sess-wait",
     ) -> None:
         from cw.dev_queue import save_dev_queue
@@ -4873,7 +4874,7 @@ class TestDevQueueWait:
         )
         monkeypatch.setattr(
             "cw.cli.wait_for_terminal",
-            lambda ticket_id, client, timeout: task,
+            lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -4896,7 +4897,7 @@ class TestDevQueueWait:
         )
         monkeypatch.setattr(
             "cw.cli.wait_for_terminal",
-            lambda ticket_id, client, timeout: task,
+            lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -4918,7 +4919,7 @@ class TestDevQueueWait:
         )
         monkeypatch.setattr(
             "cw.cli.wait_for_terminal",
-            lambda ticket_id, client, timeout: task,
+            lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -4940,7 +4941,7 @@ class TestDevQueueWait:
         )
         monkeypatch.setattr(
             "cw.cli.wait_for_terminal",
-            lambda ticket_id, client, timeout: task,
+            lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -4954,7 +4955,7 @@ class TestDevQueueWait:
         """TimeoutError from wait_for_terminal → exit _WAIT_EXIT_TIMEOUT (124)."""
         from cw.cli import _WAIT_EXIT_TIMEOUT
 
-        def _raise_timeout(ticket_id: str, client: str, timeout: float) -> None:
+        def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
 
         monkeypatch.setattr("cw.cli.wait_for_terminal", _raise_timeout)
@@ -4980,7 +4981,7 @@ class TestDevQueueWait:
         )
         monkeypatch.setattr(
             "cw.cli.wait_for_terminal",
-            lambda ticket_id, client, timeout: task,
+            lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -5010,7 +5011,7 @@ class TestDevQueueWait:
         )
         monkeypatch.setattr(
             "cw.cli.wait_for_terminal",
-            lambda ticket_id, client, timeout: task,
+            lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -5032,7 +5033,7 @@ class TestDevQueueWait:
 
         from cw.cli import _WAIT_EXIT_TIMEOUT
 
-        def _raise_timeout(ticket_id: str, client: str, timeout: float) -> None:
+        def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
 
         monkeypatch.setattr("cw.cli.wait_for_terminal", _raise_timeout)
@@ -5066,7 +5067,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.COMPLETED,
         )
 
-        def _capture(ticket_id: str, client: str, timeout: float) -> TicketTask:
+        def _capture(ticket_id: str, client: str, *, timeout: float) -> TicketTask:
             captured.append(timeout)
             return task
 
