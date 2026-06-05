@@ -467,7 +467,7 @@ def _load_monitored_prs() -> list[MonitoredPR]:
             raw: dict[str, Any] = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        active: dict[str, Any] = raw.get("active", {})
+        active: dict[str, Any] = raw.get("monitored", {})
         for pr_data in active.values():
             if not isinstance(pr_data, dict):
                 continue

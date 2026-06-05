@@ -155,7 +155,7 @@ def _write_monitor_file(
         "thread_status": thread_status or {},
         "delta_findings": [],
     }
-    payload = {"active": {pr_key: pr_data}, "completed": {}}
+    payload = {"monitored": {pr_key: pr_data}, "completed": {}}
     filename = repo.replace("/", "--") + ".json"
     path = review_monitor_dir / filename
     path.write_text(json.dumps(payload, indent=2))
@@ -447,6 +447,25 @@ class TestOrchestratorStatus:
         assert pr.pr_number == 42
         assert pr.unresolved_threads == 1
         assert pr.status == "watching"
+
+    def test_load_monitored_prs_uses_monitored_key(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """_load_monitored_prs reads the 'monitored' key (not 'active')."""
+        review_dir = tmp_orchestrate_dirs / "review-monitor"
+        _write_monitor_file(
+            review_dir,
+            "owner/repo",
+            99,
+            status="watching",
+            role="author",
+        )
+        # After _write_monitor_file update, file uses 'monitored' key.
+        # _load_monitored_prs must read it.
+        snapshot = orchestrator_status()
+        assert len(snapshot.monitored_prs) == 1
+        assert snapshot.monitored_prs[0].pr_number == 99
 
     def test_recent_events_capped(
         self,
