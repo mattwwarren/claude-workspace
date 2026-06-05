@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -855,10 +856,10 @@ class TestRunDoctor10Checks:
         monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
 
         if fake_run is not None:
-            monkeypatch.setattr("cw.doctor.subprocess.run", fake_run)
+            monkeypatch.setattr("cw.doctor._sp.run", fake_run)
         else:
             monkeypatch.setattr(
-                "cw.doctor.subprocess.run",
+                "cw.doctor._sp.run",
                 _make_fake_run_version(),
             )
         return settings_path, roster_path
@@ -878,7 +879,7 @@ class TestRunDoctor10Checks:
 
         monkeypatch.setattr("cw.doctor._CLAUDE_SETTINGS_PATH", settings_path)
         monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
-        monkeypatch.setattr("cw.doctor.subprocess.run", _make_fake_run_version())
+        monkeypatch.setattr("cw.doctor._sp.run", _make_fake_run_version())
 
         report = run_doctor()
         names = {c.name for c in report.checks}
@@ -1091,7 +1092,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.1.150 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1106,7 +1107,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.1.139 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1120,7 +1121,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.0.0 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1135,7 +1136,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("not-a-version\n"),
         )
         result = _check_claude_version()
@@ -1150,7 +1151,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.subprocess.run",
+            "cw.doctor._sp.run",
             lambda *_a, **_kw: self._mk_proc("some output\n", returncode=1),
         )
         result = _check_claude_version()
@@ -2727,3 +2728,306 @@ class TestCheckWorktreePathsSessions:
         report = run_doctor()
         names = [c.name for c in report.checks]
         assert "worktree/summary" in names
+
+
+# ---------------------------------------------------------------------------
+# TestCheckLoopHealth
+# ---------------------------------------------------------------------------
+
+
+class TestCheckLoopHealth:
+    """Tests for _check_loop_health."""
+
+    def _write_dispatch_tick_events(
+        self,
+        ticks: list[dict],  # type: ignore[type-arg]
+        tmp_config_dir: Path,
+    ) -> None:
+        """Write DISPATCH_TICK events to the inbox for testing."""
+        from cw.events import record_event
+        from cw.models import OrchestratorEventType
+
+        for tick in ticks:
+            record_event(OrchestratorEventType.DISPATCH_TICK, tick)
+
+    def test_stall_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """3 consecutive freshness_gate ticks with pending>0, running==0 → warn."""
+        from cw.doctor import _check_loop_health
+        from cw.models import DispatchSkipReason
+
+        ticks = [
+            {
+                "client": "client-a",
+                "pending": 1,
+                "running": 0,
+                "claimed": 0,
+                "cap": 2,
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+            }
+        ] * 3
+        self._write_dispatch_tick_events(ticks, tmp_config_dir)
+        results = _check_loop_health()
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "client-a" in warn_results[0].name
+        assert "stalled" in warn_results[0].detail
+
+    def test_healthy_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Ticks showing normal progress (no_pending) → no warn."""
+        from cw.doctor import _check_loop_health
+        from cw.models import DispatchSkipReason
+
+        ticks = [
+            {
+                "client": "client-b",
+                "pending": 0,
+                "running": 0,
+                "claimed": 0,
+                "cap": 2,
+                "skip_reason": DispatchSkipReason.NO_PENDING,
+            }
+        ] * 3
+        self._write_dispatch_tick_events(ticks, tmp_config_dir)
+        results = _check_loop_health()
+        assert not any(r.warn for r in results)
+
+    def test_fewer_than_n_events_no_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Fewer than 3 freshness_gate ticks → no warn (insufficient data)."""
+        from cw.doctor import _check_loop_health
+        from cw.models import DispatchSkipReason
+
+        ticks = [
+            {
+                "client": "client-c",
+                "pending": 2,
+                "running": 0,
+                "claimed": 0,
+                "cap": 2,
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+            }
+        ] * 2
+        self._write_dispatch_tick_events(ticks, tmp_config_dir)
+        results = _check_loop_health()
+        assert not any(r.warn for r in results)
+
+
+# ---------------------------------------------------------------------------
+# TestCheckTimedOutMerged
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTimedOutMerged:
+    """Tests for _check_timed_out_merged."""
+
+    def _make_timed_out_session(self, tmp_path: Path, sid: str = "to-sess") -> Session:
+        """Return a TIMED_OUT DAEMON session with completed_at within 7 days."""
+        from datetime import timedelta
+
+        from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus
+
+        return Session(
+            id=sid,
+            name=f"client-a/auto-dev/{sid}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=1),
+        )
+
+    def test_timed_out_merged_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """TIMED_OUT session + MERGED PR → warn=True."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-merged")
+        state = CwState(sessions=[session])
+
+        # Stub gh to return a MERGED PR.
+        monkeypatch.setattr(
+            "cw.doctor._sp.run",
+            lambda *_args, **_kwargs: type(
+                "R", (), {"returncode": 0, "stdout": '[{"state":"MERGED"}]'}
+            )(),
+        )
+        results = _check_timed_out_merged(state)
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "to-merged" in warn_results[0].detail
+
+    def test_timed_out_open_no_warn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """TIMED_OUT session + OPEN PR → no warn."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-open")
+        state = CwState(sessions=[session])
+
+        # Stub gh to return an OPEN PR.
+        monkeypatch.setattr(
+            "cw.doctor._sp.run",
+            lambda *_args, **_kwargs: type(
+                "R", (), {"returncode": 0, "stdout": '[{"state":"OPEN"}]'}
+            )(),
+        )
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_user_origin_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """USER-origin TIMED_OUT sessions are ignored."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        session = Session(
+            id="user-to",
+            name="client-a/auto-dev/user-to",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.USER,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        state = CwState(sessions=[session])
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_old_completed_at_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """TIMED_OUT sessions older than lookback window are ignored."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        session = Session(
+            id="old-to",
+            name="client-a/auto-dev/old-to",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=30),
+        )
+        state = CwState(sessions=[session])
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_no_branch_no_ticket_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """Session with no branch and unrecognised name format is skipped."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        session = Session(
+            id="no-branch",
+            # name that ticket_id_for_session cannot parse (no auto-dev/ prefix)
+            name="client-a/impl",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=1),
+            branch=None,
+        )
+        state = CwState(sessions=[session])
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_gh_unavailable_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """FileNotFoundError (gh not installed) → single warn=True about gh missing."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-gh-missing")
+        state = CwState(sessions=[session])
+
+        monkeypatch.setattr(
+            "cw.doctor._sp.run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("gh")),
+        )
+        results = _check_timed_out_merged(state)
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "gh unavailable" in warn_results[0].detail
+
+    def test_subprocess_timeout_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """subprocess.TimeoutExpired is silently swallowed (no warn)."""
+        import subprocess as _subprocess
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-timeout")
+        state = CwState(sessions=[session])
+
+        def _raise_timeout(*_args: object, **_kwargs: object) -> None:
+            raise _subprocess.TimeoutExpired(["gh"], 10)
+
+        monkeypatch.setattr("cw.doctor._sp.run", _raise_timeout)
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
