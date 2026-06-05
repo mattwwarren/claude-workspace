@@ -26,6 +26,7 @@ called outside ``reconcile``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import subprocess
@@ -111,6 +112,7 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
 _SILENTLY_IDLE_REASON = "silently_idle"
+_SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 
 
 # Grace window for a newly-spawned session to register with the daemon
@@ -565,6 +567,22 @@ def _cleanup_timed_out_worktree(
         _log.info("worktree_cleanup_ok: %s/%s", session.client, session.branch)
 
 
+def _compute_worktree_dirty(client_name: str, branch: str | None) -> bool:
+    """Return True when the worktree has unpushed commits or uncommitted changes.
+
+    Fail-safe: returns False when branch is None or empty, the client config is
+    absent, or any other error occurs — mirrors _cleanup_timed_out_worktree's
+    pattern.
+    """
+    if not branch:
+        return False
+    try:
+        client = get_client(client_name)
+        return worktree_has_unsaved_work(client, branch)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def revert_stalled_headless_sessions(
     state: CwState,
     *,
@@ -618,6 +636,17 @@ def revert_stalled_headless_sessions(
             isinstance(session.last_result, dict)
             and session.last_result.get("paused_status") == _SILENTLY_IDLE_REASON
         ):
+            salvage_skip_ticket_id = ticket_id_for_session(session.name)
+            record_event(
+                OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
+                {
+                    "session_id": session.id,
+                    "ticket_id": salvage_skip_ticket_id,
+                    "reason": _SALVAGE_SKIP_REASON,
+                    "paused_status": _SILENTLY_IDLE_REASON,
+                },
+                correlation_id=salvage_skip_ticket_id,
+            )
             continue
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
@@ -1015,6 +1044,11 @@ def _reconcile_locked() -> ReconcileReport:
     salvaged_ticket_ids: list[str] = []
     pending_events: list[dict[str, object]] = []
     phantom_names: list[str] = []
+    # Accumulate data for session.phantom_reverted events (DAEMON-origin only).
+    # Emitted after save_state but before dev_queue_lock — see operator resolution
+    # in issue #459 for lock-ordering rationale.
+    # (session_id, ticket_id, client, branch)
+    phantom_reverted_data: list[tuple[str, str, str, str | None]] = []
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
@@ -1050,6 +1084,9 @@ def _reconcile_locked() -> ReconcileReport:
         phantom_names.append(session.name)
         if ticket_id and session.origin is SessionOrigin.DAEMON:
             ticket_ids_to_revert.append(ticket_id)
+            phantom_reverted_data.append(
+                (session.id, ticket_id, session.client, session.branch)
+            )
         payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,
@@ -1063,6 +1100,24 @@ def _reconcile_locked() -> ReconcileReport:
     save_state(state)
     for payload in pending_events:
         record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    for sess_id, rev_ticket_id, rev_client, rev_branch in phantom_reverted_data:
+        wt_dirty = _compute_worktree_dirty(rev_client, rev_branch)
+        wt_path: str | None = None
+        if rev_branch:
+            with contextlib.suppress(Exception):
+                wt_path = str(worktree_path_for(get_client(rev_client), rev_branch))
+        record_event(
+            OrchestratorEventType.SESSION_PHANTOM_REVERTED,
+            {
+                "session_id": sess_id,
+                "ticket_id": rev_ticket_id,
+                "client": rev_client,
+                "worktree_dirty": wt_dirty,
+                "worktree_path": wt_path,
+            },
+            correlation_id=rev_ticket_id,
+        )
 
     reverted: list[str] = []
     if ticket_ids_to_revert or salvaged_ticket_ids:

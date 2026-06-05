@@ -19,6 +19,7 @@ from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_que
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
+    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -172,28 +173,9 @@ def dispatch_tick(
             )
             stale = False
 
-        if stale:
-            with dev_queue_lock():
-                queue_store = load_dev_queue()
-                stale_tasks = [
-                    {"ticket_id": t.ticket_id, "client": client.name}
-                    for t in queue_store.tasks
-                    if t.client == client.name and t.status == QueueItemStatus.PENDING
-                ]
-            for payload in stale_tasks:
-                record_event(OrchestratorEventType.TICKET_NEEDS_SYNC, payload)
-                if emit is not None:
-                    ticket_key = (client.name, payload["ticket_id"])
-                    if warned_stale is None or ticket_key not in warned_stale:
-                        emit(
-                            f"WARN {client.name}/{payload['ticket_id']}:"
-                            " main behind origin, ticket skipped"
-                        )
-                        if warned_stale is not None:
-                            warned_stale.add(ticket_key)
-            continue
-
-        # Count running daemon sessions for this client
+        # Count running daemon sessions and cap — hoisted above freshness gate
+        # so all four numeric fields (claimed, pending, running, cap) are
+        # available when emitting dispatch.tick with skip_reason=freshness_gate.
         running_count = sum(
             1
             for s in state.sessions
@@ -206,9 +188,51 @@ def dispatch_tick(
             client.name, config.default_max_parallel
         )
 
+        # Pre-claim pending count for dispatch.tick payload. Single lock
+        # acquisition — reused for stale_tasks when stale=True (avoids a
+        # second load on the freshness-gate path).
+        with dev_queue_lock():
+            queue_snapshot = load_dev_queue()
+        pending_count = sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client.name and t.status == QueueItemStatus.PENDING
+        )
+
+        if stale:
+            stale_tasks = [
+                {"ticket_id": t.ticket_id, "client": client.name}
+                for t in queue_snapshot.tasks
+                if t.client == client.name and t.status == QueueItemStatus.PENDING
+            ]
+            for payload in stale_tasks:
+                record_event(OrchestratorEventType.TICKET_NEEDS_SYNC, payload)
+                if emit is not None:
+                    ticket_key = (client.name, payload["ticket_id"])
+                    if warned_stale is None or ticket_key not in warned_stale:
+                        emit(
+                            f"WARN {client.name}/{payload['ticket_id']}:"
+                            " main behind origin, ticket skipped"
+                        )
+                        if warned_stale is not None:
+                            warned_stale.add(ticket_key)
+            record_event(
+                OrchestratorEventType.DISPATCH_TICK,
+                {
+                    "client": client.name,
+                    "claimed": 0,
+                    "pending": pending_count,
+                    "running": running_count,
+                    "cap": cap,
+                    "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+                },
+            )
+            continue
+
         priority_ids = plan_order_by_client.get(client.name)
         client_spawned = 0
         cap_full = running_count >= cap
+        spawn_error = False
         while running_count < cap:
             task: TicketTask | None = _claim_next_pending(
                 client.name,
@@ -340,6 +364,7 @@ def dispatch_tick(
                 # remaining slots this tick — re-trying the same failing
                 # backend immediately would just spin. See GitHub issue
                 # #149.
+                spawn_error = True
                 _log.exception(
                     "dispatch_tick: spawn failed for %s/%s; reverting task to PENDING",
                     client.name,
@@ -361,6 +386,33 @@ def dispatch_tick(
 
         if emit is not None:
             emit(f"{client.name}: spawned={client_spawned} cap_full={int(cap_full)}")
+
+        # skip_reason: first-match precedence (see operator resolution, issue #459)
+        # 1. freshness_gate — handled by early-continue above
+        # 2. cap_full — running_count >= cap before loop entered
+        # 3. spawn_error — exception broke the loop (regardless of client_spawned)
+        # 4. no_pending — loop exited with zero claims and no spawn error
+        # 5. none — at least one session spawned
+        if cap_full:
+            skip_reason = DispatchSkipReason.CAP_FULL
+        elif spawn_error:
+            skip_reason = DispatchSkipReason.SPAWN_ERROR
+        elif client_spawned == 0:
+            skip_reason = DispatchSkipReason.NO_PENDING
+        else:
+            skip_reason = DispatchSkipReason.NONE
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": client.name,
+                "claimed": client_spawned,
+                "pending": pending_count,
+                "running": running_count,
+                "cap": cap,
+                "skip_reason": skip_reason,
+            },
+        )
 
     return spawned
 

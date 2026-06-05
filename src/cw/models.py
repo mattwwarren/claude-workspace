@@ -128,6 +128,22 @@ class OrchestratorEventType(StrEnum):
     PR_REVIEW_RECEIVED = "pr.review_received"
     PR_MERGEABLE = "pr.mergeable"
     PR_MERGED = "pr.merged"
+    DISPATCH_TICK = "dispatch.tick"
+    SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
+    SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
+
+
+class DispatchSkipReason(StrEnum):
+    """First-match skip_reason values emitted in dispatch.tick events.
+
+    Precedence: FRESHNESS_GATE > CAP_FULL > SPAWN_ERROR > NO_PENDING > NONE.
+    """
+
+    FRESHNESS_GATE = "freshness_gate"
+    CAP_FULL = "cap_full"
+    SPAWN_ERROR = "spawn_error"
+    NO_PENDING = "no_pending"
+    NONE = "none"
 
 
 class OrchestratorEvent(BaseModel):

@@ -182,6 +182,71 @@ worker may recover and continue. Visible in `cw event tail` and
 
 `error_kind` is an open enum — consumers MUST tolerate unknown values.
 
+### `dispatch.tick`
+
+**Emitter:** `dispatch_tick` in `cw.dispatch`
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "claimed": 0,
+  "pending": 2,
+  "running": 1,
+  "cap": 3,
+  "skip_reason": "freshness_gate | cap_full | spawn_error | no_pending | none"
+}
+```
+**Semantics:** Emitted once per client per tick. `claimed` is the number of
+tasks newly spawned this tick. `pending` is the pre-claim count (read before
+the claim loop). `running` is the count of RUNNING tasks at tick start.
+`skip_reason` follows first-match precedence: `freshness_gate` (local branch
+behind origin, checked before anything else) → `cap_full` (running ≥ cap) →
+`spawn_error` (exception during spawn) → `no_pending` (nothing to claim) →
+`none` (at least one session spawned). `correlation_id` is `None` (per-client
+aggregate, not per-ticket). Consumers MUST tolerate unknown `skip_reason`
+values.
+
+### `session.phantom_reverted`
+
+**Emitter:** `reconcile` in `cw.reconcile` (phantom sweep)
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "worktree_dirty": false,
+  "worktree_path": "<str | null>"
+}
+```
+**Semantics:** Emitted for each DAEMON-origin session that is reaped as a
+phantom (present in state but no longer backed by a live multiplexer surface)
+and whose owning ticket is reverted to PENDING for retry. `worktree_dirty` is
+`true` when `worktree_has_unsaved_work` reports uncommitted changes in the
+session's worktree — operators should inspect before the next dispatch.
+`worktree_path` is the absolute path to the worktree, or `null` when it cannot
+be resolved. `correlation_id` is the `ticket_id`. NOT emitted for USER-origin
+sessions (those are reaped without task revert).
+
+### `session.salvage_skipped`
+
+**Emitter:** `revert_stalled_headless_sessions` in `cw.reconcile`
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "ticket_id": "<str | null>",
+  "reason": "park_marker_blocks_salvage",
+  "paused_status": "silently_idle"
+}
+```
+**Semantics:** Emitted when a stalled headless session is skipped during the
+salvage pass because it carries a park marker (`last_result.paused_status ==
+"silently_idle"`). The session is intentionally parked BLOCKED_ON_USER and
+must not be auto-retried; the operator must manually clear or close it.
+`reason` is an open enum — consumers MUST tolerate unknown values.
+`correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
+
 ## CLI
 
 ### Record an event

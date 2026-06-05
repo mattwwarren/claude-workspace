@@ -34,6 +34,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _SALVAGE_SKIP_REASON,
     _SILENTLY_IDLE_REASON,
     HEADLESS_TIMEOUT_SECONDS,
     IDLE_WATCHDOG_SECONDS,
@@ -3926,3 +3927,264 @@ def test_awaiting_subagent_finds_dotted_worktree(
         "Expected _awaiting_subagent=True for dotted worktree path; "
         f"project_dir={project_dir!r} exists={project_dir.is_dir()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# session.phantom_reverted event tests (GitHub issue #459)
+# ---------------------------------------------------------------------------
+
+
+def test_phantom_reverted_event_emitted_with_dirty_worktree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DAEMON phantom revert emits session.phantom_reverted with worktree_dirty=True."""
+    sess = _mk_session("phantom-dirty", "dead-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TICK-PD"
+    sess.branch = "auto-dev/TICK-PD"
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TICK-PD",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+
+    reconcile()
+
+    events = read_events(
+        consumer="test-phantom-dirty",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    p = events[0].payload
+    assert p["session_id"] == "phantom-dirty"
+    assert p["ticket_id"] == "TICK-PD"
+    assert p["client"] == "client-a"
+    assert p["worktree_dirty"] is True
+    assert "worktree_path" in p
+    assert events[0].correlation_id == "TICK-PD"
+
+
+def test_phantom_reverted_event_emitted_with_clean_worktree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DAEMON phantom revert emits session.phantom_reverted with dirty=False."""
+    sess = _mk_session("phantom-clean", "dead-ref-2")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TICK-PC"
+    sess.branch = "auto-dev/TICK-PC"
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TICK-PC",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+
+    reconcile()
+
+    events = read_events(
+        consumer="test-phantom-clean",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    p = events[0].payload
+    assert p["session_id"] == "phantom-clean"
+    assert p["ticket_id"] == "TICK-PC"
+    assert p["client"] == "client-a"
+    assert p["worktree_dirty"] is False
+    assert "worktree_path" in p
+    assert events[0].correlation_id == "TICK-PC"
+
+
+def test_phantom_reverted_not_emitted_for_user_origin(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """USER-origin phantom does NOT emit session.phantom_reverted."""
+    sess = _mk_session("phantom-user", "dead-ref-3")
+    # Leave origin as default (USER)
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+
+    reconcile()
+
+    events = read_events(
+        consumer="test-phantom-user-origin",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# session.salvage_skipped event tests (GitHub issue #459)
+# ---------------------------------------------------------------------------
+
+
+def test_salvage_skipped_emitted_for_park_marker(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Park-marker session emits session.salvage_skipped."""
+    worktree = tmp_path / "wt-parked-sk"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salvage-skip-1", worktree, started_at)
+    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="salvage-skip-1",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        session_id="salvage-skip-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-salvage-skipped",
+        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+    )
+    assert len(events) == 1
+    p = events[0].payload
+    assert p["session_id"] == "salvage-skip-1"
+    assert p["reason"] == _SALVAGE_SKIP_REASON
+    assert p["paused_status"] == _SILENTLY_IDLE_REASON
+    assert events[0].correlation_id == "salvage-skip-1"
+
+
+def test_salvage_skipped_not_emitted_for_terminal_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session with a real terminal sentinel does NOT emit session.salvage_skipped."""
+    worktree = tmp_path / "wt-salvaged"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salvage-real-1", worktree, started_at)
+    # last_result is None → no park marker; salvage will find a sentinel
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="salvage-real-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="salvage-real-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    # Mock _salvage_terminal_result to return a real terminal result so the
+    # session bypasses the salvage-skipped gate entirely.
+    fake_result = MagicMock()
+    fake_result.cost_usd = None
+    fake_result.status = "shipped"
+    monkeypatch.setattr(
+        "cw.reconcile._salvage_terminal_result",
+        lambda *_args, **_kwargs: (fake_result, "fake-claude-id"),
+    )
+
+    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-no-salvage-skip",
+        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+    )
+    assert len(events) == 0
+
+
+def test_compute_worktree_dirty_returns_false_when_get_client_raises(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_compute_worktree_dirty returns False when get_client raises (fail-safe)."""
+    from cw.reconcile import _compute_worktree_dirty
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda _name: (_ for _ in ()).throw(ValueError("no such client")),
+    )
+    assert _compute_worktree_dirty("missing-client", "some-branch") is False
+
+
+def test_salvage_skipped_emitted_with_null_ticket_id(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Park-marked session without auto-dev/ prefix: salvage_skipped, ticket_id=None."""
+    worktree = tmp_path / "wt-no-tid"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)
+
+    # Session name without auto-dev/ prefix → ticket_id_for_session returns None.
+    # _is_headless requires a cw-context.json with "headless": true.
+    context_dir = worktree / ".claude"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "cw-context.json").write_text(
+        '{"headless": true, "session_id": "no-tid-sess"}'
+    )
+    sess = Session(
+        id="no-tid-sess",
+        name="client-a/impl",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=tmp_path / "ws",
+        worktree_path=worktree,
+        started_at=started_at,
+        last_result={"paused_status": _SILENTLY_IDLE_REASON},
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-salvage-skip-null-tid",
+        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+    )
+    assert len(events) == 1
+    p = events[0].payload
+    assert p["ticket_id"] is None
+    assert p["reason"] == _SALVAGE_SKIP_REASON
+    assert events[0].correlation_id is None
