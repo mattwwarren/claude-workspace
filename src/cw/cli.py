@@ -50,6 +50,7 @@ from cw.dev_queue import (
     remove_ticket,
     resolve_client,
     save_dev_queue,
+    wait_for_terminal,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
 from cw.doctor import format_report, format_report_json, run_doctor
@@ -1676,6 +1677,11 @@ def dev_queue_run(
 
 _PLAN_DEFAULT_TIMEOUT = 300
 
+_WAIT_DEFAULT_TIMEOUT: int = 300
+_WAIT_EXIT_FAILED: int = 1
+_WAIT_EXIT_BLOCKED: int = 2
+_WAIT_EXIT_TIMEOUT: int = 124
+
 
 def _run_plan_impl(
     *,
@@ -1744,6 +1750,83 @@ def dev_queue_plan(client: str, timeout: int, filter_client: str | None) -> None
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
+
+
+@dev_queue.command(name="wait")
+@click.argument("ticket_id")
+@click.option(
+    "--client",
+    "-c",
+    default=None,
+    shell_complete=_complete_client,
+    help="Client name.",
+)
+@click.option(
+    "--timeout",
+    "timeout_seconds",
+    type=float,
+    default=_WAIT_DEFAULT_TIMEOUT,
+    help="Seconds to wait (default: 300).",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Emit JSON output.",
+)
+@handle_errors
+def dev_queue_wait(
+    ticket_id: str,
+    client: str | None,
+    timeout_seconds: float,
+    output_json: bool,
+) -> None:
+    """Block until a dev-queue ticket reaches terminal status.
+
+    Exits 0 for COMPLETED, 1 for FAILED/CANCELLED, 2 for BLOCKED_ON_USER,
+    and 124 on timeout.
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    try:
+        task = wait_for_terminal(ticket_id, resolved, timeout=timeout_seconds)
+    except TimeoutError:
+        if output_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "ticket_id": ticket_id,
+                        "client": resolved,
+                        "status": "timeout",
+                        "session_id": None,
+                    }
+                )
+            )
+        else:
+            click.echo(f"Timeout waiting for {ticket_id} (>{timeout_seconds:.0f}s)")
+        raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT) from None
+
+    status_str = task.status.value
+    if output_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ticket_id": ticket_id,
+                    "client": resolved,
+                    "status": status_str,
+                    "session_id": task.session_id,
+                }
+            )
+        )
+    else:
+        click.echo(f"Status: {status_str.upper()}")
+
+    if task.status == QueueItemStatus.COMPLETED:
+        return
+    if task.status == QueueItemStatus.BLOCKED_ON_USER:
+        raise click.exceptions.Exit(_WAIT_EXIT_BLOCKED)
+    raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
 
 
 @dev_queue.command(name="refresh-all")

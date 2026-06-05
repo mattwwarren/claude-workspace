@@ -135,6 +135,10 @@ ignore = [
 "src/cw/cw_queue_events_server.py" = ["PLC0415"]
 "src/cw/cw_pr_events_channel.py" = ["PLC0415"]
 "src/cw/cw_queue_events_channel.py" = ["PLC0415"]
+# dev_queue defers the dispatch import to break the dev_queue ↔ dispatch
+# circular dependency. consume_completed_sessions() is a thin wrapper whose
+# deferred body import is the sanctioned mechanism, not a workaround.
+"src/cw/dev_queue.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]
