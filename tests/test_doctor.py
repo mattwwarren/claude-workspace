@@ -17,7 +17,7 @@ from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
 if TYPE_CHECKING:
     import pytest
 
-    from cw.models import ClientConfig, OrchestratorEvent, Session, TicketTask
+    from cw.models import ClientConfig, Session, TicketTask
 
 
 def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2825,9 +2825,7 @@ class TestCheckLoopHealth:
 class TestCheckTimedOutMerged:
     """Tests for _check_timed_out_merged."""
 
-    def _make_timed_out_session(
-        self, tmp_path: Path, sid: str = "to-sess"
-    ) -> "Session":
+    def _make_timed_out_session(self, tmp_path: Path, sid: str = "to-sess") -> Session:
         """Return a TIMED_OUT DAEMON session with completed_at within 7 days."""
         from datetime import timedelta
 
@@ -2860,7 +2858,7 @@ class TestCheckTimedOutMerged:
         # Stub gh to return a MERGED PR.
         monkeypatch.setattr(
             "subprocess.run",
-            lambda *args, **kwargs: type(
+            lambda *_args, **_kwargs: type(
                 "R", (), {"returncode": 0, "stdout": '[{"state":"MERGED"}]'}
             )(),
         )
@@ -2885,9 +2883,151 @@ class TestCheckTimedOutMerged:
         # Stub gh to return an OPEN PR.
         monkeypatch.setattr(
             "subprocess.run",
-            lambda *args, **kwargs: type(
+            lambda *_args, **_kwargs: type(
                 "R", (), {"returncode": 0, "stdout": '[{"state":"OPEN"}]'}
             )(),
         )
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_user_origin_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """USER-origin TIMED_OUT sessions are ignored."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        session = Session(
+            id="user-to",
+            name="client-a/auto-dev/user-to",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.USER,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        state = CwState(sessions=[session])
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_old_completed_at_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """TIMED_OUT sessions older than lookback window are ignored."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        session = Session(
+            id="old-to",
+            name="client-a/auto-dev/old-to",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=30),
+        )
+        state = CwState(sessions=[session])
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_no_branch_no_ticket_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """Session with no branch and unrecognised name format is skipped."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        session = Session(
+            id="no-branch",
+            # name that ticket_id_for_session cannot parse (no auto-dev/ prefix)
+            name="client-a/impl",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=tmp_path,
+            completed_at=datetime.now(UTC) - timedelta(days=1),
+            branch=None,
+        )
+        state = CwState(sessions=[session])
+        results = _check_timed_out_merged(state)
+        assert not any(r.warn for r in results)
+
+    def test_gh_unavailable_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """FileNotFoundError (gh not installed) → single warn=True about gh missing."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-gh-missing")
+        state = CwState(sessions=[session])
+
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("gh")),
+        )
+        results = _check_timed_out_merged(state)
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "gh unavailable" in warn_results[0].detail
+
+    def test_subprocess_timeout_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """subprocess.TimeoutExpired is silently swallowed (no warn)."""
+        import subprocess as _subprocess
+
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-timeout")
+        state = CwState(sessions=[session])
+
+        def _raise_timeout(*_args: object, **_kwargs: object) -> None:
+            raise _subprocess.TimeoutExpired(["gh"], 10)
+
+        monkeypatch.setattr("subprocess.run", _raise_timeout)
         results = _check_timed_out_merged(state)
         assert not any(r.warn for r in results)

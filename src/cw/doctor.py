@@ -15,9 +15,9 @@ import os
 import subprocess
 import subprocess as _sp
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import ValidationError
@@ -33,12 +33,14 @@ from cw.config import (
     state_file,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.events import record_event
+from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
     CompletionReason,
+    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
+    SessionOrigin,
     SessionStatus,
 )
 from cw.native_daemon import _ROSTER_PATH
@@ -97,6 +99,12 @@ _MIN_CLAUDE_VERSION = (2, 1, 139)
 
 # Number of components (major.minor.patch) required in a version string.
 _VERSION_PARTS = 3
+
+# Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
+_LOOP_STALL_CONSECUTIVE_TICKS = 3
+
+# Lookback window (days) for timed_out-merged detection.
+_TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
 
 # Seconds of worktree inactivity (no non-.git file modified) before a pane
 # showing an idle shell is considered wedged.
@@ -653,6 +661,134 @@ def _reap_wedge_findings(
             adapter.close(session.surface_ref)
 
 
+def _check_loop_health() -> list[CheckResult]:
+    """Detect dispatch stalls: pending>0, running==0 across N consecutive ticks.
+
+    Reads DISPATCH_TICK events from the last hour, groups by client, and checks
+    whether the most recent _LOOP_STALL_CONSECUTIVE_TICKS ticks are all
+    FRESHNESS_GATE with pending>0 and running==0. When a stall is detected for
+    a client, emits a warn=True result suggesting ``cw dev-queue refresh-all``.
+    """
+    cutoff = datetime.now(UTC) - timedelta(hours=1)
+    events = read_events(
+        event_types=[OrchestratorEventType.DISPATCH_TICK],
+        since_ts=cutoff,
+    )
+
+    per_client: dict[str, list[dict[str, Any]]] = {}
+    for ev in events:
+        client = str(ev.payload.get("client", ""))
+        per_client.setdefault(client, []).append(ev.payload)
+
+    results: list[CheckResult] = []
+    for client, ticks in per_client.items():
+        recent = ticks[-_LOOP_STALL_CONSECUTIVE_TICKS:]
+        if len(recent) < _LOOP_STALL_CONSECUTIVE_TICKS:
+            continue
+        stalled = all(
+            t.get("skip_reason") == DispatchSkipReason.FRESHNESS_GATE
+            and int(t.get("pending", 0)) > 0
+            and int(t.get("running", 0)) == 0
+            and int(t.get("claimed", 0)) == 0
+            for t in recent
+        )
+        if stalled:
+            results.append(
+                CheckResult(
+                    f"loop-health/{client}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"dispatch stalled for {client} — main behind origin."
+                        " Run `cw dev-queue refresh-all`."
+                    ),
+                )
+            )
+
+    if not results:
+        results.append(CheckResult("loop-health", ok=True, warn=False, detail=""))
+    return results
+
+
+def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
+    """Detect TIMED_OUT sessions whose PR has since merged.
+
+    Scans TIMED_OUT DAEMON sessions whose completed_at falls within
+    _TIMED_OUT_MERGED_LOOKBACK_DAYS, infers their branch name, and queries
+    ``gh pr list`` to see whether the PR is MERGED. Emits a warn=True result
+    per session when a merged PR is found.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=_TIMED_OUT_MERGED_LOOKBACK_DAYS)
+    results: list[CheckResult] = []
+    gh_missing = False
+
+    for session in state.sessions:
+        if session.status != SessionStatus.TIMED_OUT:
+            continue
+        if session.origin != SessionOrigin.DAEMON:
+            continue
+        if session.completed_at is None or session.completed_at < cutoff:
+            continue
+
+        branch = session.branch
+        if branch is None:
+            ticket_id = ticket_id_for_session(session.name)
+            branch = f"auto-dev/{ticket_id}" if ticket_id is not None else None
+        if branch is None:
+            continue
+
+        try:
+            pr_result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "list",
+                    "--head",
+                    branch,
+                    "--json",
+                    "state",
+                    "--limit",
+                    "1",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            prs: list[dict[str, Any]] = (
+                json.loads(pr_result.stdout) if pr_result.returncode == 0 else []
+            )
+        except FileNotFoundError:
+            if not gh_missing:
+                results.append(
+                    CheckResult(
+                        "timed_out-merged",
+                        ok=True,
+                        warn=True,
+                        detail="gh unavailable; skipping timed_out-merged check",
+                    )
+                )
+                gh_missing = True
+            continue
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+
+        if prs and prs[0].get("state") == "MERGED":
+            results.append(
+                CheckResult(
+                    f"timed_out-merged/{session.id}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"session {session.id} is TIMED_OUT but PR for {branch}"
+                        " is MERGED — see #315."
+                    ),
+                )
+            )
+
+    return results
+
+
 def run_doctor(*, reap: bool = False) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
@@ -680,10 +816,12 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_bypass_disclaimer())
     report.checks.append(_check_claude_version())
     report.checks.append(_check_daemon_reachable())
+    report.checks.extend(_check_loop_health())
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:
+        report.checks.extend(_check_timed_out_merged(link_state))
         # Wedge checks: load queue once, run all four checks.
         queue = load_dev_queue()
         adapter = get_backend_adapter()
