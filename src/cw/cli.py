@@ -20,6 +20,7 @@ from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
     BLOCKER_REASON_VALIDATION_FAILED,
+    PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     BlockedResult,
@@ -1009,7 +1010,9 @@ def _apply_sentinel_to_task(
             return
 
         if isinstance(sentinel, AutoDevResult):
-            if sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
+            if sentinel.status in PAUSED_FOR_USER_INPUT_STATUSES:
+                target.status = QueueItemStatus.BLOCKED_ON_USER
+            elif sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
                 target.status = QueueItemStatus.COMPLETED
             elif sentinel.status == "blocked":
                 retry = (

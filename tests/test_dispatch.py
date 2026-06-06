@@ -647,6 +647,133 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
 
+    def test_consume_paused_status_routes_to_blocked_on_user(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """SESSION_COMPLETED with paused last_result routes task to BLOCKED_ON_USER.
+
+        When a wrapper-path session ends with a paused sentinel
+        (premises_pending_verification or ambiguities_pending_resolution),
+        the task must become BLOCKED_ON_USER, not COMPLETED. See #489.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-489A",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-489a",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sess = Session(
+            id="sess-489a",
+            name="test-client/auto-dev/GEN-489A",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+            last_result={
+                "status": "premises_pending_verification",
+                "schema_version": 4,
+            },
+        )
+        save_state(CwState(sessions=[sess]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-489A", "session_id": "sess-489a"},
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_consume_non_paused_status_routes_to_completed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """SESSION_COMPLETED with a non-paused last_result routes task to COMPLETED.
+
+        Verifies the paused-status guard does not affect normal shipped/no_op
+        outcomes. See #489.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-489B",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-489b",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sess = Session(
+            id="sess-489b",
+            name="test-client/auto-dev/GEN-489B",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+            last_result={"status": "shipped", "schema_version": 4},
+        )
+        save_state(CwState(sessions=[sess]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-489B", "session_id": "sess-489b"},
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+
+    def test_consume_null_last_result_routes_to_completed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """SESSION_COMPLETED with last_result=None routes task to COMPLETED.
+
+        Sessions that did not emit a sentinel (e.g. interactive) have
+        last_result=None; they must fall through to COMPLETED. See #489.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-489C",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-489c",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sess = Session(
+            id="sess-489c",
+            name="test-client/auto-dev/GEN-489C",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+            last_result=None,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-489C", "session_id": "sess-489c"},
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+
     def test_consume_advances_cursor(
         self,
         tmp_dispatch_dirs: Path,
