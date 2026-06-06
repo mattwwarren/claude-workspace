@@ -676,7 +676,10 @@ class TestConsumeCompletesTasks:
             purpose=SessionPurpose.IMPL,
             status=SessionStatus.ACTIVE,
             workspace_path=sample_client_config.workspace_path,
-            last_result={"status": "premises_pending_verification", "schema_version": 4},
+            last_result={
+                "status": "premises_pending_verification",
+                "schema_version": 4,
+            },
         )
         save_state(CwState(sessions=[sess]))
 

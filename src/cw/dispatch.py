@@ -7,7 +7,11 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import AutoDevResult, parse_stdout
+from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
+    AutoDevResult,
+    parse_stdout,
+)
 from cw.config import (
     load_clients,
     load_orchestrator_config,
@@ -501,7 +505,19 @@ def _apply_events_to_store(
                 and task.session_id != event_session_id
             ):
                 continue
-            task.status = QueueItemStatus.COMPLETED
+            state = load_state()
+            session = next(
+                (s for s in state.sessions if s.id == event_session_id),
+                None,
+            )
+            if (
+                session is not None
+                and isinstance(session.last_result, dict)
+                and session.last_result.get("status") in PAUSED_FOR_USER_INPUT_STATUSES
+            ):
+                task.status = QueueItemStatus.BLOCKED_ON_USER
+            else:
+                task.status = QueueItemStatus.COMPLETED
             sid = event_session_id if isinstance(event_session_id, str) else None
             _accumulate_task_cost(task, sid)
             completed += 1
