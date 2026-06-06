@@ -1612,17 +1612,17 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.COMPLETED
 
-    def test_signal_stop_premises_pending_v2_marks_task_completed(
+    def test_signal_stop_premises_pending_v2_marks_task_blocked_on_user(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """premises_pending_verification at schema_version=2 → COMPLETED.
+        """premises_pending_verification at schema_version=2 → BLOCKED_ON_USER.
 
         Regression for GitHub issue #316: schema_version<4 gate caused
         validation_failed BlockedResult → retry loop. After fix, parses
-        as AutoDevResult → COMPLETED.
+        as AutoDevResult → BLOCKED_ON_USER (not COMPLETED). See #489.
         """
         import datetime as dt
 
@@ -1675,17 +1675,18 @@ class TestSignalStop:
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
-        assert task.status == QueueItemStatus.COMPLETED
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
-    def test_signal_stop_ambiguities_pending_v2_marks_task_completed(
+    def test_signal_stop_ambiguities_pending_v2_marks_task_blocked_on_user(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """ambiguities_pending_resolution at schema_version=2 → COMPLETED.
+        """ambiguities_pending_resolution at schema_version=2 → BLOCKED_ON_USER.
 
-        Regression for GitHub issue #316.
+        Regression for GitHub issue #316. Paused sentinels must not be
+        routed to COMPLETED — they require human attention. See #489.
         """
         import datetime as dt
 
@@ -1738,7 +1739,7 @@ class TestSignalStop:
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
-        assert task.status == QueueItemStatus.COMPLETED
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_signal_stop_validation_failed_reverts_to_pending_under_cap(
         self,
