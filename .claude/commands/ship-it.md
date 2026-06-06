@@ -36,6 +36,24 @@ TITLE=$(git log --format='%s' -1)
 RANGE_BODY=$(git log --format='- %s' "origin/main..HEAD")
 ```
 
+Build a `Closes #<n>` trailer when this is an orchestrated run (#491). `cw`
+drops the ticket id in `.claude/cw-context.json` for every auto-dev worktree, so
+read it from there — no branch-name parsing. Only emit the trailer for a
+GitHub-numeric id (so the PR auto-closes the issue and feeds the
+`closedByPullRequestsReferences` linkage that reconcile/doctor merged-detection
+keys on). Interactive runs (no `cw-context.json`) and Linear ids (closed via
+Linear status, not GitHub) get no trailer:
+
+```bash
+CLOSES_TRAILER=""
+if [ -f .claude/cw-context.json ]; then
+  TICKET_ID=$(jq -r '.ticket_id // empty' .claude/cw-context.json 2>/dev/null)
+  if printf '%s' "$TICKET_ID" | grep -qE '^[0-9]+$'; then
+    CLOSES_TRAILER="Closes #${TICKET_ID}"
+  fi
+fi
+```
+
 Create the PR with `gh pr create`:
 
 ```bash
@@ -54,6 +72,8 @@ $RANGE_BODY
 - [ ] mypy — zero type errors
 - [ ] pytest — 100% pass rate
 - [ ] No regressions in dispatch, reconcile, or other affected modules
+
+${CLOSES_TRAILER}
 
 🤖 Shipped via /prep-pr + project /ship-it
 EOF
