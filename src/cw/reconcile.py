@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -118,6 +119,13 @@ _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # Reason tag written to SESSION_COMPLETED events when a TIMED_OUT session's PR
 # was found MERGED via issue-linkage (timed_out-merged auto-complete, #488).
 _TIMED_OUT_MERGED_REASON = "timed_out_merged"
+
+# Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
+# idle_stall_recovered — watchdog fired but no usage-limit message found.
+# usage_limit_cutoff   — transcript contains a Claude session/usage-limit message.
+_USAGE_LIMIT_RE = re.compile(r"hit (?:your )?(?:session|usage) limit", re.IGNORECASE)
+_CAUSE_IDLE_STALL = "idle_stall_recovered"
+_CAUSE_USAGE_LIMIT = "usage_limit_cutoff"
 
 # Grace window for a newly-spawned session to register with the daemon
 # (`claude agents --json`). `claude --bg` spawn → daemon roster registration
@@ -342,6 +350,30 @@ def _assistant_text_from_transcript(path: Path) -> str:
     except OSError:
         return ""
     return "\n".join(parts)
+
+
+def _detect_usage_limit(session: Session) -> bool:
+    """Return True iff the newest post-start transcript contains a usage-limit message.
+
+    Mirrors the stale-transcript mtime guard from :func:`_salvage_terminal_result`
+    (#358): only trusts output written strictly after ``session.started_at``.
+    Returns False (never raises) when the project dir is absent, no .jsonl files
+    exist, or the transcript predates the session start.
+    """
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
+        return False
+    candidates = sorted(
+        project_dir.glob("*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return False
+    newest = candidates[0]
+    if datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC) <= session.started_at:
+        return False
+    return bool(_USAGE_LIMIT_RE.search(_assistant_text_from_transcript(newest)))
 
 
 def _salvage_terminal_result(
@@ -921,6 +953,9 @@ def flag_silently_idle_daemon_sessions(
         # Stale-worktree cleanup: this task was reverted to PENDING above for
         # re-dispatch, so the retry must start from a fresh worktree (#404).
         _cleanup_timed_out_worktree(session, ticket_id)
+        cause = (
+            _CAUSE_USAGE_LIMIT if _detect_usage_limit(session) else _CAUSE_IDLE_STALL
+        )
         record_event(
             OrchestratorEventType.SESSION_TIMED_OUT,
             {
@@ -930,7 +965,7 @@ def flag_silently_idle_daemon_sessions(
                 "ticket_id": ticket_id,
                 "claude_session_id": session.claude_session_id,
                 "elapsed_seconds": (now - session.started_at).total_seconds(),
-                "cause": "idle_stall_recovered",
+                "cause": cause,
                 "last_assistant_message_excerpt": "",
             },
         )

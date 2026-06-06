@@ -3183,6 +3183,253 @@ def test_flag_silently_idle_recover_skips_cleanup_when_no_branch(
     assert sess.status == SessionStatus.TIMED_OUT
 
 
+# ---------------------------------------------------------------------------
+# GitHub #486: usage_limit_cutoff cause distinction
+# ---------------------------------------------------------------------------
+
+
+def _write_idle_transcript_with_text(
+    home: Path,
+    worktree: Path,
+    assistant_text: str,
+    filename: str = "sess-486.jsonl",
+) -> Path:
+    """Write a transcript with a single assistant text block under the project dir."""
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True, exist_ok=True)
+    path = project_dir / filename
+    record = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+        }
+    )
+    path.write_text(record + "\n")
+    return path
+
+
+def test_flag_silently_idle_usage_limit_emits_distinct_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Usage-limit transcript → cause=usage_limit_cutoff on recover (#486)."""
+    from cw.reconcile import _CAUSE_USAGE_LIMIT
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    worktree = tmp_path / "wt-ul"
+    sess = _mk_headless_daemon_session("ul-1", worktree, started_at)
+    sess.surface_ref = "ul-ref"
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="ul-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="ul-1",
+                    attempts=1,  # < cap → recover path
+                )
+            ]
+        )
+    )
+
+    transcript = _write_idle_transcript_with_text(
+        home,
+        worktree,
+        "You've hit your session limit · resets 5:20pm",
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.fire_push_notification"),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"ul-ref"}, config=OrchestratorConfig()
+        )
+
+    events = read_events(
+        consumer="test-ul-cause",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert len(events) == 1
+    assert events[0].payload["cause"] == _CAUSE_USAGE_LIMIT
+
+
+def test_flag_silently_idle_no_usage_limit_emits_idle_stall_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No usage-limit text → cause=idle_stall_recovered on recover (regress, #486)."""
+    from cw.reconcile import _CAUSE_IDLE_STALL
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    worktree = tmp_path / "wt-nostall"
+    sess = _mk_headless_daemon_session("nostall-1", worktree, started_at)
+    sess.surface_ref = "nostall-ref"
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="nostall-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="nostall-1",
+                    attempts=1,  # < cap → recover path
+                )
+            ]
+        )
+    )
+
+    transcript = _write_idle_transcript_with_text(
+        home,
+        worktree,
+        "Working on the implementation now.",
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.fire_push_notification"),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"nostall-ref"}, config=OrchestratorConfig()
+        )
+
+    events = read_events(
+        consumer="test-nostall-cause",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert len(events) == 1
+    assert events[0].payload["cause"] == _CAUSE_IDLE_STALL
+
+
+def test_detect_usage_limit_returns_true_when_message_present(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_detect_usage_limit returns True for a usage-limit phrase (#486)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-ul-direct"
+    sess = _mk_headless_daemon_session("ul-direct", worktree, started_at)
+
+    transcript = _write_idle_transcript_with_text(
+        home, worktree, "You've hit your session limit · resets 5:20pm"
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    assert _detect_usage_limit(sess) is True
+
+
+def test_detect_usage_limit_returns_false_when_absent(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_detect_usage_limit returns False for a normal assistant message (#486)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-no-ul"
+    sess = _mk_headless_daemon_session("no-ul", worktree, started_at)
+
+    transcript = _write_idle_transcript_with_text(
+        home, worktree, "Here is my analysis of the task."
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    assert _detect_usage_limit(sess) is False
+
+
+def test_detect_usage_limit_returns_false_for_stale_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_detect_usage_limit returns False when transcript predates started_at (#486)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)  # session started at 01:00
+    worktree = tmp_path / "wt-stale-ul"
+    sess = _mk_headless_daemon_session("stale-ul", worktree, started_at)
+
+    transcript = _write_idle_transcript_with_text(
+        home, worktree, "You've hit your session limit · resets 5:20pm"
+    )
+    # Stamp BEFORE started_at so the stale-transcript guard fires.
+    before_ts = started_at.timestamp() - 3600
+    os.utime(str(transcript), (before_ts, before_ts))
+
+    assert _detect_usage_limit(sess) is False
+
+
+def test_detect_usage_limit_returns_false_when_no_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_detect_usage_limit returns False when no transcript exists (#486)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-no-trans"
+    sess = _mk_headless_daemon_session("no-trans", worktree, started_at)
+    # Do NOT write any transcript — project dir doesn't exist either.
+
+    assert _detect_usage_limit(sess) is False
+
+
 def test_flag_silently_idle_parks_when_cap_exhausted(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
