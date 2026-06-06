@@ -3217,7 +3217,7 @@ def test_flag_silently_idle_usage_limit_emits_distinct_cause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Idle-stall recover with usage-limit transcript → cause=usage_limit_cutoff (#486)."""
+    """Usage-limit transcript → cause=usage_limit_cutoff on recover (#486)."""
     from cw.reconcile import _CAUSE_USAGE_LIMIT
 
     home = tmp_path / "home"
@@ -3278,7 +3278,7 @@ def test_flag_silently_idle_no_usage_limit_emits_idle_stall_cause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Idle-stall recover, no usage-limit text → cause=idle_stall_recovered (regression guard, #486)."""
+    """No usage-limit text → cause=idle_stall_recovered on recover (regress, #486)."""
     from cw.reconcile import _CAUSE_IDLE_STALL
 
     home = tmp_path / "home"
@@ -3339,7 +3339,7 @@ def test_detect_usage_limit_returns_true_when_message_present(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_detect_usage_limit returns True when transcript contains a usage-limit phrase (#486)."""
+    """_detect_usage_limit returns True for a usage-limit phrase (#486)."""
     from cw.reconcile import _detect_usage_limit
 
     home = tmp_path / "home"
@@ -3389,7 +3389,7 @@ def test_detect_usage_limit_returns_false_for_stale_transcript(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_detect_usage_limit returns False when transcript predates session.started_at (#486)."""
+    """_detect_usage_limit returns False when transcript predates started_at (#486)."""
     from cw.reconcile import _detect_usage_limit
 
     home = tmp_path / "home"
