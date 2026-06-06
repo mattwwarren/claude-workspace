@@ -8,6 +8,11 @@ from typing import Any
 
 _GH_PR_STATE_MERGED = "MERGED"
 
+# Lookback window for timed_out-merged detection, shared by doctor.py and reconcile.py.
+# Lives here (co-located with pr_is_merged_for_ticket) to avoid a circular import:
+# doctor.py imports from reconcile.py, so reconcile.py cannot import from doctor.py.
+TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
+
 
 def _fetch_issue_pr_refs(ticket_id: str, timeout: int) -> list[dict[str, Any]] | None:
     """Return the list of PR refs linked to ticket_id, or None on any error."""

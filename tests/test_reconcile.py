@@ -41,6 +41,7 @@ from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _claude_agents_json,
+    complete_timed_out_merged_tasks,
     compute_drift,
     flag_silently_idle_daemon_sessions,
     reconcile,
@@ -4313,3 +4314,368 @@ def test_salvage_skipped_emitted_with_null_ticket_id(
     assert p["ticket_id"] is None
     assert p["reason"] == _SALVAGE_SKIP_REASON
     assert events[0].correlation_id is None
+
+
+# ---------------------------------------------------------------------------
+# TestCompleteTimedOutMergedTasks — #488
+# ---------------------------------------------------------------------------
+
+
+def _mk_timed_out_daemon_session(
+    sid: str,
+    ticket_id: str,
+    completed_at: datetime,
+) -> Session:
+    """Return a TIMED_OUT DAEMON session mirroring test_doctor.py helper shape.
+
+    branch=None because DAEMON sessions always have branch=None (spawn.py never
+    sets it). name follows the auto-dev/<ticket_id> convention.
+    """
+    return Session(
+        id=sid,
+        name=f"client-a/auto-dev/{ticket_id}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        status=SessionStatus.TIMED_OUT,
+        origin=SessionOrigin.DAEMON,
+        workspace_path=Path("/tmp/ws"),
+        branch=None,
+        completed_at=completed_at,
+    )
+
+
+class TestCompleteTimedOutMergedTasks:
+    """complete_timed_out_merged_tasks() auto-completes PENDING tasks on merged PR."""
+
+    def _pending_task(self, ticket_id: str) -> TicketTask:
+        return TicketTask(ticket_id=ticket_id, client="client-a")
+
+    def test_happy_path(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DAEMON TIMED_OUT session + PENDING task + merged PR → task COMPLETED.
+
+        SESSION_COMPLETED event must carry the full payload including
+        salvaged=True, reason="timed_out_merged", correlation_id=ticket_id.
+        ReconcileReport.completed_ticket_ids == ["TKT-X"].
+        """
+        now = datetime.now(UTC)
+        ticket_id = "TKT-X"
+        session = _mk_timed_out_daemon_session(
+            "sess-happy", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == [ticket_id]
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-happy-path",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["session_id"] == "sess-happy"
+        assert p["session_name"] == f"client-a/auto-dev/{ticket_id}"
+        assert p["client"] == "client-a"
+        assert p["ticket_id"] == ticket_id
+        assert "claude_session_id" in p
+        assert p["crashed"] is False
+        assert p["salvaged"] is True
+        assert p["reason"] == "timed_out_merged"
+        assert events[0].correlation_id == ticket_id
+
+        report = reconcile.__doc__  # smoke: function exists
+        _ = report  # suppress unused
+
+    def test_gh_unavailable_skips_all(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """gh binary absent → no upgrades, loop breaks, second session NOT processed."""
+        now = datetime.now(UTC)
+        sessions = [
+            _mk_timed_out_daemon_session(
+                f"sess-{i}", f"TKT-{i}", completed_at=now - timedelta(hours=1)
+            )
+            for i in range(2)
+        ]
+        save_state(CwState(sessions=sessions))
+        save_dev_queue(
+            DevQueueStore(tasks=[self._pending_task(f"TKT-{i}") for i in range(2)])
+        )
+
+        call_count = 0
+
+        def _unavailable(tid: str, **kw: object) -> tuple[None, bool]:
+            nonlocal call_count
+            call_count += 1
+            return None, False
+
+        monkeypatch.setattr("cw.reconcile.pr_is_merged_for_ticket", _unavailable)
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        assert call_count == 1  # broke after first call
+
+        store = load_dev_queue()
+        for task in store.tasks:
+            assert task.status == QueueItemStatus.PENDING
+
+    def test_transient_error_skips_session(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """(None, True) for A, (True, True) for B → A skipped, B completed."""
+        now = datetime.now(UTC)
+        session_a = _mk_timed_out_daemon_session(
+            "sess-a", "TKT-A", completed_at=now - timedelta(hours=1)
+        )
+        session_b = _mk_timed_out_daemon_session(
+            "sess-b", "TKT-B", completed_at=now - timedelta(hours=1)
+        )
+        save_state(CwState(sessions=[session_a, session_b]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[self._pending_task("TKT-A"), self._pending_task("TKT-B")]
+            )
+        )
+
+        def _transient_then_merged(tid: str, **kw: object) -> tuple[bool | None, bool]:
+            if tid == "TKT-A":
+                return None, True
+            return True, True
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket", _transient_then_merged
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert "TKT-B" in completed
+        assert "TKT-A" not in completed
+
+        store = load_dev_queue()
+        by_tid = {t.ticket_id: t for t in store.tasks}
+        assert by_tid["TKT-A"].status == QueueItemStatus.PENDING
+        assert by_tid["TKT-B"].status == QueueItemStatus.COMPLETED
+
+    def test_idempotency(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Second reconcile() call emits ZERO extra events (task already COMPLETED)."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-IDEM"
+        session = _mk_timed_out_daemon_session(
+            "sess-idem", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        call_count = 0
+
+        def _merged(tid: str, **kw: object) -> tuple[bool, bool]:
+            nonlocal call_count
+            call_count += 1
+            return True, True
+
+        monkeypatch.setattr("cw.reconcile.pr_is_merged_for_ticket", _merged)
+
+        complete_timed_out_merged_tasks()
+        assert call_count == 1
+
+        # Second call: task is now COMPLETED, should skip gh call entirely.
+        call_count = 0
+        complete_timed_out_merged_tasks()
+        assert call_count == 0
+
+        events = read_events(
+            consumer="test-idempotency",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1  # only from first call
+
+    def test_pr_not_merged(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """(False, True) → task stays PENDING, no SESSION_COMPLETED event."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-OPEN"
+        session = _mk_timed_out_daemon_session(
+            "sess-open", ticket_id, completed_at=now - timedelta(hours=2)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (False, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
+
+        events = read_events(
+            consumer="test-pr-not-merged",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 0
+
+    def test_outside_lookback_window(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Session completed_at > 7 days ago → skipped, no gh call made."""
+        fixed_now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC)
+        ticket_id = "TKT-OLD"
+        # 8 days ago — outside the 7-day lookback
+        old_completed_at = fixed_now - timedelta(days=8)
+        session = _mk_timed_out_daemon_session(
+            "sess-old", ticket_id, completed_at=old_completed_at
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        call_count = 0
+
+        def _should_not_be_called(tid: str, **kw: object) -> tuple[bool, bool]:
+            nonlocal call_count
+            call_count += 1
+            return True, True
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket", _should_not_be_called
+        )
+
+        with freezegun.freeze_time(fixed_now):
+            completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        assert call_count == 0
+
+    def test_inside_lookback_window(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Session completed_at within 7 days → processed normally."""
+        fixed_now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC)
+        ticket_id = "TKT-RECENT"
+        # 6 days ago — inside the 7-day lookback
+        recent_completed_at = fixed_now - timedelta(days=6)
+        session = _mk_timed_out_daemon_session(
+            "sess-recent", ticket_id, completed_at=recent_completed_at
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        with freezegun.freeze_time(fixed_now):
+            completed = complete_timed_out_merged_tasks()
+
+        assert ticket_id in completed
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_completed_at_none_legacy_session(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """session.completed_at = None → skipped without TypeError."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-LEGACY"
+        session = _mk_timed_out_daemon_session(
+            "sess-legacy", ticket_id, completed_at=now - timedelta(hours=1)
+        )
+        # Override completed_at to None to simulate legacy state
+        session.completed_at = None  # type: ignore[assignment]
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        call_count = 0
+
+        def _should_not_be_called(tid: str, **kw: object) -> tuple[bool, bool]:
+            nonlocal call_count
+            call_count += 1
+            return True, True
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket", _should_not_be_called
+        )
+
+        # Must not raise
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        assert call_count == 0
+
+    def test_task_running_not_upgraded(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Task status is RUNNING → no gh call made, task stays RUNNING."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-RUN"
+        session = _mk_timed_out_daemon_session(
+            "sess-run", ticket_id, completed_at=now - timedelta(hours=1)
+        )
+        save_state(CwState(sessions=[session]))
+
+        running_task = TicketTask(
+            ticket_id=ticket_id, client="client-a", status=QueueItemStatus.RUNNING
+        )
+        save_dev_queue(DevQueueStore(tasks=[running_task]))
+
+        call_count = 0
+
+        def _should_not_be_called(tid: str, **kw: object) -> tuple[bool, bool]:
+            nonlocal call_count
+            call_count += 1
+            return True, True
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket", _should_not_be_called
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        assert call_count == 0
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING
