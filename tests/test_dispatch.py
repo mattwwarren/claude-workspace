@@ -13,6 +13,7 @@ import pytest
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue, save_plan
 from cw.dispatch import (
+    DispatchTickResult,
     _accumulate_task_cost,
     consume_completed_sessions,
     dispatch_tick,
@@ -135,7 +136,7 @@ class TestDispatchTickSpawnsSession:
         add_ticket(task)
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 1
 
@@ -204,7 +205,9 @@ class TestDispatchTickSpawnsSession:
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(cap2_config, native_daemon=daemon, parent=parent.id)
+        spawned = dispatch_tick(
+            cap2_config, native_daemon=daemon, parent=parent.id
+        ).spawned
         assert spawned == 2
 
         state = load_state()
@@ -283,7 +286,7 @@ class TestPerClientCapRespected:
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(cap2_config, native_daemon=daemon)
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon).spawned
 
         assert spawned == 2
         assert len(daemon.spawn_calls) == 2
@@ -314,7 +317,7 @@ class TestPerClientCapRespected:
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(config, native_daemon=daemon)
+        spawned = dispatch_tick(config, native_daemon=daemon).spawned
 
         # default_max_parallel=3 → spawn 3, leave 1 pending.
         assert spawned == 3
@@ -343,11 +346,11 @@ class TestNoDoubleDispatch:
         daemon = FakeNativeDaemonClient()
 
         # First tick claims the task
-        spawned1 = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned1 = dispatch_tick(simple_config, native_daemon=daemon).spawned
         assert spawned1 == 1
 
         # Second tick: running_count=1 >= cap=1, should skip
-        spawned2 = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned2 = dispatch_tick(simple_config, native_daemon=daemon).spawned
         assert spawned2 == 0
 
         # Only one spawn call total
@@ -874,7 +877,7 @@ class TestDispatchTickReturnsCount:
         add_ticket(TicketTask(ticket_id="GEN-501", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        count = dispatch_tick(cap2_config, native_daemon=daemon)
+        count = dispatch_tick(cap2_config, native_daemon=daemon).spawned
 
         assert count == 2
 
@@ -888,7 +891,7 @@ class TestDispatchTickReturnsCount:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         daemon = FakeNativeDaemonClient()
-        count = dispatch_tick(simple_config, native_daemon=daemon)
+        count = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert count == 0
 
@@ -918,7 +921,7 @@ class TestDispatchTickReturnsCount:
 
         daemon = FakeNativeDaemonClient()
         # cap=1, running=1 => should not spawn
-        count = dispatch_tick(simple_config, native_daemon=daemon)
+        count = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert count == 0
         assert len(daemon.spawn_calls) == 0
@@ -959,7 +962,9 @@ class TestDispatchTickWithPlan:
 
         daemon = FakeNativeDaemonClient()
         # cap=2 => should claim C first, then A
-        spawned = dispatch_tick(cap2_config, native_daemon=daemon, use_plan=True)
+        spawned = dispatch_tick(
+            cap2_config, native_daemon=daemon, use_plan=True
+        ).spawned
         assert spawned == 2
 
         store = load_dev_queue()
@@ -979,7 +984,9 @@ class TestDispatchTickWithPlan:
         add_ticket(TicketTask(ticket_id="GEN-SECOND", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon, use_plan=True)
+        spawned = dispatch_tick(
+            simple_config, native_daemon=daemon, use_plan=True
+        ).spawned
         assert spawned == 1
 
         store = load_dev_queue()
@@ -1005,7 +1012,9 @@ class TestDispatchTickWithPlan:
         )
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(cap2_config, native_daemon=daemon, use_plan=True)
+        spawned = dispatch_tick(
+            cap2_config, native_daemon=daemon, use_plan=True
+        ).spawned
         # cap=2: claims B first (per plan), then A (fallback)
         assert spawned == 2
 
@@ -1075,7 +1084,7 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
         lambda: [{"sessionId": "decoy000"}],
     )
 
-    spawned = dispatch_tick(simple_config, native_daemon=daemon)
+    spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
     assert spawned == 1
 
     reloaded = load_state()
@@ -1150,7 +1159,7 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
 
     # Step 2: tick triggers reconcile (revert + emit crashed event), then
     # claims and respawns the same ticket with a new session id.
-    spawned = dispatch_tick(simple_config, native_daemon=daemon)
+    spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
     assert spawned == 1
 
     queue = load_dev_queue()
@@ -1239,7 +1248,7 @@ class TestDispatchTickSpawnErrors:
         )
 
         caplog.set_level(logging.ERROR, logger="cw.dispatch")
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
 
@@ -1276,7 +1285,7 @@ class TestDispatchTickSpawnErrors:
         daemon = FakeNativeDaemonClient()
 
         caplog.set_level(logging.ERROR, logger="cw.dispatch")
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
         assert daemon.spawn_calls == []
@@ -1324,7 +1333,7 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.remove_worktree", _record_remove)
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
         assert daemon.spawn_calls == []
@@ -1360,7 +1369,7 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.remove_worktree", _remove_boom)
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
         queue = load_dev_queue()
@@ -1397,7 +1406,7 @@ class TestDispatchTickSpawnErrors:
         )
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
         # Removal must NOT have been called
@@ -1438,7 +1447,7 @@ class TestDispatchTickSpawnErrors:
         )
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
         # Removal with force=True must have been called
@@ -1476,7 +1485,7 @@ class TestDispatchTickFreshnessGate:
         )
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
 
@@ -1570,7 +1579,7 @@ class TestDispatchTickFreshnessGate:
         )
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(config, native_daemon=daemon)
+        spawned = dispatch_tick(config, native_daemon=daemon).spawned
 
         assert spawned == 1  # only fresh-client
 
@@ -1598,7 +1607,7 @@ class TestDispatchTickFreshnessGate:
         )
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 1
 
@@ -1702,7 +1711,7 @@ class TestDispatchTickFreshnessGate:
         daemon = FakeNativeDaemonClient()
 
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 1  # dispatch proceeded
         assert any(
@@ -1742,7 +1751,7 @@ class TestDispatchTickReconcileErrors:
 
         # Must not raise; reconcile guard catches and logs, dispatch_tick
         # continues to the dev-queue scan and returns normally.
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
         assert any(
@@ -1845,7 +1854,7 @@ class TestDispatchDoesNotTouchMainCheckout:
         add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         after_head = subprocess.check_output(
             ["git", "-C", str(workspace_dir), "rev-parse", "HEAD"],
@@ -1879,7 +1888,7 @@ class TestDispatchDoesNotTouchMainCheckout:
         add_ticket(TicketTask(ticket_id="GEN-300-guard", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
 
         assert spawned == 0
         assert daemon.spawn_calls == []
@@ -1959,7 +1968,7 @@ class TestSpawnCloseRaceRegression:
         )
 
         # Now dispatch_tick should NOT re-spawn (CANCELLED != PENDING).
-        spawned = dispatch_tick(simple_config, native_daemon=daemon)
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
         assert spawned == 0, (
             f"Dispatcher should not re-spawn a CANCELLED task, got {spawned}"
         )
@@ -2428,3 +2437,158 @@ class TestDispatchTickEvents:
         # Pre-claim: 2 pending. Post-claim: 1 pending. Event must show 2.
         assert p["pending"] == 2
         assert p["claimed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchUsageLimitBackoff
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchUsageLimitBackoff:
+    """Usage-limit back-off: detected at spawn time, subsequent ticks skipped."""
+
+    def test_usage_limit_detected_from_spawn_raises(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """UsageLimitError from spawn: tick result has usage_limit_detected=True."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL1", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert isinstance(result, DispatchTickResult)
+        assert result.usage_limit_detected is True
+        assert result.spawned == 0
+
+    def test_usage_limit_skip_reason_in_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """dispatch.tick event has skip_reason=usage_limited when limit detected."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL2", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-ul-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.USAGE_LIMITED
+
+    def test_usage_limited_until_future_skips_all_clients(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """When usage_limited_until is in the future, tick skips all clients."""
+        from datetime import timedelta
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL3", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        future = datetime.now(UTC) + timedelta(hours=1)
+
+        result = dispatch_tick(
+            simple_config,
+            native_daemon=daemon,
+            usage_limited_until=future,
+        )
+
+        assert isinstance(result, DispatchTickResult)
+        assert result.spawned == 0
+        assert result.usage_limit_detected is False
+        assert daemon.spawn_calls == []
+
+        events = read_events(
+            consumer="test-ul-future",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.USAGE_LIMITED
+
+    def test_usage_limited_until_elapsed_spawns_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """After usage_limited_until elapses, spawning resumes normally."""
+        from datetime import timedelta
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL4", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        past = datetime.now(UTC) - timedelta(hours=1)
+
+        result = dispatch_tick(
+            simple_config,
+            native_daemon=daemon,
+            usage_limited_until=past,
+        )
+
+        assert isinstance(result, DispatchTickResult)
+        assert result.spawned == 1
+        assert len(daemon.spawn_calls) == 1
+
+    def test_run_dispatch_loop_sets_usage_limited_until(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """run_dispatch_loop with usage limit hit: no spawns occur."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL5", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-UL6", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+
+        # Run once — limit detected
+        run_dispatch_loop(
+            once=True,
+            native_daemon=daemon,
+            max_parallel=2,
+        )
+
+        # No spawns because limit was hit
+        assert daemon.spawn_calls == []
+
+    def test_once_mode_does_not_set_backoff(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """once=True: usage_limit_detected does NOT set usage_limited_until."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL7", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+
+        result = dispatch_tick(
+            simple_config,
+            native_daemon=daemon,
+            usage_limited_until=None,
+        )
+
+        # DispatchTickResult.usage_limit_detected=True but no backoff state set
+        assert isinstance(result, DispatchTickResult)
+        assert result.usage_limit_detected is True

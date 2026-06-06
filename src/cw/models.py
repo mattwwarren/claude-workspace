@@ -136,10 +136,12 @@ class OrchestratorEventType(StrEnum):
 class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
-    Precedence: FRESHNESS_GATE > CAP_FULL > SPAWN_ERROR > NO_PENDING > NONE.
+    Precedence (highest first):
+    FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > SPAWN_ERROR > NO_PENDING > NONE.
     """
 
     FRESHNESS_GATE = "freshness_gate"
+    USAGE_LIMITED = "usage_limited"
     CAP_FULL = "cap_full"
     SPAWN_ERROR = "spawn_error"
     NO_PENDING = "no_pending"
@@ -231,6 +233,9 @@ class BackendName(StrEnum):
     FAKE = "fake"
 
 
+_USAGE_LIMIT_BACKOFF_SECONDS = 3600
+
+
 class OrchestratorConfig(BaseModel):
     """Parsed contents of orchestrator.yaml.
 
@@ -243,6 +248,7 @@ class OrchestratorConfig(BaseModel):
     """
 
     tick_interval_seconds: int = 30
+    usage_limit_backoff_seconds: int = _USAGE_LIMIT_BACKOFF_SECONDS
     per_client_max_parallel: dict[str, int] = Field(default_factory=dict)
     default_max_parallel: int = 1
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)

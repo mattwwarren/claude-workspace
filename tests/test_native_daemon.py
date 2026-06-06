@@ -133,6 +133,42 @@ class TestRealNativeDaemonClientSpawn:
         with pytest.raises(CwError, match="claude --bg exited 2"):
             client.spawn_bg(cwd=tmp_path, prompt="x")
 
+    def test_usage_limit_calledprocesserror_raises_usage_limit_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CalledProcessError with usage-limit stderr raises UsageLimitError."""
+        from cw.exceptions import UsageLimitError
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(
+                1,
+                ["claude"],
+                output="",
+                stderr="You've hit your session limit · resets 3:45pm",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        with pytest.raises(UsageLimitError, match="usage limit"):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+    def test_usage_limit_in_stdout_raises_usage_limit_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exits 0 but stdout contains usage-limit text instead of session id."""
+        from cw.exceptions import UsageLimitError
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_, **__: _FakeCompleted(
+                stdout="You've hit your weekly limit · resets Mon 12:00am"
+            ),
+        )
+        client = RealNativeDaemonClient()
+        with pytest.raises(UsageLimitError, match="usage limit"):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
     def test_disclaimer_not_accepted_raises_typed_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -290,6 +326,25 @@ class TestFakeNativeDaemonClient:
         client.stop(short_id)
         assert client.stop_calls == [short_id]
         assert client.list_live_session_short_ids() == set()
+
+    def test_raise_usage_limit_raises_before_counter(self, tmp_path: Path) -> None:
+        """raise_usage_limit=True raises UsageLimitError before incrementing counter."""
+        from cw.exceptions import UsageLimitError
+
+        client = FakeNativeDaemonClient()
+        client.raise_usage_limit = True
+        with pytest.raises(UsageLimitError):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+        # Counter should not have been incremented — no slot consumed.
+        assert client.spawn_calls == []
+        assert client.list_live_session_short_ids() == set()
+
+    def test_raise_usage_limit_false_by_default(self, tmp_path: Path) -> None:
+        """raise_usage_limit defaults to False — normal spawn behavior."""
+        client = FakeNativeDaemonClient()
+        assert client.raise_usage_limit is False
+        short_id = client.spawn_bg(cwd=tmp_path, prompt="x")
+        assert len(short_id) == 8
 
 
 def test_get_native_daemon_client_returns_real_instance() -> None:

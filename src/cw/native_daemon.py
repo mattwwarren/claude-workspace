@@ -23,7 +23,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from cw.exceptions import CwError, DisclaimerNotAcceptedError
+from cw.exceptions import (
+    USAGE_LIMIT_RE,
+    CwError,
+    DisclaimerNotAcceptedError,
+    UsageLimitError,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -148,6 +153,9 @@ class RealNativeDaemonClient:
             raise CwError(msg) from exc
         except subprocess.CalledProcessError as exc:
             stderr_text = (exc.stderr or exc.stdout or "").strip()
+            if USAGE_LIMIT_RE.search(stderr_text):
+                msg = f"claude --bg failed: usage limit active. {stderr_text}"
+                raise UsageLimitError(msg) from exc
             if _DISCLAIMER_REJECTION_PATTERN in stderr_text:
                 msg = (
                     "claude --bg failed: bypassPermissions disclaimer not accepted."
@@ -164,6 +172,12 @@ class RealNativeDaemonClient:
         stdout_clean = _ANSI_CSI_PATTERN.sub("", proc.stdout or "")
         match = _BG_STDOUT_PATTERN.search(stdout_clean)
         if match is None:
+            if USAGE_LIMIT_RE.search(stdout_clean):
+                msg = (
+                    "claude --bg succeeded but usage limit detected"
+                    f" in output: {proc.stdout!r}"
+                )
+                raise UsageLimitError(msg)
             msg = (
                 "claude --bg succeeded but stdout did not contain a "
                 f"recognizable session id: {proc.stdout!r}"
@@ -218,6 +232,7 @@ class FakeNativeDaemonClient:
         self.spawn_permission_modes: list[str | None] = []
         self.stop_calls: list[str] = []
         self._live: set[str] = set()
+        self.raise_usage_limit: bool = False
 
     def spawn_bg(
         self,
@@ -227,7 +242,14 @@ class FakeNativeDaemonClient:
         extra_args: list[str] | None = None,
         permission_mode: str | None = None,
     ) -> str:
-        """Record call, register a deterministic short id, return it."""
+        """Record call, register a deterministic short id, return it.
+
+        When ``raise_usage_limit`` is True, raises :class:`UsageLimitError`
+        before incrementing the counter — so no slot is consumed.
+        """
+        if self.raise_usage_limit:
+            msg = "fake: usage limit"
+            raise UsageLimitError(msg)
         self._counter += 1
         short_id = f"{self._counter:08x}"
         self.spawn_calls.append((cwd, prompt))

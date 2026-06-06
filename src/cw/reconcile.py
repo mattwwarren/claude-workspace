@@ -29,7 +29,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -51,7 +50,7 @@ from cw.config import (
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.exceptions import CwError
+from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
     CompletionReason,
@@ -123,7 +122,7 @@ _TIMED_OUT_MERGED_REASON = "timed_out_merged"
 # Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
 # idle_stall_recovered — watchdog fired but no usage-limit message found.
 # usage_limit_cutoff   — transcript contains a Claude session/usage-limit message.
-_USAGE_LIMIT_RE = re.compile(r"hit (?:your )?(?:session|usage) limit", re.IGNORECASE)
+# USAGE_LIMIT_RE is imported from cw.exceptions (centralized there for reuse).
 _CAUSE_IDLE_STALL = "idle_stall_recovered"
 _CAUSE_USAGE_LIMIT = "usage_limit_cutoff"
 
@@ -185,12 +184,16 @@ class ReconcileReport:
     ``completed_ticket_ids`` — ticket IDs whose PENDING TicketTasks were
     auto-completed because their TIMED_OUT session's PR merged. Populated
     by :func:`reconcile` via :func:`complete_timed_out_merged_tasks`.
+    ``usage_limited`` — True when any reaped session had
+    cause=usage_limit_cutoff during this reconcile pass. Signals the
+    dispatch loop to enter back-off mode.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
     phantom_session_names: list[str] = field(default_factory=list)
     reverted_ticket_ids: list[str] = field(default_factory=list)
     completed_ticket_ids: list[str] = field(default_factory=list)
+    usage_limited: bool = False
 
 
 def compute_drift(
@@ -373,7 +376,7 @@ def _detect_usage_limit(session: Session) -> bool:
     newest = candidates[0]
     if datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC) <= session.started_at:
         return False
-    return bool(_USAGE_LIMIT_RE.search(_assistant_text_from_transcript(newest)))
+    return bool(USAGE_LIMIT_RE.search(_assistant_text_from_transcript(newest)))
 
 
 def _salvage_terminal_result(
@@ -1041,6 +1044,7 @@ def reconcile() -> ReconcileReport:
         phantom_session_names=locked_report.phantom_session_names,
         reverted_ticket_ids=locked_report.reverted_ticket_ids,
         completed_ticket_ids=completed_ticket_ids,
+        usage_limited=locked_report.usage_limited,
     )
 
 
@@ -1085,12 +1089,25 @@ def _reconcile_locked() -> ReconcileReport:
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(reverted_ticket_ids=stalled_reverted)
 
+    # Snapshot sessions that are already TIMED_OUT before the watchdog sweep,
+    # so we can detect which sessions were newly reaped by usage_limit_cutoff.
+    pre_watchdog_timed_out_ids = {
+        s.id for s in state.sessions if s.status == SessionStatus.TIMED_OUT
+    }
     silently_idle_ticket_ids = flag_silently_idle_daemon_sessions(
         state,
         now=now,
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
+    )
+    # Check whether any session newly transitioned to TIMED_OUT has a usage-limit
+    # transcript. The _detect_usage_limit I/O cost is minimal (OS-cached files).
+    watchdog_usage_limited = any(
+        s.status == SessionStatus.TIMED_OUT
+        and s.id not in pre_watchdog_timed_out_ids
+        and _detect_usage_limit(s)
+        for s in state.sessions
     )
 
     drift = compute_drift(state, native_live, now=now)
@@ -1108,7 +1125,10 @@ def _reconcile_locked() -> ReconcileReport:
                 + completed_silent_ticket_ids
             )
         )
-        return ReconcileReport(reverted_ticket_ids=all_reverted)
+        return ReconcileReport(
+            reverted_ticket_ids=all_reverted,
+            usage_limited=watchdog_usage_limited,
+        )
 
     phantom_set = set(drift.phantom_session_ids)
     ticket_ids_to_revert: list[str] = []
@@ -1242,6 +1262,7 @@ def _reconcile_locked() -> ReconcileReport:
         phantom_session_ids=drift.phantom_session_ids,
         phantom_session_names=phantom_names,
         reverted_ticket_ids=all_reverted,
+        usage_limited=watchdog_usage_limited,
     )
 
 
