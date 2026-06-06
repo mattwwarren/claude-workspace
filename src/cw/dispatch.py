@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
@@ -21,7 +23,7 @@ from cw.config import (
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
-from cw.exceptions import StaleWorktreeError, WorktreeError
+from cw.exceptions import StaleWorktreeError, UsageLimitError, WorktreeError
 from cw.models import (
     DispatchSkipReason,
     OrchestratorEventType,
@@ -53,6 +55,22 @@ if TYPE_CHECKING:
 
 _DISPATCH_CONSUMER = "dispatch"
 _log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DispatchTickResult:
+    """Return value of :func:`dispatch_tick`.
+
+    ``spawned`` — number of sessions started this tick.
+    ``usage_limit_detected`` — True if a usage limit was detected this tick
+    (either from spawn-time :class:`~cw.exceptions.UsageLimitError` or from
+    :attr:`~cw.reconcile.ReconcileReport.usage_limited`). The caller
+    (:func:`run_dispatch_loop`) uses this to set the back-off window.
+    ``--once`` mode intentionally does not back off (single tick, no loop state).
+    """
+
+    spawned: int
+    usage_limit_detected: bool = False
 
 
 def _claim_next_pending(
@@ -104,7 +122,8 @@ def dispatch_tick(
     native_daemon: NativeDaemonClient | None = None,
     emit: Callable[[str], None] | None = None,
     warned_stale: set[tuple[str, str]] | None = None,
-) -> int:
+    usage_limited_until: datetime | None = None,
+) -> DispatchTickResult:
     """Run one dispatch tick.
 
     For each client that has pending TicketTasks, check how many DAEMON
@@ -127,13 +146,22 @@ def dispatch_tick(
             have already received a "main behind origin" warning during
             this dispatcher run.  Prevents repeated spam across ticks.
             Caller owns the set; mutated in-place.
+        usage_limited_until: When set and in the future, all clients are
+            skipped with ``skip_reason=USAGE_LIMITED`` and the function
+            returns immediately. The back-off window is set by the
+            caller (:func:`run_dispatch_loop`) when a
+            :class:`~cw.exceptions.UsageLimitError` is detected.
+            Single-tick (``--once``) mode does not set back-off.
 
     Returns:
-        Number of sessions spawned during this tick.
+        :class:`DispatchTickResult` with ``spawned`` count and
+        ``usage_limit_detected`` flag.
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
+    any_usage_limit_detected = False
+    reconcile_report = None
     try:
-        reconcile()
+        reconcile_report = reconcile()
     except Exception:  # noqa: BLE001
         # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331 (4-part justification):
         # 1. reconcile() calls ``claude agents --json`` and native-daemon roster
@@ -144,6 +172,8 @@ def dispatch_tick(
         # 4. Paired test: tests/test_dispatch.py
         #    test_reconcile_failure_does_not_crash_dispatch_tick.
         _log.exception("reconcile failed during dispatch_tick; continuing")
+    if reconcile_report is not None and reconcile_report.usage_limited:
+        any_usage_limit_detected = True
     clients = load_clients()
     state = load_state()
     spawned = 0
@@ -156,6 +186,40 @@ def dispatch_tick(
                 plan_order_by_client.setdefault(plan_task.client, []).append(
                     plan_task.ticket_id,
                 )
+
+    # Usage-limit back-off gate: if the window is still active, skip all clients
+    # this tick and emit a dispatch.tick event with skip_reason=USAGE_LIMITED.
+    if usage_limited_until is not None and datetime.now(UTC) < usage_limited_until:
+        for client in clients.values():
+            running_count = sum(
+                1
+                for s in state.sessions
+                if s.client == client.name
+                and s.origin == SessionOrigin.DAEMON
+                and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+            )
+            cap = config.per_client_max_parallel.get(
+                client.name, config.default_max_parallel
+            )
+            with dev_queue_lock():
+                queue_snapshot = load_dev_queue()
+            pending_count = sum(
+                1
+                for t in queue_snapshot.tasks
+                if t.client == client.name and t.status == QueueItemStatus.PENDING
+            )
+            record_event(
+                OrchestratorEventType.DISPATCH_TICK,
+                {
+                    "client": client.name,
+                    "claimed": 0,
+                    "pending": pending_count,
+                    "running": running_count,
+                    "cap": cap,
+                    "skip_reason": DispatchSkipReason.USAGE_LIMITED,
+                },
+            )
+        return DispatchTickResult(spawned=0, usage_limit_detected=False)
 
     for client in clients.values():
         # --- Freshness gate ---
@@ -237,6 +301,7 @@ def dispatch_tick(
         client_spawned = 0
         cap_full = running_count >= cap
         spawn_error = False
+        usage_limit_detected = False
         while running_count < cap:
             task: TicketTask | None = _claim_next_pending(
                 client.name,
@@ -351,6 +416,36 @@ def dispatch_tick(
                 running_count += 1
                 spawned += 1
                 client_spawned += 1
+            except UsageLimitError:
+                # Narrow catch for fleet-wide usage limits. Raised by
+                # spawn_create_impl → NativeDaemonClient.spawn_bg when the
+                # claude output matches USAGE_LIMIT_RE. The task has not yet
+                # been stamped with a session_id (spawn failed before one was
+                # created), so the broad-catch revert is NOT needed here —
+                # _claim_next_pending already set it to RUNNING; reconcile
+                # will revert it. We break without reverting to avoid a
+                # double-revert race.
+                usage_limit_detected = True
+                any_usage_limit_detected = True
+                _log.warning(
+                    "dispatch_tick: usage limit detected for %s/%s; setting back-off",
+                    client.name,
+                    task.ticket_id,
+                )
+                # Revert the claimed task back to PENDING — spawn never succeeded.
+                with dev_queue_lock():
+                    store = load_dev_queue()
+                    for stored_task in store.tasks:
+                        if (
+                            stored_task.ticket_id == task.ticket_id
+                            and stored_task.client == client.name
+                            and stored_task.status == QueueItemStatus.RUNNING
+                        ):
+                            stored_task.status = QueueItemStatus.PENDING
+                            stored_task.session_id = None
+                            break
+                    save_dev_queue(store)
+                break  # do not retry other slots this tick
             except Exception:  # noqa: BLE001
                 # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
                 # Paired tests: TestDispatchTickSpawnErrors in
@@ -392,12 +487,16 @@ def dispatch_tick(
             emit(f"{client.name}: spawned={client_spawned} cap_full={int(cap_full)}")
 
         # skip_reason: first-match precedence (see operator resolution, issue #459)
+        # skip_reason: first-match precedence (see operator resolution, issue #459)
         # 1. freshness_gate — handled by early-continue above
-        # 2. cap_full — running_count >= cap before loop entered
-        # 3. spawn_error — exception broke the loop (regardless of client_spawned)
-        # 4. no_pending — loop exited with zero claims and no spawn error
-        # 5. none — at least one session spawned
-        if cap_full:
+        # 2. usage_limited — usage limit detected this tick for this client
+        # 3. cap_full — running_count >= cap before loop entered
+        # 4. spawn_error — exception broke the loop (regardless of client_spawned)
+        # 5. no_pending — loop exited with zero claims and no spawn error
+        # 6. none — at least one session spawned
+        if usage_limit_detected:
+            skip_reason = DispatchSkipReason.USAGE_LIMITED
+        elif cap_full:
             skip_reason = DispatchSkipReason.CAP_FULL
         elif spawn_error:
             skip_reason = DispatchSkipReason.SPAWN_ERROR
@@ -418,7 +517,9 @@ def dispatch_tick(
             },
         )
 
-    return spawned
+    return DispatchTickResult(
+        spawned=spawned, usage_limit_detected=any_usage_limit_detected
+    )
 
 
 def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
@@ -635,17 +736,30 @@ def run_dispatch_loop(
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
     warned_stale: set[tuple[str, str]] = set()
+    # Back-off window: set when a UsageLimitError is detected during a tick.
+    # Subsequent ticks skip all spawns until this window elapses.
+    usage_limited_until: datetime | None = None
 
     while True:
         consume_completed_sessions()
-        dispatch_tick(
+        result = dispatch_tick(
             config,
             use_plan=use_plan,
             parent=parent,
             native_daemon=resolved_native_daemon,
             emit=emit,
             warned_stale=warned_stale,
+            usage_limited_until=usage_limited_until,
         )
+
+        if result.usage_limit_detected and not once:
+            usage_limited_until = datetime.now(UTC) + timedelta(
+                seconds=config.usage_limit_backoff_seconds
+            )
+            _log.warning(
+                "dispatch: usage limit detected; backing off until %s",
+                usage_limited_until,
+            )
 
         if once:
             return

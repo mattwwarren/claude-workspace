@@ -792,3 +792,19 @@ class TestMigrateCwState:
         session = migrated["sessions"][0]
         assert session["cost_usd"] == 1.5
         assert session["cost_breakdown"] == {"claude-sonnet-4-6": 1.5}
+
+
+class TestOrchestratorConfigUsageLimitBackoff:
+    """OrchestratorConfig.usage_limit_backoff_seconds field."""
+
+    def test_default_is_3600(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig()
+        assert config.usage_limit_backoff_seconds == 3600
+
+    def test_can_be_overridden(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig(usage_limit_backoff_seconds=7200)
+        assert config.usage_limit_backoff_seconds == 7200
