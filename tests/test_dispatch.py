@@ -205,7 +205,9 @@ class TestDispatchTickSpawnsSession:
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(cap2_config, native_daemon=daemon, parent=parent.id).spawned
+        spawned = dispatch_tick(
+            cap2_config, native_daemon=daemon, parent=parent.id
+        ).spawned
         assert spawned == 2
 
         state = load_state()
@@ -960,7 +962,9 @@ class TestDispatchTickWithPlan:
 
         daemon = FakeNativeDaemonClient()
         # cap=2 => should claim C first, then A
-        spawned = dispatch_tick(cap2_config, native_daemon=daemon, use_plan=True).spawned
+        spawned = dispatch_tick(
+            cap2_config, native_daemon=daemon, use_plan=True
+        ).spawned
         assert spawned == 2
 
         store = load_dev_queue()
@@ -980,7 +984,9 @@ class TestDispatchTickWithPlan:
         add_ticket(TicketTask(ticket_id="GEN-SECOND", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon, use_plan=True).spawned
+        spawned = dispatch_tick(
+            simple_config, native_daemon=daemon, use_plan=True
+        ).spawned
         assert spawned == 1
 
         store = load_dev_queue()
@@ -1006,7 +1012,9 @@ class TestDispatchTickWithPlan:
         )
 
         daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(cap2_config, native_daemon=daemon, use_plan=True).spawned
+        spawned = dispatch_tick(
+            cap2_config, native_daemon=daemon, use_plan=True
+        ).spawned
         # cap=2: claims B first (per plan), then A (fallback)
         assert spawned == 2
 
@@ -2568,7 +2576,7 @@ class TestDispatchUsageLimitBackoff:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """once=True: usage_limit_detected does NOT set usage_limited_until (no loop)."""
+        """once=True: usage_limit_detected does NOT set usage_limited_until."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL7", client="test-client"))
 

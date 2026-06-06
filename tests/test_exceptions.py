@@ -56,9 +56,7 @@ class TestUsageLimitRe:
     def test_matches_session_limit(self) -> None:
         from cw.exceptions import USAGE_LIMIT_RE
 
-        assert USAGE_LIMIT_RE.search(
-            "You've hit your session limit · resets 3:45pm"
-        )
+        assert USAGE_LIMIT_RE.search("You've hit your session limit · resets 3:45pm")
 
     def test_matches_weekly_limit(self) -> None:
         from cw.exceptions import USAGE_LIMIT_RE
@@ -70,9 +68,7 @@ class TestUsageLimitRe:
     def test_matches_opus_limit(self) -> None:
         from cw.exceptions import USAGE_LIMIT_RE
 
-        assert USAGE_LIMIT_RE.search(
-            "You've hit your Opus limit · resets 3:45pm"
-        )
+        assert USAGE_LIMIT_RE.search("You've hit your Opus limit · resets 3:45pm")
 
     def test_no_match_hit_the_wall(self) -> None:
         from cw.exceptions import USAGE_LIMIT_RE

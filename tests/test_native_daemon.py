@@ -328,7 +328,7 @@ class TestFakeNativeDaemonClient:
         assert client.list_live_session_short_ids() == set()
 
     def test_raise_usage_limit_raises_before_counter(self, tmp_path: Path) -> None:
-        """raise_usage_limit=True raises UsageLimitError without incrementing counter."""
+        """raise_usage_limit=True raises UsageLimitError before incrementing counter."""
         from cw.exceptions import UsageLimitError
 
         client = FakeNativeDaemonClient()
