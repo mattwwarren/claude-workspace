@@ -419,12 +419,10 @@ def dispatch_tick(
             except UsageLimitError:
                 # Narrow catch for fleet-wide usage limits. Raised by
                 # spawn_create_impl → NativeDaemonClient.spawn_bg when the
-                # claude output matches USAGE_LIMIT_RE. The task has not yet
-                # been stamped with a session_id (spawn failed before one was
-                # created), so the broad-catch revert is NOT needed here —
-                # _claim_next_pending already set it to RUNNING; reconcile
-                # will revert it. We break without reverting to avoid a
-                # double-revert race.
+                # claude output matches USAGE_LIMIT_RE. The task was claimed
+                # to RUNNING but no session_id was assigned (spawn failed);
+                # revert it explicitly to PENDING below, then break so no
+                # further slots are tried this tick.
                 usage_limit_detected = True
                 any_usage_limit_detected = True
                 _log.warning(
@@ -486,7 +484,6 @@ def dispatch_tick(
         if emit is not None:
             emit(f"{client.name}: spawned={client_spawned} cap_full={int(cap_full)}")
 
-        # skip_reason: first-match precedence (see operator resolution, issue #459)
         # skip_reason: first-match precedence (see operator resolution, issue #459)
         # 1. freshness_gate — handled by early-continue above
         # 2. usage_limited — usage limit detected this tick for this client
