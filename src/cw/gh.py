@@ -7,6 +7,7 @@ import subprocess as _sp
 from typing import Any
 
 _GH_PR_STATE_MERGED = "MERGED"
+_PR_EXISTS_TIMEOUT = 10
 
 # Lookback window for timed_out-merged detection, shared by doctor.py and reconcile.py.
 # Lives here (co-located with pr_is_merged_for_ticket) to avoid a circular import:
@@ -105,3 +106,40 @@ def pr_is_merged_for_ticket(
             return True, True
 
     return False, True
+
+
+def pr_exists_for_branch(
+    branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT
+) -> tuple[bool | None, bool]:
+    """Return (open_pr_exists, gh_available).
+
+    open_pr_exists:
+      True   — an open PR exists for this branch
+      False  — no open PR
+      None   — transient error (timeout, non-zero exit, JSON parse failure)
+
+    gh_available:
+      False  — gh binary not found (FileNotFoundError)
+      True   — binary present (even if the call failed transiently)
+    """
+    try:
+        result = _sp.run(
+            ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None, False
+    except (OSError, _sp.TimeoutExpired):
+        return None, True
+
+    if result.returncode != 0:
+        return None, True
+
+    try:
+        data: list[dict[str, object]] = json.loads(result.stdout)
+        return len(data) > 0, True
+    except (ValueError, AttributeError):
+        return None, True
