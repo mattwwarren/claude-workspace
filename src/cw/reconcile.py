@@ -1117,7 +1117,7 @@ def reconcile() -> ReconcileReport:
         phantom_session_ids=locked_report.phantom_session_ids,
         phantom_session_names=locked_report.phantom_session_names,
         reverted_ticket_ids=locked_report.reverted_ticket_ids,
-        completed_ticket_ids=completed_ticket_ids,
+        completed_ticket_ids=locked_report.completed_ticket_ids + completed_ticket_ids,
         usage_limited=locked_report.usage_limited,
         salvaged_ticket_ids=salvaged_ticket_ids,
     )
@@ -1604,16 +1604,18 @@ def _salvage_high_path(
         _salvage_low_path(session, ticket_id, branch, str(wt_path))
         return
 
-    # Mark session completed.
+    # Mark session completed — under sessions_lock to prevent concurrent clobber.
     now = datetime.now(UTC)
-    fresh_state = load_state()
-    for s in fresh_state.sessions:
-        if s.id == session.id:
-            s.status = SessionStatus.COMPLETED
-            s.completed_at = now
-            s.completed_reason = CompletionReason.NORMAL
-            break
-    save_state(fresh_state)
+    with sessions_lock():
+        fresh_state = load_state()
+        for s in fresh_state.sessions:
+            if s.id == session.id:
+                if s.status not in (SessionStatus.COMPLETED, SessionStatus.TIMED_OUT):
+                    s.status = SessionStatus.COMPLETED
+                    s.completed_at = now
+                    s.completed_reason = CompletionReason.NORMAL
+                break
+        save_state(fresh_state)
 
     # Update queue task to COMPLETED.
     if ticket_id:
@@ -1626,8 +1628,8 @@ def _salvage_high_path(
                 ):
                     task.status = QueueItemStatus.COMPLETED
                     save_dev_queue(store)
+                    completed_ticket_ids.append(ticket_id)
                     break
-        completed_ticket_ids.append(ticket_id)
 
     # Emit SESSION_COMPLETED event.
     record_event(
@@ -1660,13 +1662,19 @@ def _salvage_low_path(
     """Execute the LOW-confidence flag-only path."""
     breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
 
-    # Update session last_result.
-    fresh_state = load_state()
-    for s in fresh_state.sessions:
-        if s.id == session.id:
-            s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
-            break
-    save_state(fresh_state)
+    # Update session last_result — under sessions_lock; idempotency guard suppresses
+    # duplicate writes and the push notification re-fire on subsequent ticks.
+    with sessions_lock():
+        fresh_state = load_state()
+        for s in fresh_state.sessions:
+            if s.id == session.id:
+                if not (
+                    isinstance(s.last_result, dict)
+                    and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
+                ):
+                    s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+                break
+        save_state(fresh_state)
 
     # Route queue task to BLOCKED_ON_USER.
     if ticket_id:
