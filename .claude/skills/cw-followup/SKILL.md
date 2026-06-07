@@ -111,6 +111,7 @@ BRANCH=$(jq -r '.raw_payload.branch' <<<"$RESULT")
 FORK_POINT=$(jq -r '.raw_payload.fork_point_sha' <<<"$RESULT")
 
 git -C "$WORKTREE" fetch origin
+git -C "$WORKTREE" checkout -B "$BRANCH" "origin/$BRANCH"
 git -C "$WORKTREE" rebase --onto origin/main "$FORK_POINT" "$BRANCH"
 git -C "$WORKTREE" push --force-with-lease origin "$BRANCH"
 gh pr create --base main --head "$BRANCH"  # body derived from the review summary
@@ -137,7 +138,7 @@ cat /tmp/decisions.md >> /tmp/body.md
 gh issue edit "$TICKET" --repo mattwwarren/claude-workspace --body-file /tmp/body.md
 ```
 
-After append, suggest re-dispatch: `cw spawn --headless --skill auto-dev <TICKET>` or queueing via `cw dev-queue add`. Do not auto-dispatch — re-dispatch belongs to the user.
+After append, suggest re-dispatch: `cw dev-queue add <TICKET>` (add `-c <CLIENT>` only for a multi-client setup); if the dispatch loop is idle, also run `cw dev-queue run --once` to kick it. Do not auto-dispatch — re-dispatch belongs to the user.
 
 #### `blocked` (validated, real `AutoDevResult` with `status=blocked`)
 
@@ -148,7 +149,7 @@ jq '.result.blocker' <<<"$RESULT"
 # stage, reason, details
 ```
 
-When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Recommend `cw spawn --headless ...` with a 2-3 minute pause for the auto-mode classifier to settle.
+When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Recommend `cw dev-queue add <TICKET>` (optionally with `-c <CLIENT>`) with a 2-3 minute pause for the auto-mode classifier to settle; if the dispatch loop is idle, run `cw dev-queue run --once` after adding.
 
 When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, recommend re-dispatch after `retry_delay_seconds` (surfacing `recovery_hint`); when it is false or absent, treat as human-escalation and surface verbatim.
 
