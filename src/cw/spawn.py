@@ -158,6 +158,11 @@ def _write_hook_context(
         "purpose": purpose,
         "ticket_id": ticket_id,
         "headless": headless,
+        # Why: the worker's isolation anchor. A headless /auto-dev run reads
+        # this to confirm it operates on its own worktree and never falls back
+        # to a git op against the operator's shared checkout (#402). Resolved
+        # to canonicalize symlinks, matching check_not_main_checkout's compare.
+        "worktree_path": str(worktree.resolve()),
     }
     atomic_write_text(context_path, json.dumps(context, indent=2) + "\n")
 
