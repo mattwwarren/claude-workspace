@@ -111,8 +111,7 @@ BRANCH=$(jq -r '.raw_payload.branch' <<<"$RESULT")
 FORK_POINT=$(jq -r '.raw_payload.fork_point_sha' <<<"$RESULT")
 
 git -C "$WORKTREE" fetch origin
-git -C "$WORKTREE" fetch origin "$BRANCH":"$BRANCH" 2>/dev/null || git -C "$WORKTREE" fetch origin "$BRANCH"
-git -C "$WORKTREE" checkout "$BRANCH"
+git -C "$WORKTREE" checkout -B "$BRANCH" "origin/$BRANCH"
 git -C "$WORKTREE" rebase --onto origin/main "$FORK_POINT" "$BRANCH"
 git -C "$WORKTREE" push --force-with-lease origin "$BRANCH"
 gh pr create --base main --head "$BRANCH"  # body derived from the review summary

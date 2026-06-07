@@ -85,7 +85,7 @@ If outcome is `invalid_sentinel`, surface the validation error verbatim — the 
 ## Out of scope
 
 - Performing post-run actions — that's `/cw-followup`.
-- Re-dispatching — that's `cw spawn --headless` or `cw dev-queue add`.
+- Re-dispatching — that's `cw dev-queue add <TICKET>` (add `-c <CLIENT>` for multi-client setups).
 - Modifying the sentinel schema — surfacing drift is in scope, fixing the parser is a separate ticket (#190, #191 surfaced via dogfood today).
 
 ## Related
