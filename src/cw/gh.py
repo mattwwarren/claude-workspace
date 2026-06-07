@@ -124,7 +124,17 @@ def pr_exists_for_branch(
     """
     try:
         result = _sp.run(
-            ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number"],
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "number",
+            ],
             capture_output=True,
             text=True,
             check=False,

@@ -178,8 +178,11 @@ def _has_commits_beyond_base(wt_path: Path) -> bool:
         return False
     try:
         result = _run_git(
-            "log", "origin/main..HEAD", "--oneline",
-            cwd=wt_path, check=False,
+            "log",
+            "origin/main..HEAD",
+            "--oneline",
+            cwd=wt_path,
+            check=False,
         )
     except OSError:
         return False

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-from cw.gh import pr_is_merged_for_ticket
+from cw.gh import pr_exists_for_branch, pr_is_merged_for_ticket
 
 if TYPE_CHECKING:
     import pytest
@@ -215,3 +216,60 @@ class TestPrIsMergedForTicket:
         merged, gh_available = pr_is_merged_for_ticket("487")
         assert merged is False
         assert gh_available is True
+
+
+class TestPrExistsForBranch:
+    """Tests for pr_exists_for_branch."""
+
+    def test_open_pr_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """gh pr list returns [{"number": 42}] → (True, True)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, json.dumps([{"number": 42}])),
+        )
+        exists, gh_available = pr_exists_for_branch("dev/497")
+        assert exists is True
+        assert gh_available is True
+
+    def test_no_pr_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """gh pr list returns [] → (False, True)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, json.dumps([])),
+        )
+        exists, gh_available = pr_exists_for_branch("dev/497")
+        assert exists is False
+        assert gh_available is True
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TimeoutExpired → (None, True)."""
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise subprocess.TimeoutExpired(["gh"], 10)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        exists, gh_available = pr_exists_for_branch("dev/497")
+        assert exists is None
+        assert gh_available is True
+
+    def test_nonzero_exit_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-zero returncode → (None, True)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(1, ""),
+        )
+        exists, gh_available = pr_exists_for_branch("dev/497")
+        assert exists is None
+        assert gh_available is True
+
+    def test_gh_absent_returns_none_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FileNotFoundError → (None, False)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(FileNotFoundError("gh")),
+        )
+        exists, gh_available = pr_exists_for_branch("dev/497")
+        assert exists is None
+        assert gh_available is False

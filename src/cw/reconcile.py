@@ -732,11 +732,9 @@ def revert_stalled_headless_sessions(
         # (#431). Their last_result is {"paused_status": _SILENTLY_IDLE_REASON}
         # and they are BLOCKED_ON_USER in the queue already; wall-clock revert
         # would re-dispatch already-parked work.
-        if (
-            isinstance(session.last_result, dict)
-            and session.last_result.get("paused_status")
-            in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON)
-        ):
+        if isinstance(session.last_result, dict) and session.last_result.get(
+            "paused_status"
+        ) in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON):
             salvage_skip_ticket_id = ticket_id_for_session(session.name)
             actual_paused_status = session.last_result.get("paused_status")
             record_event(
