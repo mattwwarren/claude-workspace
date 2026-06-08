@@ -706,6 +706,8 @@ class TestHookContextInjection:
         assert context["client"] == "test-client"
         assert context["purpose"] == "impl"
         assert context["ticket_id"] == "137"
+        # #402: the worker's isolation anchor — its own resolved worktree path.
+        assert context["worktree_path"] == str(worktree.resolve())
 
     def test_ticket_id_optional_writes_null(
         self,
