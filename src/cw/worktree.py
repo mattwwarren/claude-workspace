@@ -164,6 +164,33 @@ def _checked_out_branch(wt_path: Path) -> str | None:
     return result.stdout.strip() or None
 
 
+def _has_commits_beyond_base(wt_path: Path) -> bool:
+    """Return True iff the worktree has commits beyond origin/main.
+
+    Runs git log origin/main..HEAD in the worktree cwd. Returns False on
+    any failure — conservative default so uncertainty never triggers salvage.
+
+    # Why: salvage is a side-effecting external write. A false positive
+    # (salvaging a session with no real commits) is worse than a false
+    # negative (missing a salvageable session). Fail safe to False.
+    """
+    if not wt_path.exists():
+        return False
+    try:
+        result = _run_git(
+            "log",
+            "origin/main..HEAD",
+            "--oneline",
+            cwd=wt_path,
+            check=False,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    return bool(result.stdout.strip())
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,

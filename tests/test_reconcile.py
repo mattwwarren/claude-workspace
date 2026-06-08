@@ -34,8 +34,11 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _NEEDS_SALVAGE_REASON,
+    _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_SKIP_REASON,
     _SILENTLY_IDLE_REASON,
+    _STAGE_REVIEW_COMPLETE,
     HEADLESS_TIMEOUT_SECONDS,
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
@@ -50,6 +53,7 @@ from cw.reconcile import (
     revert_completed_silent_tasks,
     revert_stalled_headless_sessions,
     revert_timed_out_tasks,
+    salvage_committed_no_pr_sessions,
 )
 
 
@@ -1868,7 +1872,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with patch("cw.reconcile.fire_push_notification") as mock_notify:
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
         mock_notify.assert_called_once_with(sess.name, sess.client)
@@ -1942,7 +1946,7 @@ def test_flag_silently_idle_watchdog_does_not_stop_working_worker(
         patch("cw.reconcile._transcript_recently_active", return_value=True),
         patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
     ):
-        result = flag_silently_idle_daemon_sessions(
+        result, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
@@ -1994,7 +1998,7 @@ def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
@@ -2031,7 +2035,7 @@ def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
@@ -2064,7 +2068,7 @@ def test_flag_silently_idle_daemon_sessions_skips_session_with_terminal_sentinel
     state = CwState(sessions=[sess])
     save_state(state)
 
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
@@ -2096,7 +2100,7 @@ def test_flag_silently_idle_daemon_sessions_skips_user_origin(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
@@ -2154,7 +2158,7 @@ def test_flag_silently_idle_salvages_shipped_sentinel(
         patch("cw.reconcile._awaiting_subagent", return_value=False),
     ):
         state = load_state()
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
         )
 
@@ -2212,7 +2216,7 @@ def test_flag_silently_idle_salvages_no_op_sentinel(
         patch("cw.reconcile._awaiting_subagent", return_value=False),
     ):
         state = load_state()
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
         )
 
@@ -2272,7 +2276,7 @@ def test_flag_silently_idle_no_salvage_without_sentinel_still_parks(
 
     with patch("cw.reconcile.fire_push_notification"):
         state = load_state()
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
@@ -2427,7 +2431,7 @@ def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     config = OrchestratorConfig(idle_watchdog_by_tier={"large": 1800})
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=config
     )
 
@@ -2479,7 +2483,7 @@ def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     config = OrchestratorConfig()
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=config
     )
 
@@ -2531,7 +2535,7 @@ def test_flag_silently_idle_skips_worker_with_recent_transcript(
     recent_ts = (now - timedelta(seconds=half_window)).timestamp()
     os.utime(str(transcript), (recent_ts, recent_ts))
 
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
@@ -2574,7 +2578,7 @@ def test_flag_silently_idle_fires_when_project_dir_missing(
     save_state(state)
 
     with patch("cw.reconcile.fire_push_notification"):
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
@@ -2620,7 +2624,7 @@ def test_flag_silently_idle_fires_when_session_id_file_missing(
     save_state(state)
 
     with patch("cw.reconcile.fire_push_notification"):
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
@@ -2666,7 +2670,7 @@ def test_flag_silently_idle_fires_when_transcript_predates_session(
     os.utime(str(transcript), (before_start, before_start))
 
     with patch("cw.reconcile.fire_push_notification"):
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
@@ -2713,7 +2717,7 @@ def test_flag_silently_idle_fires_on_stale_transcript(
     os.utime(str(transcript), (stale_ts, stale_ts))
 
     with patch("cw.reconcile.fire_push_notification"):
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
@@ -2759,7 +2763,7 @@ def test_flag_silently_idle_fires_when_no_transcript_in_project_dir(
     save_state(state)
 
     with patch("cw.reconcile.fire_push_notification"):
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
 
@@ -2792,7 +2796,7 @@ def test_flag_silently_idle_skips_with_known_session_id_and_recent_transcript(
     recent_ts = (now - timedelta(seconds=30)).timestamp()
     os.utime(str(transcript), (recent_ts, recent_ts))
 
-    blocked = flag_silently_idle_daemon_sessions(
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
     )
 
@@ -2961,7 +2965,7 @@ def test_flag_silently_idle_skips_worker_awaiting_subagent(
         patch("cw.reconcile._awaiting_subagent", return_value=True),
         patch("cw.reconcile.fire_push_notification") as mock_notify,
     ):
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
         mock_notify.assert_not_called()
@@ -3471,7 +3475,7 @@ def test_flag_silently_idle_parks_when_cap_exhausted(
         patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
         patch("cw.reconcile.fire_push_notification") as mock_notify,
     ):
-        blocked = flag_silently_idle_daemon_sessions(
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
         mock_daemon.stop.assert_not_called()
@@ -3633,8 +3637,9 @@ def test_flag_silently_idle_recover_skips_non_running_task(
         patch("cw.reconcile._transcript_recently_active", return_value=False),
         patch("cw.reconcile._awaiting_subagent", return_value=False),
         patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._checked_out_branch", return_value=None),
     ):
-        result = flag_silently_idle_daemon_sessions(
+        result, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
         )
         # Surface still stopped (recover path, attempts=1 < cap=2)
@@ -4926,3 +4931,860 @@ class TestCompleteTimedOutMergedTasks:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# TestSalvageCommittedNoPrSessions (GitHub issue #497)
+# ---------------------------------------------------------------------------
+
+
+def _mk_live_daemon_session_with_worktree(
+    sid: str,
+    worktree: Path,
+    ticket_id: str,
+) -> Session:
+    """Build a live DAEMON ACTIVE session with a headless context and worktree."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = Session(
+        id=sid,
+        name=f"client-a/auto-dev/{ticket_id}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=worktree,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    context_dir = worktree / ".claude"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "cw-context.json").write_text(
+        '{"headless": true, "session_id": "' + sid + '"}'
+    )
+    return sess
+
+
+def _write_stage_event(
+    session_id: str,
+    stage: str,
+    started_at: datetime,
+    *,
+    offset_seconds: int = 60,
+) -> None:
+    """Write a STAGE_ENTERED event for testing _detect_post_review_clean."""
+    from cw.events import record_event
+    from cw.models import OrchestratorEventType
+
+    record_event(
+        OrchestratorEventType.STAGE_ENTERED,
+        {
+            "session_id": session_id,
+            "stage": stage,
+        },
+    )
+
+
+class TestSalvageCommittedNoPrSessions:
+    """Tests for salvage_committed_no_pr_sessions (GitHub issue #497)."""
+
+    def test_high_path_creates_draft_pr_and_completes_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HIGH path: post-review clean + commits + no PR → draft PR created,
+        task COMPLETED, SESSION_COMPLETED with salvage_kind=git_state_salvage."""
+        worktree = tmp_path / "wt-high"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-HIGH"
+        sess = _mk_live_daemon_session_with_worktree("sess-high", worktree, ticket_id)
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-high",
+                    )
+                ]
+            )
+        )
+
+        # Write a stage event for post-review clean
+        _write_stage_event("sess-high", _STAGE_REVIEW_COMPLETE, sess.started_at)
+
+        push_calls: list[object] = []
+        gh_calls: list[object] = []
+
+        def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            if args[:2] == ["git", "push"]:
+                push_calls.append(args)
+                result.stdout = ""
+                return result
+            if args[:2] == ["gh", "pr"]:
+                gh_calls.append(args)
+                result.stdout = "https://github.com/org/repo/pull/42\n"
+                return result
+            return result
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        # First call (pre-check): no PR; second call (idempotency): no PR
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_subprocess_run)
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client",
+            MagicMock,
+        )
+
+        candidates = [("sess-high", ticket_id, "dev/high-branch", str(worktree), True)]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        assert ticket_id in completed
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-high-path-salvage",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        salvage_events = [
+            e
+            for e in events
+            if e.payload.get("salvage_kind") == _SALVAGE_KIND_GIT_STATE
+        ]
+        assert len(salvage_events) == 1
+        assert salvage_events[0].payload.get("draft") is True
+        assert "github.com" in str(salvage_events[0].payload.get("pr", ""))
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-high")
+        assert s.status == SessionStatus.COMPLETED
+
+    def test_low_path_flags_needs_salvage(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LOW path: commits + no PR + no post-review clean → needs_salvage,
+        task BLOCKED_ON_USER, SESSION_NEEDS_ATTENTION with breadcrumbs."""
+        worktree = tmp_path / "wt-low"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-LOW"
+        sess = _mk_live_daemon_session_with_worktree("sess-low", worktree, ticket_id)
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-low",
+                    )
+                ]
+            )
+        )
+        # No stage event written → post_review_clean=False
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+        )
+
+        candidates = [("sess-low", ticket_id, "dev/low-branch", str(worktree), False)]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        assert completed == []
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+        events = read_events(
+            consumer="test-low-path-salvage",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        attn_events = [
+            e for e in events if e.payload.get("paused_status") == _NEEDS_SALVAGE_REASON
+        ]
+        assert len(attn_events) == 1
+        bc = attn_events[0].payload.get("breadcrumbs", "")
+        assert "dev/low-branch" in str(bc)
+        assert str(worktree) in str(bc)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-low")
+        lr = s.last_result or {}
+        assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
+
+    def test_idempotency_recheck_pr_now_exists_downgrades_to_low(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PR appears on the second pr_exists_for_branch call → downgrade to LOW."""
+        worktree = tmp_path / "wt-idem"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-IDEM"
+        sess = _mk_live_daemon_session_with_worktree("sess-idem", worktree, ticket_id)
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-idem",
+                    )
+                ]
+            )
+        )
+
+        call_count = [0]
+
+        def _pr_exists_side_effect(branch: str, **_kw: object) -> tuple[bool, bool]:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return False, True  # outer check: no PR
+            return True, True  # idempotency re-check: PR now exists
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr("cw.reconcile.pr_exists_for_branch", _pr_exists_side_effect)
+        monkeypatch.setattr(
+            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+        )
+
+        candidates = [("sess-idem", ticket_id, "dev/idem-branch", str(worktree), True)]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        # Downgraded to LOW — no PR created, task blocked
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+        # No git push attempted
+        # (confirmed by no SESSION_COMPLETED with salvage_kind=git_state_salvage)
+        events = read_events(
+            consumer="test-idem-recheck",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert all(
+            e.payload.get("salvage_kind") != _SALVAGE_KIND_GIT_STATE for e in events
+        )
+
+    def test_gh_unavailable_skips_salvage(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """pr_exists_for_branch returns (None, False) → no salvage, no event."""
+        worktree = tmp_path / "wt-gh-absent"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-GHABS"
+        sess = _mk_live_daemon_session_with_worktree("sess-ghabs", worktree, ticket_id)
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-ghabs",
+                    )
+                ]
+            )
+        )
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (None, False)
+        )
+
+        candidates = [
+            ("sess-ghabs", ticket_id, "dev/ghabs-branch", str(worktree), True)
+        ]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING  # unchanged
+
+        events = read_events(
+            consumer="test-gh-absent-salvage",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not events
+
+    def test_no_commits_beyond_base_skips_salvage(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_has_commits_beyond_base returns False → no salvage."""
+        worktree = tmp_path / "wt-no-commits"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-NOCOMMITS"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-nocommits", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-nocommits",
+                    )
+                ]
+            )
+        )
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: False)
+
+        candidates = [
+            ("sess-nocommits", ticket_id, "dev/nc-branch", str(worktree), True)
+        ]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING  # unchanged
+
+    def test_worktree_not_deleted_for_salvage_candidates(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sessions in salvage_git list do NOT have remove_worktree called."""
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        worktree = tmp_path / "wt-nodelete"
+        worktree.mkdir(parents=True)
+        (worktree / ".claude").mkdir()
+        (worktree / ".claude" / "cw-context.json").write_text(
+            '{"headless": true, "session_id": "sess-nodelete"}'
+        )
+
+        ticket_id = "TKT-NODELETE"
+        sess = Session(
+            id="sess-nodelete",
+            name=f"client-a/auto-dev/{ticket_id}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=worktree,
+            surface_ref="live-ref",
+            started_at=started_at,
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-nodelete",
+                        attempts=5,  # at/above cap → would normally park
+                    )
+                ]
+            )
+        )
+
+        remove_worktree_calls: list[object] = []
+
+        def _mock_remove(*args: object, **kwargs: object) -> None:
+            remove_worktree_calls.append(args)
+
+        monkeypatch.setattr("cw.reconcile.remove_worktree", _mock_remove)
+        # Patch _checked_out_branch to return a valid branch (triggers salvage_git)
+        monkeypatch.setattr(
+            "cw.reconcile._checked_out_branch",
+            lambda _p: "dev/nodelete-branch",
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._salvage_terminal_result", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._transcript_recently_active", lambda *_a, **_kw: False
+        )
+        monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda *_a, **_kw: False)
+
+        state = CwState(sessions=[sess])
+        _, salvage_git = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        )
+
+        # Session ended up in salvage_git, not park
+        assert len(salvage_git) == 1
+        assert salvage_git[0][0] == "sess-nodelete"
+
+        # remove_worktree was NOT called
+        assert remove_worktree_calls == []
+
+    def test_double_fire_guard_skips_needs_salvage_sessions(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """revert_stalled_headless_sessions skips sessions with
+        last_result={"paused_status": "needs_salvage"}."""
+        worktree = tmp_path / "wt-dblfire"
+        worktree.mkdir(parents=True)
+        (worktree / ".claude").mkdir()
+        (worktree / ".claude" / "cw-context.json").write_text(
+            '{"headless": true, "session_id": "sess-dblfire"}'
+        )
+
+        ticket_id = "TKT-DBLFIRE"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        sess = Session(
+            id="sess-dblfire",
+            name=f"client-a/auto-dev/{ticket_id}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=worktree,
+            surface_ref="live-ref",
+            started_at=started_at,
+            last_result={"paused_status": _NEEDS_SALVAGE_REASON},
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        session_id="sess-dblfire",
+                    )
+                ]
+            )
+        )
+
+        reverted = revert_stalled_headless_sessions(
+            state, now=now, config=OrchestratorConfig()
+        )
+
+        # Session was skipped — not reverted to PENDING
+        assert ticket_id not in reverted
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_time_window_stale_event_does_not_trigger_high(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stale s3_review_complete event (before session.started_at) → LOW path."""
+        from cw.events import record_event as _record_event
+
+        worktree = tmp_path / "wt-timewindow"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-TIMEWINDOW"
+        # Session started AFTER the event was recorded
+        # (simulate: event is from a prior session)
+        started_at = datetime(2026, 3, 1, 0, 0, 0, tzinfo=UTC)
+        sess = Session(
+            id="sess-timewindow",
+            name=f"client-a/auto-dev/{ticket_id}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=worktree,
+            surface_ref="live-ref",
+            started_at=started_at,
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                    )
+                ]
+            )
+        )
+
+        # Write event with a timestamp AFTER session started
+        # (but _detect_post_review_clean uses since_ts=session.started_at
+        #  and checks session_id match)
+        # The event has a DIFFERENT session_id — should not trigger HIGH
+        _record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {
+                "session_id": "different-session-id",  # wrong session
+                "stage": _STAGE_REVIEW_COMPLETE,
+            },
+        )
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+        )
+
+        # post_review_clean=False (different session_id → _detect_post_review_clean
+        # returns False → LOW path)
+        candidates = [
+            ("sess-timewindow", ticket_id, "dev/tw-branch", str(worktree), False)
+        ]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_session_not_in_state_is_skipped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Candidate session_id not found in state → silently skipped."""
+        save_state(CwState(sessions=[]))  # empty — no sessions
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+
+        candidates = [
+            (
+                "sess-missing",
+                "TKT-MISSING",
+                "dev/missing-branch",
+                str(tmp_path),
+                True,
+            )
+        ]
+        completed = salvage_committed_no_pr_sessions(candidates)
+        assert completed == []
+
+    def test_pr_transient_error_skips_candidate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """pr_exists_for_branch returns (None, True) → skip candidate."""
+        worktree = tmp_path / "wt-transient"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-TRANSIENT"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-transient", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-transient",
+                    )
+                ]
+            )
+        )
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        # (None, True) = transient error, gh available
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (None, True)
+        )
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-transient", ticket_id, "dev/t-branch", str(worktree), True)]
+        )
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING
+
+    def test_pr_already_exists_skips_candidate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """pr_exists_for_branch returns (True, True) → PR exists, skip."""
+        worktree = tmp_path / "wt-prexists"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-PREXISTS"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-prexists", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-prexists",
+                    )
+                ]
+            )
+        )
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (True, True)
+        )
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-prexists", ticket_id, "dev/pe-branch", str(worktree), True)]
+        )
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING
+
+    def test_git_push_failure_downgrades_to_low(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """git push failure in HIGH path → downgrade to LOW (BLOCKED_ON_USER)."""
+        worktree = tmp_path / "wt-pushfail"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-PUSHFAIL"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-pushfail", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-pushfail",
+                    )
+                ]
+            )
+        )
+
+        def _subprocess_push_fails(args: list[str], **_kw: object) -> None:
+            if args[:2] == ["git", "push"]:
+                raise subprocess.CalledProcessError(1, args)
+            msg = f"unexpected call: {args}"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile.subprocess.run", _subprocess_push_fails)
+        monkeypatch.setattr(
+            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+        )
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-pushfail", ticket_id, "dev/pf-branch", str(worktree), True)]
+        )
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_gh_pr_create_failure_downgrades_to_low(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """gh pr create failure in HIGH path → downgrade to LOW (BLOCKED_ON_USER)."""
+        worktree = tmp_path / "wt-createfail"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-CREATEFAIL"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-createfail", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-createfail",
+                    )
+                ]
+            )
+        )
+
+        def _subprocess_create_fails(args: list[str], **_kw: object) -> MagicMock:
+            if args[:2] == ["git", "push"]:
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = ""
+                return result
+            if args[:2] == ["gh", "pr"]:
+                raise subprocess.CalledProcessError(1, args)
+            msg = f"unexpected call: {args}"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile.subprocess.run", _subprocess_create_fails)
+        monkeypatch.setattr(
+            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+        )
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-createfail", ticket_id, "dev/cf-branch", str(worktree), True)]
+        )
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# TestDetectPostReviewClean
+# ---------------------------------------------------------------------------
+
+
+class TestDetectPostReviewClean:
+    """Unit tests for _detect_post_review_clean."""
+
+    def test_returns_false_when_worktree_path_none(self, tmp_config_dir: Path) -> None:
+        """Session with no worktree_path → False."""
+        from cw.reconcile import _detect_post_review_clean
+
+        sess = Session(
+            id="sess-nopath",
+            name="client-a/sess-nopath",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=None,
+            surface_ref="ref",
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        assert _detect_post_review_clean(sess) is False
+
+    def test_returns_true_when_matching_event_present(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Event with correct session_id and stage=s3_review_complete → True."""
+        from cw.events import record_event as _record_event
+        from cw.reconcile import _detect_post_review_clean
+
+        sess = Session(
+            id="sess-match",
+            name="client-a/sess-match",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=tmp_path / "wt",
+            surface_ref="ref",
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        _record_event(
+            OrchestratorEventType.STAGE_ENTERED,
+            {"session_id": "sess-match", "stage": _STAGE_REVIEW_COMPLETE},
+        )
+        assert _detect_post_review_clean(sess) is True
+
+    def test_returns_false_when_no_matching_event(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No matching event → False."""
+        from cw.reconcile import _detect_post_review_clean
+
+        sess = Session(
+            id="sess-nomatch",
+            name="client-a/sess-nomatch",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=tmp_path / "wt",
+            surface_ref="ref",
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        # No event written
+        assert _detect_post_review_clean(sess) is False
+
+    def test_returns_false_on_read_events_exception(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """read_events raises → safe False."""
+        from cw.reconcile import _detect_post_review_clean
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            msg = "disk error"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.reconcile.read_events", _raise)
+
+        sess = Session(
+            id="sess-exc",
+            name="client-a/sess-exc",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=tmp_path / "wt",
+            surface_ref="ref",
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        assert _detect_post_review_clean(sess) is False

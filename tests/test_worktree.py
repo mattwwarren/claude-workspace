@@ -1783,3 +1783,70 @@ class TestWorktreeHasUnsavedWork:
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         assert worktree_has_unsaved_work(client, "auto-dev/level3-clean") is False
+
+
+class TestHasCommitsBeyondBase:
+    """Tests for _has_commits_beyond_base."""
+
+    def test_commits_present_returns_true(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """_run_git returns non-empty stdout → True."""
+        from cw.worktree import _has_commits_beyond_base
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0)
+            result.stdout = "abc1234 chore: add feature\n"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert _has_commits_beyond_base(tmp_path) is True
+
+    def test_no_commits_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """_run_git returns empty stdout → False."""
+        from cw.worktree import _has_commits_beyond_base
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0)
+            result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert _has_commits_beyond_base(tmp_path) is False
+
+    def test_git_failure_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """_run_git returns nonzero exit → False."""
+        from cw.worktree import _has_commits_beyond_base
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=128)
+            result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert _has_commits_beyond_base(tmp_path) is False
+
+    def test_nonexistent_path_returns_false(self) -> None:
+        """Path that doesn't exist → False."""
+        from pathlib import Path as _Path
+
+        from cw.worktree import _has_commits_beyond_base
+
+        assert _has_commits_beyond_base(_Path("/nonexistent/path/xyz")) is False
+
+    def test_oserror_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """OSError from _run_git (e.g. git not on PATH) → False."""
+        from cw.worktree import _has_commits_beyond_base
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> None:
+            msg = "git not found"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert _has_commits_beyond_base(tmp_path) is False

@@ -32,6 +32,7 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw._util import claude_project_dir
@@ -49,9 +50,13 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.events import record_event
+from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, CwError
-from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
+from cw.gh import (
+    TIMED_OUT_MERGED_LOOKBACK_DAYS,
+    pr_exists_for_branch,
+    pr_is_merged_for_ticket,
+)
 from cw.models import (
     CompletionReason,
     OrchestratorConfig,
@@ -63,11 +68,15 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.notify import fire_push_notification
-from cw.worktree import remove_worktree, worktree_has_unsaved_work, worktree_path_for
+from cw.worktree import (
+    _checked_out_branch,
+    _has_commits_beyond_base,
+    remove_worktree,
+    worktree_has_unsaved_work,
+    worktree_path_for,
+)
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import CwState, Session
 
 _log = logging.getLogger(__name__)
@@ -118,6 +127,17 @@ _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # Reason tag written to SESSION_COMPLETED events when a TIMED_OUT session's PR
 # was found MERGED via issue-linkage (timed_out-merged auto-complete, #488).
 _TIMED_OUT_MERGED_REASON = "timed_out_merged"
+# Git-state salvage constants (GitHub issue #497).
+_NEEDS_SALVAGE_REASON = "needs_salvage"
+_SALVAGE_KIND_GIT_STATE = "git_state_salvage"
+_STAGE_REVIEW_COMPLETE = "s3_review_complete"
+_SALVAGE_PR_TITLE_TEMPLATE = "chore: salvage auto-dev branch for #{ticket_id}"
+_SALVAGE_PR_BODY_TEMPLATE = (
+    "Auto-salvaged by reconcile after the session was reaped post-review.\n\n"
+    "The worker reached Stage 3 review (clean) and was reaped before opening a PR. "
+    "Review this branch and merge when satisfied.\n\n"
+    "Ticket: #{ticket_id}"
+)
 
 # Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
 # idle_stall_recovered — watchdog fired but no usage-limit message found.
@@ -187,6 +207,9 @@ class ReconcileReport:
     ``usage_limited`` — True when any reaped session had
     cause=usage_limit_cutoff during this reconcile pass. Signals the
     dispatch loop to enter back-off mode.
+    ``salvaged_ticket_ids`` — ticket IDs auto-completed via the HIGH-path
+    git-state salvage (committed-but-no-PR reaped sessions). Populated by
+    :func:`salvage_committed_no_pr_sessions`. See GitHub issue #497.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
@@ -194,6 +217,7 @@ class ReconcileReport:
     reverted_ticket_ids: list[str] = field(default_factory=list)
     completed_ticket_ids: list[str] = field(default_factory=list)
     usage_limited: bool = False
+    salvaged_ticket_ids: list[str] = field(default_factory=list)
 
 
 def compute_drift(
@@ -425,6 +449,32 @@ def _session_project_dir(session: Session) -> Path | None:
     if worktree is None:
         return None
     return claude_project_dir(worktree)
+
+
+def _detect_post_review_clean(session: Session) -> bool:
+    """Return True iff the event bus has a post-review-clean marker for this session.
+
+    Reads STAGE_ENTERED events from the inbox and checks for an event with
+    payload["stage"] == _STAGE_REVIEW_COMPLETE correlated to session.id,
+    with a time-window guard (event after session.started_at).
+
+    Returns False on any error — conservative default.
+    """
+    if session.worktree_path is None:
+        return False
+    try:
+        events = read_events(
+            event_types=[OrchestratorEventType.STAGE_ENTERED],
+            since_ts=session.started_at,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    for ev in events:
+        session_id = ev.payload.get("session_id")
+        stage = ev.payload.get("stage")
+        if session_id == session.id and stage == _STAGE_REVIEW_COMPLETE:
+            return True
+    return False
 
 
 def _transcript_recently_active(
@@ -682,18 +732,18 @@ def revert_stalled_headless_sessions(
         # (#431). Their last_result is {"paused_status": _SILENTLY_IDLE_REASON}
         # and they are BLOCKED_ON_USER in the queue already; wall-clock revert
         # would re-dispatch already-parked work.
-        if (
-            isinstance(session.last_result, dict)
-            and session.last_result.get("paused_status") == _SILENTLY_IDLE_REASON
-        ):
+        if isinstance(session.last_result, dict) and session.last_result.get(
+            "paused_status"
+        ) in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON):
             salvage_skip_ticket_id = ticket_id_for_session(session.name)
+            actual_paused_status = session.last_result.get("paused_status")
             record_event(
                 OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
                 {
                     "session_id": session.id,
                     "ticket_id": salvage_skip_ticket_id,
                     "reason": _SALVAGE_SKIP_REASON,
-                    "paused_status": _SILENTLY_IDLE_REASON,
+                    "paused_status": actual_paused_status,
                 },
                 correlation_id=salvage_skip_ticket_id,
             )
@@ -846,7 +896,7 @@ def flag_silently_idle_daemon_sessions(
     native_live: set[str],
     config: OrchestratorConfig,
     task_by_ticket: dict[str, TicketTask] | None = None,
-) -> list[str]:
+) -> tuple[list[str], list[_SalvageCandidate]]:
     """Flag DAEMON RUNNING sessions idle past the watchdog budget with no sentinel.
 
     These are sessions the wrapper never got a chance to signal — typically
@@ -858,7 +908,10 @@ def flag_silently_idle_daemon_sessions(
     (the daemon still has them). Sessions with a dead surface ref are handled
     by the phantom sweep → PENDING for retry.
 
-    Returns list of ticket IDs whose queue task was set to BLOCKED_ON_USER.
+    Returns a tuple of:
+    - list of ticket IDs whose queue task was set to BLOCKED_ON_USER
+    - list of git-state salvage candidates for the post-lock pass:
+      (session_id, ticket_id, branch, worktree_path_str, post_review_clean)
     """
     if task_by_ticket is None:
         task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
@@ -866,6 +919,9 @@ def flag_silently_idle_daemon_sessions(
     recover: list[tuple[Session, str | None]] = []
     park: list[tuple[Session, str | None]] = []
     salvaged: list[tuple[Session, str | None, AutoDevResult]] = []
+    # Git-state salvage candidates collected under the lock (no git/gh subprocesses).
+    # Tuple: (session_id, ticket_id, branch, worktree_path_str, post_review_clean)
+    salvage_git: list[_SalvageCandidate] = []
     for session in state.sessions:
         if session.origin is not SessionOrigin.DAEMON:
             continue
@@ -899,14 +955,31 @@ def flag_silently_idle_daemon_sessions(
             _apply_salvaged_completion(session, result, claude_session_id, now=now)
             salvaged.append((session, ticket_id, result))
             continue
+        # Git-state salvage: check under lock using only event bus reads (no
+        # git/gh subprocess). Branch and worktree are needed by the post-lock
+        # salvage_committed_no_pr_sessions pass.
+        if session.worktree_path is not None:
+            branch = _checked_out_branch(session.worktree_path)
+            if branch is not None:
+                post_review_clean = _detect_post_review_clean(session)
+                salvage_git.append(
+                    (
+                        session.id,
+                        ticket_id,
+                        branch,
+                        str(session.worktree_path),
+                        post_review_clean,
+                    )
+                )
+                continue
         cap = resolve_idle_retry_cap(task, config)
         if task is not None and task.attempts < cap:
             recover.append((session, ticket_id))
         else:
             park.append((session, ticket_id))
 
-    if not recover and not park and not salvaged:
-        return []
+    if not recover and not park and not salvaged and not salvage_git:
+        return [], []
 
     # Auto-recover: retire the session and revert its task for re-dispatch.
     for session, _ in recover:
@@ -1005,7 +1078,7 @@ def flag_silently_idle_daemon_sessions(
         if session.surface_ref is not None:
             get_native_daemon_client().stop(session.surface_ref)
 
-    return blocked
+    return blocked, salvage_git
 
 
 def reconcile() -> ReconcileReport:
@@ -1030,30 +1103,39 @@ def reconcile() -> ReconcileReport:
     tradeoff for a file-based, single-user tool.
     """
     with sessions_lock():
-        locked_report = _reconcile_locked()
+        locked_report, salvage_git_candidates = _reconcile_locked()
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
+    salvaged_ticket_ids = salvage_committed_no_pr_sessions(salvage_git_candidates)
 
-    if not completed_ticket_ids:
+    if not completed_ticket_ids and not salvaged_ticket_ids:
         return locked_report
 
     return ReconcileReport(
         phantom_session_ids=locked_report.phantom_session_ids,
         phantom_session_names=locked_report.phantom_session_names,
         reverted_ticket_ids=locked_report.reverted_ticket_ids,
-        completed_ticket_ids=completed_ticket_ids,
+        completed_ticket_ids=locked_report.completed_ticket_ids + completed_ticket_ids,
         usage_limited=locked_report.usage_limited,
+        salvaged_ticket_ids=salvaged_ticket_ids,
     )
 
 
-def _reconcile_locked() -> ReconcileReport:
+_SalvageCandidate = tuple[str, str | None, str, str, bool]
+
+
+def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     """Body of reconcile(), called while sessions_lock is held.
 
     Separated so reconcile() holds exactly one lock acquisition and the
     helpers (revert_stalled_headless_sessions, flag_silently_idle_daemon_sessions)
     can save_state directly without re-acquiring the lock.
+
+    Returns a tuple of (ReconcileReport, salvage_git_candidates) where
+    salvage_git_candidates is the list of git-state salvage candidates for
+    the post-lock pass in salvage_committed_no_pr_sessions.
     """
     state = load_state()
     now = datetime.now(UTC)
@@ -1087,20 +1169,21 @@ def _reconcile_locked() -> ReconcileReport:
         native_live = set()
         daemon_errored = True
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
-        return ReconcileReport(reverted_ticket_ids=stalled_reverted)
+        return ReconcileReport(reverted_ticket_ids=stalled_reverted), []
 
     # Snapshot sessions that are already TIMED_OUT before the watchdog sweep,
     # so we can detect which sessions were newly reaped by usage_limit_cutoff.
     pre_watchdog_timed_out_ids = {
         s.id for s in state.sessions if s.status == SessionStatus.TIMED_OUT
     }
-    silently_idle_ticket_ids = flag_silently_idle_daemon_sessions(
+    idle_result = flag_silently_idle_daemon_sessions(
         state,
         now=now,
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
     )
+    silently_idle_ticket_ids, salvage_git_candidates = idle_result
     # Check whether any session newly transitioned to TIMED_OUT has a usage-limit
     # transcript. The _detect_usage_limit I/O cost is minimal (OS-cached files).
     watchdog_usage_limited = any(
@@ -1128,7 +1211,7 @@ def _reconcile_locked() -> ReconcileReport:
         return ReconcileReport(
             reverted_ticket_ids=all_reverted,
             usage_limited=watchdog_usage_limited,
-        )
+        ), salvage_git_candidates
 
     phantom_set = set(drift.phantom_session_ids)
     ticket_ids_to_revert: list[str] = []
@@ -1258,11 +1341,14 @@ def _reconcile_locked() -> ReconcileReport:
         )
     )
 
-    return ReconcileReport(
-        phantom_session_ids=drift.phantom_session_ids,
-        phantom_session_names=phantom_names,
-        reverted_ticket_ids=all_reverted,
-        usage_limited=watchdog_usage_limited,
+    return (
+        ReconcileReport(
+            phantom_session_ids=drift.phantom_session_ids,
+            phantom_session_names=phantom_names,
+            reverted_ticket_ids=all_reverted,
+            usage_limited=watchdog_usage_limited,
+        ),
+        salvage_git_candidates,
     )
 
 
@@ -1396,6 +1482,228 @@ def complete_timed_out_merged_tasks() -> list[str]:
             )
 
     return completed_ids
+
+
+def salvage_committed_no_pr_sessions(
+    candidates: list[_SalvageCandidate],
+) -> list[str]:
+    """Post-pass: git-state salvage for committed-but-no-PR reaped sessions.
+
+    Called from reconcile() AFTER sessions_lock releases — git and gh subprocesses
+    run here, never under the session lock. See GitHub issue #497.
+
+    candidates: list of (session_id, ticket_id, branch, worktree_path_str,
+    post_review_clean) collected by flag_silently_idle_daemon_sessions under lock.
+
+    Returns list of ticket_ids that were auto-completed (HIGH path).
+    """
+    if not candidates:
+        return []
+
+    completed_ticket_ids: list[str] = []
+    state = load_state()
+
+    for (
+        session_id,
+        ticket_id,
+        branch,
+        worktree_path_str,
+        post_review_clean,
+    ) in candidates:
+        session = next((s for s in state.sessions if s.id == session_id), None)
+        if session is None:
+            continue
+
+        wt_path = Path(worktree_path_str)
+
+        # Confirm git-state trigger: commits beyond base AND no open PR.
+        has_commits = _has_commits_beyond_base(wt_path)
+        if not has_commits:
+            # No commits beyond base — not a salvage candidate; fall through to
+            # existing recover/park on the next reconcile tick.
+            continue
+
+        pr_result, gh_available = pr_exists_for_branch(branch)
+        if not gh_available:
+            # gh absent — cannot confirm PR absence; treat as non-candidate.
+            continue
+        if pr_result is None:
+            # Transient error — cannot confirm; treat as non-candidate.
+            continue
+        if pr_result is True:
+            # PR already exists — not our case.
+            continue
+
+        # Confirmed: commits beyond base AND no open PR.
+        if post_review_clean:
+            # HIGH path: automated draft PR.
+            _salvage_high_path(
+                session, ticket_id, branch, wt_path, completed_ticket_ids
+            )
+        else:
+            # LOW path: flag for human salvage.
+            _salvage_low_path(session, ticket_id, branch, worktree_path_str)
+
+    return completed_ticket_ids
+
+
+def _salvage_high_path(
+    session: Session,
+    ticket_id: str | None,
+    branch: str,
+    wt_path: Path,
+    completed_ticket_ids: list[str],
+) -> None:
+    """Execute the HIGH-confidence automated draft PR path."""
+    # Idempotency re-check immediately before creating the PR.
+    pr_result, gh_available = pr_exists_for_branch(branch)
+    if not gh_available or pr_result is True or pr_result is None:
+        # Cannot confirm or PR now exists — downgrade to LOW.
+        _salvage_low_path(session, ticket_id, branch, str(wt_path))
+        return
+
+    # Push branch to origin (no-op if already pushed).
+    try:
+        subprocess.run(
+            ["git", "push", "origin", f"HEAD:refs/heads/{branch}"],
+            cwd=wt_path,
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        _salvage_low_path(session, ticket_id, branch, str(wt_path))
+        return
+
+    # Create draft PR.
+    title = _SALVAGE_PR_TITLE_TEMPLATE.format(ticket_id=ticket_id or "unknown")
+    body = _SALVAGE_PR_BODY_TEMPLATE.format(ticket_id=ticket_id or "unknown")
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--draft",
+                "--base",
+                "main",
+                "--head",
+                branch,
+                "--title",
+                title,
+                "--body",
+                body,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+        pr_url = result.stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        _salvage_low_path(session, ticket_id, branch, str(wt_path))
+        return
+
+    # Mark session completed — under sessions_lock to prevent concurrent clobber.
+    now = datetime.now(UTC)
+    with sessions_lock():
+        fresh_state = load_state()
+        for s in fresh_state.sessions:
+            if s.id == session.id:
+                if s.status not in (SessionStatus.COMPLETED, SessionStatus.TIMED_OUT):
+                    s.status = SessionStatus.COMPLETED
+                    s.completed_at = now
+                    s.completed_reason = CompletionReason.NORMAL
+                break
+        save_state(fresh_state)
+
+    # Update queue task to COMPLETED.
+    if ticket_id:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id == ticket_id
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.COMPLETED
+                    save_dev_queue(store)
+                    completed_ticket_ids.append(ticket_id)
+                    break
+
+    # Emit SESSION_COMPLETED event.
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "crashed": False,
+            "salvaged": True,
+            "salvage_kind": _SALVAGE_KIND_GIT_STATE,
+            "draft": True,
+            "pr": pr_url,
+        },
+    )
+
+    # Stop the surface if still running.
+    if session.surface_ref is not None:
+        with contextlib.suppress(Exception):
+            get_native_daemon_client().stop(session.surface_ref)
+
+
+def _salvage_low_path(
+    session: Session,
+    ticket_id: str | None,
+    branch: str,
+    worktree_path_str: str,
+) -> None:
+    """Execute the LOW-confidence flag-only path."""
+    breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
+
+    # Update session last_result — under sessions_lock; idempotency guard suppresses
+    # duplicate writes and the push notification re-fire on subsequent ticks.
+    with sessions_lock():
+        fresh_state = load_state()
+        for s in fresh_state.sessions:
+            if s.id == session.id:
+                if not (
+                    isinstance(s.last_result, dict)
+                    and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
+                ):
+                    s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+                break
+        save_state(fresh_state)
+
+    # Route queue task to BLOCKED_ON_USER.
+    if ticket_id:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id == ticket_id
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    save_dev_queue(store)
+                    break
+
+    # Emit SESSION_NEEDS_ATTENTION with breadcrumbs for human salvage.
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "paused_status": _NEEDS_SALVAGE_REASON,
+            "breadcrumbs": breadcrumbs,
+            "crashed": False,
+        },
+    )
+    fire_push_notification(session.name, session.client)
 
 
 def revert_timed_out_tasks() -> list[str]:
