@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-import os
 import subprocess as _sp
 import tomllib
 import urllib.parse
@@ -25,21 +24,18 @@ import yaml
 from pydantic import ValidationError
 
 from cw import __version__
-from cw.cmux import get_backend_adapter
 from cw.config import (
     clients_file,
     load_clients,
     load_state,
     orchestrator_config_file,
-    save_state,
     state_file,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.events import read_events, record_event
+from cw.events import read_events
 from cw.exceptions import CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
-    CompletionReason,
     DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
@@ -51,7 +47,6 @@ from cw.reconcile import SPAWN_GRACE_SECONDS, reconcile, ticket_id_for_session
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
-    from cw.cmux import MultiplexerAdapter
     from cw.models import CwState, DevQueueStore, Session
 
 
@@ -114,13 +109,6 @@ _CW_PACKAGE_NAME = "claude-workspace"
 
 # Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
 _LOOP_STALL_CONSECUTIVE_TICKS = 3
-
-# Seconds of worktree inactivity (no non-.git file modified) before a pane
-# showing an idle shell is considered wedged.
-WEDGE_IDLE_MTIME_SECONDS = 300
-
-# Shell command names that indicate a pane is idle (back at prompt).
-_SHELL_COMMANDS: frozenset[str] = frozenset({"bash", "zsh", "fish", "sh", "dash"})
 
 
 def _check_config_file() -> CheckResult:
@@ -354,65 +342,6 @@ def _check_worktree_paths_sessions(
 # ---------------------------------------------------------------------------
 
 
-def _check_wedge_pane_idle(
-    state: CwState,
-    _queue: DevQueueStore,
-    adapter: MultiplexerAdapter,
-) -> list[WedgeFinding]:
-    """Detect panes showing idle shell with no recent worktree file activity.
-
-    Fail-open: if inspect_pane returns {}, skip — missing info must not
-    trigger false-positive findings.
-    """
-    findings: list[WedgeFinding] = []
-    live_statuses = {SessionStatus.ACTIVE, SessionStatus.IDLE}
-    for session in state.sessions:
-        if session.status not in live_statuses:
-            continue
-        if session.surface_ref is None:
-            continue
-        pane_info = adapter.inspect_pane(session.surface_ref)
-        if not pane_info:
-            continue
-        if pane_info.get("cmd") not in _SHELL_COMMANDS:
-            continue
-        worktree = session.worktree_path
-        if worktree is None or not worktree.is_dir():
-            continue
-        cutoff = datetime.now(UTC).timestamp() - WEDGE_IDLE_MTIME_SECONDS
-        recent = False
-        for dirpath, dirnames, filenames in os.walk(worktree):
-            # Exclude .git from mtime scan — git operations update files there
-            # even when no real work is happening.
-            dirnames[:] = [d for d in dirnames if d != ".git"]
-            for fname in filenames:
-                fpath = Path(dirpath) / fname
-                try:
-                    if fpath.stat().st_mtime > cutoff:
-                        recent = True
-                        break
-                except OSError:
-                    continue
-            if recent:
-                break
-        if recent:
-            continue
-        findings.append(
-            WedgeFinding(
-                wedge_class="wedge/pane-idle-but-active",
-                session_id=session.id,
-                ticket_id=ticket_id_for_session(session.name),
-                recipe=(
-                    "Session pane shows idle shell prompt with no recent worktree"
-                    " activity. Run: cw doctor --reap to synthesize completed event"
-                    " and revert queue task."
-                ),
-                state_file=str(state_file()),
-            )
-        )
-    return findings
-
-
 def _check_wedge_task_running_no_session(
     state: CwState,
     queue: DevQueueStore,
@@ -577,77 +506,38 @@ def _check_wedge_repo_ahead(
     return findings
 
 
-def _reap_wedge_findings(
-    findings: list[WedgeFinding],
-    state: CwState,
-    adapter: MultiplexerAdapter,
-) -> None:
+def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     """Apply mutations for actionable wedge classes.
 
-    Class-1 (pane-idle-but-active): mark session COMPLETED, close pane,
-    revert queue task to PENDING.
     Class-2 (task-running-no-session): revert queue task to PENDING.
     Class-3 (task-running-completed-session): revert queue task to PENDING.
     Class-4 (repo-ahead-of-queue): advisory only — no mutations.
+
+    The former class-1 (pane-idle-but-active) wedge was removed with the
+    multiplexer substrate — under the native daemon there are no panes to
+    inspect for an idle shell (see #504).
     """
-    session_by_id = {s.id: s for s in state.sessions}
-    now = datetime.now(UTC)
+    revert_ticket_ids: set[str] = {
+        f.ticket_id
+        for f in findings
+        if f.ticket_id and f.wedge_class != "wedge/repo-ahead-of-queue"
+    }
+    if not revert_ticket_ids:
+        return
 
-    # Collect IDs for class-1 sessions and ticket IDs for queue revert (classes 1-3).
-    class1_session_ids: set[str] = set()
-    for f in findings:
-        if f.wedge_class != "wedge/pane-idle-but-active" or f.session_id is None:
-            continue
-        if f.session_id in session_by_id:
-            class1_session_ids.add(f.session_id)
-
-    revert_ticket_ids: set[str] = set()
-    for f in findings:
-        if f.wedge_class == "wedge/repo-ahead-of-queue":
-            continue
-        if f.ticket_id:
-            revert_ticket_ids.add(f.ticket_id)
-
-    # Hold queue lock across BOTH state writes — mutations happen inside the
-    # lock so no reader sees sessions.json=COMPLETED while dev_queue.json=RUNNING.
-    if class1_session_ids or revert_ticket_ids:
-        with dev_queue_lock():
-            if class1_session_ids:
-                for sid in class1_session_ids:
-                    session = session_by_id[sid]
-                    session.status = SessionStatus.COMPLETED
-                    session.completed_reason = CompletionReason.NORMAL
-                    session.completed_at = now
-                save_state(state)
-            if revert_ticket_ids:
-                queue = load_dev_queue()
-                changed = False
-                for task in queue.tasks:
-                    if (
-                        task.ticket_id in revert_ticket_ids
-                        and task.status == QueueItemStatus.RUNNING
-                    ):
-                        task.status = QueueItemStatus.PENDING
-                        task.session_id = None
-                        changed = True
-                if changed:
-                    save_dev_queue(queue)
-
-    # Side effects AFTER both writes succeed.
-    for sid in class1_session_ids:
-        session = session_by_id[sid]
-        record_event(
-            OrchestratorEventType.SESSION_COMPLETED,
-            {
-                "session_id": session.id,
-                "session_name": session.name,
-                "client": session.client,
-                "crashed": False,  # FIX 4: not a crash
-                "ticket_id": ticket_id_for_session(session.name),
-            },
-        )
-        if session.surface_ref is not None:
-            adapter.close(session.surface_ref)
+    with dev_queue_lock():
+        queue = load_dev_queue()
+        changed = False
+        for task in queue.tasks:
+            if (
+                task.ticket_id in revert_ticket_ids
+                and task.status == QueueItemStatus.RUNNING
+            ):
+                task.status = QueueItemStatus.PENDING
+                task.session_id = None
+                changed = True
+        if changed:
+            save_dev_queue(queue)
 
 
 def _check_loop_health() -> list[CheckResult]:
@@ -815,10 +705,8 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
 
     if link_state is not None:
         report.checks.extend(_check_timed_out_merged(link_state))
-        # Wedge checks: load queue once, run all four checks.
+        # Wedge checks: load queue once, run all three checks.
         queue = load_dev_queue()
-        adapter = get_backend_adapter()
-        report.wedge_findings.extend(_check_wedge_pane_idle(link_state, queue, adapter))
         report.wedge_findings.extend(
             _check_wedge_task_running_no_session(link_state, queue)
         )
@@ -827,7 +715,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         )
         report.wedge_findings.extend(_check_wedge_repo_ahead(link_state, queue))
         if reap and report.wedge_findings:
-            _reap_wedge_findings(report.wedge_findings, link_state, adapter)
+            _reap_wedge_findings(report.wedge_findings)
 
     if reap:
         report.checks.append(_check_reconcile())

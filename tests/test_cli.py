@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     import click
     import pytest
 
-    from cw.cmux import FakeCmuxAdapter
     from cw.models import QueueItemStatus
 
 
@@ -3020,6 +3019,31 @@ class TestParseSentinelFromTranscript:
         assert _parse_sentinel_from_transcript(str(worktree), "uuid-userblock") is None
 
 
+class TestIterAssistantTextBlocks:
+    """Tests for _iter_assistant_text_blocks (shared transcript walker)."""
+
+    def test_missing_file_yields_nothing(self, tmp_path: Path) -> None:
+        from cw.cli import _iter_assistant_text_blocks
+
+        assert list(_iter_assistant_text_blocks(tmp_path / "nope.jsonl")) == []
+
+    def test_oserror_on_open_yields_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An I/O error mid-read is swallowed — the walker yields nothing."""
+        from cw.cli import _iter_assistant_text_blocks
+
+        transcript = tmp_path / "t.jsonl"
+        transcript.write_text('{"type": "assistant"}\n')
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            msg = "boom"
+            raise OSError(msg)
+
+        monkeypatch.setattr("pathlib.Path.open", _boom)
+        assert list(_iter_assistant_text_blocks(transcript)) == []
+
+
 class TestCompletion:
     def test_completion_command_bash(self) -> None:
         runner = CliRunner()
@@ -4448,19 +4472,21 @@ class TestSpawnCloseTaskCancellation:
 
 
 class TestPeek:
-    """Tests for `cw peek` — read-only session output snapshot."""
+    """Tests for `cw peek` — read-only session output snapshot from transcript."""
 
     def _make_session(
         self,
         tmp_path: Path,
         *,
         status: SessionStatus = SessionStatus.ACTIVE,
-        surface_ref: str | None = "ws:0.1",
+        claude_session_id: str | None = "abc12345",
         sess_id: str = "peeksess",
         name: str = "test-client/impl",
     ) -> Session:
         workspace = tmp_path / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True, exist_ok=True)
         session = Session(
             id=sess_id,
             name=name,
@@ -4468,41 +4494,67 @@ class TestPeek:
             purpose=SessionPurpose.IMPL,
             status=status,
             workspace_path=workspace,
-            surface_ref=surface_ref,
+            worktree_path=worktree,
+            claude_session_id=claude_session_id,
         )
         state = load_state()
         state.sessions.append(session)
         save_state(state)
         return session
 
-    def test_peek_happy_path(
+    def _write_transcript(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
+        session: Session,
+        text: str,
     ) -> None:
+        """Place a Claude-shaped transcript holding one assistant text block.
 
-        session = self._make_session(tmp_path, surface_ref="ws:0.1")
-        mock_cmux_adapter._live.add("ws:0.1")
-        mock_cmux_adapter.set_surface_content("ws:0.1", "hello world\n")
+        Patches ``Path.home`` so ``claude_project_dir`` resolves under the
+        tmp tree rather than the real ``~/.claude/projects``.
+        """
+        fake_home = tmp_path / "fake-home"
+        cwd = session.worktree_path or session.workspace_path
+        encoded = str(cwd).replace("/", "-").replace(".", "-")
+        transcript_dir = fake_home / ".claude" / "projects" / encoded
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        }
+        (transcript_dir / f"{session.claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+    @staticmethod
+    def _patch_empty_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Point ``Path.home`` at an empty tmp home (no transcript present)."""
+        monkeypatch.setattr("cw.cli.Path.home", lambda: tmp_path / "empty-home")
+
+    def test_peek_happy_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(tmp_path)
+        self._write_transcript(monkeypatch, tmp_path, session, "hello world")
 
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            result = runner.invoke(main, ["peek", session.name])
+        result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 0, result.output
         assert "hello world" in result.output
 
     def test_peek_by_session_id(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        session = self._make_session(tmp_path, surface_ref="ws:0.1", sess_id="abc12345")
-        mock_cmux_adapter._live.add("ws:0.1")
-        mock_cmux_adapter.set_surface_content("ws:0.1", "output via id\n")
+        session = self._make_session(tmp_path, sess_id="id99999")
+        self._write_transcript(monkeypatch, tmp_path, session, "output via id")
 
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            result = runner.invoke(main, ["peek", session.id])
+        result = runner.invoke(main, ["peek", session.id])
         assert result.exit_code == 0, result.output
         assert "output via id" in result.output
 
@@ -4512,106 +4564,87 @@ class TestPeek:
         assert result.exit_code == 1
         assert "not found" in result.output
 
-    def test_peek_completed_session_exits_1(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
-    ) -> None:
-        session = self._make_session(
-            tmp_path, status=SessionStatus.COMPLETED, surface_ref="ws:0.1"
-        )
+    def test_peek_completed_session_exits_1(self, tmp_path: Path) -> None:
+        session = self._make_session(tmp_path, status=SessionStatus.COMPLETED)
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            result = runner.invoke(main, ["peek", session.name])
+        result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 1
         assert "completed" in result.output
 
-    def test_peek_surface_gone_exits_1_with_suggestion(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
-    ) -> None:
-        # Session is ACTIVE but surface_ref not in list_surfaces()
-        session = self._make_session(
-            tmp_path, status=SessionStatus.ACTIVE, surface_ref="ws:0.1"
-        )
-        # Don't add surface ref to _live, so list_surfaces() won't find it.
+    def test_peek_no_claude_session_id_exits_1(self, tmp_path: Path) -> None:
+        session = self._make_session(tmp_path, claude_session_id=None)
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            result = runner.invoke(main, ["peek", session.name])
+        result = runner.invoke(main, ["peek", session.name])
+        assert result.exit_code == 1
+        assert "Claude session id" in result.output
+
+    def test_peek_missing_transcript_exits_1_with_suggestion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Session is ACTIVE with a claude_session_id, but no transcript exists.
+        session = self._make_session(tmp_path)
+        self._patch_empty_home(monkeypatch, tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 1
         assert "post-mortem" in result.output
 
-    def test_peek_default_lines(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
+    def test_peek_default_lines_tails_50(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        session = self._make_session(tmp_path, surface_ref="ws:0.1")
-        mock_cmux_adapter._live.add("ws:0.1")
-        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
+        session = self._make_session(tmp_path)
+        body = "\n".join(f"line{i}" for i in range(60))
+        self._write_transcript(monkeypatch, tmp_path, session, body)
 
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            runner.invoke(main, ["peek", session.name])
-        assert len(mock_cmux_adapter.capture_calls) == 1
-        assert mock_cmux_adapter.capture_calls[0]["lines"] == 50
+        result = runner.invoke(main, ["peek", session.name])
+        assert result.exit_code == 0, result.output
+        emitted = result.output.strip().splitlines()
+        assert len(emitted) == 50
+        assert emitted[-1] == "line59"
+        assert emitted[0] == "line10"
 
     def test_peek_custom_lines(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        session = self._make_session(tmp_path, surface_ref="ws:0.1")
-        mock_cmux_adapter._live.add("ws:0.1")
-        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
+        session = self._make_session(tmp_path)
+        body = "\n".join(f"line{i}" for i in range(60))
+        self._write_transcript(monkeypatch, tmp_path, session, body)
 
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            runner.invoke(main, ["peek", "--lines", "10", session.name])
-        assert mock_cmux_adapter.capture_calls[0]["lines"] == 10
+        result = runner.invoke(main, ["peek", "--lines", "10", session.name])
+        assert result.exit_code == 0, result.output
+        emitted = result.output.strip().splitlines()
+        assert len(emitted) == 10
+        assert emitted[-1] == "line59"
 
-    def test_peek_default_scrollback(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
+    def test_peek_scrollback_bounds_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        session = self._make_session(tmp_path, surface_ref="ws:0.1")
-        mock_cmux_adapter._live.add("ws:0.1")
-        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
+        # scrollback caps how many trailing transcript lines are considered:
+        # with 60 lines but --scrollback 5, only the last 5 are eligible, so
+        # --lines 50 yields 5 and warns about the shortfall.
+        session = self._make_session(tmp_path)
+        body = "\n".join(f"line{i}" for i in range(60))
+        self._write_transcript(monkeypatch, tmp_path, session, body)
 
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            runner.invoke(main, ["peek", session.name])
-        assert mock_cmux_adapter.capture_calls[0]["scrollback"] == 200
-
-    def test_peek_custom_scrollback(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
-    ) -> None:
-        session = self._make_session(tmp_path, surface_ref="ws:0.1")
-        mock_cmux_adapter._live.add("ws:0.1")
-        mock_cmux_adapter.set_surface_content("ws:0.1", "some content\n")
-
-        runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            runner.invoke(main, ["peek", "--scrollback", "500", session.name])
-        assert mock_cmux_adapter.capture_calls[0]["scrollback"] == 500
+        result = runner.invoke(
+            main, ["peek", "--scrollback", "5", "--lines", "50", session.name]
+        )
+        assert result.exit_code == 0, result.output
+        emitted = [ln for ln in result.output.splitlines() if ln.startswith("line")]
+        assert emitted == ["line55", "line56", "line57", "line58", "line59"]
+        assert "fewer than" in result.stderr
 
     def test_peek_warns_when_fewer_lines_available(
-        self,
-        tmp_path: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        session = self._make_session(tmp_path, surface_ref="ws:0.1")
-        mock_cmux_adapter._live.add("ws:0.1")
-        # Only 3 lines of content but we request 50
-        mock_cmux_adapter.set_surface_content("ws:0.1", "line1\nline2\nline3")
+        session = self._make_session(tmp_path)
+        self._write_transcript(monkeypatch, tmp_path, session, "line1\nline2\nline3")
 
         runner = CliRunner()
-        with patch("cw.cli.get_cmux_adapter", return_value=mock_cmux_adapter):
-            result = runner.invoke(main, ["peek", "--lines", "50", session.name])
+        result = runner.invoke(main, ["peek", "--lines", "50", session.name])
         assert result.exit_code == 0
         assert "fewer than" in result.stderr
 
