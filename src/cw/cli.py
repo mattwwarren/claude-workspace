@@ -1456,12 +1456,24 @@ def dev_queue() -> None:
     default=None,
     help="Override headless timeout (seconds) for this ticket.",
 )
+@click.option(
+    "--scope",
+    "-s",
+    "scope_hint",
+    type=click.Choice(["small", "large"]),
+    default=None,
+    help=(
+        "Scope tier for headless budget resolution. Used as a fallback when the "
+        "session has no prior result (pre-Stage-1). Accepts 'small' or 'large'."
+    ),
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
     client: str | None,
     priority: int,
     headless_timeout_override: int | None,
+    scope_hint: str | None,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
     config = load_orchestrator_config()
@@ -1472,6 +1484,7 @@ def dev_queue_add(
             client=resolved,
             priority=priority,
             headless_timeout_override=headless_timeout_override,
+            scope_hint=scope_hint,
         )
         inserted = add_ticket(task)
         if not inserted:
