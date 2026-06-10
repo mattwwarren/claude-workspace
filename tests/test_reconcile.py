@@ -34,6 +34,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _DIRTY_WORKTREE_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_SKIP_REASON,
@@ -4658,11 +4659,17 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DAEMON phantom revert emits session.phantom_reverted with worktree_dirty=True."""
+    """DAEMON phantom revert emits session.phantom_reverted with worktree_dirty=True.
+
+    Uses worktree_path (not session.branch) for dirty detection — DAEMON sessions
+    always have branch=None in production (GitHub issue #421).
+    """
+    wt_path = tmp_path / "wt-pd"
     sess = _mk_session("phantom-dirty", "dead-ref")
     sess.origin = SessionOrigin.DAEMON
     sess.name = "client-a/auto-dev/TICK-PD"
-    sess.branch = "auto-dev/TICK-PD"
+    sess.branch = None  # DAEMON sessions always have branch=None in production
+    sess.worktree_path = wt_path
     save_state(CwState(sessions=[sess]))
 
     task = TicketTask(
@@ -4675,6 +4682,10 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
     monkeypatch.setattr(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch",
+        lambda _p: "auto-dev/TICK-PD",
     )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
@@ -4694,7 +4705,7 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
     assert p["ticket_id"] == "TICK-PD"
     assert p["client"] == "client-a"
     assert p["worktree_dirty"] is True
-    assert "worktree_path" in p
+    assert p["worktree_path"] == str(wt_path)
     assert events[0].correlation_id == "TICK-PD"
 
 
@@ -4703,11 +4714,17 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DAEMON phantom revert emits session.phantom_reverted with dirty=False."""
+    """DAEMON phantom revert emits session.phantom_reverted with dirty=False.
+
+    Uses worktree_path (not session.branch) for dirty detection — DAEMON sessions
+    always have branch=None in production (GitHub issue #421).
+    """
+    wt_path = tmp_path / "wt-pc"
     sess = _mk_session("phantom-clean", "dead-ref-2")
     sess.origin = SessionOrigin.DAEMON
     sess.name = "client-a/auto-dev/TICK-PC"
-    sess.branch = "auto-dev/TICK-PC"
+    sess.branch = None  # DAEMON sessions always have branch=None in production
+    sess.worktree_path = wt_path
     save_state(CwState(sessions=[sess]))
 
     task = TicketTask(
@@ -4720,6 +4737,10 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     monkeypatch.setattr(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch",
+        lambda _p: "auto-dev/TICK-PC",
     )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
@@ -4739,7 +4760,7 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     assert p["ticket_id"] == "TICK-PC"
     assert p["client"] == "client-a"
     assert p["worktree_dirty"] is False
-    assert "worktree_path" in p
+    assert p["worktree_path"] == str(wt_path)
     assert events[0].correlation_id == "TICK-PC"
 
 
@@ -4765,6 +4786,424 @@ def test_phantom_reverted_not_emitted_for_user_origin(
         event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
     )
     assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# GitHub issue #421 — phantom-sweep dirty-worktree routing tests
+# ---------------------------------------------------------------------------
+
+
+def test_phantom_dirty_worktree_routes_to_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DAEMON session with branch=None but worktree_path set, dirty worktree
+    routes task to BLOCKED_ON_USER, not PENDING.
+
+    This test MUST use worktree_path for dirtiness, NOT session.branch.
+    Asserts session.branch is None so the test fails if impl reads session.branch.
+    """
+    wt_path = tmp_path / "wt-421-dirty"
+    sess = _mk_session("phantom-421-dirty", "dead-ref-421")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TICK-421D"
+    sess.branch = None  # Always None on DAEMON sessions — impl must NOT use this
+    sess.worktree_path = wt_path
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TICK-421D",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-421-dirty",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch",
+        lambda _p: "auto-dev/TICK-421D",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+
+    report = reconcile()
+
+    # Dirty phantom → BLOCKED_ON_USER, NOT PENDING
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "TICK-421D")
+    assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert updated_task.session_id is None  # session stamp cleared
+
+    # BLOCKED_ON_USER ticket must NOT appear in reverted_ticket_ids
+    assert "TICK-421D" not in report.reverted_ticket_ids
+
+    # Assert branch was never consulted (it's None, impl must use worktree_path)
+    state = load_state()
+    matching = [s for s in state.sessions if s.id == "phantom-421-dirty"]
+    assert matching, "session should still be in state after reap"
+    # (session is COMPLETED/CRASHED after phantom reap, branch is still None)
+    assert matching[0].branch is None
+
+
+def test_phantom_clean_worktree_routes_to_pending(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DAEMON session with branch=None and clean worktree routes task to PENDING."""
+    wt_path = tmp_path / "wt-421-clean"
+    sess = _mk_session("phantom-421-clean", "dead-ref-421c")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TICK-421C"
+    sess.branch = None
+    sess.worktree_path = wt_path
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TICK-421C",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-421-clean",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch",
+        lambda _p: "auto-dev/TICK-421C",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+
+    report = reconcile()
+
+    # Clean phantom → PENDING for retry
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "TICK-421C")
+    assert updated_task.status == QueueItemStatus.PENDING
+    assert updated_task.session_id is None
+
+    # Clean-reverted ticket appears in reverted_ticket_ids
+    assert "TICK-421C" in report.reverted_ticket_ids
+
+
+def test_dirty_phantom_task_not_re_claimable(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After dirty phantom routes to BLOCKED_ON_USER, task stays invisible to dispatch.
+
+    BLOCKED_ON_USER tasks are not claimed by _claim_next_pending (it only
+    claims PENDING tasks), so the dirty worktree is not re-dispatched.
+    """
+    wt_path = tmp_path / "wt-421-nore"
+    sess = _mk_session("phantom-421-nore", "dead-ref-421n")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/TICK-421N"
+    sess.branch = None
+    sess.worktree_path = wt_path
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="TICK-421N",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-421-nore",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch",
+        lambda _p: "auto-dev/TICK-421N",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+
+    reconcile()
+
+    # Task is BLOCKED_ON_USER — a subsequent reconcile should not touch it
+    reconcile()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "TICK-421N")
+    assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_phantom_reverted_event_carries_queue_status(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SESSION_PHANTOM_REVERTED event payload includes queue_status field.
+
+    dirty worktree → queue_status='blocked_on_user'
+    clean worktree → queue_status='pending'
+    """
+    # --- dirty case ---
+    wt_dirty = tmp_path / "wt-qs-dirty"
+    sess_d = _mk_session("phantom-qs-d", "dead-qs-d")
+    sess_d.origin = SessionOrigin.DAEMON
+    sess_d.name = "client-a/auto-dev/TICK-QSD"
+    sess_d.branch = None
+    sess_d.worktree_path = wt_dirty
+    save_state(CwState(sessions=[sess_d]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="TICK-QSD",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSD")
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    reconcile()
+
+    events = read_events(
+        consumer="test-qs-dirty",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["queue_status"] == "blocked_on_user"
+
+    # --- clean case ---
+    wt_clean = tmp_path / "wt-qs-clean"
+    sess_c = _mk_session("phantom-qs-c", "dead-qs-c")
+    sess_c.origin = SessionOrigin.DAEMON
+    sess_c.name = "client-a/auto-dev/TICK-QSC"
+    sess_c.branch = None
+    sess_c.worktree_path = wt_clean
+    save_state(CwState(sessions=[sess_c]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="TICK-QSC",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSC")
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    reconcile()
+
+    events = read_events(
+        consumer="test-qs-clean",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["queue_status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# GitHub issue #421 — sibling revert paths: timed_out + completed_silent
+# ---------------------------------------------------------------------------
+
+
+def _mk_daemon_session_with_worktree(
+    sid: str,
+    status: SessionStatus,
+    wt_path: Path,
+) -> Session:
+    """Build a DAEMON session with worktree_path set, branch=None."""
+    sess = Session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=status,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+        worktree_path=wt_path,
+        branch=None,  # Always None on DAEMON sessions
+    )
+    return sess
+
+
+def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT DAEMON session with dirty worktree routes task to BLOCKED_ON_USER."""
+    wt_path = tmp_path / "wt-to-dirty"
+    sess = _mk_daemon_session_with_worktree("to-dirty", SessionStatus.TIMED_OUT, wt_path)
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="to-dirty",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="to-dirty",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-dirty")
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+
+    reverted = revert_timed_out_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "to-dirty")
+    assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert updated_task.session_id is None
+    # Dirty ticket not in reverted list
+    assert "to-dirty" not in reverted
+
+    # SESSION_NEEDS_ATTENTION emitted with dirty_worktree paused_status
+    events = read_events(
+        consumer="test-to-dirty-attn",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    p = events[0].payload
+    assert p["session_id"] == "to-dirty"
+    assert p["paused_status"] == _DIRTY_WORKTREE_REASON
+
+
+def test_revert_timed_out_clean_worktree_routes_to_pending(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT DAEMON session with clean worktree routes task to PENDING."""
+    wt_path = tmp_path / "wt-to-clean"
+    sess = _mk_daemon_session_with_worktree("to-clean", SessionStatus.TIMED_OUT, wt_path)
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="to-clean",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="to-clean",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-clean")
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+
+    reverted = revert_timed_out_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "to-clean")
+    assert updated_task.status == QueueItemStatus.PENDING
+    assert updated_task.session_id is None
+    assert "to-clean" in reverted
+
+
+def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """COMPLETED DAEMON session with dirty worktree routes task to BLOCKED_ON_USER."""
+    wt_path = tmp_path / "wt-cs-dirty"
+    sess = _mk_daemon_session_with_worktree("cs-dirty", SessionStatus.COMPLETED, wt_path)
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="cs-dirty",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cs-dirty",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-dirty")
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+
+    reverted = revert_completed_silent_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "cs-dirty")
+    assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert updated_task.session_id is None
+    assert "cs-dirty" not in reverted
+
+
+def test_revert_completed_silent_clean_worktree_routes_to_pending(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """COMPLETED DAEMON session with clean worktree routes task to PENDING."""
+    wt_path = tmp_path / "wt-cs-clean"
+    sess = _mk_daemon_session_with_worktree("cs-clean", SessionStatus.COMPLETED, wt_path)
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="cs-clean",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cs-clean",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-clean")
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+
+    reverted = revert_completed_silent_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "cs-clean")
+    assert updated_task.status == QueueItemStatus.PENDING
+    assert updated_task.session_id is None
+    assert "cs-clean" in reverted
 
 
 # ---------------------------------------------------------------------------

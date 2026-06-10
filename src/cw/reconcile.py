@@ -127,6 +127,10 @@ _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # Reason tag written to SESSION_COMPLETED events when a TIMED_OUT session's PR
 # was found MERGED via issue-linkage (timed_out-merged auto-complete, #488).
 _TIMED_OUT_MERGED_REASON = "timed_out_merged"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when a session's
+# worktree has unsaved work and the task is routed to BLOCKED_ON_USER instead
+# of being retried automatically (GitHub issue #421).
+_DIRTY_WORKTREE_REASON = "dirty_worktree"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -702,6 +706,26 @@ def _compute_worktree_dirty(client_name: str, branch: str | None) -> bool:
     if not branch:
         return False
     try:
+        client = get_client(client_name)
+        return worktree_has_unsaved_work(client, branch)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> bool:
+    """Return True if the worktree at *worktree_path* has unsaved work.
+
+    Uses worktree_path (always set on DAEMON sessions) instead of
+    session.branch (always None on DAEMON sessions, making the branch-based
+    check a production no-op).  Mirror _compute_worktree_dirty's fail-safe:
+    returns False on any error, None path, or missing path.
+    """
+    if not worktree_path:
+        return False
+    try:
+        branch = _checked_out_branch(worktree_path)
+        if not branch:
+            return False
         client = get_client(client_name)
         return worktree_has_unsaved_work(client, branch)
     except Exception:  # noqa: BLE001
