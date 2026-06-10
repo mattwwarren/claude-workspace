@@ -1372,9 +1372,7 @@ class TestFindTicket:
         assert result.status == QueueItemStatus.RUNNING
         assert result.session_id == "sess-10"
 
-    def test_find_returns_terminal_when_no_active(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_find_returns_terminal_when_no_active(self, tmp_config_dir: Path) -> None:
         """Terminal record returned when no active record exists (backward compat)."""
         terminal = TicketTask(
             ticket_id="GEN-11",
