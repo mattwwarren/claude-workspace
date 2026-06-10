@@ -44,6 +44,7 @@ from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _claude_agents_json,
+    _has_terminal_sentinel,
     complete_timed_out_merged_tasks,
     compute_drift,
     flag_silently_idle_daemon_sessions,
@@ -1880,8 +1881,9 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     assert "SILENT-1" in blocked
     # #348: flag-only — session stays ACTIVE so daemon worker can keep running.
     # Operators disposition flagged sessions via `cw spawn complete` /
-    # `cw doctor --reap`. last_result.paused_status still set to prevent
-    # double-firing via _has_terminal_sentinel on subsequent ticks (#324).
+    # `cw doctor --reap`. last_result.paused_status still set; the
+    # _salvage_low_path idempotency guard (not _has_terminal_sentinel) prevents
+    # double-firing on subsequent ticks (#324, #418).
     assert sess.status == SessionStatus.ACTIVE
     assert sess.completed_at is None
     assert sess.completed_reason is None
@@ -2076,6 +2078,78 @@ def test_flag_silently_idle_daemon_sessions_skips_session_with_terminal_sentinel
     assert sess.status == SessionStatus.ACTIVE
 
 
+def test_blocked_terminal_sentinel_suppresses_watchdog(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session with last_result={"status": "blocked", ...} → treated as terminal,
+    watchdog skips it. Regression guard: ensures fix does not gate on
+    SALVAGE_TERMINAL_STATUSES (which excludes "blocked")."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="has-blocked-sentinel",
+        name="client-a/auto-dev/HAS-BLK",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        last_result={
+            "status": "blocked",
+            "blocker": {"reason": "impl_failed"},
+        },
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
+def test_has_terminal_sentinel_unit(
+    tmp_config_dir: Path,
+) -> None:
+    """_has_terminal_sentinel returns True only for dicts with a 'status' key."""
+    base = Session(
+        id="unit-sentinel",
+        name="client-a/unit-sentinel",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    base.last_result = {"status": "shipped"}
+    assert _has_terminal_sentinel(base) is True
+
+    base.last_result = {"status": "blocked", "blocker": {"reason": "impl_failed"}}
+    assert _has_terminal_sentinel(base) is True
+
+    base.last_result = {"paused_status": "silently_idle"}
+    assert _has_terminal_sentinel(base) is False
+
+    base.last_result = {"paused_status": "needs_salvage"}
+    assert _has_terminal_sentinel(base) is False
+
+    base.last_result = None
+    assert _has_terminal_sentinel(base) is False
+
+    base.last_result = "not-a-dict"  # type: ignore[assignment]
+    assert _has_terminal_sentinel(base) is False
+
+
 def test_flag_silently_idle_daemon_sessions_skips_user_origin(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -2229,6 +2303,68 @@ def test_flag_silently_idle_salvages_no_op_sentinel(
 
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-noop-1")
     assert task.status == QueueItemStatus.COMPLETED
+
+    mock_daemon.stop.assert_called_once_with("fake-short-id")
+
+
+def test_silently_idle_parked_session_salvaged_on_next_pass(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#418: ACTIVE session parked silently_idle with shipped sentinel in transcript
+    → salvaged on next watchdog pass, not at 60-min wall-clock timeout."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-418-park"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = _mk_headless_daemon_session("418-park-1", worktree, started_at)
+    # Session was previously parked silently_idle — this is the #418 bug state.
+    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+    _write_salvage_transcript(
+        home, worktree, "claude-418-uuid-1", _shipped_salvage_payload()
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="418-park-1",
+                    client="client-a",
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    session_id="418-park-1",
+                    attempts=2,
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+    ):
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
+        )
+
+    assert blocked == []
+    reloaded = next(s for s in load_state().sessions if s.id == "418-park-1")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "shipped"
+
+    # Queue task stays BLOCKED_ON_USER — queue-task auto-complete for
+    # salvaged-from-park is out of scope for #418 (separate follow-up).
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "418-park-1")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
     mock_daemon.stop.assert_called_once_with("fake-short-id")
 
@@ -5130,6 +5266,67 @@ class TestSalvageCommittedNoPrSessions:
         s = next(s for s in reloaded.sessions if s.id == "sess-low")
         lr = s.last_result or {}
         assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
+
+    def test_low_path_idempotent_on_second_pass(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_salvage_low_path called twice for same already-flagged session →
+        SESSION_NEEDS_ATTENTION fires exactly once, fire_push_notification
+        called exactly once. Guards the self-contained idempotency added in #418."""
+        worktree = tmp_path / "wt-idem-low"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-IDEM-LOW"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-idem-low", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-idem-low",
+                    )
+                ]
+            )
+        )
+
+        push_calls: list[tuple[str, str]] = []
+
+        def _capture_push(name: str, client: str, **_kw: object) -> None:
+            push_calls.append((name, client))
+
+        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile.fire_push_notification", _capture_push)
+
+        candidates = [
+            ("sess-idem-low", ticket_id, "dev/idem-low-branch", str(worktree), False)
+        ]
+
+        # First pass — should flag and emit.
+        salvage_committed_no_pr_sessions(candidates)
+        # Second pass — already_flagged should suppress.
+        salvage_committed_no_pr_sessions(candidates)
+
+        events = read_events(
+            consumer="test-low-idem",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        attn_events = [
+            e for e in events if e.payload.get("paused_status") == _NEEDS_SALVAGE_REASON
+        ]
+        assert len(attn_events) == 1, "SESSION_NEEDS_ATTENTION must fire exactly once"
+        assert len(push_calls) == 1, (
+            "fire_push_notification must be called exactly once"
+        )
 
     def test_idempotency_recheck_pr_now_exists_downgrades_to_low(
         self,
