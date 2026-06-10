@@ -4272,6 +4272,181 @@ def test_revert_stalled_skips_parked_silently_idle_session(
 
 
 # ---------------------------------------------------------------------------
+# GitHub issue #403: backfill claude_session_id from daemon roster
+# Workers parked before their first Stop hook never have claude_session_id
+# written by spawn.  _transcript_recently_active and _awaiting_subagent
+# degrade to scan-all without it.  Backfill during reconcile from the same
+# _claude_agents_json() call that builds native_live.
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_claude_session_id_happy_path(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ACTIVE DAEMON session with surface_ref matching roster → claude_session_id backfilled and persisted."""
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+    worktree = tmp_path / "wt-backfill"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("backfill-1", worktree, started_at, surface_ref=short_id)
+    assert sess.claude_session_id is None
+    save_state(CwState(sessions=[sess]))
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}])
+    reconcile()
+    # Reload from disk to verify persistence
+    reloaded = next(s for s in load_state().sessions if s.id == "backfill-1")
+    assert reloaded.claude_session_id == full_uuid
+
+
+def test_backfill_claude_session_id_no_overwrite(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude_session_id already set → roster entry does not change it."""
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    existing = "existing-uuid"
+    short_id = full_uuid[:8]
+    worktree = tmp_path / "wt-no-overwrite"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("no-overwrite-1", worktree, started_at, surface_ref=short_id)
+    sess.claude_session_id = existing
+    save_state(CwState(sessions=[sess]))
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}])
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "no-overwrite-1")
+    assert reloaded.claude_session_id == existing
+
+
+def test_backfill_claude_session_id_not_in_roster(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """surface_ref absent from roster → claude_session_id stays None."""
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    worktree = tmp_path / "wt-not-in-roster"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("not-in-roster-1", worktree, started_at, surface_ref="deadbeef")
+    save_state(CwState(sessions=[sess]))
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}])
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "not-in-roster-1")
+    assert reloaded.claude_session_id is None
+
+
+def test_backfill_claude_session_id_outage(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roster fetch raises → no backfill, no crash; outage guard holds."""
+    import subprocess as _subprocess
+
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+    worktree = tmp_path / "wt-outage"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("outage-1", worktree, started_at, surface_ref=short_id)
+    save_state(CwState(sessions=[sess]))
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise _subprocess.CalledProcessError(1, "claude")
+
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", _raise)
+    # Must not raise
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "outage-1")
+    assert reloaded.claude_session_id is None
+
+
+def test_backfill_claude_session_id_same_tick_liveness(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After backfill, _transcript_recently_active uses the by-id path (not scan-all)."""
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-liveness"
+    sess = _mk_headless_daemon_session("liveness-1", worktree, started_at, surface_ref=short_id)
+    assert sess.claude_session_id is None
+    save_state(CwState(sessions=[sess]))
+
+    # Write the transcript under the full UUID filename (by-id path)
+    _write_idle_transcript(home, worktree, filename=f"{full_uuid}.jsonl")
+
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}])
+    reconcile()
+
+    # The session should NOT be flagged silently idle — transcript found via by-id path
+    reloaded = next(s for s in load_state().sessions if s.id == "liveness-1")
+    assert reloaded.claude_session_id == full_uuid
+    # Session still ACTIVE — watchdog did not fire
+    assert reloaded.status == SessionStatus.ACTIVE
+
+
+def test_backfill_claude_session_id_guard_branches(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard branches: surface_ref=None and non-DAEMON sessions are not backfilled."""
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+    worktree = tmp_path / "wt-guard"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    # DAEMON ACTIVE but surface_ref=None
+    daemon_no_ref = _mk_headless_daemon_session("guard-no-ref", worktree, started_at, surface_ref=None)
+    assert daemon_no_ref.claude_session_id is None
+
+    # USER ACTIVE with matching surface_ref — should NOT be backfilled
+    user_sess = _mk_session("guard-user", short_id, status=SessionStatus.ACTIVE)
+    # _mk_session defaults to USER origin
+    assert user_sess.origin is SessionOrigin.USER
+
+    save_state(CwState(sessions=[daemon_no_ref, user_sess]))
+    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}])
+    reconcile()
+
+    state = load_state()
+    reloaded_no_ref = next(s for s in state.sessions if s.id == "guard-no-ref")
+    reloaded_user = next(s for s in state.sessions if s.id == "guard-user")
+    assert reloaded_no_ref.claude_session_id is None
+    assert reloaded_user.claude_session_id is None
+
+
+def test_backfill_claude_session_id_malformed_roster(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-str sessionId in roster is skipped; valid entry still backfills."""
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+    worktree = tmp_path / "wt-malformed"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("malformed-1", worktree, started_at, surface_ref=short_id)
+    save_state(CwState(sessions=[sess]))
+    # Roster has a malformed entry alongside the valid one
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": 12345}, {"sessionId": full_uuid}],
+    )
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "malformed-1")
+    assert reloaded.claude_session_id == full_uuid
+
+
+# ---------------------------------------------------------------------------
 # Dot-encoding regression tests (GitHub issue #463)
 # Worktrees under ~/.cw/ contain a dot in the path segment; Claude Code
 # encodes BOTH '/' and '.' as '-'.  The old single-replace produced a
