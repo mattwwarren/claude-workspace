@@ -54,7 +54,7 @@ class QueueItemStatus(StrEnum):
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
-CW_STATE_SCHEMA_VERSION = 4
+CW_STATE_SCHEMA_VERSION = 5
 DEV_QUEUE_SCHEMA_VERSION = 2
 
 
@@ -225,14 +225,6 @@ class DevQueueStore(BaseModel):
         return [t for t in self.tasks if t.client == client]
 
 
-class BackendName(StrEnum):
-    """Name of a multiplexer backend cw can drive."""
-
-    CMUX = "cmux"
-    TMUX = "tmux"
-    FAKE = "fake"
-
-
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
 
 
@@ -252,7 +244,6 @@ class OrchestratorConfig(BaseModel):
     per_client_max_parallel: dict[str, int] = Field(default_factory=dict)
     default_max_parallel: int = 1
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)
-    backend: BackendName | None = None
     # Per-tier wall-clock budgets (seconds) for headless DAEMON sessions.
     # Keyed by scope.tier from the auto-dev sentinel; unknown tiers fall back
     # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.
@@ -393,7 +384,6 @@ class ClientConfig(BaseModel):
     worker_model: str | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
-    cmux_workspace: str | None = None
 
     @model_validator(mode="after")
     def _validate_path_config(self) -> ClientConfig:

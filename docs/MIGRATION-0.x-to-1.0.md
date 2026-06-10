@@ -4,12 +4,21 @@
 
 ### Session backend
 
-cw 1.0 ships the **tmux backend as the default on Linux** and keeps cmux on macOS.
-The `surface_ref` field on sessions (used by 0.x to track multiplexer pane
-handles) remains in the state schema for compatibility. Clearing stale
-`surface_ref` entries and the `claude_session_id` → `state.json.resumeSessionId`
-mapping are handled by the Phase F migration in issue #119 and are **not** part
-of this upgrade step.
+The **multiplexer layer (cmux/tmux) is removed entirely in cw 1.0**. Sessions
+are no longer launched inside tmux panes or cmux workspaces. Instead, cw
+spawns workers directly via `claude --bg` and tracks their liveness through
+`claude agents --json` / the daemon roster at
+`~/.claude/daemon/roster.json`.
+
+The `surface_ref` field on sessions remains in the state schema for
+compatibility. On first load after upgrading, cw automatically:
+
+1. Backs up your pre-migration `sessions.json` to
+   `.sessions.json.0.x-backup` in the same directory.
+2. Clears any legacy multiplexer pane reference (e.g. `ws:0.1`,
+   `tmux-pane-3`) from `surface_ref`, replacing it with `null`. Valid
+   8-char hex daemon session ids are preserved unchanged.
+3. Bumps the schema version to 5.
 
 ### Worktree paths
 
@@ -46,6 +55,5 @@ update the session's `worktree_path` by editing
 
 ## What you need to do
 
-Nothing. For worktrees: they stay where they are. For `surface_ref` and
-`claude_session_id` migration: that work belongs to issue #119 (Phase F) and
-will be handled in a separate upgrade step.
+Nothing. Worktrees stay where they are. The `surface_ref` migration runs
+automatically on first `load_state()` call after upgrading to 1.0.

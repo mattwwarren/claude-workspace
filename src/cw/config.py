@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 from io import StringIO
 from pathlib import Path
@@ -29,6 +30,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
 )
+from cw.native_daemon import SHORT_SESSION_ID_RE
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -241,6 +243,7 @@ def load_state() -> CwState:
     if not path.exists():
         return CwState()
     raw = json.loads(path.read_text())
+    _backup_state_file(raw)
     return CwState.model_validate(migrate_cw_state(raw))
 
 
@@ -261,11 +264,21 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
         # corruption surfaces downstream rather than getting a false
         # "fully migrated" stamp.
         return raw
+    # Capture the on-disk version before we bump it so per-step guards
+    # can condition on "is this an upgrade from version X?".
+    on_disk_version = int(raw.get("schema_version") or 0)
     if isinstance(sessions, list):
         for session_raw in sessions:
             if not isinstance(session_raw, dict):
                 continue
             _migrate_zellij_fields(session_raw)
+            # Only clear legacy multiplexer surface_refs during the v4→v5
+            # upgrade pass.  After migration the field may legally hold any
+            # string set by the live daemon path; re-clearing it on every
+            # load would wipe valid programmatic writes (e.g. test fixtures,
+            # daemon-spawn short ids that happen to look like plain strings).
+            if on_disk_version < 5:
+                _clear_non_hex_surface_refs(session_raw)
             _coerce_session_origin(session_raw)
             _fill_linkage_field_defaults(session_raw)
             _fill_last_result_default(session_raw)
@@ -342,6 +355,39 @@ def _fill_cost_fields_default(session_raw: dict[str, Any]) -> None:
         session_raw["cost_usd"] = None
     if "cost_breakdown" not in session_raw:
         session_raw["cost_breakdown"] = None
+
+
+def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
+    """Clear non-native surface_ref values (legacy cmux/tmux pane IDs).
+
+    Native daemon workers store an 8-char hex short-id as surface_ref.
+    Legacy cmux/tmux backends stored pane references like "ws:0.1" or
+    "tmux-pane-3". Clear any value that doesn't match the native hex
+    pattern so stale references don't confuse reconcile.
+    """
+    surface_ref = session_raw.get("surface_ref")
+    if surface_ref is None:
+        return
+    if not SHORT_SESSION_ID_RE.fullmatch(surface_ref):
+        session_raw["surface_ref"] = None
+
+
+def _backup_state_file(raw: dict[str, Any]) -> None:
+    """Back up sessions.json before the first v5 migration. Idempotent.
+
+    Only runs when the on-disk schema_version is below the current version
+    AND the backup doesn't already exist. This preserves the pre-migration
+    state for manual recovery.
+    """
+    path = state_file()
+    if not path.exists():
+        return
+    backup = path.parent / f".{path.name}.0.x-backup"
+    if backup.exists():
+        return
+    if int(raw.get("schema_version") or 0) >= CW_STATE_SCHEMA_VERSION:
+        return
+    shutil.copy2(path, backup)
 
 
 def save_state(state: CwState) -> None:

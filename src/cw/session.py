@@ -265,10 +265,7 @@ def background_session(
         click.echo(f"Backgrounding session: {session.name}...")
 
         if session.status == SessionStatus.ACTIVE:
-            click.echo(
-                "Marking as backgrounded without /session-done injection"
-                " (not inside a cmux session)."
-            )
+            click.echo("Marking as backgrounded without /session-done injection.")
 
         session.status = SessionStatus.BACKGROUNDED
         session.backgrounded_at = datetime.now(UTC)

@@ -33,8 +33,8 @@ def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-class TestRunDoctorFakeBackend:
-    """run_doctor returns a healthy report on the fake backend."""
+class TestRunDoctorHealthy:
+    """run_doctor returns a healthy report."""
 
     def test_report_includes_version(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
@@ -43,7 +43,7 @@ class TestRunDoctorFakeBackend:
         report = run_doctor()
         assert report.version
 
-    def test_report_ok_on_fake_backend(
+    def test_report_ok_on_healthy_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         _stub_claude_version_ok(monkeypatch)
@@ -157,8 +157,7 @@ def test_cw_doctor_cli_reap_flag(
 
     from cw.cli import main
 
-    # Force fake backend so the binary/socket check passes on every platform
-    # (macOS default is cmux, whose socket does not exist in CI).
+    # Stub the claude-version check so it passes without the real binary.
     _stub_claude_version_ok(monkeypatch)
     runner = CliRunner()
     result = runner.invoke(main, ["doctor", "--reap"])
