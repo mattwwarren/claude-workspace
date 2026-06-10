@@ -2440,9 +2440,7 @@ class TestCheckWorktreePathsSessions:
         names = [c.name for c in report.checks]
         assert "worktree/summary" in names
 
-    def test_completed_session_missing_worktree_no_warn(
-        self, tmp_path: Path
-    ) -> None:
+    def test_completed_session_missing_worktree_no_warn(self, tmp_path: Path) -> None:
         from cw.doctor import _check_worktree_paths_sessions
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
@@ -2461,9 +2459,7 @@ class TestCheckWorktreePathsSessions:
         assert warn_results == []
         assert results[-1].name == "worktree/summary"
 
-    def test_timed_out_session_missing_worktree_no_warn(
-        self, tmp_path: Path
-    ) -> None:
+    def test_timed_out_session_missing_worktree_no_warn(self, tmp_path: Path) -> None:
         from cw.doctor import _check_worktree_paths_sessions
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
@@ -2482,9 +2478,7 @@ class TestCheckWorktreePathsSessions:
         assert warn_results == []
         assert results[-1].name == "worktree/summary"
 
-    def test_active_session_missing_worktree_still_warns(
-        self, tmp_path: Path
-    ) -> None:
+    def test_active_session_missing_worktree_still_warns(self, tmp_path: Path) -> None:
         from cw.doctor import _check_worktree_paths_sessions
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
@@ -2602,9 +2596,7 @@ class TestCheckWorktreePathsSessions:
         summary = results[-1]
         assert "0 missing worktrees" in summary.detail
 
-    def test_format_report_no_warn_for_completed_session(
-        self, tmp_path: Path
-    ) -> None:
+    def test_format_report_no_warn_for_completed_session(self, tmp_path: Path) -> None:
         from cw.doctor import _check_worktree_paths_sessions, format_report
         from cw.models import CwState, Session, SessionPurpose, SessionStatus
 
