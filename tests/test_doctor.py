@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.cmux import FakeCmuxAdapter
 from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
 
 if TYPE_CHECKING:
@@ -1323,13 +1322,13 @@ class TestWedgeFindingDataclass:
         from cw.doctor import WedgeFinding
 
         wf = WedgeFinding(
-            wedge_class="wedge/pane-idle-but-active",
+            wedge_class="wedge/task-running-no-session",
             session_id="abc",
             ticket_id="123",
             recipe="run cw doctor --reap",
             state_file="/tmp/x.json",
         )
-        assert wf.wedge_class == "wedge/pane-idle-but-active"
+        assert wf.wedge_class == "wedge/task-running-no-session"
         assert wf.session_id == "abc"
         assert wf.ticket_id == "123"
         assert wf.recipe == "run cw doctor --reap"
@@ -1345,7 +1344,7 @@ class TestWedgeFindingDataclass:
         from cw.doctor import DoctorReport, WedgeFinding
 
         wf = WedgeFinding(
-            wedge_class="wedge/pane-idle-but-active",
+            wedge_class="wedge/task-running-no-session",
             session_id="abc",
             ticket_id="123",
             recipe="fix it",
@@ -1357,180 +1356,6 @@ class TestWedgeFindingDataclass:
             wedge_findings=[wf],
         )
         assert report.ok is True
-
-
-class TestWedgePaneIdleButActive:
-    """wedge/pane-idle-but-active detection logic."""
-
-    def _make_active_session(
-        self, tmp_path: Path, *, surface_ref: str | None = "s:0.1"
-    ) -> Session:
-        from datetime import UTC, datetime
-
-        from cw.models import Session, SessionPurpose, SessionStatus
-
-        wt = tmp_path / "worktree"
-        wt.mkdir(parents=True, exist_ok=True)
-        return Session(
-            id="sess-active",
-            name="client-a/auto-dev/TST-1",
-            client="client-a",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            workspace_path=tmp_path,
-            worktree_path=wt if surface_ref is not None else None,
-            surface_ref=surface_ref,
-            started_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-
-    def test_detected_when_shell_and_old_mtime(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
-    ) -> None:
-        import time
-
-        from cw.cmux import FakeCmuxAdapter
-        from cw.config import save_state
-        from cw.dev_queue import save_dev_queue
-        from cw.doctor import _check_wedge_pane_idle
-        from cw.models import CwState, DevQueueStore
-
-        session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])
-        save_state(state)
-        save_dev_queue(DevQueueStore(tasks=[]))
-
-        adapter = FakeCmuxAdapter()
-        old_time = time.time() - 700
-        adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
-
-        # Create a file with old mtime
-        test_file = tmp_path / "worktree" / "test.py"
-        test_file.write_text("code")
-        import os
-
-        os.utime(str(test_file), (old_time, old_time))
-
-        queue = DevQueueStore(tasks=[])
-        findings = _check_wedge_pane_idle(state, queue, adapter)
-        assert len(findings) == 1
-        assert findings[0].wedge_class == "wedge/pane-idle-but-active"
-        assert findings[0].session_id == "sess-active"
-
-    def test_not_detected_nonshell_cmd(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
-    ) -> None:
-        import time
-
-        from cw.cmux import FakeCmuxAdapter
-        from cw.doctor import _check_wedge_pane_idle
-        from cw.models import CwState, DevQueueStore
-
-        session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])
-
-        adapter = FakeCmuxAdapter()
-        adapter.set_pane_info("s:0.1", {"cmd": "claude", "last_activity": None})
-
-        old_time = time.time() - 700
-        test_file = tmp_path / "worktree" / "test.py"
-        test_file.write_text("code")
-        import os
-
-        os.utime(str(test_file), (old_time, old_time))
-
-        queue = DevQueueStore(tasks=[])
-        findings = _check_wedge_pane_idle(state, queue, adapter)
-        assert findings == []
-
-    def test_not_detected_recent_mtime(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
-    ) -> None:
-        from cw.cmux import FakeCmuxAdapter
-        from cw.doctor import _check_wedge_pane_idle
-        from cw.models import CwState, DevQueueStore
-
-        session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])
-
-        adapter = FakeCmuxAdapter()
-        adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
-
-        # File with recent mtime (now)
-        test_file = tmp_path / "worktree" / "test.py"
-        test_file.write_text("fresh code")
-
-        queue = DevQueueStore(tasks=[])
-        findings = _check_wedge_pane_idle(state, queue, adapter)
-        assert findings == []
-
-    def test_not_detected_no_surface_ref(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
-    ) -> None:
-        from cw.cmux import FakeCmuxAdapter
-        from cw.doctor import _check_wedge_pane_idle
-        from cw.models import CwState, DevQueueStore
-
-        session = self._make_active_session(tmp_path, surface_ref=None)
-        state = CwState(sessions=[session])
-
-        adapter = FakeCmuxAdapter()
-        queue = DevQueueStore(tasks=[])
-        findings = _check_wedge_pane_idle(state, queue, adapter)
-        assert findings == []
-
-    def test_git_dir_excluded_from_mtime(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
-    ) -> None:
-        import os
-        import time
-
-        from cw.cmux import FakeCmuxAdapter
-        from cw.doctor import _check_wedge_pane_idle
-        from cw.models import CwState, DevQueueStore
-
-        session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])
-
-        adapter = FakeCmuxAdapter()
-        adapter.set_pane_info("s:0.1", {"cmd": "bash", "last_activity": None})
-
-        wt = tmp_path / "worktree"
-        old_time = time.time() - 700
-
-        # Create old non-.git file
-        old_file = wt / "old.py"
-        old_file.write_text("old code")
-        os.utime(str(old_file), (old_time, old_time))
-
-        # Create recent .git/FETCH_HEAD — must be excluded
-        git_dir = wt / ".git"
-        git_dir.mkdir()
-        fetch_head = git_dir / "FETCH_HEAD"
-        fetch_head.write_text("ref")
-        # leave fetch_head with current mtime (recent)
-
-        queue = DevQueueStore(tasks=[])
-        findings = _check_wedge_pane_idle(state, queue, adapter)
-        # .git/ excluded → old.py is only non-.git file → finding IS emitted
-        assert len(findings) == 1
-        assert findings[0].wedge_class == "wedge/pane-idle-but-active"
-
-    def test_inspect_pane_empty_skips(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
-    ) -> None:
-        from cw.cmux import FakeCmuxAdapter
-        from cw.doctor import _check_wedge_pane_idle
-        from cw.models import CwState, DevQueueStore
-
-        session = self._make_active_session(tmp_path)
-        state = CwState(sessions=[session])
-
-        adapter = FakeCmuxAdapter()
-        # inspect_pane returns {} (default) — fail-open, skip
-
-        queue = DevQueueStore(tasks=[])
-        findings = _check_wedge_pane_idle(state, queue, adapter)
-        assert findings == []
 
 
 class TestWedgeTaskRunningNoSession:
@@ -2091,75 +1916,15 @@ class TestWedgeReapRecipes:
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
-    def test_class1_reap_mutates_session_and_queue(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        tmp_config_dir: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
-    ) -> None:
-        from cw.config import load_state, save_state
-        from cw.dev_queue import load_dev_queue, save_dev_queue
-        from cw.doctor import WedgeFinding, _reap_wedge_findings
-        from cw.models import (
-            CwState,
-            DevQueueStore,
-            QueueItemStatus,
-            SessionStatus,
-            TicketTask,
-        )
-
-        session = self._make_session(tmp_path)
-        state = CwState(sessions=[session])
-        save_state(state)
-
-        task = TicketTask(
-            ticket_id="TST-REAP",
-            client="client-a",
-            status=QueueItemStatus.RUNNING,
-            session_id="reap-sess",
-        )
-        save_dev_queue(DevQueueStore(tasks=[task]))
-
-        from cw.config import state_file as _sf
-
-        finding = WedgeFinding(
-            wedge_class="wedge/pane-idle-but-active",
-            session_id="reap-sess",
-            ticket_id="TST-REAP",
-            recipe="fix",
-            state_file=str(_sf()),
-        )
-
-        _reap_wedge_findings([finding], state, mock_cmux_adapter)
-
-        # session should be COMPLETED
-        reloaded = load_state()
-        sess = next(s for s in reloaded.sessions if s.id == "reap-sess")
-        assert sess.status == SessionStatus.COMPLETED
-
-        # queue task should be PENDING
-        store = load_dev_queue()
-        t = next(t for t in store.tasks if t.ticket_id == "TST-REAP")
-        assert t.status == QueueItemStatus.PENDING
-
-        # adapter.close should have been called
-        assert len(mock_cmux_adapter.calls["close"]) == 1
-
     def test_class2_reap_reverts_queue_only(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         tmp_config_dir: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
-        from cw.config import save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.doctor import WedgeFinding, _reap_wedge_findings
-        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
-
-        state = CwState(sessions=[])
-        save_state(state)
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
         task = TicketTask(
             ticket_id="TST-C2",
@@ -2179,7 +1944,7 @@ class TestWedgeReapRecipes:
             state_file=str(_sf()),
         )
 
-        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+        _reap_wedge_findings([finding])
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "TST-C2")
@@ -2190,15 +1955,10 @@ class TestWedgeReapRecipes:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         tmp_config_dir: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
-        from cw.config import save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.doctor import WedgeFinding, _reap_wedge_findings
-        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
-
-        state = CwState(sessions=[])
-        save_state(state)
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
         task = TicketTask(
             ticket_id="TST-C3",
@@ -2218,7 +1978,7 @@ class TestWedgeReapRecipes:
             state_file=str(_sf()),
         )
 
-        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+        _reap_wedge_findings([finding])
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "TST-C3")
@@ -2229,15 +1989,10 @@ class TestWedgeReapRecipes:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         tmp_config_dir: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
-        from cw.config import save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.doctor import WedgeFinding, _reap_wedge_findings
-        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
-
-        state = CwState(sessions=[])
-        save_state(state)
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
         task = TicketTask(
             ticket_id="TST-C4",
@@ -2256,57 +2011,18 @@ class TestWedgeReapRecipes:
             state_file=str(_sf()),
         )
 
-        _reap_wedge_findings([finding], state, mock_cmux_adapter)
+        _reap_wedge_findings([finding])
 
         # advisory only — queue should remain RUNNING
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "TST-C4")
         assert t.status == QueueItemStatus.RUNNING
 
-    def test_adapter_close_only_for_class1(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        tmp_config_dir: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
-    ) -> None:
-        from cw.config import save_state
-        from cw.dev_queue import save_dev_queue
-        from cw.doctor import WedgeFinding, _reap_wedge_findings
-        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
-
-        state = CwState(sessions=[])
-        save_state(state)
-
-        task = TicketTask(
-            ticket_id="TST-NCLOSE",
-            client="client-a",
-            status=QueueItemStatus.RUNNING,
-            session_id=None,
-        )
-        save_dev_queue(DevQueueStore(tasks=[task]))
-
-        from cw.config import state_file as _sf
-
-        finding = WedgeFinding(
-            wedge_class="wedge/task-running-no-session",
-            session_id=None,
-            ticket_id="TST-NCLOSE",
-            recipe="fix",
-            state_file=str(_sf()),
-        )
-
-        _reap_wedge_findings([finding], state, mock_cmux_adapter)
-
-        # adapter.close must NOT have been called for class-2
-        assert len(mock_cmux_adapter.calls["close"]) == 0
-
     def test_reap_false_no_mutations(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         tmp_config_dir: Path,
-        mock_cmux_adapter: FakeCmuxAdapter,
     ) -> None:
         """run_doctor(reap=False) must not trigger _reap_wedge_findings."""
         from cw.config import save_state
@@ -2326,10 +2042,6 @@ class TestWedgeReapRecipes:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         # Monkeypatch to prevent wedge check from modifying the report
-        monkeypatch.setattr(
-            "cw.doctor._check_wedge_pane_idle",
-            lambda *_a, **_kw: [],
-        )
         monkeypatch.setattr(
             "cw.doctor._check_wedge_task_running_no_session",
             lambda *_a, **_kw: [],
@@ -2403,7 +2115,7 @@ class TestDoctorJsonMode:
         _stub_claude_version_ok(monkeypatch)
 
         wf = WedgeFinding(
-            wedge_class="wedge/pane-idle-but-active",
+            wedge_class="wedge/task-running-no-session",
             session_id="abc",
             ticket_id="123",
             recipe="fix it",
