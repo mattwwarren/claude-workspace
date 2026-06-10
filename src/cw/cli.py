@@ -332,8 +332,8 @@ def config() -> None:
 def doctor(reap: bool, as_json: bool) -> None:
     """Run environment preflight checks and print a health report.
 
-    Reports the resolved backend, backend binary/daemon availability,
-    config file locations and validity, and state file parseability.
+    Reports daemon health, session count, and connectivity status.
+    Also checks config file locations and validity, and state file parseability.
     Exits non-zero if any check fails.
 
     With ``--reap``, also detects and repairs the following wedge conditions:
@@ -1733,7 +1733,7 @@ def _run_plan_impl(
     "-c",
     required=True,
     shell_complete=_complete_client,
-    help="Client whose cmux workspace will host the planner session.",
+    help="Client whose workspace will host the planner session.",
 )
 @click.option(
     "--timeout",

@@ -1,8 +1,8 @@
 """Shared utility helpers for cw internal modules.
 
 Keep this module free of imports from other ``cw.*`` modules to avoid
-circular dependencies — it is imported by both :mod:`cw.cmux` and
-:mod:`cw.tmux`.
+circular dependencies — imported by :mod:`cw.wrapper`, :mod:`cw.cli`, and
+:mod:`cw.reconcile`, so those modules load without circular dependencies.
 """
 
 from __future__ import annotations
