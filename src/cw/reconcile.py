@@ -1282,8 +1282,8 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     # Accumulate data for session.phantom_reverted events (DAEMON-origin only).
     # Emitted after save_state but before dev_queue_lock — see operator resolution
     # in issue #459 for lock-ordering rationale.
-    # (session_id, ticket_id, client, branch)
-    phantom_reverted_data: list[tuple[str, str, str, str | None]] = []
+    # (session_id, ticket_id, client, worktree_path)
+    phantom_reverted_data: list[tuple[str, str, str, Path | None]] = []
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
@@ -1321,7 +1321,7 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         if ticket_id and session.origin is SessionOrigin.DAEMON:
             ticket_ids_to_revert.append(ticket_id)
             phantom_reverted_data.append(
-                (session.id, ticket_id, session.client, session.branch)
+                (session.id, ticket_id, session.client, session.worktree_path)
             )
         payload: dict[str, object] = {
             "session_id": session.id,
@@ -1337,12 +1337,17 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     for payload in pending_events:
         record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
-    for sess_id, rev_ticket_id, rev_client, rev_branch in phantom_reverted_data:
-        wt_dirty = _compute_worktree_dirty(rev_client, rev_branch)
-        wt_path: str | None = None
-        if rev_branch:
-            with contextlib.suppress(Exception):
-                wt_path = str(worktree_path_for(get_client(rev_client), rev_branch))
+    # Why: dirty-check runs under sessions_lock before the queue mutation, but
+    # the orphaned claude --bg process may still be alive and could write to the
+    # worktree between this check and the BLOCKED_ON_USER routing below (TOCTOU).
+    # The accepted tradeoff is block > clobber — narrow the window, accept the race.
+    dirty_ticket_ids: set[str] = set()
+    for sess_id, rev_ticket_id, rev_client, rev_wt_path in phantom_reverted_data:
+        wt_dirty = _worktree_dirty_by_path(rev_client, rev_wt_path)
+        wt_path_str: str | None = str(rev_wt_path) if rev_wt_path else None
+        if wt_dirty:
+            dirty_ticket_ids.add(rev_ticket_id)
+        queue_status = "blocked_on_user" if wt_dirty else "pending"
         record_event(
             OrchestratorEventType.SESSION_PHANTOM_REVERTED,
             {
@@ -1350,7 +1355,8 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
                 "ticket_id": rev_ticket_id,
                 "client": rev_client,
                 "worktree_dirty": wt_dirty,
-                "worktree_path": wt_path,
+                "worktree_path": wt_path_str,
+                "queue_status": queue_status,
             },
             correlation_id=rev_ticket_id,
         )
@@ -1366,13 +1372,18 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
                 if task.status != QueueItemStatus.RUNNING:
                     continue
                 if task.ticket_id in revert_set:
-                    task.status = QueueItemStatus.PENDING
+                    if task.ticket_id in dirty_ticket_ids:
+                        # Dirty worktree: park for operator inspection rather than
+                        # re-dispatching — clobbering in-flight work is data loss.
+                        task.status = QueueItemStatus.BLOCKED_ON_USER
+                    else:
+                        task.status = QueueItemStatus.PENDING
+                        reverted.append(task.ticket_id)
                     # Drop the stamp from the prior (now-crashed) session so
                     # the next dispatch_tick can re-stamp with the freshly
                     # spawned session_id without a window where the task
                     # carries a stale id. See GitHub issue #97.
                     task.session_id = None
-                    reverted.append(task.ticket_id)
                     changed = True
                 elif task.ticket_id in salvaged_set:
                     # Terminal-success salvage: retire the task instead of
@@ -1412,17 +1423,34 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     )
 
 
-def _revert_running_tasks_for_sessions(session_ids: set[str]) -> list[str]:
+def _revert_running_tasks_for_sessions(
+    session_ids: set[str],
+    dirty_session_ids: set[str] | None = None,
+) -> list[str]:
     """Revert RUNNING TicketTasks whose ``session_id`` is in *session_ids*.
 
     Shared helper for the per-status revert wrappers. Acquires
     ``dev_queue_lock`` for the read+write window; writes only when at least
-    one task was reverted. Returns the list of reverted ticket IDs.
+    one task was reverted. Returns the list of reverted ticket IDs (PENDING
+    only — BLOCKED_ON_USER tickets are excluded from the return value so they
+    do not enter ReconcileReport.reverted_ticket_ids).
+
+    When *dirty_session_ids* is provided, tasks whose session_id is in the
+    set are routed to BLOCKED_ON_USER instead of PENDING to preserve in-flight
+    worktree state for operator inspection (GitHub issue #421).
+
+    # Why: dirtiness is checked before dev_queue_lock is acquired (in the
+    # callers revert_timed_out_tasks / revert_completed_silent_tasks), but the
+    # orphaned claude --bg process may still be alive and could write to the
+    # worktree between that check and the BLOCKED_ON_USER write below (TOCTOU).
+    # The accepted tradeoff is block > clobber — narrow the window, accept the race.
     """
     if not session_ids:
         return []
 
+    dirty = dirty_session_ids or set()
     reverted: list[str] = []
+    changed = False
     with dev_queue_lock():
         store = load_dev_queue()
         for task in store.tasks:
@@ -1430,10 +1458,14 @@ def _revert_running_tasks_for_sessions(session_ids: set[str]) -> list[str]:
                 continue
             if task.session_id not in session_ids:
                 continue
-            task.status = QueueItemStatus.PENDING
+            if task.session_id in dirty:
+                task.status = QueueItemStatus.BLOCKED_ON_USER
+            else:
+                task.status = QueueItemStatus.PENDING
+                reverted.append(task.ticket_id)
             task.session_id = None
-            reverted.append(task.ticket_id)
-        if reverted:
+            changed = True
+        if changed:
             save_dev_queue(store)
     return reverted
 
@@ -1776,20 +1808,63 @@ def _salvage_low_path(
     fire_push_notification(session.name, session.client)
 
 
+def _build_dirty_session_ids_and_notify(
+    sessions: list[Session],
+) -> set[str]:
+    """Identify sessions with dirty worktrees, emit SESSION_NEEDS_ATTENTION.
+
+    Called before acquiring dev_queue_lock so that dirtiness is assessed
+    outside the lock window (see TOCTOU note in _revert_running_tasks_for_sessions).
+
+    Returns the set of session IDs whose worktrees have unsaved work.
+    Does NOT write session.last_result — this is a queue-level guard, not a
+    park-marker update (to avoid interfering with the existing park-marker logic).
+    """
+    dirty_session_ids: set[str] = set()
+    for session in sessions:
+        if not _worktree_dirty_by_path(session.client, session.worktree_path):
+            continue
+        dirty_session_ids.add(session.id)
+        ticket_id = ticket_id_for_session(session.name)
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _DIRTY_WORKTREE_REASON,
+                "breadcrumbs": str(session.worktree_path) if session.worktree_path else "",
+                "crashed": False,
+            },
+        )
+        fire_push_notification(session.name, session.client)
+    return dirty_session_ids
+
+
 def revert_timed_out_tasks() -> list[str]:
     """Revert RUNNING TicketTasks whose owning session is TIMED_OUT.
 
     Called during :func:`reconcile` as a backstop for the case where
     ``signal_stop`` crashed after writing TIMED_OUT status but before
     reverting the dev-queue task. Returns the list of ticket IDs reverted.
+
+    Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
+    PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
+    inspection (GitHub issue #421).
     """
     state = load_state()
-    session_ids = {
-        s.id
+    target_sessions = [
+        s
         for s in state.sessions
         if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
-    }
-    return _revert_running_tasks_for_sessions(session_ids)
+    ]
+    session_ids = {s.id for s in target_sessions}
+    # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
+    # _revert_running_tasks_for_sessions docstring).
+    dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
+    return _revert_running_tasks_for_sessions(session_ids, dirty_session_ids)
 
 
 def revert_completed_silent_tasks() -> list[str]:
@@ -1799,11 +1874,19 @@ def revert_completed_silent_tasks() -> list[str]:
     without reverting their dev-queue task (e.g. the session wrote COMPLETED
     status but the dispatch consumer had not yet processed it). Returns the
     list of ticket IDs reverted.
+
+    Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
+    PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
+    inspection (GitHub issue #421).
     """
     state = load_state()
-    session_ids = {
-        s.id
+    target_sessions = [
+        s
         for s in state.sessions
         if s.status == SessionStatus.COMPLETED and s.origin is SessionOrigin.DAEMON
-    }
-    return _revert_running_tasks_for_sessions(session_ids)
+    ]
+    session_ids = {s.id for s in target_sessions}
+    # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
+    # _revert_running_tasks_for_sessions docstring).
+    dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
+    return _revert_running_tasks_for_sessions(session_ids, dirty_session_ids)

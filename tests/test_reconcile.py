@@ -4951,17 +4951,12 @@ def test_dirty_phantom_task_not_re_claimable(
     assert updated_task.status == QueueItemStatus.BLOCKED_ON_USER
 
 
-def test_phantom_reverted_event_carries_queue_status(
+def test_phantom_reverted_event_carries_queue_status_blocked(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SESSION_PHANTOM_REVERTED event payload includes queue_status field.
-
-    dirty worktree → queue_status='blocked_on_user'
-    clean worktree → queue_status='pending'
-    """
-    # --- dirty case ---
+    """SESSION_PHANTOM_REVERTED event includes queue_status='blocked_on_user' for dirty."""
     wt_dirty = tmp_path / "wt-qs-dirty"
     sess_d = _mk_session("phantom-qs-d", "dead-qs-d")
     sess_d.origin = SessionOrigin.DAEMON
@@ -4999,7 +4994,13 @@ def test_phantom_reverted_event_carries_queue_status(
     assert len(events) == 1
     assert events[0].payload["queue_status"] == "blocked_on_user"
 
-    # --- clean case ---
+
+def test_phantom_reverted_event_carries_queue_status_pending(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SESSION_PHANTOM_REVERTED event includes queue_status='pending' for clean."""
     wt_clean = tmp_path / "wt-qs-clean"
     sess_c = _mk_session("phantom-qs-c", "dead-qs-c")
     sess_c.origin = SessionOrigin.DAEMON
@@ -5018,7 +5019,15 @@ def test_phantom_reverted_event_carries_queue_status(
             ]
         )
     )
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
     monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSC")
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
     monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
     reconcile()
 
