@@ -110,7 +110,32 @@ leg. #313's schemas are the contract source.
 - **#506 split** — if the `wait` stale-record observation isn't fixed inside
   #506, file it separately; #507's requeue-in-place is the structural fix.
 
-## Decisions made this session
+## Pre-flight risks from milestone 1.0 (checked 2026-06-10)
+
+Nine 1.0 issues remain open. None blocks writing the sprint code; these
+affect running it through the pipeline:
+
+- **#402 (isolation breach — worker mutated operator MAIN checkout):** fix
+  first, or run all sprint workers in worktree-mode clients and keep the
+  operator checkout hands-off during waves. Data-loss class. (#421,
+  unmilestoned phantom-sweep clobber, is the same risk family.)
+- **#393 (event inbox cursor wedge):** can silently blind wave monitoring;
+  if not fixed, fall back to `/cw-queue-peek` polling rather than trusting
+  the queue channel alone.
+- **#403 (missing claude_session_id on parked workers):** degrades
+  `/cw-validate-result` for stuck workers — expect manual transcript lookup.
+- **Sequencing:** defer #387 (mutate_state rewrite) and #119 (multiplexer
+  removal, heavy cli.py churn) until after the sprint; both collide with
+  files the sprint edits. Sprint code pins to current `_lock()` /
+  `sessions_lock()` idioms.
+- **Version skew:** #465 (unreleased changes since v0.14.2) + #473
+  (install.sh stale cache) mean the installed cw may trail main — verify
+  the local install matches main before wave 1. #473 also intersects the
+  install-wiring work item above.
+- Non-blockers: #120/#162 (release logistics), #220 (mitigated via
+  `worker_model`), #178 (workaround: `cw dev-queue refresh-all` per wave).
+
+
 
 - Sprint anchors on existing tickets rather than new specs (only genuinely
   new verb, `move`, was filed as #507).
