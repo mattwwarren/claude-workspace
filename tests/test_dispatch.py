@@ -630,14 +630,14 @@ class TestConsumeCompletesTasks:
             ticket_id="GEN-WRAP",
             client="test-client",
             status=QueueItemStatus.RUNNING,
-            session_id="wrapper-session",
+            session_id="daemon-session",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
             {
-                "session_id": "wrapper-session",
+                "session_id": "daemon-session",
                 "session_name": "test-client/auto-dev/GEN-WRAP",
                 "client": "test-client",
                 "crashed": False,

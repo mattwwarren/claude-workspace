@@ -12,7 +12,7 @@ Audit of dead code candidates identified after the orchestrator subsystem landed
 | `SessionOrigin.DELEGATE` | `models.py` | **DELETE** | Defined but never used; no callsite sets origin to DELEGATE. |
 | `SessionOrigin.DAEMON` | `models.py` | **DELETE** | Defined but never used; no callsite sets origin to DAEMON. |
 | `SessionPurpose.IDEA` | `models.py` | **KEEP** | In `DEFAULT_AUTO_PURPOSES`; heavily referenced across session, queue, tests. |
-| `wrapper.py` / `cw run-claude` / `cw pane-exited` | `wrapper.py`, `cli.py` | **KEEP** | Active: `session.py:111` embeds `cw run-claude` in Zellij pane commands; `pane-exited` is the fallback signal. Orchestrator-spawned sessions still use this path. |
+| `wrapper.py` / `cw run-claude` / `cw pane-exited` | `wrapper.py`, `cli.py` | **DELETED** | Deleted in #242 — ADR-0000 Phase C complete, native daemon is the only path. |
 | Zellij refs in `session.py`, `cli.py` | `session.py`, `cli.py` | **NOTE (pending #4)** | `session.py` and `cli.py` have extensive Zellij calls. These will become dead once issue #4 replaces `zellij.py`. Do NOT delete now — tracked in #4. |
 | `SessionOrigin.USER` | `models.py` | **KEEP** | Default value for `Session.origin`; the field is live. |
 
@@ -44,14 +44,10 @@ grep 'SessionOrigin' -> only in:
 DELEGATE and DAEMON variants are never referenced anywhere.
 
 ### wrapper.py / run-claude / pane-exited
-```
-grep 'run_claude_wrapper|signal_idle' -> used in:
-  src/cw/cli.py:51 (import)
-  src/cw/cli.py:593 (run_claude command calls run_claude_wrapper)
-  src/cw/cli.py:607 (pane_exited command calls signal_idle)
-  src/cw/session.py:111 (pane command: "cw run-claude ...")
-```
-Live code path.
+
+Deleted in #242 — all references to `run_claude_wrapper`, `signal_idle`, `cw run-claude`,
+and `cw pane-exited` removed from `cli.py` and `session.py`. Native daemon (`claude --bg`)
+is now the only session spawn path.
 
 ## Changes Applied
 

@@ -10,8 +10,7 @@ the daemon and other consumers read from it using cursor-based consumption.
 - **Lock**: `~/.local/share/cw/events/.inbox.lock` — `fcntl` exclusive lock prevents concurrent writes
 
 `EVENTS_DIR` is already defined in `config.py` as `STATE_DIR / "events"`.
-The same directory holds `.idle` signal files used by `wrapper.py`; the new
-`inbox.jsonl` coexists without conflict.
+The `inbox.jsonl` file coexists with any other state in this directory without conflict.
 
 ## Event Model
 
