@@ -2581,8 +2581,8 @@ def schema_list(as_json: bool) -> None:
 @click.option(
     "--format",
     "fmt",
-    type=click.Choice(["json", "tldr"]),
     default="tldr",
+    type=click.Choice(["json", "tldr"]),
     show_default=True,
     help="Output format. 'json' is raw model_json_schema() (no envelope).",
 )
@@ -2590,14 +2590,16 @@ def schema_show(name: str, fmt: str) -> None:
     """Show schema for NAME.
 
     Available schemas: auto-dev-result, ticket-task, session.
-
     --format=json outputs raw model_json_schema() with no cw_version or
-    generated_at envelope. This is intentional (versioned export is a
-    non-goal; output always reflects current code).
+    other envelope.  --format=tldr (default) outputs a compact human-
+    readable field table plus enum tables for Status / Tier fields.
     """
     if name not in REGISTRY:
         available = ", ".join(sorted(REGISTRY))
         msg = f"Unknown schema {name!r}. Available: {available}"
         raise click.UsageError(msg)
     model_cls = REGISTRY[name]
-    click.echo(format_json(model_cls) if fmt == "json" else format_tldr(model_cls))
+    if fmt == "json":
+        click.echo(format_json(model_cls))
+    else:
+        click.echo(format_tldr(model_cls))
