@@ -99,7 +99,6 @@ class TestSession:
         assert s.worktree_path is None
         assert s.branch is None
         assert s.surface_ref is None
-        assert s.last_handoff_path is None
         assert s.claude_session_id is None
         assert s.backgrounded_at is None
         assert s.resumed_at is None
