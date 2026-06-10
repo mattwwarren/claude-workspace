@@ -1191,17 +1191,21 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         # `claude --bg` returns at spawn. Normalize to short id for
         # comparison; otherwise reconcile sees every native session as a
         # phantom because UUID != short-id.
+        _agents = _claude_agents_json()
         native_live = {
-            sid[:8]
-            for a in _claude_agents_json()
-            if isinstance(sid := a.get("sessionId"), str)
+            sid[:8] for a in _agents if isinstance(sid := a.get("sessionId"), str)
+        }
+        surface_to_full = {
+            sid[:8]: sid for a in _agents if isinstance(sid := a.get("sessionId"), str)
         }
         daemon_errored = False
     except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
         native_live = set()
+        surface_to_full = {}
         daemon_errored = True
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(reverted_ticket_ids=stalled_reverted), []
+    _backfill_claude_session_ids(state, surface_to_full)
 
     # Snapshot sessions that are already TIMED_OUT before the watchdog sweep,
     # so we can detect which sessions were newly reaped by usage_limit_cutoff.
