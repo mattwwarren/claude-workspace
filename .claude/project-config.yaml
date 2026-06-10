@@ -26,7 +26,7 @@ quality_gates:
   - name: hooks
     command: "uv run pre-commit run --all-files"
   - name: test
-    command: "uv run pytest tests/ -m 'not integration' --cov=cw --cov-report=xml --cov-fail-under=88"
+    command: "uv run --extra mcp pytest tests/ -m 'not integration' --cov=cw --cov-report=xml --cov-fail-under=88"
   - name: test-integration
     command: "uv run pytest tests/ -m integration"
   - name: patch-coverage
