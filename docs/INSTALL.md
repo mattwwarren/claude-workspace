@@ -10,7 +10,6 @@ Install these before installing cw:
 |------|----------|---------|---------|
 | [uv](https://docs.astral.sh/uv/) | Yes | Python package manager | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | [Python 3.13+](https://python.org/) | Yes | Runtime | Via uv: `uv python install 3.13` |
-| [cmux](https://github.com/cmuxio/cmux) (macOS) | Yes on macOS | Terminal multiplexer backend | See cmux install guide |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Yes | AI coding assistant | `npm install -g @anthropic-ai/claude-code` |
 | [peon-ping](https://github.com/PeonPing/peon-ping) | No | Sound notifications when Claude needs attention | `curl -fsSL peonping.com/install \| bash` |
 
@@ -21,8 +20,6 @@ Install these before installing cw:
 uv --version          # >= 0.4.0
 python3 --version     # >= 3.13
 claude --version      # any recent version
-# On macOS, verify cmux is running (its daemon socket exists)
-test -S ~/Library/Application\ Support/cmux/cmux.sock && echo cmux-ok
 peon status           # optional
 ```
 
@@ -144,7 +141,7 @@ _CW_COMPLETE=fish_source cw | source
 cw start my-project
 ```
 
-This launches a multiplexer workspace with panes for each session purpose (impl, idea, debt).
+This spawns background Claude daemon sessions for each session purpose (impl, idea, debt).
 
 ## File Locations
 
@@ -215,13 +212,17 @@ cw requires Python 3.13+. Install it via uv:
 uv python install 3.13
 ```
 
-### Multiplexer not launching
+### Daemon not starting
 
-On macOS, verify cmux is running and its socket is reachable:
+The Claude native daemon starts automatically when `cw` first spawns a worker
+session. Verify liveness via:
 
 ```bash
-test -S ~/Library/Application\ Support/cmux/cmux.sock && echo cmux-ok
+claude agents --json   # lists running background sessions
 ```
+
+If no workers appear after `cw start`, check that the `claude` binary is on
+your `PATH` and the bypass-permissions disclaimer has been accepted.
 
 ### Permission errors on `~/.config/cw/`
 
