@@ -2440,6 +2440,182 @@ class TestCheckWorktreePathsSessions:
         names = [c.name for c in report.checks]
         assert "worktree/summary" in names
 
+    def test_completed_session_missing_worktree_no_warn(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_worktree_paths_sessions
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        missing = tmp_path / "gone-completed"
+        session = Session(
+            id="jjj10",
+            name="client/impl",
+            client="client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.COMPLETED,
+            workspace_path=tmp_path,
+            worktree_path=missing,
+        )
+        results = _check_worktree_paths_sessions(CwState(sessions=[session]))
+        warn_results = [r for r in results if r.warn]
+        assert warn_results == []
+        assert results[-1].name == "worktree/summary"
+
+    def test_timed_out_session_missing_worktree_no_warn(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_worktree_paths_sessions
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        missing = tmp_path / "gone-timed-out"
+        session = Session(
+            id="kkk11",
+            name="client/impl",
+            client="client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.TIMED_OUT,
+            workspace_path=tmp_path,
+            worktree_path=missing,
+        )
+        results = _check_worktree_paths_sessions(CwState(sessions=[session]))
+        warn_results = [r for r in results if r.warn]
+        assert warn_results == []
+        assert results[-1].name == "worktree/summary"
+
+    def test_active_session_missing_worktree_still_warns(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_worktree_paths_sessions
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        missing = tmp_path / "gone-active"
+        session = Session(
+            id="lll12",
+            name="client/impl",
+            client="client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=tmp_path,
+            worktree_path=missing,
+        )
+        results = _check_worktree_paths_sessions(CwState(sessions=[session]))
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert warn_results[0].name == "worktree/lll12"
+
+    def test_mixed_terminal_missing_active_present_no_warn(
+        self, tmp_path: Path
+    ) -> None:
+        from cw.doctor import _check_worktree_paths_sessions
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        present = tmp_path / "present"
+        present.mkdir()
+        missing = tmp_path / "gone"
+        sessions = [
+            Session(
+                id="mmm13",
+                name="client/impl",
+                client="client",
+                purpose=SessionPurpose.IMPL,
+                status=SessionStatus.ACTIVE,
+                workspace_path=tmp_path,
+                worktree_path=present,
+            ),
+            Session(
+                id="nnn14",
+                name="client/idea",
+                client="client",
+                purpose=SessionPurpose.IDEA,
+                status=SessionStatus.COMPLETED,
+                workspace_path=tmp_path,
+                worktree_path=missing,
+            ),
+        ]
+        results = _check_worktree_paths_sessions(CwState(sessions=sessions))
+        warn_results = [r for r in results if r.warn]
+        assert warn_results == []
+
+    def test_mixed_active_missing_and_terminal_missing_only_active_warns(
+        self, tmp_path: Path
+    ) -> None:
+        from cw.doctor import _check_worktree_paths_sessions
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        missing_active = tmp_path / "gone-active"
+        missing_completed = tmp_path / "gone-completed"
+        sessions = [
+            Session(
+                id="ooo15",
+                name="client/impl",
+                client="client",
+                purpose=SessionPurpose.IMPL,
+                status=SessionStatus.ACTIVE,
+                workspace_path=tmp_path,
+                worktree_path=missing_active,
+            ),
+            Session(
+                id="ppp16",
+                name="client/idea",
+                client="client",
+                purpose=SessionPurpose.IDEA,
+                status=SessionStatus.COMPLETED,
+                workspace_path=tmp_path,
+                worktree_path=missing_completed,
+            ),
+        ]
+        results = _check_worktree_paths_sessions(CwState(sessions=sessions))
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert warn_results[0].name == "worktree/ooo15"
+
+    def test_summary_counts_exclude_terminal_missing_from_warn_count(
+        self, tmp_path: Path
+    ) -> None:
+        from cw.doctor import _check_worktree_paths_sessions
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        present = tmp_path / "present"
+        present.mkdir()
+        missing_completed = tmp_path / "gone"
+        sessions = [
+            Session(
+                id="qqq17",
+                name="client/impl",
+                client="client",
+                purpose=SessionPurpose.IMPL,
+                status=SessionStatus.ACTIVE,
+                workspace_path=tmp_path,
+                worktree_path=present,
+            ),
+            Session(
+                id="rrr18",
+                name="client/idea",
+                client="client",
+                purpose=SessionPurpose.IDEA,
+                status=SessionStatus.COMPLETED,
+                workspace_path=tmp_path,
+                worktree_path=missing_completed,
+            ),
+        ]
+        results = _check_worktree_paths_sessions(CwState(sessions=sessions))
+        summary = results[-1]
+        assert "0 missing worktrees" in summary.detail
+
+    def test_format_report_no_warn_for_completed_session(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_worktree_paths_sessions, format_report
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        missing = tmp_path / "gone-completed2"
+        session = Session(
+            id="sss19",
+            name="client/impl",
+            client="client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.COMPLETED,
+            workspace_path=tmp_path,
+            worktree_path=missing,
+        )
+        state = CwState(sessions=[session])
+        results = _check_worktree_paths_sessions(state)
+        report = DoctorReport(version="0.0.0", checks=list(results))
+        rendered = format_report(report)
+        assert "[WARN] worktree/sss19" not in rendered
+
 
 # ---------------------------------------------------------------------------
 # TestCheckLoopHealth
