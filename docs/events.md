@@ -10,8 +10,7 @@ the daemon and other consumers read from it using cursor-based consumption.
 - **Lock**: `~/.local/share/cw/events/.inbox.lock` — `fcntl` exclusive lock prevents concurrent writes
 
 `EVENTS_DIR` is already defined in `config.py` as `STATE_DIR / "events"`.
-The same directory holds `.idle` signal files used by `wrapper.py`; the new
-`inbox.jsonl` coexists without conflict.
+The `inbox.jsonl` file coexists with any other state in this directory without conflict.
 
 ## Event Model
 
@@ -216,17 +215,59 @@ values.
   "ticket_id": "<str>",
   "client": "<str>",
   "worktree_dirty": false,
-  "worktree_path": "<str | null>"
+  "worktree_path": "<str | null>",
+  "queue_status": "pending"
 }
 ```
 **Semantics:** Emitted for each DAEMON-origin session that is reaped as a
 phantom (present in state but no longer backed by a live multiplexer surface)
-and whose owning ticket is reverted to PENDING for retry. `worktree_dirty` is
-`true` when `worktree_has_unsaved_work` reports uncommitted changes in the
-session's worktree — operators should inspect before the next dispatch.
-`worktree_path` is the absolute path to the worktree, or `null` when it cannot
-be resolved. `correlation_id` is the `ticket_id`. NOT emitted for USER-origin
-sessions (those are reaped without task revert).
+and whose owning ticket is reverted to PENDING (clean worktree) or routed to
+BLOCKED_ON_USER (dirty worktree, to preserve work for operator inspection).
+`worktree_dirty` is `true` when `worktree_has_unsaved_work` reports uncommitted
+changes in the session's worktree. `worktree_path` is the absolute path to the
+worktree set on the session at time of reap (populated from `session.worktree_path`,
+which is always set for DAEMON sessions; `session.branch` is always `null` for
+DAEMON sessions and is NOT used for path resolution). `queue_status` is
+`"pending"` when the ticket was re-queued for retry or `"blocked_on_user"` when
+it was parked for operator inspection due to a dirty worktree. `correlation_id`
+is the `ticket_id`. NOT emitted for USER-origin sessions (those are reaped
+without task revert).
+
+### `session.needs_attention`
+
+**Emitter:** `flag_silently_idle_daemon_sessions`, `revert_timed_out_tasks`,
+`revert_completed_silent_tasks`, `_salvage_low_path` in `cw.reconcile`
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "session_name": "<str>",
+  "client": "<str>",
+  "ticket_id": "<str | null>",
+  "claude_session_id": "<str | null>",
+  "paused_status": "<str>",
+  "breadcrumbs": "<str>",
+  "crashed": false
+}
+```
+**Semantics:** Emitted when a session requires human intervention — the
+orchestrator cannot automatically retry or complete it. `paused_status` is an
+open enum; consumers MUST tolerate unknown values. Known values:
+
+- `"silently_idle"` — DAEMON session is still alive but has been idle longer
+  than the watchdog budget without emitting a sentinel. Operator should inspect
+  and either resume or close the session.
+- `"needs_salvage"` — DAEMON session has commits beyond origin/main but no open
+  PR. The orchestrator cannot auto-salvage (e.g. low confidence or salvage
+  already attempted). Operator should review the branch and open a PR or discard.
+- `"dirty_worktree"` — A phantom-reaped, TIMED_OUT, or COMPLETED session's
+  worktree has uncommitted changes. The owning task has been routed to
+  BLOCKED_ON_USER instead of being re-dispatched to avoid clobbering in-flight
+  work. `breadcrumbs` is the absolute path to the worktree. Operator should
+  review, commit or discard the changes, then manually unblock the task.
+
+`correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
+A push notification is fired for each emission (via `fire_push_notification`).
 
 ### `session.salvage_skipped`
 

@@ -120,16 +120,26 @@ def test_incident_419_dispatch_stall_warns(tmp_config_dir: Path) -> None:
 
 def test_incident_421_phantom_dirty_worktree(
     tmp_config_dir: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Replay #421: phantom session with dirty worktree emits phantom_reverted.
+    """Replay #421: phantom dirty worktree routes ticket to BLOCKED_ON_USER.
 
     Incident: a DAEMON session disappeared from the daemon roster while its
     worktree still had uncommitted changes. reconcile() reverted the ticket to
-    PENDING, losing work silently. The session.phantom_reverted event (#459)
-    exposes worktree_dirty so the orchestrator can warn before re-dispatching.
+    PENDING, losing work silently.
+
+    Fix: dirty worktrees are now routed to BLOCKED_ON_USER for operator
+    inspection. The session.phantom_reverted event carries queue_status=
+    'blocked_on_user' so the operator can see the decision.
+
+    Dirtiness is driven through worktree_path (not session.branch, which is
+    always None for DAEMON sessions — the root cause of the original bug).
     """
+    wt_path = tmp_path / "wt-incident-421"
     sess = _make_daemon_session("phantom-421", "TICKET-421", surface_ref="dead-agent")
+    sess.worktree_path = wt_path
+    sess.branch = None  # Confirms the fix doesn't rely on session.branch
     save_state(CwState(sessions=[sess]))
     save_dev_queue(
         DevQueueStore(
@@ -148,7 +158,16 @@ def test_incident_421_phantom_dirty_worktree(
         lambda: [{"sessionId": "decoy000"}],
     )
     # Incident #421: worktree was dirty at the time of phantom revert.
-    monkeypatch.setattr("cw.reconcile._compute_worktree_dirty", lambda *_: True)
+    # Drive dirtiness through worktree_path (not session.branch).
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch",
+        lambda _p: "auto-dev/TICKET-421",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
 
     reconcile()
 
@@ -161,7 +180,19 @@ def test_incident_421_phantom_dirty_worktree(
     assert payload["session_id"] == "phantom-421"
     assert payload["ticket_id"] == "TICKET-421"
     assert payload["worktree_dirty"] is True
+    assert payload["queue_status"] == "blocked_on_user"
     assert events[0].correlation_id == "TICKET-421"
+
+    # The ticket must be BLOCKED_ON_USER, preserving the worktree for operator
+    # inspection instead of silently re-dispatching and clobbering the work.
+    from cw.dev_queue import load_dev_queue
+
+    queue = load_dev_queue()
+    task = next(t for t in queue.tasks if t.ticket_id == "TICKET-421")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        f"Expected BLOCKED_ON_USER, got {task.status} — "
+        "dirty worktree was silently clobbered"
+    )
 
 
 # ---------------------------------------------------------------------------

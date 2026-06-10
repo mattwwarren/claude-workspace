@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import sys
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, get_args
@@ -28,7 +29,6 @@ from cw.auto_dev_result import (
     extract_block,
     parse_stdout,
 )
-from cw.cmux import MultiplexerAdapter, get_cmux_adapter
 from cw.config import (
     get_client,
     init_client,
@@ -105,10 +105,9 @@ from cw.spawn import spawn_create_impl
 from cw.tui import DetailLevel, watch_flat
 from cw.tui import watch as tui_watch
 from cw.worktree import fast_forward_main
-from cw.wrapper import run_claude_wrapper, signal_idle
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 
 def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
@@ -333,38 +332,33 @@ def config() -> None:
 def doctor(reap: bool, as_json: bool) -> None:
     """Run environment preflight checks and print a health report.
 
-    Reports the resolved backend, backend binary/daemon availability,
-    config file locations and validity, and state file parseability.
+    Reports daemon health, session count, and connectivity status.
+    Also checks config file locations and validity, and state file parseability.
     Exits non-zero if any check fails.
 
     With ``--reap``, also detects and repairs the following wedge conditions:
 
     \b
-    Class 1 — wedge/pane-idle-but-active
-      Session pane shows an idle shell with no recent worktree activity.
-      Action: mark session COMPLETED, close pane, revert queue task to PENDING.
-      Recipe: cw doctor --reap
-
-    \b
-    Class 2 — wedge/task-running-no-session
+    wedge/task-running-no-session
       Queue task is RUNNING but has no associated live session.
       Action: revert queue task to PENDING.
       Recipe: cw doctor --reap
 
     \b
-    Class 3 — wedge/task-running-completed-session
+    wedge/task-running-completed-session
       Queue task is RUNNING but its session is already COMPLETED.
       Action: revert queue task to PENDING.
       Recipe: cw doctor --reap
 
     \b
-    Class 4 — wedge/repo-ahead-of-queue (advisory only)
+    wedge/repo-ahead-of-queue (advisory only)
       Branch is pushed to remote but queue task is still RUNNING.
       No automatic mutation — inspect and resolve manually.
       Recipe: cw spawn-complete <ticket_id> [--status shipped]
 
-    ``--reap`` also reconciles session state with the live multiplexer,
-    marking phantom sessions COMPLETED and reverting their tickets to PENDING.
+    ``--reap`` also reconciles session state against the native daemon
+    roster, marking phantom sessions COMPLETED and reverting their tickets
+    to PENDING.
     """
     report = run_doctor(reap=reap)
     if as_json:
@@ -929,23 +923,6 @@ def event_tail(
         click.echo(f"Cursor advanced to: {events[-1].id}", err=True)
 
 
-@main.command(name="run-claude")
-@click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
-@handle_errors
-def run_claude(extra_args: tuple[str, ...]) -> None:
-    """Wrapper around Claude that signals IDLE on exit.
-
-    Used as the pane command in the multiplexer workspace. After Claude
-    exits, transitions the session to IDLE and waits for daemon triggers.
-
-    \b
-    Examples:
-      cw run-claude -- --resume
-      cw run-claude -- --resume --append-system-prompt "..."
-    """
-    run_claude_wrapper(extra_args)
-
-
 # Max dispatch attempts before a validation_failed sentinel caps the task as
 # FAILED rather than reverting to PENDING. See issue #251 Bug B.
 _VALIDATION_FAILED_MAX_ATTEMPTS = 3
@@ -1073,14 +1050,30 @@ def _parse_sentinel_from_transcript(
     framing was present but the inner payload was unusable (§6 failure modes).
 
     Used by ``signal_stop`` for headless DAEMON sessions, whose result must
-    be captured here because they bypass the cw wrapper entirely. See GitHub
-    issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
+    be captured here because they bypass session lifecycle tracking entirely.
+    See GitHub issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
     """
     if not claude_session_id:
         return None
     transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
+    for text in _iter_assistant_text_blocks(transcript_path):
+        if extract_block(text) is not None:
+            return parse_stdout(text)
+    return None
+
+
+def _iter_assistant_text_blocks(transcript_path: Path) -> Iterator[str]:
+    """Yield each assistant text block from a Claude transcript JSONL file.
+
+    The transcript stores one event per line; ``assistant`` events carry
+    ``message.content`` blocks whose ``text`` fields hold the model output,
+    JSON-escaped (real newlines restored by ``json.loads``). Blocks are
+    yielded in file order. A missing file, an I/O error, or a malformed
+    line/record yields nothing rather than raising — callers treat an empty
+    iteration as "no output available".
+    """
     if not transcript_path.is_file():
-        return None
+        return
     try:
         with transcript_path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -1100,11 +1093,10 @@ def _parse_sentinel_from_transcript(
                     if not isinstance(block, dict) or block.get("type") != "text":
                         continue
                     text = block.get("text")
-                    if isinstance(text, str) and extract_block(text) is not None:
-                        return parse_stdout(text)
+                    if isinstance(text, str):
+                        yield text
     except OSError:
-        return None
-    return None
+        return
 
 
 def _sentinel_present_in_transcript(
@@ -1351,11 +1343,10 @@ def signal_stop() -> None:
         session.completed_reason = CompletionReason.NORMAL
         if isinstance(claude_session_id, str):
             session.claude_session_id = claude_session_id
-        # Issue #225: headless DAEMON sessions bypass the cw wrapper, so
-        # signal_completed (wrapper.py) never runs and last_result stayed None.
-        # Capture the parsed sentinel here before save_state so downstream
-        # consumers (consume_completed_sessions, /cw-followup) can route by
-        # status. parse_stdout returns BlockedResult on malformed payloads — we
+        # Issue #225: headless DAEMON sessions set last_result via signal_stop,
+        # which parses the transcript before save_state so downstream consumers
+        # (consume_completed_sessions, /cw-followup) can route by status.
+        # parse_stdout returns BlockedResult on malformed payloads — we
         # persist either shape; both serialize to a dict with a "status" field.
         if parsed_sentinel is not None:
             session.last_result = parsed_sentinel.model_dump(mode="json")
@@ -1380,21 +1371,6 @@ def signal_stop() -> None:
     # missing-binary / timeout errors rather than failing the hook.
     if session.origin is SessionOrigin.DAEMON and session.surface_ref is not None:
         get_native_daemon_client().stop(session.surface_ref)
-
-
-@main.command(name="pane-exited")
-@click.option("--client", "-c", required=True, help="Client name.")
-@click.option("--purpose", "-p", required=True, help="Session purpose.")
-@click.option("--exit-code", type=int, default=0, help="Claude exit code.")
-@handle_errors
-def pane_exited(client: str, purpose: str, exit_code: int) -> None:
-    """Explicitly signal that Claude exited in a pane.
-
-    Fallback for cases where the wrapper isn't running. Transitions
-    the session to IDLE.
-    """
-    signal_idle(client, purpose, exit_code=exit_code)
-    click.echo(f"Signaled IDLE for {client}/{purpose} (exit code {exit_code}).")
 
 
 @main.command(name="daemon")
@@ -1724,7 +1700,7 @@ def _run_plan_impl(
     "-c",
     required=True,
     shell_complete=_complete_client,
-    help="Client whose cmux workspace will host the planner session.",
+    help="Client whose workspace will host the planner session.",
 )
 @click.option(
     "--timeout",
@@ -2441,12 +2417,20 @@ def _peek_session(
     *,
     lines: int,
     scrollback: int,
-    adapter: MultiplexerAdapter | None = None,
 ) -> None:
     """Emit the last *lines* lines of worker output for *session_name*.
 
+    Worker output is read from the session's Claude transcript
+    (``~/.claude/projects/<encoded-cwd>/<claude_session_id>.jsonl``) rather
+    than a multiplexer pane — dispatched workers run under the native daemon
+    with no pane to scrape (see #504). Only assistant text blocks are
+    surfaced; *scrollback* bounds how many trailing transcript output lines
+    are considered before tailing the last *lines* of them. ``scrollback=0``
+    means "no limit" — keep every output line.
+
     Raises :exc:`cw.exceptions.CwError` when the session is not found,
-    is already completed, or its surface is no longer live.
+    is already completed, has no recorded Claude session id, or has no
+    readable transcript.
     """
     state = load_state()
     session = state.find_by_name_or_id(session_name)
@@ -2456,33 +2440,40 @@ def _peek_session(
     if session.status == SessionStatus.COMPLETED:
         msg = (
             f"Session '{session_name}' is completed (status: completed)."
-            " Its surface is no longer available."
-        )
-        raise CwError(msg)
-    if session.surface_ref is None:
-        msg = f"Session '{session_name}' has no surface reference recorded."
-        raise CwError(msg)
-    _adapter = adapter or get_cmux_adapter()
-    live = _adapter.list_surfaces()
-    if session.surface_ref not in live:
-        msg = (
-            f"Surface '{session.surface_ref}' for session '{session_name}' is gone."
-            f" Run 'cw post-mortem {session.id}' for the full transcript"
+            f" Run 'cw post-mortem {session.id}' for its transcript"
             " once that command is available."
         )
         raise CwError(msg)
-    content = _adapter.capture_surface(
-        session.surface_ref, lines=lines, scrollback=scrollback
-    )
-    stripped = content.strip()
-    actual_lines = len(content.splitlines()) if stripped else 0
-    if actual_lines < lines and stripped:
+    if session.claude_session_id is None:
+        msg = f"Session '{session_name}' has no Claude session id recorded."
+        raise CwError(msg)
+    cwd = session.worktree_path or session.workspace_path
+    transcript_path = claude_project_dir(cwd) / f"{session.claude_session_id}.jsonl"
+    if not transcript_path.is_file():
+        msg = (
+            f"Transcript for session '{session_name}' not found at"
+            f" {transcript_path}. Run 'cw post-mortem {session.id}' for the full"
+            " transcript once that command is available."
+        )
+        raise CwError(msg)
+    # Bound peak memory to the scrollback window: a long-running session's
+    # transcript can be many MB, but peek only ever shows the tail. The
+    # deque drops older lines as it fills (maxlen=None keeps everything).
+    window: deque[str] = deque(maxlen=scrollback or None)
+    for text in _iter_assistant_text_blocks(transcript_path):
+        window.extend(text.splitlines())
+    content = "\n".join(list(window)[-lines:])
+    if len(window) < lines and content.strip():
         click.echo(
-            f"Warning: fewer than {lines} lines available in scrollback"
-            f" (got {actual_lines}).",
+            f"Warning: fewer than {lines} lines available in transcript"
+            f" (got {len(window)}).",
             err=True,
         )
-    click.echo(content, nl=False)
+    # Why: content is newline-joined with no trailing newline; click.echo
+    # adds exactly one, matching terminal output convention (the old pane
+    # path used nl=False because the adapter returned raw, newline-framed
+    # scrollback).
+    click.echo(content)
 
 
 @main.command()

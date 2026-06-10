@@ -105,12 +105,20 @@ def _claim_next_pending(
                         task.attempts += 1
                         save_dev_queue(store)
                         return task
-        for task in store.tasks:
-            if task.client == client_name and task.status == QueueItemStatus.PENDING:
-                task.status = QueueItemStatus.RUNNING
-                task.attempts += 1
-                save_dev_queue(store)
-                return task
+        pending = sorted(
+            [
+                t
+                for t in store.tasks
+                if t.client == client_name and t.status == QueueItemStatus.PENDING
+            ],
+            key=lambda t: (-t.priority, t.created_at),
+        )
+        if pending:
+            task = pending[0]
+            task.status = QueueItemStatus.RUNNING
+            task.attempts += 1
+            save_dev_queue(store)
+            return task
     return None
 
 
@@ -523,9 +531,9 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
     """Add the session's cost_usd to task.total_cost_usd, if available.
 
     Reads cost via two-source fallback:
-      1. session.cost_usd (populated by signal_completed — normal headless path)
+      1. session.cost_usd (populated by signal_stop — normal headless path)
       2. session.last_result.get('cost_usd') (populated by persist_last_result —
-         event-replay path where signal_completed did not run)
+         event-replay path where signal_stop did not run)
 
     When both sources are absent, total_cost_usd is left unchanged.
     Called inside dev_queue_lock so the mutation is covered by the same

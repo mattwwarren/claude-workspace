@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.cmux import FakeCmuxAdapter
 from cw.models import ClientConfig, CwState, Session, SessionPurpose, SessionStatus
 from cw.native_daemon import FakeNativeDaemonClient
 
@@ -151,12 +150,6 @@ def sample_state(sample_client: ClientConfig) -> CwState:
             ),
         ]
     )
-
-
-@pytest.fixture
-def mock_cmux_adapter() -> FakeCmuxAdapter:
-    """A FakeCmuxAdapter for testing session operations."""
-    return FakeCmuxAdapter()
 
 
 @pytest.fixture

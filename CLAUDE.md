@@ -17,8 +17,7 @@ Multi-session workspace orchestrator for Claude Code.
   - `queue.py` - Task queue for inter-session messaging
   - `session.py` - Session lifecycle (start, bg, resume)
   - `worktree.py` - Git worktree management for parallel work
-  - `wrapper.py` - Claude wrapper for IDLE signaling
-  - `cmux.py` - Multiplexer adapter protocol + cmux implementation
+  - `native_daemon.py` - Native `claude --bg` daemon client and protocol
 - `config/` - Example configuration files
 - `tests/` - Test suite
 
@@ -43,7 +42,7 @@ uv run ruff check src/ tests/                                    # 1. Lint
 uv run ruff format --check src/ tests/                           # 2. Format
 uv run mypy --strict src/                                        # 3. Type check
 uv run pre-commit run --all-files                                # 4. Hooks
-uv run pytest tests/ -m 'not integration' \
+uv run --extra mcp pytest tests/ -m 'not integration' \
   --cov=cw --cov-report=xml --cov-fail-under=88                  # 5. Unit + total cov ≥88%
 uv run pytest tests/ -m integration                              # 6. tmux integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
@@ -64,16 +63,16 @@ Report format: Only actionable problems. Zero praise, zero summaries.
 
 ## Testing
 
-541 tests across 21 test files (see `tests/`). Test files map one-to-one
-onto source modules (`test_cli.py` ↔ `cli.py`, `test_cmux.py` ↔
-`cmux.py`, etc.).
+Tests across test files (see `tests/`). Test files map one-to-one
+onto source modules (`test_cli.py` ↔ `cli.py`, `test_native_daemon.py` ↔
+`native_daemon.py`, etc.).
 
 **Patterns:**
 - Isolation: the autouse `tmp_config_dir` fixture in `conftest.py` patches
   every `cw.config.*` path at module load; consumers read paths through
   accessor functions so no per-test module-local patching is needed
-- Mock `cw.cmux.FakeCmuxAdapter` via the `mock_cmux_adapter` fixture for
-  session tests
+- Mock `cw.native_daemon.FakeNativeDaemonClient` via the `mock_native_daemon`
+  fixture for daemon-origin spawn and reconcile tests
 - Use `freezegun` for time-dependent assertions
 - Use Click's `CliRunner` for CLI tests
 - File-based locking for concurrent session state access
@@ -112,7 +111,7 @@ Completions provide:
 ### Full session lifecycle
 
 ```bash
-# Start a new session (launches a multiplexer surface with impl/idea/debt panes)
+# Start a new session (spawns Claude daemon workers for impl/idea/debt)
 cw start my-client
 
 # Background when done (triggers /session-done, waits for handoff)
@@ -142,10 +141,10 @@ cw list
 
 ## Architecture Decisions
 
-- **Keystroke injection**: `cw bg` injects `/session-done` into multiplexer panes. Fragile but zero-coupling to Claude Code internals.
+- **Keystroke injection**: `cw bg` injects `/session-done` into active Claude sessions. Fragile but zero-coupling to Claude Code internals.
 - **Flat JSON state**: Simple, human-readable. Single-user tool.
-- **Pluggable backend**: Multiplexer adapters implement a small protocol (`spawn`, `close`, `identify`, `list_surfaces`). Backends: cmux (macOS default), tmux (Linux/other default, since 0.6.0), fake (for tests/CI). Selection via `CW_BACKEND` env → `orchestrator.yaml` `backend:` → platform default.
-- **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms — sessions in state but no longer backed by a live multiplexer surface — and reap them (DAEMON-origin tickets revert RUNNING → PENDING for retry). A transient-outage guard prevents mass-reaping when the adapter returns zero surfaces while state has many. Explicit force via `cw doctor --reap`. No background daemon needed.
+- **Native daemon backend**: Workers are spawned via `claude --bg` and tracked by short hex session id in `~/.claude/daemon/roster.json`. No multiplexer required.
+- **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms — sessions in state but no longer in the daemon roster — and reap them (DAEMON-origin tickets revert RUNNING → PENDING for retry). Explicit force via `cw doctor --reap`. No background daemon needed.
 - **File-based locking**: Prevents concurrent state corruption from parallel session operations.
 - **Event history**: Audit trail for session lifecycle transitions.
 

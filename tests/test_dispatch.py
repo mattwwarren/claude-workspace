@@ -611,18 +611,18 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
 
-    def test_consume_completes_wrapper_emitted_event_shape(
+    def test_consume_completes_extended_event_shape(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """The full event payload emitted by wrapper.signal_completed completes.
+        """SESSION_COMPLETED with extra fields (status, session_name) completes.
 
-        Issue #99: the wrapper emits SESSION_COMPLETED with crashed=False
+        Issue #99: signal_stop emits SESSION_COMPLETED with crashed=False
         plus ``status`` (the parsed auto-dev outcome) and ``session_name``.
         The consumer must treat this exactly like a legacy non-crashed event
-        — the new fields are forward-compatible metadata, not behavior.
+        — the extra fields are forward-compatible metadata, not behavior.
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -630,14 +630,14 @@ class TestConsumeCompletesTasks:
             ticket_id="GEN-WRAP",
             client="test-client",
             status=QueueItemStatus.RUNNING,
-            session_id="wrapper-session",
+            session_id="daemon-session",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
             {
-                "session_id": "wrapper-session",
+                "session_id": "daemon-session",
                 "session_name": "test-client/auto-dev/GEN-WRAP",
                 "client": "test-client",
                 "crashed": False,
@@ -658,7 +658,7 @@ class TestConsumeCompletesTasks:
     ) -> None:
         """SESSION_COMPLETED with paused last_result routes task to BLOCKED_ON_USER.
 
-        When a wrapper-path session ends with a paused sentinel
+        When a session ends with a paused sentinel
         (premises_pending_verification or ambiguities_pending_resolution),
         the task must become BLOCKED_ON_USER, not COMPLETED. See #489.
         """
@@ -1822,6 +1822,135 @@ class TestClaimNextPendingAttempts:
         claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-cumulative")
         assert claimed.status == QueueItemStatus.RUNNING
         assert claimed.attempts == 3
+
+
+# ---------------------------------------------------------------------------
+# TestClaimNextPendingPriority
+# ---------------------------------------------------------------------------
+
+
+class TestClaimNextPendingPriority:
+    """_claim_next_pending respects priority field (highest claimed first).
+
+    Regression for GitHub issue #506: the fallback FIFO loop ignored the
+    priority field.  Tasks with higher priority must be claimed before
+    lower-priority tasks, regardless of enqueue order.
+    """
+
+    def test_high_priority_claimed_before_low_priority(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """High-priority task enqueued after low-priority is claimed first."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Enqueue low-priority first, high-priority second
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-LOW",
+                client="test-client",
+                priority=0,
+                created_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-HIGH",
+                client="test-client",
+                priority=10,
+                created_at=datetime.fromisoformat("2026-01-01T00:01:00+00:00"),
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        store = load_dev_queue()
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].ticket_id == "GEN-HIGH"
+
+    def test_equal_priority_fifo_order(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Equal-priority tasks are claimed in FIFO (oldest created_at first)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Enqueue in order: earlier created_at first, later second
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-FIRST",
+                client="test-client",
+                priority=5,
+                created_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-SECOND",
+                client="test-client",
+                priority=5,
+                created_at=datetime.fromisoformat("2026-01-01T00:01:00+00:00"),
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        store = load_dev_queue()
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].ticket_id == "GEN-FIRST"
+
+    def test_priority_without_use_plan(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        cap2_config: OrchestratorConfig,
+    ) -> None:
+        """Priority respected in fallback loop even when use_plan=False."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # FIFO backlog: two low-priority tasks enqueued first
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-BACKLOG-A",
+                client="test-client",
+                priority=0,
+                created_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-BACKLOG-B",
+                client="test-client",
+                priority=0,
+                created_at=datetime.fromisoformat("2026-01-01T00:01:00+00:00"),
+            )
+        )
+        # High-priority task added last
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-URGENT",
+                client="test-client",
+                priority=10,
+                created_at=datetime.fromisoformat("2026-01-01T00:02:00+00:00"),
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        # cap=2 => two claims; URGENT (p=10) + BACKLOG-A (p=0, earlier)
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon).spawned
+        assert spawned == 2
+
+        store = load_dev_queue()
+        running_ids = sorted(t.ticket_id for t in store.running())
+        assert running_ids == ["GEN-BACKLOG-A", "GEN-URGENT"]
 
 
 # ---------------------------------------------------------------------------

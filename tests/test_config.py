@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.config import (
+    _backup_state_file,
     ensure_config,
     get_client,
     init_client,
@@ -593,13 +594,18 @@ class TestMigrateCwState:
         assert state.schema_version == CW_STATE_SCHEMA_VERSION
 
     def test_rename_zellij_pane_to_surface_ref(self) -> None:
+        # Zellij pane IDs ("0:1.0") are non-hex → cleared to None by the v5
+        # migration that runs on files below schema_version 5. The rename step
+        # still fires (zellij_pane is removed) but the subsequent non-hex
+        # cleaner nulls out the legacy value.
         raw = {"sessions": [{"id": "s1", "zellij_pane": "0:1.0"}]}
         migrated = migrate_cw_state(raw)
         session = migrated["sessions"][0]
-        assert session["surface_ref"] == "0:1.0"
+        assert session["surface_ref"] is None
         assert "zellij_pane" not in session
 
     def test_drop_zellij_pane_when_surface_ref_already_set(self) -> None:
+        # "fresh" is non-hex so it's also cleared by the v5 migration pass.
         raw = {
             "sessions": [
                 {"id": "s1", "zellij_pane": "stale", "surface_ref": "fresh"},
@@ -607,7 +613,7 @@ class TestMigrateCwState:
         }
         migrated = migrate_cw_state(raw)
         session = migrated["sessions"][0]
-        assert session["surface_ref"] == "fresh"
+        assert session["surface_ref"] is None
         assert "zellij_pane" not in session
 
     def test_drop_zellij_tab_unconditionally(self) -> None:
@@ -692,8 +698,9 @@ class TestMigrateCwState:
         }
         migrated = migrate_cw_state(raw)
         session = migrated["sessions"][0]
-        # Zellij armor ran
-        assert session["surface_ref"] == "0:1.0"
+        # Zellij armor ran (rename happened, but "0:1.0" is non-hex so v5
+        # cleaner nulls it out)
+        assert session["surface_ref"] is None
         assert "zellij_pane" not in session
         # Linkage fields filled
         assert session["parent_session_id"] is None
@@ -792,6 +799,166 @@ class TestMigrateCwState:
         session = migrated["sessions"][0]
         assert session["cost_usd"] == 1.5
         assert session["cost_breakdown"] == {"claude-sonnet-4-6": 1.5}
+
+    # -----------------------------------------------------------------------
+    # Phase F: cmux surface_ref migration tests (schema v5)
+    # -----------------------------------------------------------------------
+
+    def test_migrate_clears_non_hex_surface_ref(self) -> None:
+        """surface_ref like 'ws:0.1' (legacy cmux pane ID) should be cleared."""
+        raw = {
+            "schema_version": 4,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "surface_ref": "ws:0.1",
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["surface_ref"] is None
+
+    def test_migrate_preserves_valid_hex_surface_ref(self) -> None:
+        """surface_ref like 'a1b2c3d4' (8-char hex) should be left unchanged."""
+        raw = {
+            "schema_version": 4,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "surface_ref": "a1b2c3d4",
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["surface_ref"] == "a1b2c3d4"
+
+    def test_migrate_preserves_none_surface_ref(self) -> None:
+        """surface_ref of None should be left as None."""
+        raw = {
+            "schema_version": 4,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "surface_ref": None,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        assert migrated["sessions"][0]["surface_ref"] is None
+
+    def test_migrate_bumps_schema_version_to_five(self) -> None:
+        """After migration, schema_version must equal 5."""
+        raw: dict[str, object] = {
+            "schema_version": 4,
+            "sessions": [],
+        }
+        migrated = migrate_cw_state(raw)
+        assert migrated["schema_version"] == 5
+
+    def test_migrate_round_trip_clears_legacy_surface_ref(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Round-trip: write v4 state with legacy surface_ref, load_state(),
+        assert the loaded session's surface_ref is None."""
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = state_dir / "sessions.json"
+        import json
+
+        sf.write_text(
+            json.dumps(
+                {
+                    "schema_version": 4,
+                    "sessions": [
+                        {
+                            "id": "roundtrip",
+                            "name": "c/impl",
+                            "client": "c",
+                            "purpose": "impl",
+                            "workspace_path": str(state_dir),
+                            "surface_ref": "fake-pane-1",
+                        }
+                    ],
+                }
+            )
+        )
+        loaded = load_state()
+        assert len(loaded.sessions) == 1
+        assert loaded.sessions[0].surface_ref is None
+
+    def test_backup_created_with_original_content(self, tmp_config_dir: Path) -> None:
+        """_backup_state_file() creates .sessions.json.0.x-backup with
+        the original pre-migration content."""
+        import json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = state_dir / "sessions.json"
+        original = {
+            "schema_version": 4,
+            "sessions": [{"id": "orig", "surface_ref": "ws:0.2"}],
+        }
+        sf.write_text(json.dumps(original))
+
+        _backup_state_file(original)
+
+        backup = state_dir / ".sessions.json.0.x-backup"
+        assert backup.exists()
+        content = json.loads(backup.read_text())
+        assert content["schema_version"] == 4
+        assert content["sessions"][0]["surface_ref"] == "ws:0.2"
+
+    def test_loaded_state_has_none_surface_ref_and_version_five(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Loaded state after migration has surface_ref=None and schema_version=5."""
+        import json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = state_dir / "sessions.json"
+        sf.write_text(
+            json.dumps(
+                {
+                    "schema_version": 4,
+                    "sessions": [
+                        {
+                            "id": "chk01",
+                            "name": "c/impl",
+                            "client": "c",
+                            "purpose": "impl",
+                            "workspace_path": str(state_dir),
+                            "surface_ref": "cmux-legacy",
+                        }
+                    ],
+                }
+            )
+        )
+        loaded = load_state()
+        assert loaded.schema_version == 5
+        assert loaded.sessions[0].surface_ref is None
+
+    def test_backup_is_idempotent(self, tmp_config_dir: Path) -> None:
+        """Second call to _backup_state_file() does NOT overwrite backup."""
+        import json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = state_dir / "sessions.json"
+        original = {
+            "schema_version": 4,
+            "sessions": [{"id": "idem", "surface_ref": "tmux-pane"}],
+        }
+        sf.write_text(json.dumps(original))
+
+        # First call creates backup
+        _backup_state_file(original)
+        backup = state_dir / ".sessions.json.0.x-backup"
+        first_mtime = backup.stat().st_mtime
+
+        # Overwrite the state file to simulate a post-migration state
+        migrated = {"schema_version": 5, "sessions": []}
+        sf.write_text(json.dumps(migrated))
+
+        # Second call must NOT overwrite the backup (it already exists)
+        _backup_state_file(migrated)
+        assert backup.stat().st_mtime == first_mtime
 
 
 class TestOrchestratorConfigUsageLimitBackoff:

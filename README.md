@@ -27,7 +27,7 @@ See [docs/INSTALL.md](docs/INSTALL.md) for full installation guide.
 # Add your first project
 cw init my-project --path /path/to/repo
 
-# Start working (launches multiplexer surfaces with impl/idea/debt panes)
+# Start working (spawns Claude background daemon sessions)
 cw start my-project
 
 # Background current session (auto-generates handoff context)
@@ -42,10 +42,6 @@ cw status
 
 ## Prerequisites
 
-- A terminal multiplexer backend: [cmux](https://github.com/cmuxio/cmux) on
-  macOS (default) or tmux on Linux / other platforms (default since 0.6.0).
-  Override with `CW_BACKEND=tmux|cmux|fake` or the `backend:` field in
-  `orchestrator.yaml`.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) - AI coding assistant
 - [uv](https://docs.astral.sh/uv/) - Python package manager
 - [peon-ping](https://github.com/PeonPing/peon-ping) - Sound notifications when Claude needs attention (optional)
@@ -55,7 +51,7 @@ cw status
 | Command | Description |
 |---------|-------------|
 | `cw init <name> --path <path>` | Add a new project |
-| `cw start <client>` | Start or resume sessions in the active multiplexer |
+| `cw start <client>` | Start or resume sessions as background daemon workers |
 | `cw bg` | Background current session (triggers handoff) |
 | `cw resume <session>` | Resume a backgrounded session |
 | `cw done <session>` | Mark a session as completed |
@@ -65,8 +61,6 @@ cw status
 | `cw queue list <client>` | View queued items |
 | `cw queue next <client>` | Claim next queued item |
 | `cw config` | Show configuration |
-| `cw run-claude` | Internal: pane command wrapper |
-| `cw pane-exited` | Internal: pane exit handler |
 | `cw completion <shell>` | Show shell completion snippet |
 
 ## Workflow
@@ -86,9 +80,9 @@ The core workflow is: **init** → **start** → **work** → **bg/resume** → 
 ```
 
 1. **`cw init`** registers a project (workspace path, branch, purposes)
-2. **`cw start`** launches a multiplexer workspace with one Claude Code pane per purpose (impl, idea, debt). Each pane runs `cw run-claude` which starts Claude with purpose-specific prompts.
-3. **Work** happens inside each Claude Code pane — implementation, brainstorming, or debt cleanup.
-4. **`cw bg`** backgrounds all panes: injects `/session-done` into each Claude instance, waits for handoff files, then marks sessions as backgrounded.
+2. **`cw start`** spawns Claude background daemon workers — one per purpose (impl, idea, debt) — using `claude --bg` with purpose-specific prompts.
+3. **Work** happens inside each daemon worker — implementation, brainstorming, or debt cleanup.
+4. **`cw bg`** backgrounds all workers: injects `/session-done` into each Claude instance, waits for handoff files, then marks sessions as backgrounded.
 5. **`cw resume`** restarts a session with its handoff context auto-injected, so Claude picks up where it left off.
 6. **`cw done`** marks a session as completed when the work is finished.
 
@@ -117,9 +111,6 @@ Planning Session          Queue              Execution Session
 cw start client-a
 cw start client-b
 
-# Each gets its own multiplexer workspace with separate Claude panes
-# Switch between clients using the multiplexer's navigation
-
 # List all active sessions across clients
 cw list
 ```
@@ -145,10 +136,10 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options.
 
 `cw` manages two things:
 
-1. **Multiplexer layouts** - a workspace per client, panes per purpose (impl, idea, debt)
-2. **Session lifecycle** - start, background (with auto-handoff), and resume Claude Code sessions
+1. **Daemon worker lifecycle** - spawn, background, and resume `claude --bg` workers per purpose (impl, idea, debt)
+2. **Session state** - persist context, track liveness via the daemon roster, and inject handoff context on resume
 
-Claude Code stays native in every terminal pane. `cw` just orchestrates around it.
+`cw` shells out to `claude --bg` to spawn workers and polls `claude agents --json` to track liveness.
 
 ## Shell Completion
 

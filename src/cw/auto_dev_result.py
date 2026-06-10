@@ -315,7 +315,7 @@ _PRE_FLIGHT_BLOCKED_NEXT_ACTIONS: frozenset[str] = frozenset(
 # next_actions prefixes that indicate a blocked session is paused for human
 # input (issue #328). A blocked result carrying only these prefixes is not a
 # terminal-reject shape — it will be re-dispatched once the human acts.
-# Public so wrapper.py can import and reuse the same list without duplicating.
+# Public so other modules can import and reuse the same list without duplicating.
 USER_DIRECTED_PREFIXES: tuple[str, ...] = (
     "user_resolve_",
     "user_decide_",
