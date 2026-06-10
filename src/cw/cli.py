@@ -104,7 +104,6 @@ from cw.spawn import spawn_create_impl
 from cw.tui import DetailLevel, watch_flat
 from cw.tui import watch as tui_watch
 from cw.worktree import fast_forward_main
-from cw.wrapper import run_claude_wrapper, signal_idle
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -923,23 +922,6 @@ def event_tail(
         click.echo(f"Cursor advanced to: {events[-1].id}", err=True)
 
 
-@main.command(name="run-claude")
-@click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
-@handle_errors
-def run_claude(extra_args: tuple[str, ...]) -> None:
-    """Wrapper around Claude that signals IDLE on exit.
-
-    Used as the pane command in the multiplexer workspace. After Claude
-    exits, transitions the session to IDLE and waits for daemon triggers.
-
-    \b
-    Examples:
-      cw run-claude -- --resume
-      cw run-claude -- --resume --append-system-prompt "..."
-    """
-    run_claude_wrapper(extra_args)
-
-
 # Max dispatch attempts before a validation_failed sentinel caps the task as
 # FAILED rather than reverting to PENDING. See issue #251 Bug B.
 _VALIDATION_FAILED_MAX_ATTEMPTS = 3
@@ -1067,8 +1049,8 @@ def _parse_sentinel_from_transcript(
     framing was present but the inner payload was unusable (§6 failure modes).
 
     Used by ``signal_stop`` for headless DAEMON sessions, whose result must
-    be captured here because they bypass the cw wrapper entirely. See GitHub
-    issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
+    be captured here because they bypass session lifecycle tracking entirely.
+    See GitHub issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
     """
     if not claude_session_id:
         return None
@@ -1360,11 +1342,10 @@ def signal_stop() -> None:
         session.completed_reason = CompletionReason.NORMAL
         if isinstance(claude_session_id, str):
             session.claude_session_id = claude_session_id
-        # Issue #225: headless DAEMON sessions bypass the cw wrapper, so
-        # signal_completed (wrapper.py) never runs and last_result stayed None.
-        # Capture the parsed sentinel here before save_state so downstream
-        # consumers (consume_completed_sessions, /cw-followup) can route by
-        # status. parse_stdout returns BlockedResult on malformed payloads — we
+        # Issue #225: headless DAEMON sessions set last_result via signal_stop,
+        # which parses the transcript before save_state so downstream consumers
+        # (consume_completed_sessions, /cw-followup) can route by status.
+        # parse_stdout returns BlockedResult on malformed payloads — we
         # persist either shape; both serialize to a dict with a "status" field.
         if parsed_sentinel is not None:
             session.last_result = parsed_sentinel.model_dump(mode="json")
@@ -1389,21 +1370,6 @@ def signal_stop() -> None:
     # missing-binary / timeout errors rather than failing the hook.
     if session.origin is SessionOrigin.DAEMON and session.surface_ref is not None:
         get_native_daemon_client().stop(session.surface_ref)
-
-
-@main.command(name="pane-exited")
-@click.option("--client", "-c", required=True, help="Client name.")
-@click.option("--purpose", "-p", required=True, help="Session purpose.")
-@click.option("--exit-code", type=int, default=0, help="Claude exit code.")
-@handle_errors
-def pane_exited(client: str, purpose: str, exit_code: int) -> None:
-    """Explicitly signal that Claude exited in a pane.
-
-    Fallback for cases where the wrapper isn't running. Transitions
-    the session to IDLE.
-    """
-    signal_idle(client, purpose, exit_code=exit_code)
-    click.echo(f"Signaled IDLE for {client}/{purpose} (exit code {exit_code}).")
 
 
 @main.command(name="daemon")

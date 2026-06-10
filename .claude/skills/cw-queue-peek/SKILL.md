@@ -152,7 +152,7 @@ between the remove and the close).
 
 - `cw event tail --type session.needs_attention --type session.timed_out` —
   durable exit/attention state for finished or stalled sessions. The bus is
-  emitted automatically by the wrapper (on exit) and reconcile (idle/timeout
+  emitted automatically by reconcile (idle/timeout
   watchdog), so it supersedes a dedicated session-watch skill.
 - `cw-validate-result` — post-mortem sentinel + PR inspection
 - `cw-followup` — react to a finished session's sentinel result

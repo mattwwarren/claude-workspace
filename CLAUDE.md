@@ -17,7 +17,6 @@ Multi-session workspace orchestrator for Claude Code.
   - `queue.py` - Task queue for inter-session messaging
   - `session.py` - Session lifecycle (start, bg, resume)
   - `worktree.py` - Git worktree management for parallel work
-  - `wrapper.py` - Claude wrapper for IDLE signaling
   - `native_daemon.py` - Native `claude --bg` daemon client and protocol
 - `config/` - Example configuration files
 - `tests/` - Test suite

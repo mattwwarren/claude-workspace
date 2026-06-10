@@ -611,18 +611,18 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
 
-    def test_consume_completes_wrapper_emitted_event_shape(
+    def test_consume_completes_extended_event_shape(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """The full event payload emitted by wrapper.signal_completed completes.
+        """SESSION_COMPLETED with extra fields (status, session_name) completes.
 
-        Issue #99: the wrapper emits SESSION_COMPLETED with crashed=False
+        Issue #99: signal_stop emits SESSION_COMPLETED with crashed=False
         plus ``status`` (the parsed auto-dev outcome) and ``session_name``.
         The consumer must treat this exactly like a legacy non-crashed event
-        — the new fields are forward-compatible metadata, not behavior.
+        — the extra fields are forward-compatible metadata, not behavior.
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -630,14 +630,14 @@ class TestConsumeCompletesTasks:
             ticket_id="GEN-WRAP",
             client="test-client",
             status=QueueItemStatus.RUNNING,
-            session_id="wrapper-session",
+            session_id="daemon-session",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
             {
-                "session_id": "wrapper-session",
+                "session_id": "daemon-session",
                 "session_name": "test-client/auto-dev/GEN-WRAP",
                 "client": "test-client",
                 "crashed": False,
@@ -658,7 +658,7 @@ class TestConsumeCompletesTasks:
     ) -> None:
         """SESSION_COMPLETED with paused last_result routes task to BLOCKED_ON_USER.
 
-        When a wrapper-path session ends with a paused sentinel
+        When a session ends with a paused sentinel
         (premises_pending_verification or ambiguities_pending_resolution),
         the task must become BLOCKED_ON_USER, not COMPLETED. See #489.
         """

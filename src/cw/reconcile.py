@@ -438,9 +438,8 @@ def _salvage_terminal_result(
     """Recover a terminal-success AUTO_DEV_RESULT from the session's transcript.
 
     A headless session that emitted a valid sentinel and then stalled (e.g.
-    sitting in ``wait_for_ci``) or crashed never reaches the wrapper's
-    post-exit parse, so its disposition is lost. This recovers it directly
-    from the transcript.
+    sitting in ``wait_for_ci``) or crashed before session lifecycle completion
+    may have its disposition lost. This recovers it directly from the transcript.
 
     Returns ``(result, claude_session_id)`` only when the newest transcript
     in the session's worktree — modified strictly after ``after`` (the session
@@ -623,7 +622,7 @@ def _apply_salvaged_completion(
     *,
     now: datetime,
 ) -> None:
-    """Mark ``session`` COMPLETED from a salvaged sentinel (like signal_completed)."""
+    """Mark ``session`` COMPLETED from a salvaged sentinel (like signal_stop)."""
     session.status = SessionStatus.COMPLETED
     session.completed_at = now
     session.completed_reason = CompletionReason.NORMAL
@@ -955,7 +954,7 @@ def flag_silently_idle_daemon_sessions(
 ) -> tuple[list[str], list[_SalvageCandidate]]:
     """Flag DAEMON RUNNING sessions idle past the watchdog budget with no sentinel.
 
-    These are sessions the wrapper never got a chance to signal — typically
+    These are sessions that stalled without emitting a terminal signal — typically
     because the child process self-backgrounded a subagent and exited before
     the subagent returned (GitHub #105, #121). They appear ACTIVE/IDLE in cw
     state while producing no output.

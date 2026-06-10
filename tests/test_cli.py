@@ -2836,13 +2836,12 @@ _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED = (
 class TestParseSentinelFromTranscript:
     """Tests for _parse_sentinel_from_transcript (GitHub issue #225).
 
-    Headless DAEMON sessions complete via signal_stop, not the cw wrapper.
-    The wrapper's signal_completed is the only path that assigns
-    session.last_result today, so headless sessions emit valid sentinels
-    that the orchestrator never sees. This helper walks the same Claude
-    transcript JSONL the bool checker uses, but on a sentinel hit it
-    returns the parsed AutoDevResult (or BlockedResult for malformed
-    blocks) instead of throwing the parse away.
+    Headless DAEMON sessions complete via signal_stop and assign
+    session.last_result, so their sentinels are captured before the
+    orchestrator sees the SESSION_COMPLETED event. This helper walks
+    the same Claude transcript JSONL the bool checker uses, but on a
+    sentinel hit it returns the parsed AutoDevResult (or BlockedResult
+    for malformed blocks) instead of throwing the parse away.
     """
 
     def _write_transcript(
