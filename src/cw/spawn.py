@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import CwError, HookContextConflictError, WorktreeError
-from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus
+from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus, TicketTask
 from cw.native_daemon import get_native_daemon_client
 
 if TYPE_CHECKING:
@@ -18,6 +19,10 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig
     from cw.native_daemon import NativeDaemonClient
+
+# Schema version for cw-context.json. Increment when the shape changes so
+# workers can detect whether they are reading a context written by an older cw.
+CW_CONTEXT_SCHEMA_VERSION = 1
 
 
 def _validate_worktree(path: Path) -> None:
@@ -75,6 +80,8 @@ def _write_hook_context(
     ticket_id: str | None,
     origin: SessionOrigin,
     headless: bool = False,
+    task: TicketTask | None = None,
+    wall_clock_budget_seconds: int | None = None,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -151,7 +158,8 @@ def _write_hook_context(
         settings_path,
         json.dumps(_HOOK_SETTINGS_TEMPLATE, indent=2) + "\n",
     )
-    context = {
+    context: dict[str, object] = {
+        "schema_version": CW_CONTEXT_SCHEMA_VERSION,
         "session_id": session_id,
         "session_name": session_name,
         "client": client,
@@ -164,6 +172,42 @@ def _write_hook_context(
         # to canonicalize symlinks, matching check_not_main_checkout's compare.
         "worktree_path": str(worktree.resolve()),
     }
+    if task is not None:
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        try:
+            rev = subprocess.run(
+                ["git", "-C", str(worktree), "rev-parse", "origin/main"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=clean_env,
+            )
+            origin_sha: str | None = rev.stdout.strip() or None
+        except (subprocess.CalledProcessError, OSError):
+            origin_sha = None
+
+        context.update(
+            {
+                "attempt": task.attempts,
+                "wall_clock_budget_seconds": wall_clock_budget_seconds,
+                "stage_started_at": datetime.now(UTC).isoformat(),
+                "expected_sentinel_schema_ref": {
+                    "command": "cw schema show auto-dev-result --format=tldr",
+                    "model": "AutoDevResult",
+                    "version": 4,
+                },
+                "queue_metadata": {
+                    "scope_hint": task.scope_hint,
+                    "plan_source": task.plan_source,
+                    "headless_timeout_override": task.headless_timeout_override,
+                },
+                "world_state_snapshot": {
+                    "origin_main_sha_at_spawn": origin_sha,
+                    "origin_main_branch": "main",
+                    "prior_attempts_summary": [],
+                },
+            }
+        )
     atomic_write_text(context_path, json.dumps(context, indent=2) + "\n")
 
 
@@ -179,6 +223,8 @@ def spawn_create_impl(
     headless: bool = False,
     extra_args: list[str] | None = None,
     permission_mode: str | None = None,
+    task: TicketTask | None = None,
+    wall_clock_budget_seconds: int | None = None,
 ) -> str:
     """Create a daemon-spawned session via the native Claude background daemon.
 
@@ -230,6 +276,8 @@ def spawn_create_impl(
         ticket_id=ticket_id,
         origin=SessionOrigin.DAEMON,
         headless=headless,
+        task=task,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
     )
 
     final_extra: list[str] = []
