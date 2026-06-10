@@ -2040,9 +2040,9 @@ Optional keys (some `reason` values require them):
 - `no_op` → `"stage1_pre_flight"`
 - `plan_pending_approval` → `"stage1_plan"`
 - `review_pending_approval` → `"stage3_review"`
-- `merge_gate_blocked` → `"stage4_merge_gate"`
-- `scope_exceeded` / `forbidden_area` → `"stage1_scope"`
-- `blocked` with `blocker.reason: "plan_unreviewable"` or `"plan_unsound"` → `"stage1_plan_review"`
+- `merge_gate_blocked` → `"stage4a_merge_gate"`
+- `scope_exceeded` / `forbidden_area` → whichever stage detected the violation (`"stage1_plan"` at planning, or the impl stage if later); mirror in `blocker.stage`
+- `blocked` with `blocker.reason: "plan_unreviewable"` or `"plan_unsound"` → `"stage1_plan"`
 - `blocked` (other reasons) → whichever stage produced the BLOCK; mirror this in `blocker.stage`.
 
 **`worktree_path`** and **`branch`** — these are two distinct namespaces; do NOT conflate them.
