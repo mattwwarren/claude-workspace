@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import sys
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, get_args
@@ -15,7 +16,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw._util import _tail_lines, claude_project_dir
+from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
@@ -2457,7 +2458,8 @@ def _peek_session(
     than a multiplexer pane — dispatched workers run under the native daemon
     with no pane to scrape (see #504). Only assistant text blocks are
     surfaced; *scrollback* bounds how many trailing transcript output lines
-    are considered before tailing the last *lines* of them.
+    are considered before tailing the last *lines* of them. ``scrollback=0``
+    means "no limit" — keep every output line.
 
     Raises :exc:`cw.exceptions.CwError` when the session is not found,
     is already completed, has no recorded Claude session id, or has no
@@ -2487,17 +2489,23 @@ def _peek_session(
             " transcript once that command is available."
         )
         raise CwError(msg)
-    output_lines: list[str] = []
+    # Bound peak memory to the scrollback window: a long-running session's
+    # transcript can be many MB, but peek only ever shows the tail. The
+    # deque drops older lines as it fills (maxlen=None keeps everything).
+    window: deque[str] = deque(maxlen=scrollback or None)
     for text in _iter_assistant_text_blocks(transcript_path):
-        output_lines.extend(text.splitlines())
-    window = output_lines[-scrollback:] if scrollback else output_lines
-    content = _tail_lines("\n".join(window), lines)
+        window.extend(text.splitlines())
+    content = "\n".join(list(window)[-lines:])
     if len(window) < lines and content.strip():
         click.echo(
             f"Warning: fewer than {lines} lines available in transcript"
             f" (got {len(window)}).",
             err=True,
         )
+    # Why: content is newline-joined with no trailing newline; click.echo
+    # adds exactly one, matching terminal output convention (the old pane
+    # path used nl=False because the adapter returned raw, newline-framed
+    # scrollback).
     click.echo(content)
 
 

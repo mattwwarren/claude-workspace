@@ -3022,6 +3022,41 @@ class TestParseSentinelFromTranscript:
 class TestIterAssistantTextBlocks:
     """Tests for _iter_assistant_text_blocks (shared transcript walker)."""
 
+    def test_yields_assistant_text_skipping_other_records(self, tmp_path: Path) -> None:
+        """Yields assistant text blocks in order, skipping non-assistant and
+        malformed records."""
+        from cw.cli import _iter_assistant_text_blocks
+
+        transcript = tmp_path / "t.jsonl"
+        records = [
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "ignored"}],
+                    },
+                }
+            ),
+            "{ not valid json",
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "first"},
+                            {"type": "tool_use", "name": "noise"},
+                            {"type": "text", "text": "second"},
+                        ],
+                    },
+                }
+            ),
+        ]
+        transcript.write_text("\n".join(records) + "\n")
+
+        assert list(_iter_assistant_text_blocks(transcript)) == ["first", "second"]
+
     def test_missing_file_yields_nothing(self, tmp_path: Path) -> None:
         from cw.cli import _iter_assistant_text_blocks
 
@@ -4647,6 +4682,37 @@ class TestPeek:
         result = runner.invoke(main, ["peek", "--lines", "50", session.name])
         assert result.exit_code == 0
         assert "fewer than" in result.stderr
+        # The available content is still emitted alongside the warning.
+        assert "line1" in result.output
+        assert "line3" in result.output
+
+    def test_peek_transcript_with_no_assistant_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transcript holding only non-assistant records → exit 0, no output.
+
+        No assistant text means nothing to surface; peek succeeds quietly
+        rather than erroring, and emits no warning (empty content).
+        """
+        session = self._make_session(tmp_path)
+        fake_home = tmp_path / "fake-home"
+        cwd = session.worktree_path or session.workspace_path
+        encoded = str(cwd).replace("/", "-").replace(".", "-")
+        transcript_dir = fake_home / ".claude" / "projects" / encoded
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        user_record = {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        }
+        (transcript_dir / f"{session.claude_session_id}.jsonl").write_text(
+            json.dumps(user_record) + "\n"
+        )
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["peek", session.name])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == ""
 
 
 class TestWatchCommand:
