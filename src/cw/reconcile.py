@@ -1835,7 +1835,9 @@ def _build_dirty_session_ids_and_notify(
                 "ticket_id": ticket_id,
                 "claude_session_id": session.claude_session_id,
                 "paused_status": _DIRTY_WORKTREE_REASON,
-                "breadcrumbs": str(session.worktree_path) if session.worktree_path else "",
+                "breadcrumbs": str(session.worktree_path)
+                if session.worktree_path
+                else "",
                 "crashed": False,
             },
         )

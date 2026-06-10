@@ -123,7 +123,7 @@ def test_incident_421_phantom_dirty_worktree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Replay #421: phantom session with dirty worktree routes ticket to BLOCKED_ON_USER.
+    """Replay #421: phantom dirty worktree routes ticket to BLOCKED_ON_USER.
 
     Incident: a DAEMON session disappeared from the daemon roster while its
     worktree still had uncommitted changes. reconcile() reverted the ticket to
@@ -190,7 +190,8 @@ def test_incident_421_phantom_dirty_worktree(
     queue = load_dev_queue()
     task = next(t for t in queue.tasks if t.ticket_id == "TICKET-421")
     assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
-        f"Expected BLOCKED_ON_USER, got {task.status} — dirty worktree was silently clobbered"
+        f"Expected BLOCKED_ON_USER, got {task.status} — "
+        "dirty worktree was silently clobbered"
     )
 
 

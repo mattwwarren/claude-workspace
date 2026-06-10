@@ -4956,7 +4956,7 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SESSION_PHANTOM_REVERTED event includes queue_status='blocked_on_user' for dirty."""
+    """SESSION_PHANTOM_REVERTED event: queue_status='blocked_on_user' for dirty."""
     wt_dirty = tmp_path / "wt-qs-dirty"
     sess_d = _mk_session("phantom-qs-d", "dead-qs-d")
     sess_d.origin = SessionOrigin.DAEMON
@@ -4979,7 +4979,9 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
-    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSD")
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSD"
+    )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
@@ -5023,7 +5025,9 @@ def test_phantom_reverted_event_carries_queue_status_pending(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
-    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSC")
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSC"
+    )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
@@ -5050,7 +5054,7 @@ def _mk_daemon_session_with_worktree(
     wt_path: Path,
 ) -> Session:
     """Build a DAEMON session with worktree_path set, branch=None."""
-    sess = Session(
+    return Session(
         id=sid,
         name=f"client-a/auto-dev/{sid}",
         client="client-a",
@@ -5065,7 +5069,6 @@ def _mk_daemon_session_with_worktree(
         worktree_path=wt_path,
         branch=None,  # Always None on DAEMON sessions
     )
-    return sess
 
 
 def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
@@ -5075,7 +5078,9 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
 ) -> None:
     """TIMED_OUT DAEMON session with dirty worktree routes task to BLOCKED_ON_USER."""
     wt_path = tmp_path / "wt-to-dirty"
-    sess = _mk_daemon_session_with_worktree("to-dirty", SessionStatus.TIMED_OUT, wt_path)
+    sess = _mk_daemon_session_with_worktree(
+        "to-dirty", SessionStatus.TIMED_OUT, wt_path
+    )
     save_state(CwState(sessions=[sess]))
 
     task = TicketTask(
@@ -5086,7 +5091,9 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-dirty")
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-dirty"
+    )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
@@ -5120,7 +5127,9 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
 ) -> None:
     """TIMED_OUT DAEMON session with clean worktree routes task to PENDING."""
     wt_path = tmp_path / "wt-to-clean"
-    sess = _mk_daemon_session_with_worktree("to-clean", SessionStatus.TIMED_OUT, wt_path)
+    sess = _mk_daemon_session_with_worktree(
+        "to-clean", SessionStatus.TIMED_OUT, wt_path
+    )
     save_state(CwState(sessions=[sess]))
 
     task = TicketTask(
@@ -5131,7 +5140,9 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-clean")
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-clean"
+    )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
@@ -5154,7 +5165,9 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
 ) -> None:
     """COMPLETED DAEMON session with dirty worktree routes task to BLOCKED_ON_USER."""
     wt_path = tmp_path / "wt-cs-dirty"
-    sess = _mk_daemon_session_with_worktree("cs-dirty", SessionStatus.COMPLETED, wt_path)
+    sess = _mk_daemon_session_with_worktree(
+        "cs-dirty", SessionStatus.COMPLETED, wt_path
+    )
     save_state(CwState(sessions=[sess]))
 
     task = TicketTask(
@@ -5165,7 +5178,9 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-dirty")
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-dirty"
+    )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
@@ -5188,7 +5203,9 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
 ) -> None:
     """COMPLETED DAEMON session with clean worktree routes task to PENDING."""
     wt_path = tmp_path / "wt-cs-clean"
-    sess = _mk_daemon_session_with_worktree("cs-clean", SessionStatus.COMPLETED, wt_path)
+    sess = _mk_daemon_session_with_worktree(
+        "cs-clean", SessionStatus.COMPLETED, wt_path
+    )
     save_state(CwState(sessions=[sess]))
 
     task = TicketTask(
@@ -5199,7 +5216,9 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    monkeypatch.setattr("cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-clean")
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-clean"
+    )
     monkeypatch.setattr(
         "cw.reconcile.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
