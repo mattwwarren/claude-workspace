@@ -129,8 +129,9 @@ class TestWorktreePathFor:
         result = worktree_path_for(client, "auto-dev/1")
 
         # Must be under the conservative 64-char path-length threshold.
-        assert len(str(result)) <= 64, (
-            f"worktree path length {len(str(result))} exceeds 64-char threshold: {result}"
+        path_len = len(str(result))
+        assert path_len <= 64, (
+            f"path length {path_len} exceeds 64-char threshold: {result}"
         )
         # Must be under the hash-based fallback root, not the sibling default.
         assert str(result).startswith("/home/u/.cw/wt/")

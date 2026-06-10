@@ -879,9 +879,7 @@ class TestMigrateCwState:
         assert len(loaded.sessions) == 1
         assert loaded.sessions[0].surface_ref is None
 
-    def test_backup_created_with_original_content(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_backup_created_with_original_content(self, tmp_config_dir: Path) -> None:
         """_backup_state_file() creates .sessions.json.0.x-backup with
         the original pre-migration content."""
         import json
