@@ -309,12 +309,14 @@ def _backfill_claude_session_ids(
         if (
             session.claude_session_id is None
             and session.surface_ref is not None
-            and session.surface_ref in surface_to_full
             and session.status in _LIVE_STATUSES
             and session.origin is SessionOrigin.DAEMON
         ):
-            session.claude_session_id = surface_to_full[session.surface_ref]
-            count += 1
+            from_agents = surface_to_full.get(session.surface_ref)
+            resolved = from_agents or _csid_from_transcript(session)
+            if resolved is not None:
+                session.claude_session_id = resolved
+                count += 1
     if count:
         _log.debug("Backfilled claude_session_id for %d session(s)", count)
         save_state(state)
@@ -491,6 +493,42 @@ def _session_project_dir(session: Session) -> Path | None:
     if worktree is None:
         return None
     return claude_project_dir(worktree)
+
+
+def _csid_from_transcript(session: Session) -> str | None:
+    """Return claude_session_id from the transcript filename, or None.
+
+    Fallback for _backfill_claude_session_ids when the session is no longer
+    visible in ``claude agents --json``.  The transcript is named
+    ``<project_dir>/<full-csid>.jsonl`` where ``full-csid[:8] == surface_ref``.
+    Picks the newest match by mtime; returns None if mtime <= started_at
+    (reused-worktree stale-transcript guard, mirrors #372 fix).
+    """
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
+        return None
+    try:
+        candidates = sorted(
+            project_dir.glob(f"{session.surface_ref}*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        newest = candidates[0]
+        mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
+        if mtime <= session.started_at:
+            return None
+        csid = newest.stem
+        _log.debug(
+            "Resolved claude_session_id=%s for session %s via transcript fallback",
+            csid,
+            session.id,
+        )
+    except OSError:
+        return None
+    else:
+        return csid
 
 
 def _detect_post_review_clean(session: Session) -> bool:

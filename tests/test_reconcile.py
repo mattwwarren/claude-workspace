@@ -4571,7 +4571,10 @@ def test_backfill_claude_session_id_transcript_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """surface_ref absent from agents map but transcript exists → resolved via transcript."""
+    """surface_ref absent from agents map but transcript exists.
+
+    Resolved via transcript fallback.
+    """
     import os
 
     full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
@@ -4585,8 +4588,12 @@ def test_backfill_claude_session_id_transcript_fallback(
         "tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
     )
     save_state(CwState(sessions=[sess]))
-    # Agents map is empty — session has already exited claude agents
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [])
+    # Agents returns a non-matching session (daemon reachable, but our session exited)
+    # An empty list would trigger the outage guard and abort reconcile entirely.
+    other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+    )
     # Write transcript named <short_id>-<uuid>.jsonl
     tx_path = _write_idle_transcript(
         home, worktree, filename=f"{transcript_stem}.jsonl"
@@ -4651,7 +4658,11 @@ def test_backfill_claude_session_id_no_transcript_fallback(
         "no-tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
     )
     save_state(CwState(sessions=[sess]))
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [])
+    # Non-matching session so outage guard doesn't fire
+    other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+    )
     # Manually create the project dir so it exists but is empty
     encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
@@ -4681,7 +4692,11 @@ def test_backfill_claude_session_id_stale_transcript(
         "stale-tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
     )
     save_state(CwState(sessions=[sess]))
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", lambda: [])
+    # Non-matching session so outage guard doesn't fire
+    other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+    )
     tx_path = _write_idle_transcript(
         home, worktree, filename=f"{transcript_stem}.jsonl"
     )
@@ -4689,9 +4704,7 @@ def test_backfill_claude_session_id_stale_transcript(
     stale_mtime = _BACKFILL_STARTED_AT.timestamp()
     os.utime(tx_path, (stale_mtime, stale_mtime))
     reconcile()
-    reloaded = next(
-        s for s in load_state().sessions if s.id == "stale-tx-fallback-1"
-    )
+    reloaded = next(s for s in load_state().sessions if s.id == "stale-tx-fallback-1")
     assert reloaded.claude_session_id is None
 
 
