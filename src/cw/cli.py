@@ -93,6 +93,7 @@ from cw.queue import (
     remove_item,
 )
 from cw.reconcile import reconcile, resolve_headless_budget, ticket_id_for_session
+from cw.schema import REGISTRY, format_json, format_tldr
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -2562,3 +2563,50 @@ def queue_channel_serve(port: int, host: str) -> None:
     from cw.cw_queue_events_server import serve as _serve  # noqa: PLC0415
 
     _serve(host=host, port=port)
+
+
+# --- Schema command group ---
+
+
+@main.group()
+def schema() -> None:
+    """Inspect Pydantic model schemas for AutoDevResult, TicketTask, Session."""
+
+
+@schema.command(name="list")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON array.")
+def schema_list(as_json: bool) -> None:
+    """List available schema names."""
+    names = sorted(REGISTRY)
+    if as_json:
+        click.echo(json.dumps(names))
+    else:
+        for name in names:
+            click.echo(name)
+
+
+@schema.command(name="show")
+@click.argument("name")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["json", "tldr"]),
+    default="tldr",
+    show_default=True,
+    help="Output format. 'json' is raw model_json_schema() (no envelope).",
+)
+def schema_show(name: str, fmt: str) -> None:
+    """Show schema for NAME.
+
+    Available schemas: auto-dev-result, ticket-task, session.
+
+    --format=json outputs raw model_json_schema() with no cw_version or
+    generated_at envelope. This is intentional (versioned export is a
+    non-goal; output always reflects current code).
+    """
+    if name not in REGISTRY:
+        available = ", ".join(sorted(REGISTRY))
+        msg = f"Unknown schema {name!r}. Available: {available}"
+        raise click.UsageError(msg)
+    model_cls = REGISTRY[name]
+    click.echo(format_json(model_cls) if fmt == "json" else format_tldr(model_cls))
