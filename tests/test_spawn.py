@@ -179,7 +179,7 @@ class TestSpawnCreate:
         Regression guard: the old tmux path inlined env vars and a ``cd``
         prefix into a shell command string. The native path passes cwd
         separately and the prompt unmodified — no shell wrapping, no
-        ``cw run-claude`` indirection.
+        indirection through a wrapper command.
         """
         from cw.spawn import spawn_create_impl
 
