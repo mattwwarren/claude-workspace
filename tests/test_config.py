@@ -898,7 +898,7 @@ class TestMigrateCwState:
         }
         sf.write_text(json.dumps(original))
 
-        _backup_state_file()
+        _backup_state_file(original)
 
         backup = state_dir / ".sessions.json.0.x-backup"
         assert backup.exists()
@@ -948,15 +948,16 @@ class TestMigrateCwState:
         sf.write_text(json.dumps(original))
 
         # First call creates backup
-        _backup_state_file()
+        _backup_state_file(original)
         backup = state_dir / ".sessions.json.0.x-backup"
         first_mtime = backup.stat().st_mtime
 
         # Overwrite the state file to simulate a post-migration state
-        sf.write_text(json.dumps({"schema_version": 5, "sessions": []}))
+        migrated = {"schema_version": 5, "sessions": []}
+        sf.write_text(json.dumps(migrated))
 
         # Second call must NOT overwrite the backup (it already exists)
-        _backup_state_file()
+        _backup_state_file(migrated)
         assert backup.stat().st_mtime == first_mtime
 
 

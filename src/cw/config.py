@@ -242,8 +242,8 @@ def load_state() -> CwState:
     path = state_file()
     if not path.exists():
         return CwState()
-    _backup_state_file()
     raw = json.loads(path.read_text())
+    _backup_state_file(raw)
     return CwState.model_validate(migrate_cw_state(raw))
 
 
@@ -266,7 +266,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
         return raw
     # Capture the on-disk version before we bump it so per-step guards
     # can condition on "is this an upgrade from version X?".
-    on_disk_version = int(raw.get("schema_version", 0))
+    on_disk_version = int(raw.get("schema_version") or 0)
     if isinstance(sessions, list):
         for session_raw in sessions:
             if not isinstance(session_raw, dict):
@@ -372,7 +372,7 @@ def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
         session_raw["surface_ref"] = None
 
 
-def _backup_state_file() -> None:
+def _backup_state_file(raw: dict[str, Any]) -> None:
     """Back up sessions.json before the first v5 migration. Idempotent.
 
     Only runs when the on-disk schema_version is below the current version
@@ -385,8 +385,7 @@ def _backup_state_file() -> None:
     backup = path.parent / f".{path.name}.0.x-backup"
     if backup.exists():
         return
-    raw = json.loads(path.read_text())
-    if raw.get("schema_version", 0) >= CW_STATE_SCHEMA_VERSION:
+    if int(raw.get("schema_version") or 0) >= CW_STATE_SCHEMA_VERSION:
         return
     shutil.copy2(path, backup)
 
