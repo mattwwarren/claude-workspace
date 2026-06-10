@@ -194,6 +194,11 @@ class TicketTask(BaseModel):
     # Populated by _accumulate_task_cost in consume_completed_sessions.
     # None when no cost data has been recorded yet. See GitHub issue #124.
     total_cost_usd: float | None = None
+    # The source of the implementation plan for this ticket. Carried into
+    # cw-context.json so workers can emit the correct plan_source in their
+    # AutoDevResult sentinel without rediscovering it at runtime (#314).
+    # Always None today; populated by a future dev-queue plan command.
+    plan_source: str | None = None
 
 
 class DispatchPlan(BaseModel):

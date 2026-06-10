@@ -323,7 +323,7 @@ def _backfill_claude_session_ids(
 
 def resolve_headless_budget(
     task: TicketTask | None,
-    session: Session,
+    session: Session | None,
     config: OrchestratorConfig,
 ) -> int:
     """Return the wall-clock budget (seconds) for *session*.
@@ -331,11 +331,16 @@ def resolve_headless_budget(
     Precedence (highest first):
     1. task.headless_timeout_override — explicit per-ticket escape hatch.
     2. session.last_result scope.tier — look up per-tier default in config.
+    2.5. task.scope_hint — fallback when last_result tier is unavailable (#314).
     3. HEADLESS_TIMEOUT_SECONDS — global fallback (pre-Stage-1 or unknown tier).
+
+    *session* may be None when called from the dispatch path (pre-spawn,
+    no session object exists yet). In that case step 2 is skipped and
+    step 2.5 fires if task.scope_hint is set.
     """
     if task is not None and task.headless_timeout_override is not None:
         return task.headless_timeout_override
-    last_result = session.last_result
+    last_result = session.last_result if session is not None else None
     if last_result is not None:
         tier: str | None = None
         try:
@@ -346,6 +351,15 @@ def resolve_headless_budget(
             pass
         if isinstance(tier, str):
             return config.headless_timeout_by_tier.get(tier, HEADLESS_TIMEOUT_SECONDS)
+    # Step 2.5: last_result is None or had no extractable tier — try scope_hint.
+    # Fires for sessions that haven't yet emitted a sentinel (pre-Stage-1) and
+    # for sessions whose last result had no scope.tier. Fixes the dogfood reap
+    # incident where large-tier sessions fell back to the 60-min global default
+    # because their first spawn had no last_result (#314).
+    if task is not None and task.scope_hint is not None:
+        return config.headless_timeout_by_tier.get(
+            task.scope_hint, HEADLESS_TIMEOUT_SECONDS
+        )
     return HEADLESS_TIMEOUT_SECONDS
 
 

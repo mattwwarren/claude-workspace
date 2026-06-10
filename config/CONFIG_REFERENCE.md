@@ -199,6 +199,83 @@ cw dev-queue add GEN-123 --client my-project --timeout 7200
 cw dev-queue add GEN-456 --client my-project --idle-watchdog 600
 ```
 
+## Worktree Context File (`.claude/cw-context.json`)
+
+Written by `cw` into each DAEMON worktree at spawn time. The Stop hook reads it
+to emit `SESSION_COMPLETED` events, and the `/auto-dev` worker reads it for
+operational context. All fields are present in every context; optional fields
+are `null` when not applicable.
+
+### Always-present fields
+
+- `schema_version` — integer, currently `1`. Increment when the shape changes.
+- `session_id` — cw session ID (UUID).
+- `session_name` — human-readable `<client>/<label>`.
+- `client` — client name from `clients.yaml`.
+- `purpose` — session purpose string (e.g. `"impl"`).
+- `ticket_id` — Linear/GitHub issue ID, or `null` for non-ticket sessions.
+- `headless` — `true` when spawned by the orchestrator dispatch loop.
+- `worktree_path` — absolute, canonicalized path to the worktree root.
+
+### DAEMON task fields (present when `headless: true` and a `TicketTask` exists)
+
+- `attempt` — 1-indexed current attempt number at the moment of spawn. `1` on
+  the first spawn (`_claim_next_pending` increments `TicketTask.attempts` before
+  calling `spawn_create_impl`); `2` on the first retry, etc.
+- `wall_clock_budget_seconds` — seconds this session is allowed to run before
+  the orchestrator reaps it. Computed by `resolve_headless_budget` (#314):
+  priority is (1) per-ticket override, (2) last sentinel's `scope.tier`, (2.5)
+  `task.scope_hint`, (3) global default.
+- `stage_started_at` — ISO 8601 UTC timestamp (`datetime.now(UTC).isoformat()`)
+  written at spawn. Workers can use it to compute elapsed time without relying
+  on wall-clock calls.
+- `expected_sentinel_schema_ref` — pointer to the sentinel schema the worker
+  must emit:
+  - `command` — `"cw schema show auto-dev-result --format=tldr"`
+  - `model` — `"AutoDevResult"`
+  - `version` — `4`
+- `queue_metadata` — snapshot of the task's scheduling fields at spawn:
+  - `scope_hint` — `"small"` | `"large"` | `null`
+  - `plan_source` — always `null` today; reserved for a future `cw dev-queue plan` command.
+  - `headless_timeout_override` — per-ticket timeout in seconds, or `null`.
+- `world_state_snapshot` — git context captured at spawn:
+  - `origin_main_sha_at_spawn` — SHA of `origin/main` at spawn time, or `null` if the git call fails.
+  - `origin_main_branch` — always `"main"`.
+  - `prior_attempts_summary` — always `[]` today; reserved for retry context.
+
+### Example (DAEMON, scope_hint=large)
+
+```json
+{
+  "schema_version": 1,
+  "session_id": "a1b2c3d4-...",
+  "session_name": "my-project/auto-dev-GEN-314",
+  "client": "my-project",
+  "purpose": "impl",
+  "ticket_id": "GEN-314",
+  "headless": true,
+  "worktree_path": "/path/to/.claude/worktrees/my-worktree",
+  "attempt": 0,
+  "wall_clock_budget_seconds": 5400,
+  "stage_started_at": "2026-06-10T14:32:00.123456+00:00",
+  "expected_sentinel_schema_ref": {
+    "command": "cw schema show auto-dev-result --format=tldr",
+    "model": "AutoDevResult",
+    "version": 4
+  },
+  "queue_metadata": {
+    "scope_hint": "large",
+    "plan_source": null,
+    "headless_timeout_override": null
+  },
+  "world_state_snapshot": {
+    "origin_main_sha_at_spawn": "c2e9096...",
+    "origin_main_branch": "main",
+    "prior_attempts_summary": []
+  }
+}
+```
+
 ## Managing Configuration
 
 ```bash

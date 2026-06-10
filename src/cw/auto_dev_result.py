@@ -35,6 +35,7 @@ _log = logging.getLogger(__name__)
 # canonical closed-enum statuses (issue #191). All are accepted during the
 # rollout window — see docs/headless-contract.md §8.
 SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
+AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION: int = max(SUPPORTED_SCHEMA_VERSIONS)
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
 _CLOSE_SENTINEL = "AUTO_DEV_RESULT>>>"

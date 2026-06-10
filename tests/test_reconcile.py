@@ -1769,6 +1769,86 @@ def test_resolve_headless_budget_pre_stage1_fallback(
     assert budget == HEADLESS_TIMEOUT_SECONDS
 
 
+def test_resolve_headless_budget_scope_hint_large_no_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2.5 (#314): scope_hint='large' + session=None → large-tier budget."""
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 5400
+    assert budget != HEADLESS_TIMEOUT_SECONDS
+
+
+def test_resolve_headless_budget_scope_hint_small_no_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2.5 (#314): scope_hint='small' + session=None → small-tier budget."""
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="small")
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 1800
+
+
+def test_resolve_headless_budget_no_scope_hint_no_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2.5 (#314): scope_hint=None + session=None → global timeout."""
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    task = TicketTask(ticket_id="GEN-314", client="client-a")
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == HEADLESS_TIMEOUT_SECONDS
+
+
+def test_resolve_headless_budget_override_beats_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 1 (override) beats step 2.5 (scope_hint): override=9999 > large=5400."""
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    task = TicketTask(
+        ticket_id="GEN-314",
+        client="client-a",
+        scope_hint="large",
+        headless_timeout_override=9999,
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 9999
+
+
+def test_resolve_headless_budget_last_result_beats_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2 (last_result tier) beats step 2.5 (scope_hint) when tier is present."""
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
+    sess = Session(
+        name="client-a/auto-dev/GEN-314",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "small"}},
+    )
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 1800  # small from last_result, not large from scope_hint
+
+
+def test_resolve_headless_budget_non_dict_last_result_falls_to_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Non-dict last_result → AttributeError caught → step 2.5 scope_hint fires."""
+    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
+    sess = Session(
+        name="client-a/auto-dev/GEN-314",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+    )
+    sess.last_result = ["not", "a", "dict"]  # type: ignore[assignment]
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 5400  # scope_hint fires after AttributeError caught
+
+
 def test_revert_stalled_uses_per_session_budget(
     tmp_config_dir: Path,
     tmp_path: Path,
