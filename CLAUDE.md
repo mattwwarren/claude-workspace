@@ -43,7 +43,7 @@ uv run ruff check src/ tests/                                    # 1. Lint
 uv run ruff format --check src/ tests/                           # 2. Format
 uv run mypy --strict src/                                        # 3. Type check
 uv run pre-commit run --all-files                                # 4. Hooks
-uv run pytest tests/ -m 'not integration' \
+uv run --extra mcp pytest tests/ -m 'not integration' \
   --cov=cw --cov-report=xml --cov-fail-under=88                  # 5. Unit + total cov ≥88%
 uv run pytest tests/ -m integration                              # 6. tmux integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
