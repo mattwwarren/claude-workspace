@@ -105,6 +105,17 @@ class TestSession:
         assert s.completed_reason is None
         assert s.completed_at is None
 
+    def test_legacy_last_handoff_path_ignored_on_load(self) -> None:
+        raw = {
+            "name": "c/impl",
+            "client": "c",
+            "purpose": "impl",
+            "workspace_path": "/dev/null",
+            "last_handoff_path": "/some/old/path/session.md",
+        }
+        s = Session.model_validate(raw)
+        assert not hasattr(s, "last_handoff_path")
+
     def test_claude_session_id_round_trip(self) -> None:
         s = Session(
             id="abcd1234",
