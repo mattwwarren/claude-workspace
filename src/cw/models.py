@@ -338,7 +338,7 @@ class Session(BaseModel):
     # schema. See ``cw.auto_dev_result`` for the parser.
     last_result: dict[str, Any] | None = None
     # Total USD cost for this session's auto-dev run. Populated by
-    # signal_completed from AutoDevResult.cost_usd. None when cost data
+    # signal_stop from AutoDevResult.cost_usd. None when cost data
     # was not emitted by the producer. See GitHub issue #124.
     cost_usd: float | None = None
     # Per-model cost breakdown for this session. Populated via the SDK
