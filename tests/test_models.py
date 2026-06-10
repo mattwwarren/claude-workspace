@@ -99,12 +99,22 @@ class TestSession:
         assert s.worktree_path is None
         assert s.branch is None
         assert s.surface_ref is None
-        assert s.last_handoff_path is None
         assert s.claude_session_id is None
         assert s.backgrounded_at is None
         assert s.resumed_at is None
         assert s.completed_reason is None
         assert s.completed_at is None
+
+    def test_legacy_last_handoff_path_ignored_on_load(self) -> None:
+        raw = {
+            "name": "c/impl",
+            "client": "c",
+            "purpose": "impl",
+            "workspace_path": "/dev/null",
+            "last_handoff_path": "/some/old/path/session.md",
+        }
+        s = Session.model_validate(raw)
+        assert not hasattr(s, "last_handoff_path")
 
     def test_claude_session_id_round_trip(self) -> None:
         s = Session(
