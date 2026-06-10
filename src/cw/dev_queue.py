@@ -299,14 +299,25 @@ def list_tickets(client: str | None = None) -> list[TicketTask]:
 
 
 def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask:
-    """Return the TicketTask matching (ticket_id, client) or raise CwError."""
+    """Return the TicketTask matching (ticket_id, client) or raise CwError.
+
+    Prefers the most-recent non-terminal (PENDING/RUNNING) record when
+    duplicates exist.
+    # Why: add-after-terminal creates duplicate (client, ticket_id) rows
+    # (structurally removed by #507). Returning the oldest terminal record
+    # would cause wait_for_terminal to resolve immediately on a stale status
+    # while a fresh run of the same ticket is currently RUNNING.
+    """
     matches = [
         t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
     ]
     if not matches:
         msg = f"No dev-queue task found for ticket '{ticket_id}' in client '{client}'."
         raise CwError(msg)
-    return matches[0]
+    active = [t for t in matches if t.status not in _TERMINAL_STATUSES]
+    if active:
+        return active[-1]  # most-recent active record
+    return matches[-1]  # most-recent terminal when no active record exists
 
 
 def consume_completed_sessions() -> int:
