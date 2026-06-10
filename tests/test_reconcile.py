@@ -4558,6 +4558,157 @@ def test_backfill_claude_session_id_malformed_roster(
 
 
 # ---------------------------------------------------------------------------
+# Transcript-filename fallback tests (GitHub issue #522)
+# When cw dev-queue wait drives a long run with no reconcile ticks, the
+# session exits claude agents before backfill fires.  The transcript file
+# persists, so _csid_from_transcript provides a last-resort resolution.
+# ---------------------------------------------------------------------------
+
+
+@freezegun.freeze_time(_BACKFILL_FROZEN_NOW)
+def test_backfill_claude_session_id_transcript_fallback(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """surface_ref absent from agents map but transcript exists.
+
+    Resolved via transcript fallback.
+    """
+    import os
+
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]  # "04bf1c48"
+    transcript_stem = f"{short_id}-{full_uuid}"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-tx-fallback"
+    sess = _mk_headless_daemon_session(
+        "tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
+    )
+    save_state(CwState(sessions=[sess]))
+    # Agents returns a non-matching session (daemon reachable, but our session exited)
+    # An empty list would trigger the outage guard and abort reconcile entirely.
+    other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+    )
+    # Write transcript named <short_id>-<uuid>.jsonl
+    tx_path = _write_idle_transcript(
+        home, worktree, filename=f"{transcript_stem}.jsonl"
+    )
+    # Mtime must be after started_at
+    after_started = _BACKFILL_STARTED_AT.timestamp() + 1
+    os.utime(tx_path, (after_started, after_started))
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "tx-fallback-1")
+    assert reloaded.claude_session_id == transcript_stem
+
+
+@freezegun.freeze_time(_BACKFILL_FROZEN_NOW)
+def test_backfill_claude_session_id_agents_primary_over_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agents map takes priority over transcript when both are present."""
+    import os
+
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+    transcript_stem = f"{short_id}-different-uuid-xxxx"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-agents-primary"
+    sess = _mk_headless_daemon_session(
+        "agents-primary-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
+    )
+    save_state(CwState(sessions=[sess]))
+    # Agents map has the real uuid
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}]
+    )
+    # Transcript with a different stem — should NOT win
+    tx_path = _write_idle_transcript(
+        home, worktree, filename=f"{transcript_stem}.jsonl"
+    )
+    after_started = _BACKFILL_STARTED_AT.timestamp() + 1
+    os.utime(tx_path, (after_started, after_started))
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "agents-primary-1")
+    # Agents map value wins
+    assert reloaded.claude_session_id == full_uuid
+
+
+@freezegun.freeze_time(_BACKFILL_FROZEN_NOW)
+def test_backfill_claude_session_id_no_transcript_fallback(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """surface_ref absent from agents map and no transcript → csid stays None."""
+    short_id = "04bf1c48"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-no-tx"
+    sess = _mk_headless_daemon_session(
+        "no-tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
+    )
+    save_state(CwState(sessions=[sess]))
+    # Non-matching session so outage guard doesn't fire
+    other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+    )
+    # Manually create the project dir so it exists but is empty
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True, exist_ok=True)
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "no-tx-fallback-1")
+    assert reloaded.claude_session_id is None
+
+
+@freezegun.freeze_time(_BACKFILL_FROZEN_NOW)
+def test_backfill_claude_session_id_stale_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transcript mtime <= started_at (stale reused-worktree) → csid stays None."""
+    import os
+
+    full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
+    short_id = full_uuid[:8]
+    transcript_stem = f"{short_id}-{full_uuid}"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-stale-tx"
+    sess = _mk_headless_daemon_session(
+        "stale-tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
+    )
+    save_state(CwState(sessions=[sess]))
+    # Non-matching session so outage guard doesn't fire
+    other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+    )
+    tx_path = _write_idle_transcript(
+        home, worktree, filename=f"{transcript_stem}.jsonl"
+    )
+    # Mtime exactly == started_at (not strictly after) — stale guard fires
+    stale_mtime = _BACKFILL_STARTED_AT.timestamp()
+    os.utime(tx_path, (stale_mtime, stale_mtime))
+    reconcile()
+    reloaded = next(s for s in load_state().sessions if s.id == "stale-tx-fallback-1")
+    assert reloaded.claude_session_id is None
+
+
+# ---------------------------------------------------------------------------
 # Dot-encoding regression tests (GitHub issue #463)
 # Worktrees under ~/.cw/ contain a dot in the path segment; Claude Code
 # encodes BOTH '/' and '.' as '-'.  The old single-replace produced a
