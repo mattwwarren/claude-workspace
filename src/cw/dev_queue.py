@@ -303,11 +303,11 @@ def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTas
 
     Prefers the most-recent non-terminal (PENDING/RUNNING) record when
     duplicates exist.
+    """
     # Why: add-after-terminal creates duplicate (client, ticket_id) rows
     # (structurally removed by #507). Returning the oldest terminal record
     # would cause wait_for_terminal to resolve immediately on a stale status
     # while a fresh run of the same ticket is currently RUNNING.
-    """
     matches = [
         t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
     ]
