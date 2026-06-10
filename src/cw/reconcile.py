@@ -839,8 +839,15 @@ def revert_stalled_headless_sessions(
 
 
 def _has_terminal_sentinel(session: Session) -> bool:
-    """True when the session has already emitted a terminal sentinel."""
-    return session.last_result is not None
+    """True when the session has already emitted a terminal sentinel.
+
+    A real AUTO_DEV sentinel dump always carries a ``"status"`` key; the park
+    markers (``silently_idle``/``needs_salvage``) carry ``"paused_status"`` and
+    no ``"status"``. Key presence — not value — is the structural discriminant,
+    so a parked session is correctly NOT treated as terminal and the idle
+    watchdog re-checks it for a late terminal sentinel. See #418, #497.
+    """
+    return isinstance(session.last_result, dict) and "status" in session.last_result
 
 
 def resolve_idle_watchdog_budget(
@@ -1661,20 +1668,30 @@ def _salvage_low_path(
 ) -> None:
     """Execute the LOW-confidence flag-only path."""
     breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
+    already_flagged = False
 
-    # Update session last_result — under sessions_lock; idempotency guard suppresses
-    # duplicate writes and the push notification re-fire on subsequent ticks.
+    # Update session last_result under sessions_lock. Capture already_flagged
+    # before the conditional write so the early-return below can suppress
+    # duplicate queue mutation, event, and push notification (#418).
     with sessions_lock():
         fresh_state = load_state()
         for s in fresh_state.sessions:
             if s.id == session.id:
-                if not (
+                already_flagged = (
                     isinstance(s.last_result, dict)
                     and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
-                ):
+                )
+                if not already_flagged:
                     s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
                 break
         save_state(fresh_state)
+
+    # Already dispositioned on a prior tick — suppress duplicate queue mutation,
+    # event, and push notification so the idle watchdog re-collecting this parked
+    # session does not re-fire every reconcile tick (#418 removed the upstream
+    # _has_terminal_sentinel skip this relied on).
+    if already_flagged:
+        return
 
     # Route queue task to BLOCKED_ON_USER.
     if ticket_id:

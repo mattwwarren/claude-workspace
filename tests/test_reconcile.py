@@ -5279,7 +5279,9 @@ class TestSalvageCommittedNoPrSessions:
         worktree = tmp_path / "wt-idem-low"
         worktree.mkdir(parents=True)
         ticket_id = "TKT-IDEM-LOW"
-        sess = _mk_live_daemon_session_with_worktree("sess-idem-low", worktree, ticket_id)
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-idem-low", worktree, ticket_id
+        )
         save_state(CwState(sessions=[sess]))
         save_dev_queue(
             DevQueueStore(
@@ -5322,7 +5324,9 @@ class TestSalvageCommittedNoPrSessions:
             e for e in events if e.payload.get("paused_status") == _NEEDS_SALVAGE_REASON
         ]
         assert len(attn_events) == 1, "SESSION_NEEDS_ATTENTION must fire exactly once"
-        assert len(push_calls) == 1, "fire_push_notification must be called exactly once"
+        assert len(push_calls) == 1, (
+            "fire_push_notification must be called exactly once"
+        )
 
     def test_idempotency_recheck_pr_now_exists_downgrades_to_low(
         self,
