@@ -571,10 +571,7 @@ def _display_status() -> None:
     if backgrounded:
         click.echo("Backgrounded:")
         for s in backgrounded:
-            handoff = (
-                f" handoff: {s.last_handoff_path.name}" if s.last_handoff_path else ""
-            )
-            click.echo(f"  {s.name}{handoff}")
+            click.echo(f"  {s.name}")
 
 
 # --- Queue command group ---
