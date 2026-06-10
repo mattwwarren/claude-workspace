@@ -105,12 +105,20 @@ def _claim_next_pending(
                         task.attempts += 1
                         save_dev_queue(store)
                         return task
-        for task in store.tasks:
-            if task.client == client_name and task.status == QueueItemStatus.PENDING:
-                task.status = QueueItemStatus.RUNNING
-                task.attempts += 1
-                save_dev_queue(store)
-                return task
+        pending = sorted(
+            [
+                t
+                for t in store.tasks
+                if t.client == client_name and t.status == QueueItemStatus.PENDING
+            ],
+            key=lambda t: (-t.priority, t.created_at),
+        )
+        if pending:
+            task = pending[0]
+            task.status = QueueItemStatus.RUNNING
+            task.attempts += 1
+            save_dev_queue(store)
+            return task
     return None
 
 
