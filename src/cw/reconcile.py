@@ -292,6 +292,31 @@ def _looks_like_daemon_outage(
     )
 
 
+def _backfill_claude_session_ids(
+    state: CwState, surface_to_full: dict[str, str]
+) -> int:
+    """Backfill claude_session_id from the daemon roster for DAEMON sessions.
+
+    Called once per reconcile tick, after the outage guard. Returns the number
+    of sessions updated; saves state when non-zero.
+    """
+    count = 0
+    for session in state.sessions:
+        if (
+            session.claude_session_id is None
+            and session.surface_ref is not None
+            and session.surface_ref in surface_to_full
+            and session.status in _LIVE_STATUSES
+            and session.origin is SessionOrigin.DAEMON
+        ):
+            session.claude_session_id = surface_to_full[session.surface_ref]
+            count += 1
+    if count:
+        _log.debug("Backfilled claude_session_id for %d session(s)", count)
+        save_state(state)
+    return count
+
+
 def resolve_headless_budget(
     task: TicketTask | None,
     session: Session,
@@ -1166,17 +1191,21 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         # `claude --bg` returns at spawn. Normalize to short id for
         # comparison; otherwise reconcile sees every native session as a
         # phantom because UUID != short-id.
+        _agents = _claude_agents_json()
         native_live = {
-            sid[:8]
-            for a in _claude_agents_json()
-            if isinstance(sid := a.get("sessionId"), str)
+            sid[:8] for a in _agents if isinstance(sid := a.get("sessionId"), str)
+        }
+        surface_to_full = {
+            sid[:8]: sid for a in _agents if isinstance(sid := a.get("sessionId"), str)
         }
         daemon_errored = False
     except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
         native_live = set()
+        surface_to_full = {}
         daemon_errored = True
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(reverted_ticket_ids=stalled_reverted), []
+    _backfill_claude_session_ids(state, surface_to_full)
 
     # Snapshot sessions that are already TIMED_OUT before the watchdog sweep,
     # so we can detect which sessions were newly reaped by usage_limit_cutoff.
