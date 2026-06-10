@@ -28,6 +28,8 @@ from cw.native_daemon import FakeNativeDaemonClient
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.models import OrchestratorConfig
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1664,3 +1666,343 @@ class TestSpawnCLI:
 
         assert result.exit_code != 0
         assert "nonexistent-id" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Tests for #314 task fields in cw-context.json
+# ---------------------------------------------------------------------------
+
+
+def _make_task_314(
+    ticket_id: str = "GEN-314",
+    client: str = "test-client",
+    attempts: int = 0,
+    scope_hint: str | None = "large",
+    plan_source: str | None = None,
+    headless_timeout_override: int | None = None,
+) -> TicketTask:
+    from cw.models import QueueItemStatus
+
+    return TicketTask(
+        ticket_id=ticket_id,
+        client=client,
+        status=QueueItemStatus.PENDING,
+        attempts=attempts,
+        scope_hint=scope_hint,
+        plan_source=plan_source,
+        headless_timeout_override=headless_timeout_override,
+    )
+
+
+class TestWriteHookContextTaskFields:
+    """Tests for #314: task fields written into cw-context.json by spawn_create_impl."""
+
+    def test_task_none_omits_task_fields(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Backward compat: task=None → context has no task-specific fields."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-314-task-none")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-314 --headless",
+            label="auto-dev/GEN-314",
+            native_daemon=daemon,
+            ticket_id="GEN-314",
+            headless=True,
+            task=None,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        for field in (
+            "attempt",
+            "wall_clock_budget_seconds",
+            "stage_started_at",
+            "expected_sentinel_schema_ref",
+            "queue_metadata",
+            "world_state_snapshot",
+        ):
+            assert field not in context, f"unexpected field {field!r} when task=None"
+
+    def test_task_nonnone_writes_all_task_fields(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """task provided → all #314 context fields are written with correct values."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-314-task-fields")
+        task = _make_task_314(attempts=2, scope_hint="large")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-314 --headless",
+            label="auto-dev/GEN-314",
+            native_daemon=daemon,
+            ticket_id="GEN-314",
+            headless=True,
+            task=task,
+            wall_clock_budget_seconds=5400,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["attempt"] == 2
+        assert context["wall_clock_budget_seconds"] == 5400
+        assert "stage_started_at" in context
+        ref = context["expected_sentinel_schema_ref"]
+        assert ref["model"] == "AutoDevResult"
+        assert ref["version"] == 4
+        assert "cw schema show" in ref["command"]
+        qm = context["queue_metadata"]
+        assert qm["scope_hint"] == "large"
+        assert qm["plan_source"] is None
+        assert qm["headless_timeout_override"] is None
+        ws = context["world_state_snapshot"]
+        assert ws["origin_main_branch"] == "main"
+        assert ws["prior_attempts_summary"] == []
+
+    def test_git_failure_sets_origin_sha_null(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """No remote → git rev-parse fails → origin_main_sha_at_spawn is null."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        # make_git_repo creates a repo with no remote; rev-parse origin/main fails.
+        worktree = make_git_repo("wt-314-git-fail")
+        task = _make_task_314(scope_hint=None)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-314 --headless",
+            label="auto-dev/GEN-314",
+            native_daemon=daemon,
+            ticket_id="GEN-314",
+            headless=True,
+            task=task,
+            wall_clock_budget_seconds=3600,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["world_state_snapshot"]["origin_main_sha_at_spawn"] is None
+
+    def test_attempt_from_task_attempts_not_incremented(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """context['attempt'] == task.attempts exactly — not task.attempts + 1."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-314-attempts")
+        task = _make_task_314(attempts=3)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-314 --headless",
+            label="auto-dev/GEN-314",
+            native_daemon=daemon,
+            task=task,
+            wall_clock_budget_seconds=0,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["attempt"] == 3
+
+    def test_wall_clock_budget_passthrough(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """wall_clock_budget_seconds passed to spawn_create_impl lands in context."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-314-budget")
+        task = _make_task_314()
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-314 --headless",
+            label="auto-dev/GEN-314",
+            native_daemon=daemon,
+            task=task,
+            wall_clock_budget_seconds=7200,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["wall_clock_budget_seconds"] == 7200
+
+
+# ---------------------------------------------------------------------------
+# Tests for resolve_headless_budget step 2.5 (scope_hint fallback, #314)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveHeadlessBudgetScopeHint:
+    """resolve_headless_budget step 2.5: scope_hint fires when session=None."""
+
+    def _make_config(self, small: int = 1800, large: int = 5400) -> OrchestratorConfig:
+        from cw.models import OrchestratorConfig
+
+        return OrchestratorConfig(
+            headless_timeout_by_tier={"small": small, "large": large}
+        )
+
+    def test_scope_hint_large_when_session_none(self) -> None:
+        """scope_hint='large' + session=None → large-tier budget returned."""
+        from cw.reconcile import HEADLESS_TIMEOUT_SECONDS, resolve_headless_budget
+
+        config = self._make_config(large=5400)
+        task = _make_task_314(scope_hint="large")
+
+        result = resolve_headless_budget(task, None, config)
+
+        assert result == 5400
+        assert result != HEADLESS_TIMEOUT_SECONDS
+
+    def test_scope_hint_small_when_session_none(self) -> None:
+        """scope_hint='small' + session=None → small-tier budget returned."""
+        from cw.reconcile import resolve_headless_budget
+
+        config = self._make_config(small=1800)
+        task = _make_task_314(scope_hint="small")
+
+        result = resolve_headless_budget(task, None, config)
+
+        assert result == 1800
+
+    def test_no_scope_hint_falls_through_to_global(self) -> None:
+        """scope_hint=None + session=None → HEADLESS_TIMEOUT_SECONDS (global)."""
+        from cw.reconcile import HEADLESS_TIMEOUT_SECONDS, resolve_headless_budget
+
+        config = self._make_config()
+        task = _make_task_314(scope_hint=None)
+
+        result = resolve_headless_budget(task, None, config)
+
+        assert result == HEADLESS_TIMEOUT_SECONDS
+
+    def test_override_beats_scope_hint(self) -> None:
+        """headless_timeout_override (step 1) wins over scope_hint (step 2.5)."""
+        from cw.reconcile import resolve_headless_budget
+
+        config = self._make_config(large=5400)
+        task = _make_task_314(scope_hint="large", headless_timeout_override=9999)
+
+        result = resolve_headless_budget(task, None, config)
+
+        assert result == 9999
+
+    def test_session_last_result_tier_beats_scope_hint(self) -> None:
+        """Step 2 (last_result tier) wins over step 2.5 (scope_hint) when present."""
+        from cw.reconcile import resolve_headless_budget
+
+        config = self._make_config(small=1800, large=5400)
+        task = _make_task_314(scope_hint="large")
+
+        sess = Session(
+            name="test/sess",
+            client="test",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/tmp"),
+        )
+        sess.last_result = {"scope": {"tier": "small"}}
+
+        result = resolve_headless_budget(task, sess, config)
+
+        assert result == 1800  # small from last_result, not large from scope_hint
+
+    def test_last_result_non_dict_falls_through_to_scope_hint(self) -> None:
+        """last_result present but non-dict → AttributeError caught → step 2.5 fires."""
+        from cw.reconcile import resolve_headless_budget
+
+        config = self._make_config(large=5400)
+        task = _make_task_314(scope_hint="large")
+
+        sess = Session(
+            name="test/sess",
+            client="test",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/tmp"),
+        )
+        # A list has no .get() — triggers the except (AttributeError, TypeError) branch.
+        sess.last_result = ["not", "a", "dict"]  # type: ignore[assignment]
+
+        result = resolve_headless_budget(task, sess, config)
+
+        assert result == 5400  # scope_hint fallback fires
+
+
+class TestWriteHookContextOriginShaSuccess:
+    """Tests for the git-success path in _write_hook_context (#314)."""
+
+    def test_origin_sha_populated_when_git_succeeds(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When git rev-parse succeeds, origin_main_sha_at_spawn is the SHA."""
+        import subprocess as subprocess_mod
+
+        import cw.spawn as spawn_mod
+        from cw.spawn import spawn_create_impl
+
+        fake_sha = "abc1234def5678"
+        real_run = subprocess_mod.run
+
+        def patched_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess_mod.CompletedProcess[str]:
+            if "rev-parse" in cmd and "origin/main" in cmd:
+                return subprocess_mod.CompletedProcess(
+                    cmd, 0, stdout=fake_sha + "\n", stderr=""
+                )
+            return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(spawn_mod.subprocess, "run", patched_run)
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-sha-success")
+        task = _make_task_314()
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-314 --headless",
+            label="auto-dev/GEN-314",
+            native_daemon=daemon,
+            task=task,
+            wall_clock_budget_seconds=5400,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["world_state_snapshot"]["origin_main_sha_at_spawn"] == fake_sha

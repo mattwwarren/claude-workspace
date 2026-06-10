@@ -32,7 +32,12 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import get_native_daemon_client
-from cw.reconcile import AUTO_DEV_LABEL_PREFIX, reconcile, ticket_id_for_session
+from cw.reconcile import (
+    AUTO_DEV_LABEL_PREFIX,
+    reconcile,
+    resolve_headless_budget,
+    ticket_id_for_session,
+)
 from cw.spawn import spawn_create_impl
 from cw.worktree import (
     check_not_main_checkout,
@@ -386,6 +391,10 @@ def dispatch_tick(
                     parent=parent,
                     ticket_id=task.ticket_id,
                     headless=True,
+                    task=task,
+                    wall_clock_budget_seconds=resolve_headless_budget(
+                        task, None, config
+                    ),
                 )
 
                 # Stamp session_id on the queued task so the completion
