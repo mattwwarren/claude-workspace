@@ -1825,6 +1825,135 @@ class TestClaimNextPendingAttempts:
 
 
 # ---------------------------------------------------------------------------
+# TestClaimNextPendingPriority
+# ---------------------------------------------------------------------------
+
+
+class TestClaimNextPendingPriority:
+    """_claim_next_pending respects priority field (highest claimed first).
+
+    Regression for GitHub issue #506: the fallback FIFO loop ignored the
+    priority field.  Tasks with higher priority must be claimed before
+    lower-priority tasks, regardless of enqueue order.
+    """
+
+    def test_high_priority_claimed_before_low_priority(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """High-priority task enqueued after low-priority is claimed first."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Enqueue low-priority first, high-priority second
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-LOW",
+                client="test-client",
+                priority=0,
+                created_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-HIGH",
+                client="test-client",
+                priority=10,
+                created_at=datetime.fromisoformat("2026-01-01T00:01:00+00:00"),
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        store = load_dev_queue()
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].ticket_id == "GEN-HIGH"
+
+    def test_equal_priority_fifo_order(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Equal-priority tasks are claimed in FIFO (oldest created_at first)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Enqueue in order: earlier created_at first, later second
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-FIRST",
+                client="test-client",
+                priority=5,
+                created_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-SECOND",
+                client="test-client",
+                priority=5,
+                created_at=datetime.fromisoformat("2026-01-01T00:01:00+00:00"),
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        store = load_dev_queue()
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].ticket_id == "GEN-FIRST"
+
+    def test_priority_without_use_plan(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        cap2_config: OrchestratorConfig,
+    ) -> None:
+        """Priority respected in fallback loop even when use_plan=False."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # FIFO backlog: two low-priority tasks enqueued first
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-BACKLOG-A",
+                client="test-client",
+                priority=0,
+                created_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-BACKLOG-B",
+                client="test-client",
+                priority=0,
+                created_at=datetime.fromisoformat("2026-01-01T00:01:00+00:00"),
+            )
+        )
+        # High-priority task added last
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-URGENT",
+                client="test-client",
+                priority=10,
+                created_at=datetime.fromisoformat("2026-01-01T00:02:00+00:00"),
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        # cap=2 => two claims; URGENT (p=10) + BACKLOG-A (p=0, earlier)
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon).spawned
+        assert spawned == 2
+
+        store = load_dev_queue()
+        running_ids = sorted(t.ticket_id for t in store.running())
+        assert running_ids == ["GEN-BACKLOG-A", "GEN-URGENT"]
+
+
+# ---------------------------------------------------------------------------
 # TestDispatchDoesNotTouchMainCheckout
 # ---------------------------------------------------------------------------
 

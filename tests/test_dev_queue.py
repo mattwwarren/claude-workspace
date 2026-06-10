@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.config import load_orchestrator_config
 from cw.dev_queue import (
+    _find_ticket,
     add_ticket,
     cancel_task_for_session,
     cancel_ticket,
@@ -1312,3 +1313,105 @@ class TestWaitForTerminal:
         result = wait_for_terminal("GEN-8", "genhealth", timeout=5, poll_interval=0)
         assert result.status == QueueItemStatus.COMPLETED
         assert result.session_id is None
+
+
+# ---------------------------------------------------------------------------
+# TestFindTicket
+# ---------------------------------------------------------------------------
+
+
+class TestFindTicket:
+    """Tests for _find_ticket() multi-record disambiguation.
+
+    Regression for GitHub issue #506: when a ticket is re-enqueued after
+    a terminal run, _find_ticket must prefer the active (non-terminal)
+    record over the stale terminal one.
+    """
+
+    def test_find_prefers_active_over_terminal_completed(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """PENDING record returned when COMPLETED + PENDING exist for same ticket."""
+        terminal = TicketTask(
+            ticket_id="GEN-9",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+        )
+        active = TicketTask(
+            ticket_id="GEN-9",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+        )
+        store = DevQueueStore(tasks=[terminal, active])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-9", "genhealth")
+        assert result.status == QueueItemStatus.PENDING
+
+    def test_find_prefers_running_over_terminal_completed(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING record returned when COMPLETED + RUNNING exist for same ticket."""
+        terminal = TicketTask(
+            ticket_id="GEN-10",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+        )
+        active = TicketTask(
+            ticket_id="GEN-10",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-10",
+        )
+        store = DevQueueStore(tasks=[terminal, active])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-10", "genhealth")
+        assert result.status == QueueItemStatus.RUNNING
+        assert result.session_id == "sess-10"
+
+    def test_find_returns_terminal_when_no_active(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Terminal record returned when no active record exists (backward compat)."""
+        terminal = TicketTask(
+            ticket_id="GEN-11",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+        )
+        store = DevQueueStore(tasks=[terminal])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-11", "genhealth")
+        assert result.status == QueueItemStatus.COMPLETED
+
+    def test_wait_for_terminal_skips_stale_completed_record(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """wait_for_terminal does not resolve immediately on stale COMPLETED record.
+
+        When a ticket was completed then re-enqueued (PENDING), the stale
+        COMPLETED record must not cause wait_for_terminal to return early.
+        The active PENDING record should be returned and polling should proceed.
+        """
+        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
+
+        stale_terminal = TicketTask(
+            ticket_id="GEN-12",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+        )
+        active_pending = TicketTask(
+            ticket_id="GEN-12",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+        )
+        store = DevQueueStore(tasks=[stale_terminal, active_pending])
+        save_dev_queue(store)
+
+        # timeout=0 means it should time out (not resolve early on stale record)
+        with pytest.raises(TimeoutError):
+            wait_for_terminal("GEN-12", "genhealth", timeout=0, poll_interval=0)
