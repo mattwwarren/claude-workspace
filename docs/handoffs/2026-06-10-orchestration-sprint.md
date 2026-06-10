@@ -89,8 +89,18 @@ leg. #313's schemas are the contract source.
 
 ## Unticketed work — file when prerequisites land
 
-- **`cw mcp serve` tool server** — file after #313 (schemas) and #238
-  (function-level inspection API) so the tool surface mirrors them.
+- **Install wiring for agent onboarding** (replaces the MCP tool server as
+  the near-term path — see Decisions): extend `cw init` / `install.sh` to
+  (1) register the two channel MCP servers in `.mcp.json` instead of
+  shipping `.example` files, (2) install cw skills/agents + a `Bash(cw *)`
+  permission allowlist entry, (3) add a SessionStart hook running `cw brief`
+  (interim: `cw orchestrate status --json`), (4) surface `cw schema` in the
+  generated CLAUDE.md snippet. Folds into milestone 1.1 next to #238/#313.
+- **`cw mcp serve` tool server** — DEFERRED, not cancelled. Revisit trigger:
+  a session without shell access to the operator machine (remote/phone)
+  needs to drive cw — that makes MCP-over-SSE a capability gap rather than
+  a convenience. Until then the CLI + `--json` + allowlist path is
+  equivalent and avoids maintaining every verb twice.
 - **`cw brief`** (token-frugal agent-first snapshot + next-action hints) —
   file after #308/#310 so it can reuse their row data; pairs with a
   SessionStart hook that injects it (see `session-start-hook` skill).
@@ -108,6 +118,12 @@ leg. #313's schemas are the contract source.
   `total_cost_usd`); never create a duplicate `(client, ticket_id)` row.
 - #310 Path A (denormalize onto `TicketTask`) endorsed — matches the issue's
   own recommendation.
+- **No MCP milestone.** The orientation tax traced to missing information
+  (undocumented schemas, no `--json` commands — see #238 evidence), not a
+  missing transport. CLI + `cw schema` + `Bash(cw *)` allowlist + install
+  wiring is equivalent for local sessions at a fraction of the maintenance
+  cost (a tool server duplicates every verb). Event push already exists as
+  MCP via the channel proxies; the install just needs to register them.
 
 ## Open questions for the operator
 
