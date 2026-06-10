@@ -594,13 +594,18 @@ class TestMigrateCwState:
         assert state.schema_version == CW_STATE_SCHEMA_VERSION
 
     def test_rename_zellij_pane_to_surface_ref(self) -> None:
+        # Zellij pane IDs ("0:1.0") are non-hex → cleared to None by the v5
+        # migration that runs on files below schema_version 5. The rename step
+        # still fires (zellij_pane is removed) but the subsequent non-hex
+        # cleaner nulls out the legacy value.
         raw = {"sessions": [{"id": "s1", "zellij_pane": "0:1.0"}]}
         migrated = migrate_cw_state(raw)
         session = migrated["sessions"][0]
-        assert session["surface_ref"] == "0:1.0"
+        assert session["surface_ref"] is None
         assert "zellij_pane" not in session
 
     def test_drop_zellij_pane_when_surface_ref_already_set(self) -> None:
+        # "fresh" is non-hex so it's also cleared by the v5 migration pass.
         raw = {
             "sessions": [
                 {"id": "s1", "zellij_pane": "stale", "surface_ref": "fresh"},
@@ -608,7 +613,7 @@ class TestMigrateCwState:
         }
         migrated = migrate_cw_state(raw)
         session = migrated["sessions"][0]
-        assert session["surface_ref"] == "fresh"
+        assert session["surface_ref"] is None
         assert "zellij_pane" not in session
 
     def test_drop_zellij_tab_unconditionally(self) -> None:
@@ -693,8 +698,9 @@ class TestMigrateCwState:
         }
         migrated = migrate_cw_state(raw)
         session = migrated["sessions"][0]
-        # Zellij armor ran
-        assert session["surface_ref"] == "0:1.0"
+        # Zellij armor ran (rename happened, but "0:1.0" is non-hex so v5
+        # cleaner nulls it out)
+        assert session["surface_ref"] is None
         assert "zellij_pane" not in session
         # Linkage fields filled
         assert session["parent_session_id"] is None

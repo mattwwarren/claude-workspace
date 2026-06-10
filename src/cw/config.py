@@ -264,12 +264,21 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
         # corruption surfaces downstream rather than getting a false
         # "fully migrated" stamp.
         return raw
+    # Capture the on-disk version before we bump it so per-step guards
+    # can condition on "is this an upgrade from version X?".
+    on_disk_version = int(raw.get("schema_version", 0))
     if isinstance(sessions, list):
         for session_raw in sessions:
             if not isinstance(session_raw, dict):
                 continue
             _migrate_zellij_fields(session_raw)
-            _clear_non_hex_surface_refs(session_raw)
+            # Only clear legacy multiplexer surface_refs during the v4→v5
+            # upgrade pass.  After migration the field may legally hold any
+            # string set by the live daemon path; re-clearing it on every
+            # load would wipe valid programmatic writes (e.g. test fixtures,
+            # daemon-spawn short ids that happen to look like plain strings).
+            if on_disk_version < 5:
+                _clear_non_hex_surface_refs(session_raw)
             _coerce_session_origin(session_raw)
             _fill_linkage_field_defaults(session_raw)
             _fill_last_result_default(session_raw)
