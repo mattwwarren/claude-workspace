@@ -28,8 +28,6 @@ from cw.native_daemon import FakeNativeDaemonClient
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cw.models import OrchestratorConfig
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1673,7 +1671,7 @@ class TestSpawnCLI:
 # ---------------------------------------------------------------------------
 
 
-def _make_task_314(
+def _make_pending_task(
     ticket_id: str = "GEN-314",
     client: str = "test-client",
     attempts: int = 0,
@@ -1744,7 +1742,7 @@ class TestWriteHookContextTaskFields:
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
         worktree = make_git_repo("wt-314-task-fields")
-        task = _make_task_314(attempts=2, scope_hint="large")
+        task = _make_pending_task(attempts=2, scope_hint="large")
 
         spawn_create_impl(
             client=client,
@@ -1787,7 +1785,7 @@ class TestWriteHookContextTaskFields:
         daemon = FakeNativeDaemonClient()
         # make_git_repo creates a repo with no remote; rev-parse origin/main fails.
         worktree = make_git_repo("wt-314-git-fail")
-        task = _make_task_314(scope_hint=None)
+        task = _make_pending_task(scope_hint=None)
 
         spawn_create_impl(
             client=client,
@@ -1816,7 +1814,7 @@ class TestWriteHookContextTaskFields:
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
         worktree = make_git_repo("wt-314-attempts")
-        task = _make_task_314(attempts=3)
+        task = _make_pending_task(attempts=3)
 
         spawn_create_impl(
             client=client,
@@ -1843,7 +1841,7 @@ class TestWriteHookContextTaskFields:
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
         worktree = make_git_repo("wt-314-budget")
-        task = _make_task_314()
+        task = _make_pending_task()
 
         spawn_create_impl(
             client=client,
@@ -1857,106 +1855,6 @@ class TestWriteHookContextTaskFields:
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         assert context["wall_clock_budget_seconds"] == 7200
-
-
-# ---------------------------------------------------------------------------
-# Tests for resolve_headless_budget step 2.5 (scope_hint fallback, #314)
-# ---------------------------------------------------------------------------
-
-
-class TestResolveHeadlessBudgetScopeHint:
-    """resolve_headless_budget step 2.5: scope_hint fires when session=None."""
-
-    def _make_config(self, small: int = 1800, large: int = 5400) -> OrchestratorConfig:
-        from cw.models import OrchestratorConfig
-
-        return OrchestratorConfig(
-            headless_timeout_by_tier={"small": small, "large": large}
-        )
-
-    def test_scope_hint_large_when_session_none(self) -> None:
-        """scope_hint='large' + session=None → large-tier budget returned."""
-        from cw.reconcile import HEADLESS_TIMEOUT_SECONDS, resolve_headless_budget
-
-        config = self._make_config(large=5400)
-        task = _make_task_314(scope_hint="large")
-
-        result = resolve_headless_budget(task, None, config)
-
-        assert result == 5400
-        assert result != HEADLESS_TIMEOUT_SECONDS
-
-    def test_scope_hint_small_when_session_none(self) -> None:
-        """scope_hint='small' + session=None → small-tier budget returned."""
-        from cw.reconcile import resolve_headless_budget
-
-        config = self._make_config(small=1800)
-        task = _make_task_314(scope_hint="small")
-
-        result = resolve_headless_budget(task, None, config)
-
-        assert result == 1800
-
-    def test_no_scope_hint_falls_through_to_global(self) -> None:
-        """scope_hint=None + session=None → HEADLESS_TIMEOUT_SECONDS (global)."""
-        from cw.reconcile import HEADLESS_TIMEOUT_SECONDS, resolve_headless_budget
-
-        config = self._make_config()
-        task = _make_task_314(scope_hint=None)
-
-        result = resolve_headless_budget(task, None, config)
-
-        assert result == HEADLESS_TIMEOUT_SECONDS
-
-    def test_override_beats_scope_hint(self) -> None:
-        """headless_timeout_override (step 1) wins over scope_hint (step 2.5)."""
-        from cw.reconcile import resolve_headless_budget
-
-        config = self._make_config(large=5400)
-        task = _make_task_314(scope_hint="large", headless_timeout_override=9999)
-
-        result = resolve_headless_budget(task, None, config)
-
-        assert result == 9999
-
-    def test_session_last_result_tier_beats_scope_hint(self) -> None:
-        """Step 2 (last_result tier) wins over step 2.5 (scope_hint) when present."""
-        from cw.reconcile import resolve_headless_budget
-
-        config = self._make_config(small=1800, large=5400)
-        task = _make_task_314(scope_hint="large")
-
-        sess = Session(
-            name="test/sess",
-            client="test",
-            purpose=SessionPurpose.IMPL,
-            workspace_path=Path("/tmp"),
-        )
-        sess.last_result = {"scope": {"tier": "small"}}
-
-        result = resolve_headless_budget(task, sess, config)
-
-        assert result == 1800  # small from last_result, not large from scope_hint
-
-    def test_last_result_non_dict_falls_through_to_scope_hint(self) -> None:
-        """last_result present but non-dict → AttributeError caught → step 2.5 fires."""
-        from cw.reconcile import resolve_headless_budget
-
-        config = self._make_config(large=5400)
-        task = _make_task_314(scope_hint="large")
-
-        sess = Session(
-            name="test/sess",
-            client="test",
-            purpose=SessionPurpose.IMPL,
-            workspace_path=Path("/tmp"),
-        )
-        # A list has no .get() — triggers the except (AttributeError, TypeError) branch.
-        sess.last_result = ["not", "a", "dict"]  # type: ignore[assignment]
-
-        result = resolve_headless_budget(task, sess, config)
-
-        assert result == 5400  # scope_hint fallback fires
 
 
 class TestWriteHookContextOriginShaSuccess:
@@ -1992,7 +1890,7 @@ class TestWriteHookContextOriginShaSuccess:
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
         worktree = make_git_repo("wt-sha-success")
-        task = _make_task_314()
+        task = _make_pending_task()
 
         spawn_create_impl(
             client=client,

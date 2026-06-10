@@ -219,8 +219,9 @@ are `null` when not applicable.
 
 ### DAEMON task fields (present when `headless: true` and a `TicketTask` exists)
 
-- `attempt` — the `TicketTask.attempts` value at the moment of spawn. Starts at
-  `0` for the first spawn; reconcile increments it before re-spawning retries.
+- `attempt` — 1-indexed current attempt number at the moment of spawn. `1` on
+  the first spawn (`_claim_next_pending` increments `TicketTask.attempts` before
+  calling `spawn_create_impl`); `2` on the first retry, etc.
 - `wall_clock_budget_seconds` — seconds this session is allowed to run before
   the orchestrator reaps it. Computed by `resolve_headless_budget` (#314):
   priority is (1) per-ticket override, (2) last sentinel's `scope.tier`, (2.5)

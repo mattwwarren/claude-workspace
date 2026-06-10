@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
+from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus, TicketTask
@@ -23,6 +24,16 @@ if TYPE_CHECKING:
 # Schema version for cw-context.json. Increment when the shape changes so
 # workers can detect whether they are reading a context written by an older cw.
 CW_CONTEXT_SCHEMA_VERSION = 1
+
+
+def _git_clean_env() -> dict[str, str]:
+    """Return os.environ with GIT_* vars stripped.
+
+    GIT_* vars (e.g. GIT_DIR, GIT_WORK_TREE) can misdirect git commands to the
+    wrong repository when cw itself runs inside a git hook. Strip them so every
+    subprocess.run git call operates on the path it is explicitly given via -C.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
 def _validate_worktree(path: Path) -> None:
@@ -42,13 +53,12 @@ def _validate_worktree(path: Path) -> None:
             f"branch name was not already taken."
         )
         raise WorktreeError(msg)
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     result = subprocess.run(
         ["git", "-C", str(path), "rev-parse", "--git-dir"],
         capture_output=True,
         text=True,
         check=False,
-        env=clean_env,
+        env=_git_clean_env(),
     )
     if result.returncode != 0:
         msg = (
@@ -82,6 +92,7 @@ def _write_hook_context(
     headless: bool = False,
     task: TicketTask | None = None,
     wall_clock_budget_seconds: int | None = None,
+    default_branch: str = "main",
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -173,14 +184,13 @@ def _write_hook_context(
         "worktree_path": str(worktree.resolve()),
     }
     if task is not None:
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         try:
             rev = subprocess.run(
-                ["git", "-C", str(worktree), "rev-parse", "origin/main"],
+                ["git", "-C", str(worktree), "rev-parse", f"origin/{default_branch}"],
                 capture_output=True,
                 text=True,
                 check=True,
-                env=clean_env,
+                env=_git_clean_env(),
             )
             origin_sha: str | None = rev.stdout.strip() or None
         except (subprocess.CalledProcessError, OSError):
@@ -194,7 +204,7 @@ def _write_hook_context(
                 "expected_sentinel_schema_ref": {
                     "command": "cw schema show auto-dev-result --format=tldr",
                     "model": "AutoDevResult",
-                    "version": 4,
+                    "version": AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
                 },
                 "queue_metadata": {
                     "scope_hint": task.scope_hint,
@@ -203,7 +213,8 @@ def _write_hook_context(
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,
-                    "origin_main_branch": "main",
+                    "origin_main_branch": default_branch,
+                    # Why: reserved for retry context in a future pass; always [] today.
                     "prior_attempts_summary": [],
                 },
             }
@@ -278,6 +289,7 @@ def spawn_create_impl(
         headless=headless,
         task=task,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
+        default_branch=client.default_branch,
     )
 
     final_extra: list[str] = []
