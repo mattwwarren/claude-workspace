@@ -5189,3 +5189,20 @@ class TestResultValidate:
         result = runner.invoke(main, ["result", "validate", "-"], input=bad_payload)
         assert result.exit_code != 0
         assert len(result.output) > 0
+
+    def test_malformed_json_stdin_exits_nonzero(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["result", "validate", "-"], input="not-valid-json{")
+        assert result.exit_code != 0
+        assert "json:" in result.output
+
+    def test_valid_json_file_path_exits_zero(self, tmp_path: "Path") -> None:
+        import pathlib
+
+        payload_file = pathlib.Path(tmp_path) / "payload.json"
+        payload_file.write_text(json.dumps(self._valid_payload()))
+        runner = CliRunner()
+        result = runner.invoke(main, ["result", "validate", str(payload_file)])
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed["status"] == "shipped"
