@@ -14,7 +14,7 @@ import freezegun
 import pytest
 
 from cw._util import claude_project_dir
-from cw.config import load_state, save_state
+from cw.config import load_state, mutate_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import WorktreeError
@@ -8442,3 +8442,72 @@ def test_reap_reason_not_stamped_when_task_already_completed_completed_silent(
     s = next(s for s in reloaded.sessions if s.id == "backstop-c-noop-1")
     # Task was not RUNNING so no revert happened — reap_reason must stay None.
     assert s.reap_reason is None
+
+
+def test_revert_timed_out_tasks_stamp_survives_concurrent_mutate_state(
+    tmp_config_dir: Path,
+) -> None:
+    """Both mutations survive when revert_timed_out_tasks() races a concurrent
+    mutate_state() write.  Neither call should clobber the other's changes
+    because both go through mutate_state() under sessions_lock."""
+    import concurrent.futures
+
+    sess = Session(
+        id="conc-to-1",
+        name="client-a/auto-dev/CONC-TO-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        completed_reason=CompletionReason.TIMED_OUT,
+    )
+    bystander = Session(
+        id="conc-bystander",
+        name="client-a/bystander",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[sess, bystander]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="CONC-TO-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="conc-to-1",
+                )
+            ]
+        )
+    )
+
+    def _competing_write() -> None:
+        def _mark(state: CwState) -> None:
+            for s in state.sessions:
+                if s.id == "conc-bystander":
+                    s.surface_ref = "concurrent-write"
+
+        mutate_state(_mark)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_competing_write)
+        revert_timed_out_tasks()
+    # Re-raise any exception from the thread (future.result() does this).
+    future.result()
+
+    reloaded = load_state()
+
+    # revert_timed_out_tasks must have stamped the TIMED_OUT session.
+    stamped = next(s for s in reloaded.sessions if s.id == "conc-to-1")
+    assert stamped.reap_reason == ReapReason.COMPLETED_BACKSTOP
+
+    # The concurrent write must also have survived.
+    bystander_after = next(s for s in reloaded.sessions if s.id == "conc-bystander")
+    assert bystander_after.surface_ref == "concurrent-write"
