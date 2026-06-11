@@ -39,7 +39,6 @@ from cw.config import (
     sessions_lock,
     show_config,
 )
-from cw.daemon import run_watcher_tick
 from cw.dev_queue import (
     add_ticket,
     cancel_task_for_session,
@@ -1375,31 +1374,21 @@ def signal_stop() -> None:
     "--once",
     is_flag=True,
     default=False,
-    help="Run one tick and exit (useful for testing or cron).",
+    help="Accepted for backwards compatibility; has no effect.",
 )
 @handle_errors
 def daemon(once: bool) -> None:
-    """Run the PR event watcher daemon.
+    """Deprecated shim — the PR-dispatch/watch role has been removed.
 
-    Polls review-monitor state files and emits orchestrator events
-    for PR lifecycle changes (merged, CI failed, review received, mergeable).
-
-    \b
-    Run continuously (default):
-      cw daemon
-
-    \b
-    Single tick (e.g. from cron):
-      cw daemon --once
+    This command now only emits a deprecation notice. The cw-pr-events
+    channel-based orchestrator replaces the dispatch role previously
+    handled here.
     """
     click.echo(
         "Note: cw daemon's PR-dispatch role is deprecated as of 0.11. "
-        "The channel-based orchestrator (cw orchestrator-start, arriving in #115b) "
-        "will replace this dispatch role. "
-        "The PR watcher loop (this command's other role) is still required.",
+        "This role has been removed in favour of the cw-pr-events channel.",
         err=True,
     )
-    run_watcher_tick(once=once)
 
 
 _COMPLETION_SCRIPTS = {
