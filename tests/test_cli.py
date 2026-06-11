@@ -5192,11 +5192,12 @@ class TestResultValidate:
 
     def test_malformed_json_stdin_exits_nonzero(self) -> None:
         runner = CliRunner()
-        result = runner.invoke(main, ["result", "validate", "-"], input="not-valid-json{")
+        bad_input = "not-valid-json{"
+        result = runner.invoke(main, ["result", "validate", "-"], input=bad_input)
         assert result.exit_code != 0
         assert "json:" in result.output
 
-    def test_valid_json_file_path_exits_zero(self, tmp_path: "Path") -> None:
+    def test_valid_json_file_path_exits_zero(self, tmp_path: Path) -> None:
         import pathlib
 
         payload_file = pathlib.Path(tmp_path) / "payload.json"
