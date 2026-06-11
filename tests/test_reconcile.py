@@ -26,6 +26,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapReason,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -3046,7 +3047,7 @@ def test_confirm_before_reap_v5_state_round_trips(
 ) -> None:
     """v5 state payload (no idle_observation_count key) round-trips through load.
 
-    Counter defaults 0; schema_version stamped 6 after migration. (#545)
+    Counter defaults 0; schema_version stamped 7 after migration. (#545, #380)
     """
     import json
 
@@ -3070,7 +3071,7 @@ def test_confirm_before_reap_v5_state_round_trips(
         )
     )
     loaded = load_state()
-    assert loaded.schema_version == 6
+    assert loaded.schema_version == 7
     assert loaded.sessions[0].idle_observation_count == 0
 
 
@@ -7912,3 +7913,448 @@ def test_csid_from_transcript_via_helper(
 
     result = _csid_from_transcript(sess)
     assert result == full_stem
+
+
+# ---------------------------------------------------------------------------
+# ReapReason taxonomy tests (GitHub #380)
+# One test per reap-site decision-table row.
+# ---------------------------------------------------------------------------
+
+
+def test_reap_reason_phantom_surface(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_reconcile_locked phantom sweep sets reap_reason=phantom_surface."""
+    sess = _mk_session("phantom-s1", "dead-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = "client-a/auto-dev/PHANTOM-1"
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="PHANTOM-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="phantom-s1",
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+
+    reconcile()
+
+    reloaded = load_state()
+    s = reloaded.find_by_name_or_id("phantom-s1")
+    assert s is not None
+    assert s.reap_reason == ReapReason.PHANTOM_SURFACE
+
+
+def test_reap_reason_wall_clock_budget(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """revert_stalled_headless_sessions sets reap_reason=wall_clock_budget."""
+    worktree = tmp_path / "wt-wc"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("wc-budget-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "wc-budget-1")
+    assert s.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+
+
+def test_reap_reason_idle_stall(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Recover path (no usage limit) sets reap_reason=idle_stall."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id="idle-stall-1",
+        name="client-a/auto-dev/IDLE-STALL-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="IDLE-STALL-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-stall-1",
+                    attempts=1,  # < DEFAULT_IDLE_RETRY_CAP → recover path
+                )
+            ]
+        )
+    )
+
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._detect_usage_limit", return_value=False),
+        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile.fire_push_notification"),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
+        )
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "idle-stall-1")
+    assert s.reap_reason == ReapReason.IDLE_STALL
+
+
+def test_reap_reason_usage_limit_cutoff(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """flag_silently_idle recover branch with usage limit sets
+    reap_reason=usage_limit_cutoff."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id="usage-limit-1",
+        name="client-a/auto-dev/USAGE-LIMIT-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="USAGE-LIMIT-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="usage-limit-1",
+                    attempts=1,  # < cap → recover path
+                )
+            ]
+        )
+    )
+
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._detect_usage_limit", return_value=True),
+        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile.fire_push_notification"),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
+        )
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "usage-limit-1")
+    assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+
+def test_reap_reason_retry_cap_parked(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """flag_silently_idle park branch (cap reached) sets
+    reap_reason=retry_cap_parked."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id="cap-parked-1",
+        name="client-a/auto-dev/CAP-PARKED-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="CAP-PARKED-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="cap-parked-1",
+                    attempts=2,  # at DEFAULT_IDLE_RETRY_CAP → park path
+                )
+            ]
+        )
+    )
+
+    with (
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.fire_push_notification"),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
+        )
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "cap-parked-1")
+    assert s.reap_reason == ReapReason.RETRY_CAP_PARKED
+
+
+def test_reap_reason_completed_backstop_timed_out(
+    tmp_config_dir: Path,
+) -> None:
+    """revert_timed_out_tasks backstop sets reap_reason=completed_backstop on sessions
+    without a prior reap_reason."""
+    sess = Session(
+        id="backstop-to-1",
+        name="client-a/auto-dev/BACKSTOP-TO-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        completed_reason=CompletionReason.TIMED_OUT,
+        # reap_reason intentionally None — simulates signal_stop path
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="BACKSTOP-TO-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="backstop-to-1",
+                )
+            ]
+        )
+    )
+
+    revert_timed_out_tasks()
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "backstop-to-1")
+    assert s.reap_reason == ReapReason.COMPLETED_BACKSTOP
+
+
+def test_reap_reason_completed_backstop_completed(
+    tmp_config_dir: Path,
+) -> None:
+    """revert_completed_silent_tasks backstop sets reap_reason=completed_backstop."""
+    sess = Session(
+        id="backstop-c-1",
+        name="client-a/auto-dev/BACKSTOP-C-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.COMPLETED,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        completed_reason=CompletionReason.NORMAL,
+        # reap_reason intentionally None
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="BACKSTOP-C-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="backstop-c-1",
+                )
+            ]
+        )
+    )
+
+    revert_completed_silent_tasks()
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "backstop-c-1")
+    assert s.reap_reason == ReapReason.COMPLETED_BACKSTOP
+
+
+def test_reap_reason_salvage_completed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_salvage_high_path sets reap_reason=salvage_completed on the session."""
+    worktree = tmp_path / "wt-salv-comp"
+    worktree.mkdir(parents=True)
+    ticket_id = "SALV-COMP-1"
+
+    sess = Session(
+        id="salv-comp-1",
+        name=f"client-a/auto-dev/{ticket_id}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=worktree,
+        surface_ref="live-ref-sc",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-comp-1",
+                )
+            ]
+        )
+    )
+
+    def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "https://github.com/org/repo/pull/99\n"
+        return result
+
+    monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+    monkeypatch.setattr(
+        "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+    )
+    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("cw.reconcile.get_native_daemon_client", MagicMock)
+
+    candidates = [("salv-comp-1", ticket_id, "dev/salv-comp", str(worktree), True)]
+    salvage_committed_no_pr_sessions(candidates)
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "salv-comp-1")
+    assert s.reap_reason == ReapReason.SALVAGE_COMPLETED
+
+
+def test_reap_reason_salvage_parked(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_salvage_low_path sets reap_reason=salvage_parked on the session."""
+    worktree = tmp_path / "wt-salv-park"
+    worktree.mkdir(parents=True)
+    ticket_id = "SALV-PARK-1"
+
+    sess = Session(
+        id="salv-park-1",
+        name=f"client-a/auto-dev/{ticket_id}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=worktree,
+        surface_ref="live-ref-sp",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-park-1",
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+    monkeypatch.setattr(
+        "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+    )
+    monkeypatch.setattr("cw.reconcile.fire_push_notification", lambda *_a, **_kw: None)
+
+    candidates = [("salv-park-1", ticket_id, "dev/salv-park", str(worktree), False)]
+    salvage_committed_no_pr_sessions(candidates)
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "salv-park-1")
+    assert s.reap_reason == ReapReason.SALVAGE_PARKED
+
+
+def test_reap_reason_not_overwritten_by_backstop(
+    tmp_config_dir: Path,
+) -> None:
+    """revert_timed_out_tasks backstop does NOT overwrite an existing reap_reason."""
+    sess = Session(
+        id="backstop-skip-1",
+        name="client-a/auto-dev/BACKSTOP-SKIP-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        completed_reason=CompletionReason.TIMED_OUT,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,  # already set by reconcile
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="BACKSTOP-SKIP-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="backstop-skip-1",
+                )
+            ]
+        )
+    )
+
+    revert_timed_out_tasks()
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "backstop-skip-1")
+    # Must remain WALL_CLOCK_BUDGET, not be overwritten with COMPLETED_BACKSTOP
+    assert s.reap_reason == ReapReason.WALL_CLOCK_BUDGET

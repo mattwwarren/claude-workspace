@@ -62,6 +62,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapReason,
     SessionOrigin,
     SessionStatus,
     TicketTask,
@@ -849,6 +850,7 @@ def revert_stalled_headless_sessions(
         session.status = SessionStatus.TIMED_OUT
         session.completed_at = now
         session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
         pending.append((session, ticket_id))
 
     if not pending and not salvaged:
@@ -1106,13 +1108,20 @@ def flag_silently_idle_daemon_sessions(
         return [], []
 
     # Auto-recover: retire the session and revert its task for re-dispatch.
+    # Compute usage-limit cause before save_state so reap_reason persists.
     for session, _ in recover:
         session.status = SessionStatus.TIMED_OUT
         session.completed_at = now
         session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = (
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if _detect_usage_limit(session)
+            else ReapReason.IDLE_STALL
+        )
     # Park: flag-only (preserves #348 — no daemon stop, session stays ACTIVE).
     for session, _ in park:
         session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+        session.reap_reason = ReapReason.RETRY_CAP_PARKED
 
     # Write session to disk BEFORE queue mutation so a crash between the two
     # leaves state set on disk — watchdog skips on subsequent ticks. (#324, #348)
@@ -1147,6 +1156,8 @@ def flag_silently_idle_daemon_sessions(
 
     # Recovery: stop the dead surface + emit a distinguishable timeout event.
     # Payload mirrors the wall-clock timeout path; cause distinguishes the source.
+    # reap_reason was set (and persisted) in the mutation loop above, so we
+    # read it back rather than re-running _detect_usage_limit here.
     for session, ticket_id in recover:
         if session.surface_ref is not None:
             get_native_daemon_client().stop(session.surface_ref)
@@ -1154,7 +1165,9 @@ def flag_silently_idle_daemon_sessions(
         # re-dispatch, so the retry must start from a fresh worktree (#404).
         _cleanup_timed_out_worktree(session, ticket_id)
         cause = (
-            _CAUSE_USAGE_LIMIT if _detect_usage_limit(session) else _CAUSE_IDLE_STALL
+            _CAUSE_USAGE_LIMIT
+            if session.reap_reason is ReapReason.USAGE_LIMIT_CUTOFF
+            else _CAUSE_IDLE_STALL
         )
         record_event(
             OrchestratorEventType.SESSION_TIMED_OUT,
@@ -1385,6 +1398,7 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         session.status = SessionStatus.COMPLETED
         session.completed_reason = CompletionReason.CRASHED
         session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
         phantom_names.append(session.name)
         if ticket_id and session.origin is SessionOrigin.DAEMON:
             ticket_ids_to_revert.append(ticket_id)
@@ -1774,6 +1788,7 @@ def _salvage_high_path(
                     s.status = SessionStatus.COMPLETED
                     s.completed_at = now
                     s.completed_reason = CompletionReason.NORMAL
+                    s.reap_reason = ReapReason.SALVAGE_COMPLETED
                 break
         save_state(fresh_state)
 
@@ -1836,6 +1851,7 @@ def _salvage_low_path(
                 )
                 if not already_flagged:
                     s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+                    s.reap_reason = ReapReason.SALVAGE_PARKED
                 break
         save_state(fresh_state)
 
@@ -1923,6 +1939,9 @@ def revert_timed_out_tasks() -> list[str]:
     Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
     PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
     inspection (GitHub issue #421).
+
+    Sets reap_reason=COMPLETED_BACKSTOP on sessions that lack a reason so
+    the queue-events server can emit queue.session_reaped (#380).
     """
     state = load_state()
     target_sessions = [
@@ -1931,6 +1950,16 @@ def revert_timed_out_tasks() -> list[str]:
         if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
     ]
     session_ids = {s.id for s in target_sessions}
+    # Stamp reap_reason on any session that does not already have one (sessions
+    # reaching this backstop path may have been set TIMED_OUT by signal_stop
+    # without a reap_reason — mark them now so the bus server has a reason).
+    state_changed = False
+    for s in target_sessions:
+        if s.reap_reason is None:
+            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
+            state_changed = True
+    if state_changed:
+        save_state(state)
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
@@ -1948,6 +1977,9 @@ def revert_completed_silent_tasks() -> list[str]:
     Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
     PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
     inspection (GitHub issue #421).
+
+    Sets reap_reason=COMPLETED_BACKSTOP on sessions that lack a reason so
+    the queue-events server can emit queue.session_reaped (#380).
     """
     state = load_state()
     target_sessions = [
@@ -1956,6 +1988,17 @@ def revert_completed_silent_tasks() -> list[str]:
         if s.status == SessionStatus.COMPLETED and s.origin is SessionOrigin.DAEMON
     ]
     session_ids = {s.id for s in target_sessions}
+    # Stamp reap_reason on any session that does not already have one (sessions
+    # reaching this backstop path may have completed via signal_stop or
+    # salvage without a reap_reason — mark them now so the bus server has a
+    # reason to include in queue.session_reaped).
+    state_changed = False
+    for s in target_sessions:
+        if s.reap_reason is None:
+            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
+            state_changed = True
+    if state_changed:
+        save_state(state)
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)

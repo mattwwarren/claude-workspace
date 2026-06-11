@@ -41,7 +41,9 @@ from cw.models import (
     CwState,
     DevQueueStore,
     QueueItemStatus,
+    ReapReason,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TicketTask,
@@ -1115,3 +1117,143 @@ class TestPollOnceLockGuard:
         assert len(enqueued) == 1, (
             f"Expected 1 enqueued event, got {len(enqueued)}: {broadcast_calls}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestSessionReapedDeltaDetection (GitHub #380)
+# ---------------------------------------------------------------------------
+
+
+def _make_reaped_session(
+    session_id: str,
+    status: SessionStatus,
+    reap_reason: ReapReason,
+    surface_ref: str | None = "fake-ref",
+    origin: SessionOrigin = SessionOrigin.DAEMON,
+) -> Session:
+    from pathlib import Path
+
+    return Session(
+        id=session_id,
+        name=f"test-client/auto-dev/{session_id}",
+        client="test-client",
+        purpose=SessionPurpose.IMPL,
+        status=status,
+        origin=origin,
+        workspace_path=Path("/tmp/test"),
+        started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
+        surface_ref=surface_ref,
+        reap_reason=reap_reason,
+    )
+
+
+class TestSessionReapedDeltaDetection:
+    """queue.session_reaped fires when a new reap_reason appears on a session."""
+
+    def test_new_reap_reason_produces_session_reaped(self) -> None:
+        sess = _make_reaped_session(
+            "s-reaped-1",
+            SessionStatus.COMPLETED,
+            ReapReason.PHANTOM_SURFACE,
+        )
+        old = QueueSnapshot(session_statuses={"s-reaped-1": "active"})
+        state = CwState(sessions=[sess])
+        events = _compute_session_deltas(old, state)
+        reaped = [e for e in events if e.get("event") == "queue.session_reaped"]
+        assert len(reaped) == 1
+        ev = reaped[0]
+        assert ev["session_id"] == "s-reaped-1"
+        assert ev["reason"] == "phantom_surface"
+        assert ev["to_status"] == "completed"
+
+    def test_session_reaped_payload_fields_present(self) -> None:
+        sess = _make_reaped_session(
+            "s-reaped-payload",
+            SessionStatus.TIMED_OUT,
+            ReapReason.WALL_CLOCK_BUDGET,
+            surface_ref="abc12345",
+        )
+        old = QueueSnapshot(session_statuses={"s-reaped-payload": "active"})
+        state = CwState(sessions=[sess])
+        events = _compute_session_deltas(old, state)
+        ev = next(e for e in events if e.get("event") == "queue.session_reaped")
+        assert ev["session_id"] == "s-reaped-payload"
+        assert ev["surface_ref"] == "abc12345"
+        assert ev["origin"] == "daemon"
+        assert ev["reason"] == "wall_clock_budget"
+        assert ev["from_status"] == "active"
+        assert ev["to_status"] == "timed_out"
+
+    def test_already_seen_reap_reason_produces_no_event(self) -> None:
+        sess = _make_reaped_session(
+            "s-reaped-seen",
+            SessionStatus.COMPLETED,
+            ReapReason.IDLE_STALL,
+        )
+        # Snapshot already shows the reason → no new event
+        old = QueueSnapshot(
+            session_statuses={"s-reaped-seen": "completed"},
+            session_reap_reasons={"s-reaped-seen": "idle_stall"},
+        )
+        state = CwState(sessions=[sess])
+        events = _compute_session_deltas(old, state)
+        reaped = [e for e in events if e.get("event") == "queue.session_reaped"]
+        assert reaped == []
+
+    def test_null_surface_ref_included_in_payload(self) -> None:
+        sess = _make_reaped_session(
+            "s-reaped-no-ref",
+            SessionStatus.TIMED_OUT,
+            ReapReason.COMPLETED_BACKSTOP,
+            surface_ref=None,
+        )
+        old = QueueSnapshot(session_statuses={"s-reaped-no-ref": "timed_out"})
+        state = CwState(sessions=[sess])
+        events = _compute_session_deltas(old, state)
+        ev = next(e for e in events if e.get("event") == "queue.session_reaped")
+        assert ev["surface_ref"] is None
+
+    def test_session_without_reap_reason_produces_no_event(self) -> None:
+        """Sessions with reap_reason=None never produce queue.session_reaped."""
+        sess = _make_session("s-no-reason", SessionStatus.COMPLETED)
+        old = QueueSnapshot(session_statuses={"s-no-reason": "active"})
+        state = CwState(sessions=[sess])
+        events = _compute_session_deltas(old, state)
+        reaped = [e for e in events if e.get("event") == "queue.session_reaped"]
+        assert reaped == []
+
+    def test_snapshot_includes_reap_reason_field(self) -> None:
+        """_poll_once snapshot includes session_reap_reasons dict."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        sess = _make_reaped_session(
+            "s-snap",
+            SessionStatus.COMPLETED,
+            ReapReason.SALVAGE_COMPLETED,
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore())
+
+        from cw.cw_queue_events_server import _poll_once
+
+        new_snap, _ = _poll_once(QueueSnapshot())
+        assert "s-snap" in new_snap.session_reap_reasons
+        assert new_snap.session_reap_reasons["s-snap"] == "salvage_completed"
+
+    def test_each_reason_value_produces_event(self) -> None:
+        """All ReapReason enum values produce a queue.session_reaped event."""
+        for reason in ReapReason:
+            sess = _make_reaped_session(
+                f"s-all-{reason}",
+                SessionStatus.COMPLETED,
+                reason,
+            )
+            old = QueueSnapshot(
+                session_statuses={f"s-all-{reason}": "active"},
+            )
+            state = CwState(sessions=[sess])
+            events = _compute_session_deltas(old, state)
+            reaped = [e for e in events if e.get("event") == "queue.session_reaped"]
+            assert len(reaped) == 1, f"Expected 1 event for reason={reason}"
+            assert reaped[0]["reason"] == str(reason)

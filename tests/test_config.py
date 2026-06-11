@@ -846,14 +846,16 @@ class TestMigrateCwState:
         migrated = migrate_cw_state(raw)
         assert migrated["sessions"][0]["surface_ref"] is None
 
-    def test_migrate_bumps_schema_version_to_six(self) -> None:
-        """After migration, schema_version must equal 6."""
+    def test_migrate_bumps_schema_version_to_current(self) -> None:
+        """After migration, schema_version must equal CW_STATE_SCHEMA_VERSION."""
+        from cw.models import CW_STATE_SCHEMA_VERSION
+
         raw: dict[str, object] = {
             "schema_version": 4,
             "sessions": [],
         }
         migrated = migrate_cw_state(raw)
-        assert migrated["schema_version"] == 6
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
 
     def test_migrate_round_trip_clears_legacy_surface_ref(
         self, tmp_config_dir: Path
@@ -906,10 +908,10 @@ class TestMigrateCwState:
         assert content["schema_version"] == 4
         assert content["sessions"][0]["surface_ref"] == "ws:0.2"
 
-    def test_loaded_state_has_none_surface_ref_and_version_six(
+    def test_loaded_state_has_none_surface_ref_and_current_version(
         self, tmp_config_dir: Path
     ) -> None:
-        """Loaded state after migration has surface_ref=None and schema_version=6."""
+        """Loaded state after migration has surface_ref=None and current version."""
         import json
 
         state_dir = tmp_config_dir / ".local" / "share" / "cw"
@@ -931,8 +933,10 @@ class TestMigrateCwState:
                 }
             )
         )
+        from cw.models import CW_STATE_SCHEMA_VERSION
+
         loaded = load_state()
-        assert loaded.schema_version == 6
+        assert loaded.schema_version == CW_STATE_SCHEMA_VERSION
         assert loaded.sessions[0].surface_ref is None
 
     def test_backup_is_idempotent(self, tmp_config_dir: Path) -> None:
