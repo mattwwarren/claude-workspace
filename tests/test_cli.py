@@ -4596,7 +4596,8 @@ class TestPeek:
     ) -> None:
         # scrollback caps how many trailing transcript lines are considered:
         # with 60 lines but --scrollback 5, only the last 5 are eligible, so
-        # --lines 50 yields 5 and warns about the shortfall.
+        # --lines 50 yields 5. No "fewer than" warning because the user
+        # intentionally capped the window via --scrollback.
         session = self._make_session(tmp_path)
         body = "\n".join(f"line{i}" for i in range(60))
         self._write_transcript(monkeypatch, tmp_path, session, body)
@@ -4608,7 +4609,7 @@ class TestPeek:
         assert result.exit_code == 0, result.output
         emitted = [ln for ln in result.output.splitlines() if ln.startswith("line")]
         assert emitted == ["line55", "line56", "line57", "line58", "line59"]
-        assert "fewer than" in result.stderr
+        assert "fewer than" not in result.stderr
 
     def test_peek_warns_when_fewer_lines_available(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -2426,7 +2426,11 @@ def _peek_session(
     for text in _iter_assistant_text_blocks(transcript_path):
         window.extend(text.splitlines())
     content = "\n".join(list(window)[-lines:])
-    if len(window) < lines and content.strip():
+    if (
+        len(window) < lines
+        and content.strip()
+        and not (scrollback and scrollback < lines)
+    ):
         click.echo(
             f"Warning: fewer than {lines} lines available in transcript"
             f" (got {len(window)}).",
@@ -2453,7 +2457,7 @@ def _peek_session(
     "-s",
     default=_PEEK_DEFAULT_SCROLLBACK,
     show_default=True,
-    help="Maximum scrollback depth to search (lines).",
+    help="Max lines of transcript to scan. 0 = no limit (whole transcript).",
 )
 @handle_errors
 def peek(session_name: str, lines: int, scrollback: int) -> None:
