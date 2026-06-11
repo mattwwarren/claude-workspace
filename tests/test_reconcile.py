@@ -3136,16 +3136,84 @@ def test_awaiting_subagent_false_when_pending_tool_use_too_old(
     """Pending tool_use older than SUBAGENT_LIVENESS_WINDOW → hung subagent."""
     from cw.reconcile import SUBAGENT_LIVENESS_WINDOW_SECONDS, _awaiting_subagent
 
+    # Window is 1800 s (30 min) as of #544; tool_use exactly at the boundary
+    # (1800 s old) is expired (< is strict).
+    assert SUBAGENT_LIVENESS_WINDOW_SECONDS == 1800
     now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     transcript = project_dir / "sess-uuid.jsonl"
-    assert SUBAGENT_LIVENESS_WINDOW_SECONDS < 1800
     transcript.write_text(
         json.dumps(
             {
                 "type": "assistant",
-                "timestamp": "2026-01-01T00:30:00Z",
+                "timestamp": "2026-01-01T00:30:00Z",  # exactly 1800 s before now
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is False
+
+
+def test_awaiting_subagent_true_for_20_min_old_tool_use(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Pending tool_use ~20 min old is within the 1800 s window → alive (#544).
+
+    A large refactor running a single tool call for 20-30 min must NOT be reaped.
+    The liveness window was raised from 900→1800 s specifically to cover this case.
+    """
+    from cw.reconcile import _awaiting_subagent
+
+    # now=01:00:00, tool_use at 00:40:00 → 20 min = 1200 s < 1800 → alive
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:40:00Z",  # 20 min = 1200 s before now
+                "message": {
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "name": "Agent"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    sess = _make_daemon_session(claude_session_id="sess-uuid")
+    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+        assert _awaiting_subagent(sess, now) is True
+
+
+def test_awaiting_subagent_false_for_35_min_old_tool_use(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Pending tool_use ~35 min old is beyond the 1800 s window → reaped (#544).
+
+    The guard must not become permanent: a tool_use older than 1800 s indicates
+    a genuinely hung subagent and the watchdog should still reap it.
+    """
+    from cw.reconcile import _awaiting_subagent
+
+    # now=01:00:00, tool_use at 00:25:00 → 35 min = 2100 s > 1800 → expired
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    transcript = project_dir / "sess-uuid.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:25:00Z",  # 35 min = 2100 s before now
                 "message": {
                     "stop_reason": "tool_use",
                     "content": [{"type": "tool_use", "name": "Agent"}],
