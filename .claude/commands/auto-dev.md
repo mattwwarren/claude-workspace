@@ -1926,6 +1926,16 @@ cw event record stage.entered \
   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"done\",\"prev_stage\":\"s5_ci_waiting\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
 ```
 
+**Pre-emit validation gate.** Before framing the sentinel block, validate the inner JSON payload with `cw result validate`. A validation failure means the payload is malformed — fix the field errors, do not emit invalid JSON.
+
+```bash
+# Write the payload to a temp file and validate before emission
+printf '%s' "$SENTINEL_JSON" | cw result validate -
+# On success: cw result validate exits 0 and prints normalized JSON to stdout
+# On failure: exits 1 and prints field.path: message lines to stderr
+# Fix all reported errors before proceeding to emit the framed block
+```
+
 ```
 <<<AUTO_DEV_RESULT
 {

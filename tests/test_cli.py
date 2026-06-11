@@ -5134,3 +5134,76 @@ class TestDevQueueWait:
         assert _WAIT_EXIT_FAILED == 1
         assert _WAIT_EXIT_BLOCKED == 2
         assert _WAIT_EXIT_TIMEOUT == 124
+
+
+class TestResultValidate:
+    def _valid_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "ticket_id": "GEN-1234",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 3,
+                "lines_estimate": 42,
+                "lines_actual": 47,
+                "forbidden_touched": False,
+            },
+            "plan_source": "linear_existing",
+            "branch": "dev/gen-1234-fix-login",
+            "worktree_path": "/tmp/wt/gen-1234",
+            "fork_point_sha": "abc1234",
+            "commits": ["sha1", "sha2"],
+            "pr": {
+                "number": 42,
+                "url": "https://github.com/foo/bar/pull/42",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "MEDIUM",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+
+    def test_valid_json_stdin_exits_zero_with_normalized_json(self) -> None:
+        runner = CliRunner()
+        valid_json = json.dumps(self._valid_payload())
+        result = runner.invoke(main, ["result", "validate", "-"], input=valid_json)
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed["status"] == "shipped"
+
+    def test_invalid_json_stdin_exits_nonzero_with_error_in_output(self) -> None:
+        runner = CliRunner()
+        bad_payload = json.dumps({"status": "shipped", "schema_version": 1})
+        result = runner.invoke(main, ["result", "validate", "-"], input=bad_payload)
+        assert result.exit_code != 0
+        assert len(result.output) > 0
+
+    def test_malformed_json_stdin_exits_nonzero(self) -> None:
+        runner = CliRunner()
+        bad_input = "not-valid-json{"
+        result = runner.invoke(main, ["result", "validate", "-"], input=bad_input)
+        assert result.exit_code != 0
+        assert "json:" in result.output
+
+    def test_valid_json_file_path_exits_zero(self, tmp_path: Path) -> None:
+        import pathlib
+
+        payload_file = pathlib.Path(tmp_path) / "payload.json"
+        payload_file.write_text(json.dumps(self._valid_payload()))
+        runner = CliRunner()
+        result = runner.invoke(main, ["result", "validate", str(payload_file)])
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed["status"] == "shipped"
