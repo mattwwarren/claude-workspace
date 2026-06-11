@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from cw.onboarding import (
     _CLAUDE_MD_MARKER,
+    _SESSIONSTART_COMMAND,
     install_claude_md_snippet,
     install_cw_allowlist,
     install_sessionstart_hook,
@@ -178,8 +179,6 @@ class TestInstallCwAllowlist:
 
 
 class TestInstallSessionstartHook:
-    _COMMAND = "cw orchestrate status --json || true"
-
     def test_happy_path_writes_hook(self, tmp_path: Path) -> None:
         workspace = tmp_path / "repo"
         workspace.mkdir()
@@ -193,7 +192,7 @@ class TestInstallSessionstartHook:
         commands = [
             h["command"] for item in session_start for h in item.get("hooks", [])
         ]
-        assert self._COMMAND in commands
+        assert _SESSIONSTART_COMMAND in commands
 
     def test_idempotent(self, tmp_path: Path) -> None:
         workspace = tmp_path / "repo"
@@ -209,7 +208,7 @@ class TestInstallSessionstartHook:
             for item in data["hooks"]["SessionStart"]
             for h in item.get("hooks", [])
         ]
-        assert commands.count(self._COMMAND) == 1
+        assert commands.count(_SESSIONSTART_COMMAND) == 1
 
     def test_existing_different_hooks_preserved(self, tmp_path: Path) -> None:
         workspace = tmp_path / "repo"
@@ -238,7 +237,7 @@ class TestInstallSessionstartHook:
             for h in item.get("hooks", [])
         ]
         assert "echo hello" in commands
-        assert self._COMMAND in commands
+        assert _SESSIONSTART_COMMAND in commands
 
     def test_absent_dir_created(self, tmp_path: Path) -> None:
         workspace = tmp_path / "repo"
@@ -329,3 +328,58 @@ class TestInstallClaudeMdSnippet:
         claude_md = workspace / "CLAUDE.md"
         assert claude_md.exists()
         assert _CLAUDE_MD_MARKER in claude_md.read_text()
+
+    def test_cw_schema_fails_content_unchanged(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When cw schema list fails, pre-existing CLAUDE.md must not be modified."""
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+        claude_md = workspace / "CLAUDE.md"
+        original_content = "# Existing project\n\nSome content.\n"
+        claude_md.write_text(original_content)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["cw", "schema", "list"],
+                returncode=1,
+                stdout=b"",
+                stderr=b"",
+            )
+            install_claude_md_snippet(workspace)
+
+        assert claude_md.read_text() == original_content
+        captured = capsys.readouterr()
+        assert "unavailable" in captured.out
+
+
+class TestInstallSessionstartHookExtra:
+    def test_corrupt_settings_file_warns_and_writes(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Unparseable settings.json emits a warning, resets to empty, writes hook."""
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+        claude_dir = workspace / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text("{invalid json{{")
+
+        # Must not raise
+        install_sessionstart_hook(workspace)
+
+        # Warning was emitted
+        captured = capsys.readouterr()
+        assert "could not parse" in captured.out
+
+        # Valid settings.json was written with the hook
+        assert settings_path.exists()
+        data = json.loads(settings_path.read_text())
+        commands = [
+            h["command"]
+            for item in data["hooks"]["SessionStart"]
+            for h in item.get("hooks", [])
+        ]
+        assert _SESSIONSTART_COMMAND in commands

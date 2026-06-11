@@ -72,6 +72,7 @@ from cw.models import (
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.onboarding import (
+    CW_ALLOWLIST_ENTRY,
     install_claude_md_snippet,
     install_cw_allowlist,
     install_sessionstart_hook,
@@ -418,6 +419,18 @@ def upgrade_workers() -> None:
         raise click.exceptions.Exit(result.returncode)
 
 
+def _run_onboarding_steps(workspace: Path, name: str) -> None:
+    """Call all four onboarding functions and print the four status lines."""
+    register_mcp_servers(workspace, name)
+    install_cw_allowlist()
+    install_sessionstart_hook(workspace)
+    install_claude_md_snippet(workspace)
+    click.echo("  .mcp.json         — MCP servers registered")
+    click.echo(f"  ~/.claude/settings.json — {CW_ALLOWLIST_ENTRY} allow entry added")
+    click.echo("  .claude/settings.json  — SessionStart hook added")
+    click.echo("  CLAUDE.md              — cw snippet appended")
+
+
 @main.command(name="init")
 @click.argument("name", required=False, default=None)
 @click.option(
@@ -468,6 +481,10 @@ def init(
     Re-run onboarding for an existing client:
       cw init my-project --onboard-only
     """
+    if no_onboarding and onboard_only:
+        msg = "--no-onboarding and --onboard-only are mutually exclusive"
+        raise CwError(msg)
+
     if onboard_only:
         if name is None:
             msg = "Name is required with --onboard-only"
@@ -480,15 +497,8 @@ def init(
             )
             raise CwError(msg)
         workspace = client.workspace_path
-        register_mcp_servers(workspace, name)
-        install_cw_allowlist()
-        install_sessionstart_hook(workspace)
-        install_claude_md_snippet(workspace)
         click.echo(f"Onboarding complete for '{name}'.")
-        click.echo("  .mcp.json         — MCP servers registered")
-        click.echo("  ~/.claude/settings.json — Bash(cw:*) allow entry added")
-        click.echo("  .claude/settings.json  — SessionStart hook added")
-        click.echo("  CLAUDE.md              — cw snippet appended")
+        _run_onboarding_steps(workspace, name)
         return
 
     if name is None:
@@ -518,16 +528,9 @@ def init(
     click.echo(f"Added client '{name}' to configuration.")
 
     if not no_onboarding:
-        register_mcp_servers(path, name)
-        install_cw_allowlist()
-        install_sessionstart_hook(path)
-        install_claude_md_snippet(path)
         click.echo()
         click.echo("Agent onboarding:")
-        click.echo("  .mcp.json         — MCP servers registered")
-        click.echo("  ~/.claude/settings.json — Bash(cw:*) allow entry added")
-        click.echo("  .claude/settings.json  — SessionStart hook added")
-        click.echo("  CLAUDE.md              — cw snippet appended")
+        _run_onboarding_steps(path, name)
 
     click.echo()
     click.echo("Next steps:")

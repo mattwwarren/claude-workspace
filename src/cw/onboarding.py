@@ -20,7 +20,11 @@ from cw.atomic import atomic_write_text
 _CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
 # Base URLs for the two MCP proxy channels.
+# Why: mirrors _DEFAULT_BASE_URL in cw_queue_events_channel.py — update
+# together if port changes.
 _QUEUE_EVENTS_BASE_URL = "http://127.0.0.1:8789"
+# Why: mirrors _DEFAULT_BASE_URL in cw_pr_events_channel.py — update
+# together if port changes.
 _PR_EVENTS_BASE_URL = "http://127.0.0.1:8788"
 
 # Marker inserted into CLAUDE.md to detect already-onboarded repos.
@@ -61,6 +65,9 @@ def register_mcp_servers(workspace_path: Path, client_name: str) -> None:
     atomic_write_text(mcp_path, json.dumps(existing, indent=2) + "\n")
 
 
+CW_ALLOWLIST_ENTRY = "Bash(cw:*)"
+
+
 def install_cw_allowlist() -> None:
     """Merge ``Bash(cw:*)`` into ``~/.claude/settings.json`` allow list.
 
@@ -90,12 +97,15 @@ def install_cw_allowlist() -> None:
     permissions: dict[str, Any] = data.setdefault("permissions", {})
     allow: list[Any] = permissions.setdefault("allow", [])
 
-    entry = "Bash(cw:*)"
+    entry = CW_ALLOWLIST_ENTRY
     if entry not in allow:
         allow.append(entry)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+
+
+_SESSIONSTART_COMMAND = "cw orchestrate status --json || true"
 
 
 def install_sessionstart_hook(workspace_path: Path) -> None:
@@ -116,20 +126,23 @@ def install_sessionstart_hook(workspace_path: Path) -> None:
             raw = settings_path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except (json.JSONDecodeError, OSError):
+            click.echo(
+                f"cw init: could not parse {settings_path} — "
+                "resetting to empty settings to add SessionStart hook."
+            )
             data = {}
 
-    target_command = "cw orchestrate status --json || true"
+    target_command = _SESSIONSTART_COMMAND
 
     # Duplicate detection: traverse hooks.SessionStart[*].hooks[*].command
-    hooks_root: dict[str, Any] = data.get("hooks", {})
-    for item in hooks_root.get("SessionStart", []):
+    hooks: dict[str, Any] = data.setdefault("hooks", {})
+    for item in hooks.get("SessionStart", []):
         for hook in item.get("hooks", []):
             if hook.get("command") == target_command:
                 return  # already present
 
     # Build or extend the hooks structure.
-    hooks_section: dict[str, Any] = data.setdefault("hooks", {})
-    session_start: list[Any] = hooks_section.setdefault("SessionStart", [])
+    session_start: list[Any] = hooks.setdefault("SessionStart", [])
     session_start.append(
         {
             "matcher": "",
@@ -168,6 +181,8 @@ def install_claude_md_snippet(workspace_path: Path) -> None:
     if _CLAUDE_MD_MARKER in existing_text:
         return  # already onboarded
 
+    _queue_port = _QUEUE_EVENTS_BASE_URL.rsplit(":", 1)[-1]
+    _pr_port = _PR_EVENTS_BASE_URL.rsplit(":", 1)[-1]
     snippet = (
         "\n"
         f"{_CLAUDE_MD_MARKER}\n"
@@ -176,13 +191,12 @@ def install_claude_md_snippet(workspace_path: Path) -> None:
         "This workspace is managed by `cw`. Background sessions receive tasks\n"
         "via the MCP channels wired in `.mcp.json`.\n"
         "\n"
-        "- Queue events: `cw-queue-events` MCP server (port 8789)\n"
-        "- PR events: `cw-pr-events` MCP server (port 8788)\n"
+        f"- Queue events: `cw-queue-events` MCP server (port {_queue_port})\n"
+        f"- PR events: `cw-pr-events` MCP server (port {_pr_port})\n"
         "- Dispatch status: `cw orchestrate status` (SessionStart hook)\n"
     )
 
     try:
-        with claude_md.open("a", encoding="utf-8") as fh:
-            fh.write(snippet)
+        atomic_write_text(claude_md, existing_text + snippet)
     except OSError as exc:
         click.echo(f"cw init: could not write CLAUDE.md snippet: {exc}")

@@ -3321,7 +3321,7 @@ class TestInitCli:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["init", "my-repo", "--path", str(repo)],
+            ["init", "my-repo", "--path", str(repo), "--no-onboarding"],
         )
         assert result.exit_code == 0, result.output
         assert "Added client 'my-repo'" in result.output
@@ -3346,6 +3346,7 @@ class TestInitCli:
                 "develop",
                 "--purposes",
                 "impl,idea",
+                "--no-onboarding",
             ],
         )
         assert result.exit_code == 0, result.output
@@ -3365,7 +3366,7 @@ class TestInitCli:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["init"],
+            ["init", "--no-onboarding"],
             input=f"my-repo\n{repo}\nmain\n",
         )
         assert result.exit_code == 0, result.output
@@ -3445,10 +3446,11 @@ class TestInitCli:
 
         # Pre-register the client so --onboard-only can find it.
         runner = CliRunner()
-        runner.invoke(
+        result = runner.invoke(
             main,
             ["init", "my-repo", "--path", str(repo), "--no-onboarding"],
         )
+        assert result.exit_code == 0, f"Setup failed: {result.output}"
 
         with (
             patch("cw.cli.register_mcp_servers") as mock_mcp,
@@ -3497,6 +3499,63 @@ class TestInitCli:
 
         assert result.exit_code != 0
         assert "Name is required" in result.output
+
+    def test_init_no_onboarding_and_onboard_only_conflict(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """--no-onboarding and --onboard-only together exit nonzero with error."""
+        repo = make_git_repo("my-repo")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "init",
+                "my-repo",
+                "--path",
+                str(repo),
+                "--no-onboarding",
+                "--onboard-only",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output
+
+    def test_init_calls_onboarding_with_correct_workspace(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default cw init calls all four onboarding functions with correct args."""
+        from unittest.mock import MagicMock
+
+        repo = make_git_repo("my-repo")
+
+        mock_mcp = MagicMock()
+        mock_allow = MagicMock()
+        mock_hook = MagicMock()
+        mock_md = MagicMock()
+
+        monkeypatch.setattr("cw.cli.register_mcp_servers", mock_mcp)
+        monkeypatch.setattr("cw.cli.install_cw_allowlist", mock_allow)
+        monkeypatch.setattr("cw.cli.install_sessionstart_hook", mock_hook)
+        monkeypatch.setattr("cw.cli.install_claude_md_snippet", mock_md)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["init", "my-repo", "--path", str(repo)],
+        )
+
+        assert result.exit_code == 0, result.output
+        mock_mcp.assert_called_once_with(repo, "my-repo")
+        mock_allow.assert_called_once()
+        mock_hook.assert_called_once_with(repo)
+        mock_md.assert_called_once_with(repo)
 
 
 class TestQueueNextCli:
