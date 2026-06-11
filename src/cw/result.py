@@ -12,6 +12,10 @@ from pydantic import ValidationError
 from cw.auto_dev_result import AutoDevResult
 
 
+def _format_errors(exc: ValidationError) -> list[str]:
+    return [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+
+
 def validate_payload(payload: dict[str, Any]) -> list[str]:
     """Validate a raw AutoDevResult payload dict.
 
@@ -21,14 +25,8 @@ def validate_payload(payload: dict[str, Any]) -> list[str]:
     try:
         AutoDevResult.model_validate(payload)
     except ValidationError as exc:
-        lines = []
-        for err in exc.errors():
-            loc = ".".join(str(p) for p in err["loc"])
-            msg = err["msg"]
-            lines.append(f"{loc}: {msg}")
-        return lines
-    else:
-        return []
+        return _format_errors(exc)
+    return []
 
 
 @click.group()
@@ -89,13 +87,13 @@ def result_validate(path: str) -> None:
         payload: dict[str, Any] = json.loads(raw)
     except json.JSONDecodeError as exc:
         click.echo(f"json: {exc}", err=True)
-        raise SystemExit(1) from exc
+        raise click.exceptions.Exit(1) from exc
 
-    errors = validate_payload(payload)
-    if errors:
-        for line in errors:
+    try:
+        result_obj = AutoDevResult.model_validate(payload)
+    except ValidationError as exc:
+        for line in _format_errors(exc):
             click.echo(line, err=True)
-        raise SystemExit(1)
+        raise click.exceptions.Exit(1) from exc
 
-    result_obj = AutoDevResult.model_validate(payload)
     click.echo(result_obj.model_dump_json(indent=2))
