@@ -6,6 +6,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-11
+
+First stable release: the multiplexer layer (cmux/tmux) is deleted entirely,
+workers spawn via `claude --bg` and are tracked by the native daemon roster,
+and the reap path has been bulletproofed end-to-end (#543).
+
+### Architecture
+
+- **Native supervisor replaces multiplexer layer** (#119/#521): cmux/tmux
+  adapters, the `MultiplexerAdapter` abstraction, and all wrapper shims are
+  deleted. Workers spawn via `claude --bg`; liveness tracked through
+  `~/.claude/daemon/roster.json`. No external multiplexer required.
+
+### Added
+
+- **Observable reaps: `queue.session_reaped` + `ReapReason` taxonomy**
+  (#380): the reconciler emits a structured `queue.session_reaped` event for
+  every reap decision, carrying one of eight `ReapReason` values
+  (`phantom_surface`, `idle_stall`, `usage_limit_cutoff`, `retry_cap_parked`,
+  `wall_clock_budget`, `completed_backstop`, `salvage_completed`,
+  `salvage_parked`). `Session.reap_reason` (schema v7) records the reason on
+  the session object.
+- **Confirm-before-reap** (#545): idle watchdog waits for
+  `idle_confirm_observations` (default: 2) consecutive idle observations before
+  triggering an idle-stall reap. `Session.idle_observation_count` (schema v6)
+  tracks the accumulating count.
+- **Widened subagent-liveness window** (#544): `SUBAGENT_LIVENESS_WINDOW_SECONDS`
+  raised 900 s → 1800 s so a single long quiet tool call or in-flight subagent
+  is not reaped as idle. The transcript-mtime window and elapsed budgets are
+  unchanged, and roster presence is deliberately NOT treated as proof-of-life
+  (a dead worker can linger in the roster).
+- **Unified transcript locator via `surface_ref`-prefix glob** (#541): precise
+  liveness check resolves the transcript path from the daemon session id prefix
+  rather than scanning all transcripts.
+- **Sentinel-aware `cw dev-queue wait`** (#535): `wait` detects
+  `AUTO_DEV_RESULT` sentinels in the transcript directly, eliminating
+  false-timeout (exit 124) for long-running workers whose reconcile cycle
+  hasn't fired yet.
+- **`cw result validate`** (#482): pre-emit gate validates a candidate
+  `AutoDevResult` JSON object against the authoritative schema.
+- **`cw schema`**: inspect Pydantic model schemas for `AutoDevResult`,
+  `TicketTask`, and `Session` directly from the CLI.
+
+### Schema
+
+- **v5** (#119/#521): cleared legacy multiplexer `surface_ref` values on
+  upgrade. Auto-migrates on first load.
+- **v6** (#545): added `Session.idle_observation_count`. Purely additive;
+  defaults to `0`.
+- **v7** (#380): added `Session.reap_reason`. Purely additive; defaults to
+  `None`.
+
+### Documentation
+
+- **Operator runbooks** (#538/#539): `docs/dispatch-runbook.md` (end-to-end
+  `cw dev-queue` dispatch procedure) and `docs/session-disposition.md` (how to
+  read a session's outcome from the transcript sentinel).
+- **`docs/MIGRATION-0.x-to-1.0.md`**: updated to cover the v5→v7 schema
+  chain, the new 1.0 contract surface, and the `cw daemon` deprecation shim.
+
+### Known issues
+
+- **#542**: `cw dev-queue wait` can ride to the hard timeout (exit 124) instead
+  of returning exit 3 (ATTENTION) when a session is reaped mid-wait. The
+  sentinel-aware path only catches successful sentinels; a reap-during-wait
+  is not yet signalled early.
+
 ## [0.14.2] — 2026-06-03
 
 Reliability-hardening release: a wave of concurrency, atomicity, and

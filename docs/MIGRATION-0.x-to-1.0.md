@@ -20,6 +20,29 @@ compatibility. On first load after upgrading, cw automatically:
    8-char hex daemon session ids are preserved unchanged.
 3. Bumps the schema version to 5.
 
+### Schema version chain
+
+The state file schema has moved through three steps since the multiplexer
+deletion:
+
+- **v5** (#119/#521): cleared legacy multiplexer `surface_ref` values on first
+  load (the migration described above).
+- **v6** (#545): added `Session.idle_observation_count` — the count of
+  consecutive idle observations before a confirm-before-reap decision is made.
+  Purely additive; old state files load with a default of `0`.
+- **v7** (#380): added `Session.reap_reason` — the `ReapReason` enum value
+  recorded when a session is reaped by the reconciler. Purely additive; old
+  state files load with `None`.
+
+v6 and v7 carry no migration steps: the new fields default safely, so old
+state files load without user action.
+
+### `cw daemon`
+
+`cw daemon` is a **deprecated shim** — it emits a deprecation notice and
+exits. The PR-dispatch/watch role it once held has been replaced by the
+cw-pr-events channel-based orchestrator. Use `cw orchestrator-start` instead.
+
 ### Worktree paths
 
 **Worktrees stay exactly where they are.** cw still creates them via
@@ -27,33 +50,42 @@ compatibility. On first load after upgrading, cw automatically:
 If you used a custom `worktree_base` in 0.x your worktrees remain under that
 path.
 
-## What `cw doctor` now checks
+## New in 1.0
 
-`cw doctor` verifies that every session carrying a `worktree_path` still has
-that path on disk. Sessions where `worktree_path` is `None` are skipped
-silently.
+Brief summaries below; the linked docs have the authoritative detail.
 
-Example output when worktrees are present and healthy:
-
-```
-  [OK] worktree/summary — 3 sessions checked, 0 missing worktrees
-```
-
-Example output when a worktree was deleted manually:
-
-```
-  [WARN] worktree/a1b2c3d4 — path does not exist: /home/user/ws/.worktrees/client/feature
-  [OK]   worktree/summary — 2 sessions checked, 1 missing worktrees
-```
-
-The check is **read-only and warn-only**: cw never moves or recreates a
-missing worktree. A missing worktree is informational — you may have
-intentionally deleted a finished branch. No manual action is required unless
-you want to resume that session, in which case create a new worktree and
-update the session's `worktree_path` by editing
-`~/.local/share/cw/sessions.json` directly.
+- **`cw schema`** — inspect Pydantic model schemas for `AutoDevResult`,
+  `TicketTask`, and `Session` directly from the CLI (`cw schema list`,
+  `cw schema show <name>`).
+- **`cw result validate`** (#482) — pre-emit gate: validates a candidate
+  `AutoDevResult` JSON object against the authoritative schema before the
+  worker emits the sentinel block. See `cw result validate --help`.
+- **Sentinel-aware `cw dev-queue wait`** (#535) — `wait` now detects
+  `AUTO_DEV_RESULT` sentinels in the transcript directly rather than relying
+  solely on task-status polling, eliminating false-timeout (exit 124) for
+  long-running healthy workers whose reconcile cycle hasn't fired yet.
+- **`queue.session_reaped` bus events + `ReapReason` taxonomy** (#380) — the
+  reconciler emits a structured `queue.session_reaped` event for every reap
+  decision, carrying one of eight `ReapReason` values
+  (`phantom_surface`, `idle_stall`, `usage_limit_cutoff`, `retry_cap_parked`,
+  `wall_clock_budget`, `completed_backstop`, `salvage_completed`,
+  `salvage_parked`). See [`docs/headless-contract.md`](headless-contract.md)
+  for the full event schema.
+- **Confirm-before-reap** (#545) — the idle watchdog waits for
+  `idle_confirm_observations` (default: 2) consecutive idle observations before
+  triggering an idle-stall reap, reducing false-positive reaps on workers that
+  are legitimately between tool calls.
+- **Widened subagent-liveness window** (#544) —
+  `SUBAGENT_LIVENESS_WINDOW_SECONDS` raised 900 s → 1800 s so a single long
+  quiet tool call or in-flight subagent is not reaped as idle; the
+  transcript-mtime window and elapsed budgets are unchanged.
+- **Operator docs** (#538/#539) — `docs/dispatch-runbook.md` covers the
+  end-to-end `cw dev-queue` dispatch procedure;
+  `docs/session-disposition.md` explains how to read a session's outcome from
+  the transcript sentinel. See those files for the full reference.
 
 ## What you need to do
 
 Nothing. Worktrees stay where they are. The `surface_ref` migration runs
-automatically on first `load_state()` call after upgrading to 1.0.
+automatically on first `load_state()` call after upgrading to 1.0. The v6/v7
+schema additions are purely additive and require no manual action.
