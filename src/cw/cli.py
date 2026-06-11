@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,6 +63,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
+    Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
@@ -91,10 +93,18 @@ from cw.queue import (
     peek_next,
     remove_item,
 )
-from cw.reconcile import reconcile, resolve_headless_budget, ticket_id_for_session
+from cw.reconcile import (
+    _csid_from_transcript,
+    _session_project_dir,
+    reconcile,
+    resolve_headless_budget,
+    resolve_idle_watchdog_budget,
+    ticket_id_for_session,
+)
 from cw.result import result as result_group
 from cw.schema import REGISTRY, format_json, format_tldr
 from cw.session import (
+    _is_native_surface_ref,
     background_all_sessions,
     background_session,
     done_session,
@@ -1624,7 +1634,90 @@ _PLAN_DEFAULT_TIMEOUT = 300
 _WAIT_DEFAULT_TIMEOUT: int = 300
 _WAIT_EXIT_FAILED: int = 1
 _WAIT_EXIT_BLOCKED: int = 2
+_WAIT_EXIT_ATTENTION: int = 3
 _WAIT_EXIT_TIMEOUT: int = 124
+
+# Poll interval for the sentinel-aware wait loop (seconds).
+_WAIT_SENTINEL_POLL_INTERVAL: float = 5.0
+
+# Exit-code mapping from AutoDevResult.status to wait exit codes.
+_WAIT_STATUS_EXIT: dict[str, int] = {
+    "shipped": 0,
+    "no_op": 0,
+    "blocked": _WAIT_EXIT_BLOCKED,
+    "ambiguities_pending_resolution": _WAIT_EXIT_BLOCKED,
+    "premises_pending_verification": _WAIT_EXIT_BLOCKED,
+    "plan_pending_approval": _WAIT_EXIT_BLOCKED,
+    "review_pending_approval": _WAIT_EXIT_BLOCKED,
+    "merge_gate_blocked": _WAIT_EXIT_BLOCKED,
+    "scope_exceeded": _WAIT_EXIT_FAILED,
+    "forbidden_area": _WAIT_EXIT_FAILED,
+    "validation_failed": _WAIT_EXIT_FAILED,
+    "failed": _WAIT_EXIT_FAILED,
+}
+
+
+def _emit_wait_timeout(
+    ticket_id: str,
+    resolved: str,
+    timeout_seconds: float,
+    output_json: bool,
+) -> None:
+    """Emit timeout output for ``dev-queue wait``."""
+    if output_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ticket_id": ticket_id,
+                    "client": resolved,
+                    "status": "timeout",
+                    "session_id": None,
+                    "state": "timeout",
+                    "sentinel_status": None,
+                    "pr_url": None,
+                }
+            )
+        )
+    else:
+        click.echo(f"Timeout waiting for {ticket_id} (>{timeout_seconds:.0f}s)")
+
+
+def _transcript_age_seconds(
+    session: Session,
+    now: datetime,
+) -> float | None:
+    """Return seconds since the session's transcript was last written, or None.
+
+    Returns None when the transcript file cannot be located.  Delegates to
+    ``_transcript_recently_active`` semantics but exposes the raw age so the
+    caller can compare against the budget.
+    """
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
+        return None
+    try:
+        if session.claude_session_id is not None:
+            transcript = project_dir / f"{session.claude_session_id}.jsonl"
+            if not transcript.is_file():
+                return None
+            mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
+            return (now - mtime).total_seconds()
+
+        # No csid yet — scan for the newest post-spawn .jsonl
+        candidates = sorted(
+            project_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        newest = candidates[0]
+        mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
+        if mtime <= session.started_at:
+            return None
+        return (now - mtime).total_seconds()
+    except OSError:
+        return None
 
 
 def _run_plan_impl(
@@ -1728,49 +1821,177 @@ def dev_queue_wait(
 ) -> None:
     """Block until a dev-queue ticket reaches terminal status.
 
-    Exits 0 for COMPLETED, 1 for FAILED/CANCELLED, 2 for BLOCKED_ON_USER,
-    and 124 on timeout.
+    Sentinel-aware: detects AUTO_DEV_RESULT sentinels in the transcript
+    directly rather than relying solely on task-status polling.  This
+    eliminates false-timeout (exit 124) for long-running healthy workers
+    whose reconcile cycle hasn't fired yet.
+
+    Exit codes:
+      0   shipped / no_op (or COMPLETED queue status)
+      1   scope_exceeded / forbidden_area / failed / FAILED / CANCELLED
+      2   blocked / *_pending_* family / BLOCKED_ON_USER
+      3   ATTENTION — transcript stale past idle budget, worker not in roster
+      124 hard timeout ceiling (--timeout) with no terminal or attention signal
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
-    try:
-        task = wait_for_terminal(ticket_id, resolved, timeout=timeout_seconds)
-    except TimeoutError:
-        if output_json:
-            click.echo(
-                json.dumps(
-                    {
-                        "ticket_id": ticket_id,
-                        "client": resolved,
-                        "status": "timeout",
-                        "session_id": None,
-                    }
+
+    deadline = time.monotonic() + timeout_seconds
+
+    while True:
+        # --- Step 1: fast path — task already terminal in the queue ---
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == ticket_id), None)
+        if task is None:
+            # Fallback: delegate to wait_for_terminal so it can surface
+            # "not found" errors (CwError) and handle TimeoutError.
+            try:
+                task = wait_for_terminal(ticket_id, resolved, timeout=timeout_seconds)
+            except TimeoutError:
+                _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
+                raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT) from None
+
+        if task.status in {
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.FAILED,
+            QueueItemStatus.CANCELLED,
+            QueueItemStatus.BLOCKED_ON_USER,
+        }:
+            status_str = task.status.value
+            if output_json:
+                click.echo(
+                    json.dumps(
+                        {
+                            "ticket_id": ticket_id,
+                            "client": resolved,
+                            "status": status_str,
+                            "session_id": task.session_id,
+                            "state": "terminal",
+                            "sentinel_status": None,
+                            "pr_url": None,
+                        }
+                    )
                 )
-            )
-        else:
-            click.echo(f"Timeout waiting for {ticket_id} (>{timeout_seconds:.0f}s)")
-        raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT) from None
+            else:
+                click.echo(f"Status: {status_str.upper()}")
 
-    status_str = task.status.value
-    if output_json:
-        click.echo(
-            json.dumps(
-                {
-                    "ticket_id": ticket_id,
-                    "client": resolved,
-                    "status": status_str,
-                    "session_id": task.session_id,
-                }
-            )
+            if task.status == QueueItemStatus.COMPLETED:
+                return
+            if task.status == QueueItemStatus.BLOCKED_ON_USER:
+                raise click.exceptions.Exit(_WAIT_EXIT_BLOCKED)
+            raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
+
+        # --- Step 2: resolve the session ---
+        session_id = task.session_id
+        if session_id is None:
+            # Spawn-window grace: session hasn't registered yet — keep polling.
+            if time.monotonic() >= deadline:
+                _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
+                raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
+            time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
+            continue
+
+        cw_state = load_state()
+        session = next((s for s in cw_state.sessions if s.id == session_id), None)
+        if session is None:
+            # Session not in state yet — spawn-window grace, keep polling.
+            if time.monotonic() >= deadline:
+                _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
+                raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
+            time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
+            continue
+
+        # --- Step 3: resolve claude session id ---
+        csid = session.claude_session_id or _csid_from_transcript(session)
+
+        # --- Step 4: parse sentinel from transcript ---
+        sentinel: AutoDevResult | BlockedResult | None = None
+        if session.worktree_path is not None and csid is not None:
+            sentinel = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
+
+        # BlockedResult means framing present but payload unusable — treat as
+        # not-yet-terminal (could be a partial write); keep polling.
+        if isinstance(sentinel, AutoDevResult):
+            # TERMINAL: map sentinel status → exit code
+            exit_code = _WAIT_STATUS_EXIT.get(sentinel.status, _WAIT_EXIT_FAILED)
+            pr_url = sentinel.pr.url if sentinel.pr is not None else None
+            if output_json:
+                click.echo(
+                    json.dumps(
+                        {
+                            "ticket_id": ticket_id,
+                            "client": resolved,
+                            "status": task.status.value,
+                            "session_id": task.session_id,
+                            "state": "terminal",
+                            "sentinel_status": sentinel.status,
+                            "pr_url": pr_url,
+                        }
+                    )
+                )
+            else:
+                click.echo(
+                    f"Sentinel: {sentinel.status.upper()}"
+                    + (f" ({pr_url})" if pr_url else "")
+                )
+            raise click.exceptions.Exit(exit_code)
+
+        # --- Step 5: HEARTBEAT / ATTENTION ---
+        now = datetime.now(UTC)
+        budget = resolve_idle_watchdog_budget(task, config)
+        transcript_age = _transcript_age_seconds(session, now)
+        is_stale = transcript_age is not None and transcript_age > budget
+        # ATTENTION: stale AND worker not native OR not in daemon roster.
+        # Must guard with _is_native_surface_ref to avoid false-attention on
+        # non-daemon surface refs (e.g. tmux window names).
+        in_roster = False
+        surface_ref = session.surface_ref
+        if surface_ref is not None and _is_native_surface_ref(surface_ref):
+            daemon = get_native_daemon_client()
+            in_roster = surface_ref in daemon.list_live_session_short_ids()
+
+        # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
+        no_sentinel_at_all = sentinel is None
+        is_attention = (
+            is_stale
+            and no_sentinel_at_all
+            and surface_ref is not None
+            and _is_native_surface_ref(surface_ref)
+            and not in_roster
         )
-    else:
-        click.echo(f"Status: {status_str.upper()}")
 
-    if task.status == QueueItemStatus.COMPLETED:
-        return
-    if task.status == QueueItemStatus.BLOCKED_ON_USER:
-        raise click.exceptions.Exit(_WAIT_EXIT_BLOCKED)
-    raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
+        if is_attention:
+            elapsed_seconds = (now - session.started_at).total_seconds()
+            if output_json:
+                click.echo(
+                    json.dumps(
+                        {
+                            "ticket_id": ticket_id,
+                            "client": resolved,
+                            "status": task.status.value,
+                            "session_id": task.session_id,
+                            "state": "attention",
+                            "sentinel_status": None,
+                            "pr_url": None,
+                            "elapsed_seconds": elapsed_seconds,
+                            "transcript_age_seconds": transcript_age,
+                        }
+                    )
+                )
+            else:
+                click.echo(
+                    f"ATTENTION: {ticket_id} stalled "
+                    f"(transcript {transcript_age:.0f}s old, not in roster)"
+                )
+            raise click.exceptions.Exit(_WAIT_EXIT_ATTENTION)
+
+        # HEARTBEAT: no terminal sentinel but transcript advancing (or session
+        # hasn't hit the budget yet) — keep polling within the hard ceiling.
+        if time.monotonic() >= deadline:
+            _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
+            raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
+
+        time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
 
 
 @dev_queue.command(name="refresh-all")
