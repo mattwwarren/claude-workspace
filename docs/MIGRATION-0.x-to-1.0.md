@@ -75,9 +75,10 @@ Brief summaries below; the linked docs have the authoritative detail.
   `idle_confirm_observations` (default: 2) consecutive idle observations before
   triggering an idle-stall reap, reducing false-positive reaps on workers that
   are legitimately between tool calls.
-- **Widened liveness windows** (#544) — transcript-mtime and roster-liveness
-  windows are tuned for the native-supervisor latency profile; workers writing
-  slowly to their transcript are no longer false-positively reaped.
+- **Widened subagent-liveness window** (#544) —
+  `SUBAGENT_LIVENESS_WINDOW_SECONDS` raised 900 s → 1800 s so a single long
+  quiet tool call or in-flight subagent is not reaped as idle; the
+  transcript-mtime window and elapsed budgets are unchanged.
 - **Operator docs** (#538/#539) — `docs/dispatch-runbook.md` covers the
   end-to-end `cw dev-queue` dispatch procedure;
   `docs/session-disposition.md` explains how to read a session's outcome from

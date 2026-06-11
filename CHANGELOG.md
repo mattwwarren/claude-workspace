@@ -32,9 +32,11 @@ and the reap path has been bulletproofed end-to-end (#543).
   `idle_confirm_observations` (default: 2) consecutive idle observations before
   triggering an idle-stall reap. `Session.idle_observation_count` (schema v6)
   tracks the accumulating count.
-- **Widened liveness windows** (#544): transcript-mtime and roster-liveness
-  windows tuned for the native-supervisor latency profile — eliminates
-  false-positive reaps on workers that are legitimately between tool calls.
+- **Widened subagent-liveness window** (#544): `SUBAGENT_LIVENESS_WINDOW_SECONDS`
+  raised 900 s → 1800 s so a single long quiet tool call or in-flight subagent
+  is not reaped as idle. The transcript-mtime window and elapsed budgets are
+  unchanged, and roster presence is deliberately NOT treated as proof-of-life
+  (a dead worker can linger in the roster).
 - **Unified transcript locator via `surface_ref`-prefix glob** (#541): precise
   liveness check resolves the transcript path from the daemon session id prefix
   rather than scanning all transcripts.
