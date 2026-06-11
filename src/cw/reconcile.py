@@ -46,6 +46,7 @@ from cw.config import (
     get_client,
     load_orchestrator_config,
     load_state,
+    mutate_state,
     save_state,
     sessions_lock,
 )
@@ -1481,7 +1482,10 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     # was not yet reverted (e.g. signal_stop crashed after setting status but
     # before touching the queue, or a headless session completed without
     # the dispatch consumer processing it). TIMED_OUT/COMPLETED sessions are
-    # already terminal so no state mutation is needed — queue revert only.
+    # already terminal; the only state mutation for these sessions is the
+    # reap_reason stamp performed above via mutate_state() in
+    # revert_timed_out_tasks / revert_completed_silent_tasks.
+    # This block handles queue revert only.
     timed_out_ticket_ids = revert_timed_out_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     all_reverted = list(
@@ -1967,13 +1971,14 @@ def revert_timed_out_tasks() -> list[str]:
         for t in store.tasks
         if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
     }
-    state_changed = False
-    for s in target_sessions:
-        if s.reap_reason is None and s.id in backstop_session_ids:
-            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
-            state_changed = True
-    if state_changed:
-        save_state(state)
+    if backstop_session_ids:
+
+        def _stamp(state: CwState) -> None:
+            for s in state.sessions:
+                if s.id in backstop_session_ids and s.reap_reason is None:
+                    s.reap_reason = ReapReason.COMPLETED_BACKSTOP
+
+        mutate_state(_stamp)
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
@@ -2019,13 +2024,14 @@ def revert_completed_silent_tasks() -> list[str]:
         for t in store.tasks
         if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
     }
-    state_changed = False
-    for s in target_sessions:
-        if s.reap_reason is None and s.id in backstop_session_ids:
-            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
-            state_changed = True
-    if state_changed:
-        save_state(state)
+    if backstop_session_ids:
+
+        def _stamp(state: CwState) -> None:
+            for s in state.sessions:
+                if s.id in backstop_session_ids and s.reap_reason is None:
+                    s.reap_reason = ReapReason.COMPLETED_BACKSTOP
+
+        mutate_state(_stamp)
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
