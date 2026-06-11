@@ -148,6 +148,8 @@ cw list
 - **File-based locking**: Prevents concurrent state corruption from parallel session operations.
 - **Event history**: Audit trail for session lifecycle transitions.
 
+**Operator runbooks:** [`docs/dispatch-runbook.md`](docs/dispatch-runbook.md) — end-to-end `cw dev-queue` dispatch procedure. [`docs/session-disposition.md`](docs/session-disposition.md) — how to read a session's outcome from the transcript sentinel.
+
 ---
 
 # Model Usage & Cost Optimization
