@@ -1338,13 +1338,23 @@ def _no_op_salvage_payload() -> dict[str, Any]:
 
 
 def _write_salvage_transcript(
-    home: Path, worktree: Path, claude_session_id: str, payload: dict[str, Any]
+    home: Path,
+    worktree: Path,
+    claude_session_id: str,
+    payload: dict[str, Any],
+    *,
+    surface_ref: str = "fake-short-id",
 ) -> Path:
     """Write a transcript jsonl under ``home`` carrying a wrapped sentinel.
 
     Mirrors Claude's on-disk layout: ``<home>/.claude/projects/<encoded>/
-    <uuid>.jsonl`` with the encoded path replacing both ``/`` and ``.``
-    with ``-`` (matching Claude Code's actual encoding).
+    <surface_ref>-<uuid>.jsonl`` with the encoded path replacing both ``/``
+    and ``.`` with ``-`` (matching Claude Code's actual encoding).
+
+    ``surface_ref`` is prepended to the filename so that
+    ``_locate_session_transcript``'s surface_ref-prefix glob can find it.
+    The full stem (``<surface_ref>-<uuid>``) becomes the stored
+    ``claude_session_id``.
     """
     encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
@@ -1358,7 +1368,8 @@ def _write_salvage_transcript(
             "content": [{"type": "text", "text": sentinel}],
         },
     }
-    path = project_dir / f"{claude_session_id}.jsonl"
+    stem = f"{surface_ref}-{claude_session_id}"
+    path = project_dir / f"{stem}.jsonl"
     path.write_text(json.dumps(record) + "\n")
     return path
 
@@ -1405,7 +1416,7 @@ def test_revert_stalled_salvages_shipped_sentinel(
     assert reloaded.completed_reason == CompletionReason.NORMAL
     assert reloaded.last_result is not None
     assert reloaded.last_result["status"] == "shipped"
-    assert reloaded.claude_session_id == "claude-uuid-1"
+    assert reloaded.claude_session_id == "fake-short-id-claude-uuid-1"
     assert reloaded.cost_usd == 1.5
 
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-1")
@@ -1579,7 +1590,9 @@ def test_reconcile_crashed_phantom_salvages_shipped_sentinel(
     )
     payload = _shipped_salvage_payload()
     payload["ticket_id"] = "salv-crash"
-    _write_salvage_transcript(home, worktree, "claude-uuid-5", payload)
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-5", payload, surface_ref="gone-ref"
+    )
     # A second, genuinely-live session keeps the daemon roster non-empty so the
     # transient-outage guard does not trip (it would otherwise abort reconcile
     # when native_live is empty). Its ref IS in the live set, so it is not a
@@ -2714,9 +2727,17 @@ def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
 
 
 def _write_idle_transcript(
-    home: Path, worktree: Path, filename: str = "sess.jsonl"
+    home: Path,
+    worktree: Path,
+    filename: str = "fake-short-id-sess.jsonl",
 ) -> Path:
-    """Write a minimal transcript .jsonl under the project dir for *worktree*."""
+    """Write a minimal transcript .jsonl under the project dir for *worktree*.
+
+    Default filename starts with ``fake-short-id`` so that
+    ``_locate_session_transcript``'s surface_ref-prefix glob finds it when the
+    session has ``surface_ref="fake-short-id"`` (the default in
+    ``_mk_headless_daemon_session``).
+    """
     encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -2746,7 +2767,7 @@ def test_flag_silently_idle_skips_worker_with_recent_transcript(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    transcript = _write_idle_transcript(home, worktree)
+    transcript = _write_idle_transcript(home, worktree, filename="live-ref-sess.jsonl")
     # Stamp at half the liveness window — well within TRANSCRIPT_LIVENESS_WINDOW_SECONDS
     half_window = TRANSCRIPT_LIVENESS_WINDOW_SECONDS // 2
     recent_ts = (now - timedelta(seconds=half_window)).timestamp()
@@ -3413,9 +3434,15 @@ def _write_idle_transcript_with_text(
     home: Path,
     worktree: Path,
     assistant_text: str,
-    filename: str = "sess-486.jsonl",
+    filename: str = "fake-short-id-sess-486.jsonl",
 ) -> Path:
-    """Write a transcript with a single assistant text block under the project dir."""
+    """Write a transcript with a single assistant text block under the project dir.
+
+    Default filename starts with ``fake-short-id`` so that
+    ``_locate_session_transcript``'s surface_ref-prefix glob finds it when the
+    session has ``surface_ref="fake-short-id"`` (the default in
+    ``_mk_headless_daemon_session``).
+    """
     encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -3471,6 +3498,7 @@ def test_flag_silently_idle_usage_limit_emits_distinct_cause(
         home,
         worktree,
         "You've hit your session limit · resets 5:20pm",
+        filename="ul-ref-sess-486.jsonl",
     )
     after_ts = started_at.timestamp() + 60
     os.utime(str(transcript), (after_ts, after_ts))
@@ -4062,7 +4090,9 @@ def test_salvage_all_terminal_statuses_from_phantom(
         ticket_id, worktree, started_at, surface_ref="gone-ref"
     )
     payload = _make_terminal_payload(status, ticket_id)
-    _write_salvage_transcript(home, worktree, f"uuid-{status}", payload)
+    _write_salvage_transcript(
+        home, worktree, f"uuid-{status}", payload, surface_ref="gone-ref"
+    )
 
     alive = _mk_session("alive-431", surface_ref="live-ref")
     save_state(CwState(sessions=[sess, alive]))
@@ -4131,7 +4161,9 @@ def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
         ticket_id, worktree, started_at, surface_ref="gone-ref"
     )
     payload = _make_terminal_payload(status, ticket_id)
-    _write_salvage_transcript(home, worktree, f"uuid-{status}", payload)
+    _write_salvage_transcript(
+        home, worktree, f"uuid-{status}", payload, surface_ref="gone-ref"
+    )
 
     alive = _mk_session("alive-471", surface_ref="live-ref")
     save_state(CwState(sessions=[sess, alive]))
@@ -6888,3 +6920,329 @@ class TestDetectPostReviewClean:
             started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
         assert _detect_post_review_clean(sess) is False
+
+
+# ---------------------------------------------------------------------------
+# _locate_session_transcript tests (GitHub #541)
+# ---------------------------------------------------------------------------
+
+
+def _make_locate_session(
+    *,
+    worktree: Path,
+    started_at: datetime,
+    surface_ref: str | None = "abcd1234",
+    claude_session_id: str | None = None,
+) -> Session:
+    """Build a minimal DAEMON ACTIVE session for locate-transcript tests."""
+    return Session(
+        id="test-locate",
+        name="client-a/impl",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=worktree,
+        surface_ref=surface_ref,
+        claude_session_id=claude_session_id,
+        started_at=started_at,
+    )
+
+
+def test_locate_by_csid_returns_path(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude_session_id set and file exists → returns that path."""
+    from cw.reconcile import _locate_session_transcript
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-csid"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        claude_session_id="full-csid-uuid",
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / "full-csid-uuid.jsonl"
+    transcript.write_text("{}\n")
+
+    result = _locate_session_transcript(sess)
+    assert result == transcript
+
+
+def test_locate_by_csid_missing_file(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude_session_id set but file absent → None."""
+    from cw.reconcile import _locate_session_transcript
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-csid-missing"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        claude_session_id="missing-csid",
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+    # No transcript written.
+
+    result = _locate_session_transcript(sess)
+    assert result is None
+
+
+def test_locate_by_surface_ref_precise_glob(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """surface_ref set, matching file mtime > started_at → returns Path."""
+    from cw.reconcile import _locate_session_transcript
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-sref"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        surface_ref="abcd1234",
+        claude_session_id=None,
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / "abcd1234-full-uuid.jsonl"
+    transcript.write_text("{}\n")
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    result = _locate_session_transcript(sess)
+    assert result == transcript
+
+
+def test_locate_excludes_sibling_by_prefix(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reused-worktree scenario: sibling transcript (different surface_ref,
+    mtime NEWER than target's started_at) does NOT win; the target's own
+    transcript is returned.  Proves the prefix-scoping (not just the mtime
+    guard) excludes the sibling.  See GitHub #541.
+    """
+    from cw.reconcile import _locate_session_transcript
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-sibling"
+    started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        surface_ref="abcd1234",
+        claude_session_id=None,
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+
+    # Sibling transcript: DIFFERENT surface_ref prefix, but mtime AFTER started_at.
+    # If only the mtime guard were applied (not the prefix glob), this would be
+    # picked as the newest candidate.
+    sibling = project_dir / "zzzzzzzz-other-session.jsonl"
+    sibling.write_text("{}\n")
+    sibling_ts = started_at.timestamp() + 120  # newer than target's started_at
+    os.utime(str(sibling), (sibling_ts, sibling_ts))
+
+    # Target transcript: correct surface_ref prefix, mtime after started_at.
+    target = project_dir / "abcd1234-full-uuid.jsonl"
+    target.write_text("{}\n")
+    target_ts = started_at.timestamp() + 60  # after started_at, but older than sibling
+    os.utime(str(target), (target_ts, target_ts))
+
+    result = _locate_session_transcript(sess)
+    # Must return the TARGET transcript, not the newer sibling.
+    assert result == target
+    assert result != sibling
+
+
+def test_locate_stale_mtime_returns_none(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """surface_ref set, matching file exists but mtime <= started_at → None."""
+    from cw.reconcile import _locate_session_transcript
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-stale-sref"
+    started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        surface_ref="abcd1234",
+        claude_session_id=None,
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / "abcd1234-uuid.jsonl"
+    transcript.write_text("{}\n")
+    # Stamp BEFORE started_at.
+    stale_ts = started_at.timestamp() - 3600
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    result = _locate_session_transcript(sess)
+    assert result is None
+
+
+def test_locate_no_surface_ref_no_csid(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both surface_ref and claude_session_id are None → None (no fallback)."""
+    from cw.reconcile import _locate_session_transcript
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-no-ids"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        surface_ref=None,
+        claude_session_id=None,
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+    # Write a transcript that would be picked by an unscoped *.jsonl glob.
+    unscoped = project_dir / "some-uuid.jsonl"
+    unscoped.write_text("{}\n")
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(unscoped), (after_ts, after_ts))
+
+    # Should NOT fall back to unscoped glob — returns None.
+    result = _locate_session_transcript(sess)
+    assert result is None
+
+
+def test_awaiting_subagent_stale_transcript_returns_false(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale transcript (mtime <= started_at) with pending tool_use → False.
+
+    Before #541, _awaiting_subagent used an unscoped *.jsonl glob with no
+    mtime guard in the surface_ref branch.  A stale transcript with a pending
+    tool_use tail would have returned True (false-positive watchdog suppression).
+    Now the mtime guard applies uniformly via _locate_session_transcript.
+    """
+    from cw.reconcile import _awaiting_subagent
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 12, 5, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-stale-subagent"
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        surface_ref="abcd1234",
+        claude_session_id=None,
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+
+    # Write a transcript with a pending tool_use tail.
+    record = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": now.isoformat(),
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Bash"}],
+            },
+        }
+    )
+    transcript = project_dir / "abcd1234-stale.jsonl"
+    transcript.write_text(record + "\n")
+    # Stamp BEFORE started_at — stale transcript guard should fire.
+    stale_ts = started_at.timestamp() - 3600
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    # Must return False: stale transcript → helper returns None → fail-open.
+    assert _awaiting_subagent(sess, now) is False
+
+
+def test_csid_from_transcript_via_helper(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_csid_from_transcript delegates to _locate_session_transcript; returns stem."""
+    from cw.reconcile import _csid_from_transcript
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-csid-helper"
+    surface_ref = "abcd1234"
+    full_stem = f"{surface_ref}-full-uuid-xxxx"
+    sess = _make_locate_session(
+        worktree=worktree,
+        started_at=started_at,
+        surface_ref=surface_ref,
+        claude_session_id=None,
+    )
+
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / f"{full_stem}.jsonl"
+    transcript.write_text("{}\n")
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    result = _csid_from_transcript(sess)
+    assert result == full_stem

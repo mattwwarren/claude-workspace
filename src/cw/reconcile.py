@@ -427,29 +427,19 @@ def _assistant_text_from_transcript(path: Path) -> str:
 def _detect_usage_limit(session: Session) -> bool:
     """Return True iff the newest post-start transcript contains a usage-limit message.
 
-    Mirrors the stale-transcript mtime guard from :func:`_salvage_terminal_result`
-    (#358): only trusts output written strictly after ``session.started_at``.
-    Returns False (never raises) when the project dir is absent, no .jsonl files
-    exist, or the transcript predates the session start.
+    Uses :func:`_locate_session_transcript` for precise per-session lookup
+    (surface_ref-prefix glob, #541).  Returns False (never raises) when the
+    project dir is absent, no matching .jsonl exists, or the transcript
+    predates the session start.
     """
-    project_dir = _session_project_dir(session)
-    if project_dir is None or not project_dir.is_dir():
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
         return False
-    candidates = sorted(
-        project_dir.glob("*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not candidates:
-        return False
-    newest = candidates[0]
-    if datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC) <= session.started_at:
-        return False
-    return bool(USAGE_LIMIT_RE.search(_assistant_text_from_transcript(newest)))
+    return bool(USAGE_LIMIT_RE.search(_assistant_text_from_transcript(transcript)))
 
 
 def _salvage_terminal_result(
-    session: Session, *, after: datetime
+    session: Session,
 ) -> tuple[AutoDevResult, str] | None:
     """Recover a terminal-success AUTO_DEV_RESULT from the session's transcript.
 
@@ -457,33 +447,22 @@ def _salvage_terminal_result(
     sitting in ``wait_for_ci``) or crashed before session lifecycle completion
     may have its disposition lost. This recovers it directly from the transcript.
 
-    Returns ``(result, claude_session_id)`` only when the newest transcript
-    in the session's worktree — modified strictly after ``after`` (the session
-    start, guarding the reused-worktree stale-transcript case, #358) — parses
-    to an :class:`AutoDevResult` whose status is in
-    :data:`_SALVAGE_TERMINAL_STATUSES`. Returns ``None`` otherwise.
+    Returns ``(result, claude_session_id)`` only when the transcript located
+    by :func:`_locate_session_transcript` (surface_ref-prefix glob, #541) —
+    which enforces mtime > started_at, guarding the reused-worktree
+    stale-transcript case (#358) — parses to an :class:`AutoDevResult` whose
+    status is in :data:`_SALVAGE_TERMINAL_STATUSES`. Returns ``None``
+    otherwise.
     """
-    project_dir = _session_project_dir(session)
-    if project_dir is None or not project_dir.is_dir():
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
         return None
-    candidates = sorted(
-        project_dir.glob("*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not candidates:
-        return None
-    newest = candidates[0]
-    # Stale-transcript guard (#358): a reused worktree may retain a prior
-    # run's transcript. Only trust output written since this session began.
-    if datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC) <= after:
-        return None
-    result = parse_stdout(_assistant_text_from_transcript(newest))
+    result = parse_stdout(_assistant_text_from_transcript(transcript))
     if (
         isinstance(result, AutoDevResult)
         and result.status in _SALVAGE_TERMINAL_STATUSES
     ):
-        return result, newest.stem
+        return result, transcript.stem
     return None
 
 
@@ -495,40 +474,64 @@ def _session_project_dir(session: Session) -> Path | None:
     return claude_project_dir(worktree)
 
 
-def _csid_from_transcript(session: Session) -> str | None:
-    """Return claude_session_id from the transcript filename, or None.
+def _locate_session_transcript(session: Session) -> Path | None:
+    """Return the session's transcript path, or None if not locatable.
 
-    Fallback for _backfill_claude_session_ids when the session is no longer
-    visible in ``claude agents --json``.  The transcript is named
-    ``<project_dir>/<full-csid>.jsonl`` where ``full-csid[:8] == surface_ref``.
-    Picks the newest match by mtime; returns None if mtime <= started_at
-    (reused-worktree stale-transcript guard, mirrors #372 fix).
+    Resolution order:
+    1. ``claude_session_id`` set and ``<project_dir>/<csid>.jsonl`` exists →
+       return that path directly (mtime guard not needed; csid is exact).
+    2. ``surface_ref`` set → newest ``<project_dir>/<surface_ref>*.jsonl``
+       with mtime strictly after ``session.started_at``, else None
+       (reused-worktree stale-transcript guard, #358/#372).
+    3. No project_dir, or neither identifier set → None.
+
+    The ``surface_ref``-prefix glob in step 2 excludes sibling transcripts
+    from other sessions that share the same project dir (reused worktree).
+    Do NOT fall back to an unscoped ``*.jsonl`` glob — that would silently
+    read a different session's transcript.
     """
     project_dir = _session_project_dir(session)
     if project_dir is None or not project_dir.is_dir():
         return None
     try:
-        candidates = sorted(
-            project_dir.glob(f"{session.surface_ref}*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not candidates:
-            return None
-        newest = candidates[0]
-        mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
-        if mtime <= session.started_at:
-            return None
-        csid = newest.stem
-        _log.debug(
-            "Resolved claude_session_id=%s for session %s via transcript fallback",
-            csid,
-            session.id,
-        )
+        if session.claude_session_id is not None:
+            path = project_dir / f"{session.claude_session_id}.jsonl"
+            return path if path.is_file() else None
+        if session.surface_ref is not None:
+            candidates = sorted(
+                project_dir.glob(f"{session.surface_ref}*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidates:
+                return None
+            newest = candidates[0]
+            mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
+            if mtime <= session.started_at:
+                return None
+            return newest
     except OSError:
         return None
-    else:
-        return csid
+    return None
+
+
+def _csid_from_transcript(session: Session) -> str | None:
+    """Return claude_session_id from the transcript filename, or None.
+
+    Thin wrapper around :func:`_locate_session_transcript`.  The transcript
+    is named ``<project_dir>/<full-csid>.jsonl`` where
+    ``full-csid[:8] == surface_ref``; the stem is therefore the full csid.
+    """
+    path = _locate_session_transcript(session)
+    if path is None:
+        return None
+    csid = path.stem
+    _log.debug(
+        "Resolved claude_session_id=%s for session %s via transcript fallback",
+        csid,
+        session.id,
+    )
+    return csid
 
 
 def _detect_post_review_clean(session: Session) -> bool:
@@ -565,35 +568,16 @@ def _transcript_recently_active(
 ) -> bool:
     """Return True if the session's transcript was written within *window_seconds* ago.
 
-    Reuses the project-dir layout from :func:`_salvage_terminal_result`.
-    Returns False — permitting the watchdog to proceed — when no transcript
-    is found (either the session is pre-first-write or path unavailable).
-    See GitHub #340.
+    Uses :func:`_locate_session_transcript` for precise per-session lookup
+    (surface_ref-prefix glob, #541).  Returns False — permitting the watchdog
+    to proceed — when no transcript is found (pre-first-write or path
+    unavailable).  See GitHub #340.
     """
-    project_dir = _session_project_dir(session)
-    if project_dir is None or not project_dir.is_dir():
-        return False
-
     try:
-        if session.claude_session_id is not None:
-            transcript = project_dir / f"{session.claude_session_id}.jsonl"
-            if not transcript.is_file():
-                return False
-            mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
-            return (now - mtime).total_seconds() < window_seconds
-
-        # claude_session_id not yet recorded — scan for the newest post-spawn .jsonl
-        candidates = sorted(
-            project_dir.glob("*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not candidates:
+        transcript = _locate_session_transcript(session)
+        if transcript is None:
             return False
-        newest = candidates[0]
-        mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
-        if mtime <= session.started_at:
-            return False
+        mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
         return (now - mtime).total_seconds() < window_seconds
     except OSError:
         return False
@@ -611,21 +595,15 @@ def _awaiting_subagent(session: Session, now: datetime) -> bool:
 
     Fail-open to False (permit the watchdog to proceed) on any read/parse error.
     """
-    project_dir = _session_project_dir(session)
-    if project_dir is None or not project_dir.is_dir():
+    # Why: _locate_session_transcript applies the mtime > started_at guard
+    # uniformly (#541).  A stale transcript (from a prior run in a reused
+    # worktree) that previously could cause a false-positive "subagent pending"
+    # signal now returns None → this function returns False (fail-open).
+    # The behavior change is intentional and conservative.
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
         return False
     try:
-        if session.claude_session_id is not None:
-            transcript = project_dir / f"{session.claude_session_id}.jsonl"
-        else:
-            candidates = sorted(
-                project_dir.glob("*.jsonl"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not candidates:
-                return False
-            transcript = candidates[0]
         if not transcript.is_file():
             return False
 
@@ -858,7 +836,7 @@ def revert_stalled_headless_sessions(
         # sentinel the worker emitted before stalling (e.g. waiting on CI).
         # If found, the session is dispositioned by that sentinel and its
         # ticket is NOT reverted for re-dispatch. See GitHub issue #372.
-        salvage = _salvage_terminal_result(session, after=session.started_at)
+        salvage = _salvage_terminal_result(session)
         if salvage is not None:
             result, claude_session_id = salvage
             _apply_salvaged_completion(session, result, claude_session_id, now=now)
@@ -1056,7 +1034,7 @@ def flag_silently_idle_daemon_sessions(
         # Before parking or recovering, try to find a terminal-success sentinel
         # the worker emitted while waiting on CI (e.g. shipped-then-wait_for_ci).
         # If found, the session is dispositioned by that sentinel. (#398)
-        salvage = _salvage_terminal_result(session, after=session.started_at)
+        salvage = _salvage_terminal_result(session)
         if salvage is not None:
             result, claude_session_id = salvage
             _apply_salvaged_completion(session, result, claude_session_id, now=now)
@@ -1342,7 +1320,7 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         # Recover a terminal-success sentinel before declaring the phantom
         # crashed, so already-shipped work is not re-dispatched (#372).
         salvage = (
-            _salvage_terminal_result(session, after=session.started_at)
+            _salvage_terminal_result(session)
             if session.origin is SessionOrigin.DAEMON
             else None
         )
