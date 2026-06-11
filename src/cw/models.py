@@ -51,11 +51,29 @@ class QueueItemStatus(StrEnum):
     BLOCKED_ON_USER = "blocked_on_user"
 
 
+class ReapReason(StrEnum):
+    """Reason taxonomy for queue.session_reaped bus events.
+
+    Each value maps to exactly one reconcile disposition path. See the
+    reap-site decision table in GitHub issue #380.
+    """
+
+    PHANTOM_SURFACE = "phantom_surface"
+    IDLE_STALL = "idle_stall"
+    USAGE_LIMIT_CUTOFF = "usage_limit_cutoff"
+    RETRY_CAP_PARKED = "retry_cap_parked"
+    WALL_CLOCK_BUDGET = "wall_clock_budget"
+    COMPLETED_BACKSTOP = "completed_backstop"
+    SALVAGE_COMPLETED = "salvage_completed"
+    SALVAGE_PARKED = "salvage_parked"
+
+
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
 # v6: added Session.idle_observation_count (GitHub #545).
-CW_STATE_SCHEMA_VERSION = 6
+# v7: added Session.reap_reason (GitHub #380).
+CW_STATE_SCHEMA_VERSION = 7
 DEV_QUEUE_SCHEMA_VERSION = 2
 
 
@@ -341,6 +359,11 @@ class Session(BaseModel):
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None
     completed_at: datetime | None = None
+    # Reason written at each reap site so the queue-events bus server can
+    # include it in queue.session_reaped notifications. Finer-grained than
+    # CompletionReason — see ReapReason and GitHub #380. None for sessions
+    # not reaped by reconcile (e.g. user-backgrounded or /session-done'd).
+    reap_reason: ReapReason | None = None
     parent_session_id: str | None = None
     worker_session_ids: list[str] = Field(default_factory=list)
     # Sentinel-block summary parsed from a headless /auto-dev worker's stdout

@@ -477,6 +477,36 @@ Emitted on every BLOCKED_ON_USER transition.
 
 **Re-dispatch rule:** never auto-retry BLOCKED_ON_USER tasks. Human must review the Linear/GitHub issue for the posted ambiguities/premises, resolve them, and then re-dispatch manually.
 
+### queue.session_reaped Bus Event (GitHub #380)
+
+Emitted on the **queue-events bus** (`cw event tail`, MCP `queue.session_reaped`) whenever reconcile disposes of a session. The bus server polls `session.reap_reason` off the state snapshot and fires exactly once per new reason stamp.
+
+Event string: `queue.session_reaped`
+
+**Payload:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `session_id` | string | The cw session ID. |
+| `surface_ref` | string \| null | Daemon surface short-id; null when the surface is gone (backstop paths). |
+| `origin` | string | `"daemon"` or `"user"`. |
+| `reason` | string | See ReapReason enum below. |
+| `from_status` | string | Session status before the reap (e.g. `"active"`, `"idle"`). |
+| `to_status` | string | Session status after the reap (e.g. `"completed"`, `"timed_out"`). |
+
+**`reason` values (ReapReason enum):**
+
+| Value | Trigger |
+|---|---|
+| `phantom_surface` | Daemon surface absent from roster (`_reconcile_locked` phantom sweep). |
+| `idle_stall` | Watchdog fired, no usage-limit message found; task reverted to PENDING for retry. |
+| `usage_limit_cutoff` | Watchdog fired; transcript contained a Claude usage-limit message; task reverted for retry. |
+| `retry_cap_parked` | Watchdog fired; retry cap reached; task set BLOCKED_ON_USER. |
+| `wall_clock_budget` | Wall-clock budget exceeded (`revert_stalled_headless_sessions`); task reverted for retry. |
+| `completed_backstop` | Backstop path (`revert_timed_out_tasks` / `revert_completed_silent_tasks`) found a TIMED_OUT or COMPLETED DAEMON session with a still-RUNNING queue task and no prior reap_reason. |
+| `salvage_completed` | Git-state HIGH path: committed branch, no open PR, post-review-clean; draft PR auto-created, task COMPLETED. |
+| `salvage_parked` | Git-state LOW path: committed branch, no open PR, not post-review-clean; task set BLOCKED_ON_USER for human salvage. |
+
 ---
 
 ## 9. Cross-References

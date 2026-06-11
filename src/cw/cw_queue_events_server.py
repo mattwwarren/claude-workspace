@@ -42,6 +42,9 @@ class QueueSnapshot(BaseModel):
     task_statuses: dict[str, str] = Field(default_factory=dict)
     task_session_ids: dict[str, str | None] = Field(default_factory=dict)
     session_statuses: dict[str, str] = Field(default_factory=dict)
+    # Tracks the last-seen reap_reason per session so the poller can fire
+    # queue.session_reaped exactly once when reconcile stamps a new reason.
+    session_reap_reasons: dict[str, str] = Field(default_factory=dict)
 
 
 class AckRequest(BaseModel):
@@ -308,6 +311,27 @@ def _compute_session_deltas(
                     "session_name": session.name,
                 }
             )
+        # Emit queue.session_reaped when reconcile stamps a new reap_reason
+        # (first non-None appearance). The reason is persisted on Session so
+        # the poller can read it off the state snapshot rather than needing
+        # out-of-band signalling. See GitHub #380.
+        reap_reason = session.reap_reason
+        if reap_reason is not None:
+            prev_reason = old.session_reap_reasons.get(session.id)
+            if prev_reason is None:
+                events.append(
+                    {
+                        "event": "queue.session_reaped",
+                        "session_id": session.id,
+                        "surface_ref": session.surface_ref,
+                        "origin": str(session.origin),
+                        "reason": str(reap_reason),
+                        "from_status": prev
+                        if prev is not None
+                        else str(session.status),
+                        "to_status": curr,
+                    }
+                )
     return events
 
 
@@ -353,6 +377,11 @@ def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]
         task_statuses={t.ticket_id: str(t.status) for t in store.tasks},
         task_session_ids={t.ticket_id: t.session_id for t in store.tasks},
         session_statuses={s.id: str(s.status) for s in state.sessions},
+        session_reap_reasons={
+            s.id: str(s.reap_reason)
+            for s in state.sessions
+            if s.reap_reason is not None
+        },
     )
     return new_snap, events
 
