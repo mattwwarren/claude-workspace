@@ -33,7 +33,7 @@ from cw.models import (
 from cw.native_daemon import SHORT_SESSION_ID_RE
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +174,15 @@ def sessions_lock() -> Iterator[None]:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
+
+
+def mutate_state(fn: Callable[[CwState], None]) -> CwState:
+    """Load state, apply fn in place under sessions_lock, save and return."""
+    with sessions_lock():
+        state = load_state()
+        fn(state)
+        save_state(state)
+        return state
 
 
 @contextlib.contextmanager
