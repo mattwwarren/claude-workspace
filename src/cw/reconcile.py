@@ -1940,8 +1940,10 @@ def revert_timed_out_tasks() -> list[str]:
     PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
     inspection (GitHub issue #421).
 
-    Sets reap_reason=COMPLETED_BACKSTOP on sessions that lack a reason so
-    the queue-events server can emit queue.session_reaped (#380).
+    Sets reap_reason=COMPLETED_BACKSTOP only on sessions whose RUNNING
+    dev-queue task is actually being reverted, so the queue-events server
+    can emit queue.session_reaped (#380) without false events on the happy
+    path (sessions whose task already completed normally are not stamped).
     """
     state = load_state()
     target_sessions = [
@@ -1950,12 +1952,24 @@ def revert_timed_out_tasks() -> list[str]:
         if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
     ]
     session_ids = {s.id for s in target_sessions}
-    # Stamp reap_reason on any session that does not already have one (sessions
-    # reaching this backstop path may have been set TIMED_OUT by signal_stop
-    # without a reap_reason — mark them now so the bus server has a reason).
+    # Pre-read the dev queue (no lock) to identify which sessions have a
+    # RUNNING task that will actually be reverted.  Only those sessions get
+    # the COMPLETED_BACKSTOP stamp so we avoid emitting false reap events for
+    # sessions whose task already completed normally via the happy path.
+    # Why: this read is outside dev_queue_lock, so a task could flip from
+    # RUNNING to another status between here and the locked revert below —
+    # TOCTOU accepted (same pattern as the dirty-check in
+    # _revert_running_tasks_for_sessions); worst case is a missed or early
+    # event, no data loss.
+    store = load_dev_queue()
+    backstop_session_ids = {
+        t.session_id
+        for t in store.tasks
+        if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
+    }
     state_changed = False
     for s in target_sessions:
-        if s.reap_reason is None:
+        if s.reap_reason is None and s.id in backstop_session_ids:
             s.reap_reason = ReapReason.COMPLETED_BACKSTOP
             state_changed = True
     if state_changed:
@@ -1978,8 +1992,10 @@ def revert_completed_silent_tasks() -> list[str]:
     PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
     inspection (GitHub issue #421).
 
-    Sets reap_reason=COMPLETED_BACKSTOP on sessions that lack a reason so
-    the queue-events server can emit queue.session_reaped (#380).
+    Sets reap_reason=COMPLETED_BACKSTOP only on sessions whose RUNNING
+    dev-queue task is actually being reverted, so the queue-events server
+    can emit queue.session_reaped (#380) without false events on the happy
+    path (sessions whose task already completed normally are not stamped).
     """
     state = load_state()
     target_sessions = [
@@ -1988,13 +2004,24 @@ def revert_completed_silent_tasks() -> list[str]:
         if s.status == SessionStatus.COMPLETED and s.origin is SessionOrigin.DAEMON
     ]
     session_ids = {s.id for s in target_sessions}
-    # Stamp reap_reason on any session that does not already have one (sessions
-    # reaching this backstop path may have completed via signal_stop or
-    # salvage without a reap_reason — mark them now so the bus server has a
-    # reason to include in queue.session_reaped).
+    # Pre-read the dev queue (no lock) to identify which sessions have a
+    # RUNNING task that will actually be reverted.  Only those sessions get
+    # the COMPLETED_BACKSTOP stamp so we avoid emitting false reap events for
+    # sessions whose task already completed normally via the happy path.
+    # Why: this read is outside dev_queue_lock, so a task could flip from
+    # RUNNING to another status between here and the locked revert below —
+    # TOCTOU accepted (same pattern as the dirty-check in
+    # _revert_running_tasks_for_sessions); worst case is a missed or early
+    # event, no data loss.
+    store = load_dev_queue()
+    backstop_session_ids = {
+        t.session_id
+        for t in store.tasks
+        if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
+    }
     state_changed = False
     for s in target_sessions:
-        if s.reap_reason is None:
+        if s.reap_reason is None and s.id in backstop_session_ids:
             s.reap_reason = ReapReason.COMPLETED_BACKSTOP
             state_changed = True
     if state_changed:

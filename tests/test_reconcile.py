@@ -8358,3 +8358,87 @@ def test_reap_reason_not_overwritten_by_backstop(
     s = next(s for s in reloaded.sessions if s.id == "backstop-skip-1")
     # Must remain WALL_CLOCK_BUDGET, not be overwritten with COMPLETED_BACKSTOP
     assert s.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+
+
+def test_reap_reason_not_stamped_when_task_already_completed_timed_out(
+    tmp_config_dir: Path,
+) -> None:
+    """revert_timed_out_tasks must NOT stamp reap_reason when the session's
+    dev-queue task is already COMPLETED (happy-path completion) — only sessions
+    whose task is still RUNNING get the COMPLETED_BACKSTOP stamp."""
+    sess = Session(
+        id="backstop-to-noop-1",
+        name="client-a/auto-dev/BACKSTOP-TO-NOOP-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        completed_reason=CompletionReason.TIMED_OUT,
+        # reap_reason intentionally None — simulates signal_stop path
+    )
+    save_state(CwState(sessions=[sess]))
+    # Task is already COMPLETED, NOT RUNNING — the session completed normally.
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="BACKSTOP-TO-NOOP-1",
+                    client="client-a",
+                    status=QueueItemStatus.COMPLETED,
+                    session_id="backstop-to-noop-1",
+                )
+            ]
+        )
+    )
+
+    revert_timed_out_tasks()
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "backstop-to-noop-1")
+    # Task was not RUNNING so no revert happened — reap_reason must stay None.
+    assert s.reap_reason is None
+
+
+def test_reap_reason_not_stamped_when_task_already_completed_completed_silent(
+    tmp_config_dir: Path,
+) -> None:
+    """revert_completed_silent_tasks must NOT stamp reap_reason when the
+    session's dev-queue task is already COMPLETED (happy-path completion) —
+    only sessions whose task is still RUNNING get the COMPLETED_BACKSTOP stamp."""
+    sess = Session(
+        id="backstop-c-noop-1",
+        name="client-a/auto-dev/BACKSTOP-C-NOOP-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.COMPLETED,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        completed_reason=CompletionReason.NORMAL,
+        # reap_reason intentionally None
+    )
+    save_state(CwState(sessions=[sess]))
+    # Task is already COMPLETED, NOT RUNNING — the session completed normally.
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="BACKSTOP-C-NOOP-1",
+                    client="client-a",
+                    status=QueueItemStatus.COMPLETED,
+                    session_id="backstop-c-noop-1",
+                )
+            ]
+        )
+    )
+
+    revert_completed_silent_tasks()
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "backstop-c-noop-1")
+    # Task was not RUNNING so no revert happened — reap_reason must stay None.
+    assert s.reap_reason is None
