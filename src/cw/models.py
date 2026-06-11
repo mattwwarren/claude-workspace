@@ -54,7 +54,8 @@ class QueueItemStatus(StrEnum):
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
-CW_STATE_SCHEMA_VERSION = 5
+# v6: added Session.idle_observation_count (GitHub #545).
+CW_STATE_SCHEMA_VERSION = 6
 DEV_QUEUE_SCHEMA_VERSION = 2
 
 
@@ -273,6 +274,10 @@ class OrchestratorConfig(BaseModel):
     # parked BLOCKED_ON_USER for the operator. Keyed by TicketTask.scope_hint;
     # unknown tiers fall back to DEFAULT_IDLE_RETRY_CAP. See GitHub issue #384.
     idle_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
+    # Number of consecutive failed idle-watchdog observations required before a
+    # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
+    # pre-#545 single-observation behavior. See GitHub #545.
+    idle_confirm_observations: int = 2
 
     @model_validator(mode="before")
     @classmethod
@@ -327,6 +332,11 @@ class Session(BaseModel):
     auto_backgrounded: bool = False
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     idle_at: datetime | None = None
+    # Consecutive idle-watchdog observations where this session failed liveness
+    # checks; reset on recovery; session is dispositioned (reaped/parked/
+    # git-salvaged) only when it reaches OrchestratorConfig.idle_confirm_observations.
+    # See GitHub #545.
+    idle_observation_count: int = 0
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None

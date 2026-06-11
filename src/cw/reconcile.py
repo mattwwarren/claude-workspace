@@ -997,6 +997,12 @@ def flag_silently_idle_daemon_sessions(
     (the daemon still has them). Sessions with a dead surface ref are handled
     by the phantom sweep → PENDING for retry.
 
+    Confirm-before-reap (#545): a session must fail the liveness check on
+    ``config.idle_confirm_observations`` consecutive watchdog ticks before it
+    is dispositioned. ``session.idle_observation_count`` is incremented each
+    tick a session fails; it is reset to 0 on recovery. This prevents a single
+    quiet poll from killing a healthy DAEMON worker.
+
     Returns a tuple of:
     - list of ticket IDs whose queue task was set to BLOCKED_ON_USER
     - list of git-state salvage candidates for the post-lock pass:
@@ -1011,6 +1017,7 @@ def flag_silently_idle_daemon_sessions(
     # Git-state salvage candidates collected under the lock (no git/gh subprocesses).
     # Tuple: (session_id, ticket_id, branch, worktree_path_str, post_review_clean)
     salvage_git: list[_SalvageCandidate] = []
+    counters_changed = False
     for session in state.sessions:
         if session.origin is not SessionOrigin.DAEMON:
             continue
@@ -1034,15 +1041,30 @@ def flag_silently_idle_daemon_sessions(
         if _transcript_recently_active(session, now) or _awaiting_subagent(
             session, now
         ):
+            # Recovery: reset the confirmation counter so subsequent idleness
+            # starts a fresh count. (#545)
+            if session.idle_observation_count > 0:
+                session.idle_observation_count = 0
+                counters_changed = True
             continue
         # Before parking or recovering, try to find a terminal-success sentinel
         # the worker emitted while waiting on CI (e.g. shipped-then-wait_for_ci).
-        # If found, the session is dispositioned by that sentinel. (#398)
+        # If found, the session is dispositioned by that sentinel immediately —
+        # sentinel salvage is evidence-based completion, not deferred by the
+        # confirm-before-reap counter. (#398)
         salvage = _salvage_terminal_result(session)
         if salvage is not None:
             result, claude_session_id = salvage
             _apply_salvaged_completion(session, result, claude_session_id, now=now)
             salvaged.append((session, ticket_id, result))
+            continue
+        # Confirm-before-reap (#545): accumulate consecutive failed observations
+        # before dispositioning. Git-salvage and park/recover are both deferred
+        # until the threshold is reached — git-salvaging a quiet-but-healthy
+        # worker would PR half-done work.
+        session.idle_observation_count += 1
+        counters_changed = True
+        if session.idle_observation_count < config.idle_confirm_observations:
             continue
         # Git-state salvage: check under lock using only event bus reads (no
         # git/gh subprocess). Branch and worktree are needed by the post-lock
@@ -1067,7 +1089,20 @@ def flag_silently_idle_daemon_sessions(
         else:
             park.append((session, ticket_id))
 
+    if (
+        not recover
+        and not park
+        and not salvaged
+        and not salvage_git
+        and not counters_changed
+    ):
+        return [], []
+
+    # Counter-only tick: persist the updated observation counts so a process
+    # restart between ticks does not replay the same observation as fresh, then
+    # return with no disposition events. (#545)
     if not recover and not park and not salvaged and not salvage_git:
+        save_state(state)
         return [], []
 
     # Auto-recover: retire the session and revert its task for re-dispatch.
