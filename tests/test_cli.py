@@ -5133,6 +5133,7 @@ class TestDevQueueWait:
 
         assert _WAIT_EXIT_FAILED == 1
         assert _WAIT_EXIT_BLOCKED == 2
+        assert _WAIT_EXIT_TIMEOUT == 124
 
 
 class TestResultValidate:
@@ -5175,17 +5176,16 @@ class TestResultValidate:
         }
 
     def test_valid_json_stdin_exits_zero_with_normalized_json(self) -> None:
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         valid_json = json.dumps(self._valid_payload())
         result = runner.invoke(main, ["result", "validate", "-"], input=valid_json)
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)
         assert parsed["status"] == "shipped"
 
-    def test_invalid_json_stdin_exits_nonzero_with_error_on_stderr(self) -> None:
-        runner = CliRunner(mix_stderr=False)
+    def test_invalid_json_stdin_exits_nonzero_with_error_in_output(self) -> None:
+        runner = CliRunner()
         bad_payload = json.dumps({"status": "shipped", "schema_version": 1})
         result = runner.invoke(main, ["result", "validate", "-"], input=bad_payload)
         assert result.exit_code != 0
-        assert len(result.stderr) > 0
-        assert _WAIT_EXIT_TIMEOUT == 124
+        assert len(result.output) > 0

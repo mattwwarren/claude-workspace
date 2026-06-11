@@ -92,6 +92,7 @@ from cw.queue import (
     remove_item,
 )
 from cw.reconcile import reconcile, resolve_headless_budget, ticket_id_for_session
+from cw.result import result as result_group
 from cw.schema import REGISTRY, format_json, format_tldr
 from cw.session import (
     background_all_sessions,
@@ -2570,3 +2571,8 @@ def schema_show(name: str, fmt: str) -> None:
         click.echo(format_json(model_cls))
     else:
         click.echo(format_tldr(model_cls))
+
+
+# --- Result command group ---
+
+main.add_command(result_group)
