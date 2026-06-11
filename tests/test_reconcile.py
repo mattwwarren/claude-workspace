@@ -1968,7 +1968,10 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
 
     with patch("cw.reconcile.fire_push_notification") as mock_notify:
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
         mock_notify.assert_called_once_with(sess.name, sess.client)
 
@@ -2507,7 +2510,10 @@ def test_flag_silently_idle_no_salvage_without_sentinel_still_parks(
     with patch("cw.reconcile.fire_push_notification"):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert "IDLE-NS" in blocked
@@ -2542,6 +2548,9 @@ def test_reconcile_includes_silently_idle_in_report(
         ).workspace_path,
         surface_ref=live_short_id,
         started_at=started_at,
+        # Pre-prime to N-1 so the reconcile() call reaches the default threshold
+        # (idle_confirm_observations=2) on its first observation. (#545)
+        idle_observation_count=1,
     )
     save_state(CwState(sessions=[sess]))
 
@@ -2565,6 +2574,556 @@ def test_reconcile_includes_silently_idle_in_report(
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "RCL-S")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# confirm-before-reap counter tests (GitHub issue #545)
+# ---------------------------------------------------------------------------
+
+
+def test_confirm_before_reap_first_observation_no_disposition(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """First failed idle observation increments counter to 1, no disposition.
+
+    Queue task stays RUNNING; session stays ACTIVE; idle_observation_count==1
+    is persisted to disk so a process restart doesn't replay the observation
+    as fresh. (#545)
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="cbreap-1",
+        name="client-a/auto-dev/CBREAP-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="CBREAP-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cbreap-1",
+        attempts=2,  # at cap — would park on pre-#545 single observation
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+        blocked, salvage_git = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(),  # default idle_confirm_observations=2
+        )
+        mock_notify.assert_not_called()
+
+    # No disposition yet — counter is 1, threshold is 2.
+    assert blocked == []
+    assert salvage_git == []
+    assert sess.status == SessionStatus.ACTIVE
+    assert sess.idle_observation_count == 1
+
+    # Counter must be persisted: load fresh state and verify.
+    reloaded = next(s for s in load_state().sessions if s.id == "cbreap-1")
+    assert reloaded.idle_observation_count == 1
+
+    # Queue task untouched.
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "CBREAP-1")
+    assert t.status == QueueItemStatus.RUNNING
+    assert t.attempts == 2  # attempts must NOT be incremented
+
+
+def test_confirm_before_reap_second_observation_fires(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Second consecutive failed observation (counter reaches threshold) fires park.
+
+    SESSION_NEEDS_ATTENTION emitted; task → BLOCKED_ON_USER. Downstream
+    semantics unchanged from pre-#545 single-observation behavior. (#545)
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    # Session pre-primed at idle_observation_count=1 (first tick already ran).
+    sess = Session(
+        id="cbreap-2",
+        name="client-a/auto-dev/CBREAP-2",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        idle_observation_count=1,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="CBREAP-2",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cbreap-2",
+        attempts=2,  # at cap → park path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(),  # idle_confirm_observations=2
+        )
+        mock_notify.assert_called_once_with(sess.name, sess.client)
+
+    assert "CBREAP-2" in blocked
+    # Park: flag-only (#348) — session stays ACTIVE.
+    assert sess.status == SessionStatus.ACTIVE
+    assert sess.last_result == {"paused_status": _SILENTLY_IDLE_REASON}
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "CBREAP-2")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    # task.attempts is unchanged — it increments only at CLAIM time.
+    assert t.attempts == 2
+
+    events = read_events(
+        consumer="test-cbreap-2",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    assert events[0].payload["session_id"] == "cbreap-2"
+
+
+def test_confirm_before_reap_liveness_recovery_resets_counter(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Liveness recovery between observations resets counter to 0 and persists.
+
+    Subsequent idleness starts counting from 1 again. (#545)
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="cbreap-3",
+        name="client-a/auto-dev/CBREAP-3",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        idle_observation_count=1,  # counter was 1 from a prior failed observation
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="CBREAP-3",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="cbreap-3",
+                    attempts=1,
+                )
+            ]
+        )
+    )
+
+    # Liveness check returns True (worker is alive this tick).
+    with patch("cw.reconcile._transcript_recently_active", return_value=True):
+        blocked, salvage_git = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(),
+        )
+
+    assert blocked == []
+    assert salvage_git == []
+    # Counter reset to 0 and persisted.
+    assert sess.idle_observation_count == 0
+    reloaded = next(s for s in load_state().sessions if s.id == "cbreap-3")
+    assert reloaded.idle_observation_count == 0
+
+    # A new idle observation now starts the count at 1 (not 2).
+    with patch("cw.reconcile._transcript_recently_active", return_value=False):
+        blocked2, _ = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(),  # threshold=2
+        )
+
+    assert blocked2 == []  # still only at count 1, threshold not reached
+    assert sess.idle_observation_count == 1
+
+
+def test_confirm_before_reap_sentinel_salvage_not_deferred(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sentinel salvage dispositions on first observation — counter does not gate it.
+
+    Evidence-based completion is not deferred by confirm-before-reap. (#545)
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-sentinel-nodefer"
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    # idle_observation_count=0 — first observation.
+    sess = _mk_headless_daemon_session("nodefer-sent", worktree, started_at)
+    sess.idle_observation_count = 0
+    _write_salvage_transcript(
+        home, worktree, "nodefer-uuid", _shipped_salvage_payload()
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="nodefer-sent",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="nodefer-sent",
+                    attempts=0,
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._transcript_recently_active", return_value=False),
+        patch("cw.reconcile._awaiting_subagent", return_value=False),
+    ):
+        blocked, _salvage_git = flag_silently_idle_daemon_sessions(
+            state=CwState(sessions=[sess]),
+            now=now,
+            native_live={"fake-short-id"},
+            config=OrchestratorConfig(),  # idle_confirm_observations=2
+        )
+
+    # Sentinel salvage fires immediately — not deferred to observation 2.
+    assert blocked == []
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.completed_reason == CompletionReason.NORMAL
+
+
+def test_confirm_before_reap_git_salvage_deferred(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git-salvage candidate NOT collected on first observation; collected at threshold.
+
+    Git-salvaging a quiet-but-healthy worker would PR half-done work, so it is
+    gated like the reap. (#545)
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-git-deferred"
+    worktree.mkdir(parents=True)
+
+    sess = Session(
+        id="git-deferred",
+        name="client-a/auto-dev/GIT-DEFERRED",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=worktree,
+        surface_ref="live-ref",
+        started_at=started_at,
+        idle_observation_count=0,  # first observation
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="GIT-DEFERRED",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="git-deferred",
+                    attempts=5,  # above cap — would normally go to salvage_git
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch",
+        lambda _p: "dev/git-deferred-branch",
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._salvage_terminal_result", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._transcript_recently_active", lambda *_a, **_kw: False
+    )
+    monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda *_a, **_kw: False)
+
+    state = CwState(sessions=[sess])
+
+    # First observation — git-salvage must NOT be collected yet.
+    _, salvage_git_1 = flag_silently_idle_daemon_sessions(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=OrchestratorConfig(),  # idle_confirm_observations=2
+    )
+    assert salvage_git_1 == []
+    assert sess.idle_observation_count == 1
+
+    # Second observation — threshold reached, git-salvage collected.
+    _, salvage_git_2 = flag_silently_idle_daemon_sessions(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=OrchestratorConfig(),
+    )
+    assert len(salvage_git_2) == 1
+    assert salvage_git_2[0][0] == "git-deferred"
+
+
+def test_confirm_before_reap_park_deferred(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Park path (attempts >= cap) deferred until threshold. (#545)"""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="park-defer",
+        name="client-a/auto-dev/PARK-DEFER",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        idle_observation_count=0,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="PARK-DEFER",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="park-defer",
+                    attempts=2,  # at cap → park when threshold reached
+                )
+            ]
+        )
+    )
+
+    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+        blocked, _ = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(),  # idle_confirm_observations=2
+        )
+        mock_notify.assert_not_called()
+
+    assert blocked == []
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "PARK-DEFER")
+    assert t.status == QueueItemStatus.RUNNING
+    # attempts unchanged
+    assert t.attempts == 2
+
+
+def test_confirm_before_reap_attempts_unchanged(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """task.attempts is unchanged by any number of idle observations. (#545)
+
+    CRITICAL: task.attempts increments only at CLAIM time in dispatch.py.
+    Conflating it with idle observations would permanently park tasks when
+    DEFAULT_IDLE_RETRY_CAP=2.
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="att-unchanged",
+        name="client-a/auto-dev/ATT-UNCHANGED",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        idle_observation_count=0,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="ATT-UNCHANGED",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="att-unchanged",
+                    attempts=1,
+                )
+            ]
+        )
+    )
+
+    # Run three observations — one counter-only, then threshold fires recover.
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    with patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()):
+        # First observation: no disposition.
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=config
+        )
+        first = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "ATT-UNCHANGED"
+        )
+        assert first.attempts == 1
+
+        # Second observation: recover fires (attempts=1 < cap=2).
+        flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"live-ref"}, config=config
+        )
+        second = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "ATT-UNCHANGED"
+        )
+        # still unchanged — only dispatch.py increments this
+        assert second.attempts == 1
+
+
+def test_confirm_before_reap_v5_state_round_trips(
+    tmp_config_dir: Path,
+) -> None:
+    """v5 state payload (no idle_observation_count key) round-trips through load.
+
+    Counter defaults 0; schema_version stamped 6 after migration. (#545)
+    """
+    import json
+
+    state_dir = tmp_config_dir / ".local" / "share" / "cw"
+    sf = state_dir / "sessions.json"
+    sf.write_text(
+        json.dumps(
+            {
+                "schema_version": 5,
+                "sessions": [
+                    {
+                        "id": "v5-sess",
+                        "name": "c/impl",
+                        "client": "c",
+                        "purpose": "impl",
+                        "workspace_path": str(state_dir),
+                        # No idle_observation_count key — v5 did not have it.
+                    }
+                ],
+            }
+        )
+    )
+    loaded = load_state()
+    assert loaded.schema_version == 6
+    assert loaded.sessions[0].idle_observation_count == 0
+
+
+def test_confirm_before_reap_single_observation_config(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """idle_confirm_observations=1 reproduces pre-#545 single-observation behavior."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="single-obs",
+        name="client-a/auto-dev/SINGLE-OBS",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        idle_observation_count=0,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="SINGLE-OBS",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="single-obs",
+                    attempts=2,  # at cap → park
+                )
+            ]
+        )
+    )
+
+    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+        blocked, _ = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
+        )
+        mock_notify.assert_called_once()
+
+    assert "SINGLE-OBS" in blocked
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "SINGLE-OBS")
     assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
 
@@ -2817,7 +3376,10 @@ def test_flag_silently_idle_fires_when_project_dir_missing(
 
     with patch("cw.reconcile.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert "no-proj-1" in blocked
@@ -2863,7 +3425,10 @@ def test_flag_silently_idle_fires_when_session_id_file_missing(
 
     with patch("cw.reconcile.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert "missing-file-1" in blocked
@@ -2909,7 +3474,10 @@ def test_flag_silently_idle_fires_when_transcript_predates_session(
 
     with patch("cw.reconcile.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert "predates-1" in blocked
@@ -2956,7 +3524,10 @@ def test_flag_silently_idle_fires_on_stale_transcript(
 
     with patch("cw.reconcile.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert "stale-tx-1" in blocked
@@ -3002,7 +3573,10 @@ def test_flag_silently_idle_fires_when_no_transcript_in_project_dir(
 
     with patch("cw.reconcile.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert "no-tx-1" in blocked
@@ -3357,7 +3931,10 @@ def test_flag_silently_idle_auto_recovers_under_cap(
         patch("cw.reconcile.fire_push_notification") as mock_notify,
     ):
         flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
         mock_daemon.stop.assert_called_once_with("live-ref")
         mock_notify.assert_not_called()
@@ -3430,7 +4007,10 @@ def test_flag_silently_idle_recover_cleans_up_worktree(
         ),
     ):
         flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert removed == [("client-a", "auto-dev/HANG-WT", True)]
@@ -3486,7 +4066,10 @@ def test_flag_silently_idle_recover_skips_cleanup_when_no_branch(
         patch("cw.reconcile.get_client", record_get_client),
     ):
         flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     assert calls == []
@@ -3579,7 +4162,10 @@ def test_flag_silently_idle_usage_limit_emits_distinct_cause(
         patch("cw.reconcile.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"ul-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"ul-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     events = read_events(
@@ -3640,7 +4226,10 @@ def test_flag_silently_idle_no_usage_limit_emits_idle_stall_cause(
         patch("cw.reconcile.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"nostall-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"nostall-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
     events = read_events(
@@ -3789,7 +4378,10 @@ def test_flag_silently_idle_parks_when_cap_exhausted(
         patch("cw.reconcile.fire_push_notification") as mock_notify,
     ):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
         mock_daemon.stop.assert_not_called()
         mock_notify.assert_called_once_with(sess.name, sess.client)
@@ -3953,7 +4545,10 @@ def test_flag_silently_idle_recover_skips_non_running_task(
         patch("cw.reconcile._checked_out_branch", return_value=None),
     ):
         result, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
         # Surface still stopped (recover path, attempts=1 < cap=2)
         mock_daemon.stop.assert_called_once_with("live-ref")
@@ -6539,7 +7134,10 @@ class TestSalvageCommittedNoPrSessions:
 
         state = CwState(sessions=[sess])
         _, salvage_git = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=OrchestratorConfig(idle_confirm_observations=1),
         )
 
         # Session ended up in salvage_git, not park
