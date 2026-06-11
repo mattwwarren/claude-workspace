@@ -71,6 +71,13 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
+from cw.onboarding import (
+    CW_ALLOWLIST_ENTRY,
+    install_claude_md_snippet,
+    install_cw_allowlist,
+    install_sessionstart_hook,
+    register_mcp_servers,
+)
 from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
@@ -412,6 +419,28 @@ def upgrade_workers() -> None:
         raise click.exceptions.Exit(result.returncode)
 
 
+def _run_onboarding_steps(workspace: Path, name: str) -> None:
+    """Call all four onboarding functions and print the four status lines."""
+    mcp_changed = register_mcp_servers(workspace, name)
+    allow_changed = install_cw_allowlist()
+    hook_changed = install_sessionstart_hook(workspace)
+    md_changed = install_claude_md_snippet(workspace)
+    mcp_status = "registered" if mcp_changed else "already configured"
+    click.echo(f"  .mcp.json              — MCP servers {mcp_status}")
+    click.echo(
+        f"  ~/.claude/settings.json — {CW_ALLOWLIST_ENTRY} allow entry "
+        f"{'added' if allow_changed else 'already configured'}"
+    )
+    click.echo(
+        f"  .claude/settings.json  — SessionStart hook "
+        f"{'added' if hook_changed else 'already configured'}"
+    )
+    click.echo(
+        f"  .claude/CLAUDE.md      — cw snippet "
+        f"{'written' if md_changed else 'already configured'}"
+    )
+
+
 @main.command(name="init")
 @click.argument("name", required=False, default=None)
 @click.option(
@@ -427,12 +456,25 @@ def upgrade_workers() -> None:
     default=None,
     help="Comma-separated session purposes (e.g. impl,idea,debt).",
 )
+@click.option(
+    "--no-onboarding/--onboarding",
+    default=False,
+    help="Skip all agent-onboarding steps (MCP servers, allowlist, hooks, CLAUDE.md).",
+)
+@click.option(
+    "--onboard-only",
+    is_flag=True,
+    default=False,
+    help="Run onboarding steps only; skip init_client (client must already exist).",
+)
 @handle_errors
 def init(
     name: str | None,
     path: Path | None,
     branch: str,
     purposes: str | None,
+    no_onboarding: bool,
+    onboard_only: bool,
 ) -> None:
     """Initialize a new client configuration.
 
@@ -444,7 +486,31 @@ def init(
     \b
     Interactive (human-friendly):
       cw init
+
+    \b
+    Re-run onboarding for an existing client:
+      cw init my-project --onboard-only
     """
+    if no_onboarding and onboard_only:
+        msg = "--no-onboarding and --onboard-only are mutually exclusive"
+        raise CwError(msg)
+
+    if onboard_only:
+        if name is None:
+            msg = "Name is required with --onboard-only"
+            raise CwError(msg)
+        cfg = load_clients()
+        client = cfg.get(name)
+        if client is None:
+            msg = (
+                f"Client '{name}' not found — run 'cw init {name} --path <repo>' first"
+            )
+            raise CwError(msg)
+        workspace = client.workspace_path
+        _run_onboarding_steps(workspace, name)
+        click.echo(f"Onboarding complete for '{name}'.")
+        return
+
     if name is None:
         # Interactive mode
         name = click.prompt("Client name")
@@ -470,6 +536,12 @@ def init(
     init_client(name, path, default_branch=branch, auto_purposes=purpose_list)
 
     click.echo(f"Added client '{name}' to configuration.")
+
+    if not no_onboarding:
+        click.echo()
+        click.echo("Agent onboarding:")
+        _run_onboarding_steps(path, name)
+
     click.echo()
     click.echo("Next steps:")
     click.echo(f"  cw start {name}              # Start a session")

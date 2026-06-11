@@ -122,6 +122,36 @@ cw init my-project --path /path/to/your/repo
 
 This creates `~/.config/cw/clients.yaml` with your project configuration.
 
+#### What `cw init` wires
+
+By default, `cw init` also runs four agent-onboarding steps against the target
+workspace:
+
+- **MCP servers** (`.mcp.json`) — merges `cw-queue-events` and `cw-pr-events`
+  entries so background agents receive queue and PR events via MCP.
+  The files `config/cw-queue-events.mcp.json.example` and
+  `config/cw-pr-events.mcp.json.example` are for manual wiring only; `cw init`
+  generates these entries automatically.
+- **Bash allowlist** (`~/.claude/settings.json`) — adds `"Bash(cw:*)"` to
+  `permissions.allow` so agents can call `cw` commands without prompting.
+- **SessionStart hook** (`<workspace>/.claude/settings.json`) — adds
+  `cw orchestrate status --json || true` so each new Claude session sees the
+  current dispatch state.
+- **CLAUDE.md snippet** (`<workspace>/.claude/CLAUDE.md`) — appends a brief
+  `<!-- cw-onboarding -->` section documenting the MCP channels and `cw schema`
+  usage. When `cw schema list` is unavailable the snippet is still written but
+  the schema-specific lines are omitted.
+
+All four steps are idempotent — re-running `cw init` or `cw init --onboard-only`
+is safe.
+
+**Flags:**
+
+- `--no-onboarding` — skip all four onboarding steps (useful for scripted
+  installs where you manage these files yourself).
+- `--onboard-only` — re-run onboarding only; skip creating a new client entry
+  (client must already exist in `clients.yaml`).
+
 ### 3. Enable Shell Completion
 
 ```bash
