@@ -16,7 +16,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw._util import claude_project_dir
+from cw._util import _iter_assistant_text_blocks, claude_project_dir
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
@@ -106,7 +106,7 @@ from cw.tui import watch as tui_watch
 from cw.worktree import fast_forward_main
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
 
 def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
@@ -1056,43 +1056,6 @@ def _parse_sentinel_from_transcript(
         if extract_block(text) is not None:
             return parse_stdout(text)
     return None
-
-
-def _iter_assistant_text_blocks(transcript_path: Path) -> Iterator[str]:
-    """Yield each assistant text block from a Claude transcript JSONL file.
-
-    The transcript stores one event per line; ``assistant`` events carry
-    ``message.content`` blocks whose ``text`` fields hold the model output,
-    JSON-escaped (real newlines restored by ``json.loads``). Blocks are
-    yielded in file order. A missing file, an I/O error, or a malformed
-    line/record yields nothing rather than raising — callers treat an empty
-    iteration as "no output available".
-    """
-    if not transcript_path.is_file():
-        return
-    try:
-        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict) or record.get("type") != "assistant":
-                    continue
-                message = record.get("message")
-                if not isinstance(message, dict):
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "text":
-                        continue
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        yield text
-    except OSError:
-        return
 
 
 def _sentinel_present_in_transcript(
