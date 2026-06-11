@@ -99,8 +99,15 @@ class LaneConfig(BaseModel):
     max_parallel: int = 1          # this lane's own slot budget (shape)
     priority: int = 0              # higher = first dibs on the ceiling
     paused: bool = False           # operator can freeze new dispatch
+    reap_policy: str = "signal_only"  # "signal_only" | "auto" — see ADR 0006
     description: str = ""
 ```
+
+`reap_policy` (added per **ADR 0006**) governs whether `reconcile()` may
+*automatically* reap a distressed session in this lane (`auto`) or must
+only *signal* and route the task to `BLOCKED_ON_USER` for the lane's
+orchestration session to authorize (`signal_only`, the default). It
+resolves lane → global default → `signal_only`.
 
 Properties:
 
@@ -394,7 +401,14 @@ driver** of a lane's intent.
 ## Reconciler interaction (`reconcile.py`)
 
 - RUNNING→PENDING reverts preserve `lane` automatically (it lives on the
-  task). No change to the revert path.
+  task) — the lane-preservation *mechanics* are unchanged.
+- **Whether the revert fires automatically is gated by `lane.reap_policy`
+  (ADR 0006).** Under the default `signal_only`, `reconcile()` detects the
+  phantom/budget/idle condition, emits `SESSION_REAP_PROPOSED`, and routes
+  the task to `BLOCKED_ON_USER` instead of reverting — the lane's
+  ORCHESTRATE session is the reap authority. Under `auto`, the revert fires
+  as today. The Tier-2 allocator counts a `signal_only`-blocked session as
+  **occupying a slot**, so a stalled lane is not over-spawned.
 - The **transient-outage guard** stays *per client* (mass-reap
   suppression is a client-level safety net; lanes do not subdivide it).
 - Phantom detection is by session, unaffected by lane.
@@ -537,6 +551,17 @@ behavior and can merge first.
 6. **Auto-tuner authority bounds.** Should the override store enforce
    min/max guardrails (e.g. `max_parallel_clients ≤ 8`) so a runaway
    tuner can't oversubscribe the host?
+7. **Per-lane reap-policy granularity.** `reap_policy` is per lane (ADR
+   0006). Is a per-*ticket* override ever warranted (e.g. a known-flaky
+   ticket forced to `auto`), or does lane-level granularity suffice?
+   (Proposed: lane-level only; revisit if a real case appears.)
+8. **Client as a non-filesystem grouping.** D4 keeps `client` = a single
+   workspace on disk. A SaaS service with many integration channels may
+   want lanes that resolve to *different* workspaces under one logical
+   client — i.e. `client` as a pure grouping and the workspace bound per
+   lane. Deliberately **deferred**: decide before Phase 3 hardens the
+   `(client, lane)` → one-workspace assumption. Not in scope for the
+   initial lanes work.
 
 ## References
 
