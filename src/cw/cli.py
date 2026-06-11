@@ -71,6 +71,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
+from cw.onboarding import (
+    install_claude_md_snippet,
+    install_cw_allowlist,
+    install_sessionstart_hook,
+    register_mcp_servers,
+)
 from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
@@ -427,12 +433,25 @@ def upgrade_workers() -> None:
     default=None,
     help="Comma-separated session purposes (e.g. impl,idea,debt).",
 )
+@click.option(
+    "--no-onboarding/--onboarding",
+    default=False,
+    help="Skip all agent-onboarding steps (MCP servers, allowlist, hooks, CLAUDE.md).",
+)
+@click.option(
+    "--onboard-only",
+    is_flag=True,
+    default=False,
+    help="Run onboarding steps only; skip init_client (client must already exist).",
+)
 @handle_errors
 def init(
     name: str | None,
     path: Path | None,
     branch: str,
     purposes: str | None,
+    no_onboarding: bool,
+    onboard_only: bool,
 ) -> None:
     """Initialize a new client configuration.
 
@@ -444,7 +463,34 @@ def init(
     \b
     Interactive (human-friendly):
       cw init
+
+    \b
+    Re-run onboarding for an existing client:
+      cw init my-project --onboard-only
     """
+    if onboard_only:
+        if name is None:
+            msg = "Name is required with --onboard-only"
+            raise CwError(msg)
+        cfg = load_clients()
+        client = cfg.get(name)
+        if client is None:
+            msg = (
+                f"Client '{name}' not found — run 'cw init {name} --path <repo>' first"
+            )
+            raise CwError(msg)
+        workspace = client.workspace_path
+        register_mcp_servers(workspace, name)
+        install_cw_allowlist()
+        install_sessionstart_hook(workspace)
+        install_claude_md_snippet(workspace)
+        click.echo(f"Onboarding complete for '{name}'.")
+        click.echo("  .mcp.json         — MCP servers registered")
+        click.echo("  ~/.claude/settings.json — Bash(cw:*) allow entry added")
+        click.echo("  .claude/settings.json  — SessionStart hook added")
+        click.echo("  CLAUDE.md              — cw snippet appended")
+        return
+
     if name is None:
         # Interactive mode
         name = click.prompt("Client name")
@@ -470,6 +516,19 @@ def init(
     init_client(name, path, default_branch=branch, auto_purposes=purpose_list)
 
     click.echo(f"Added client '{name}' to configuration.")
+
+    if not no_onboarding:
+        register_mcp_servers(path, name)
+        install_cw_allowlist()
+        install_sessionstart_hook(path)
+        install_claude_md_snippet(path)
+        click.echo()
+        click.echo("Agent onboarding:")
+        click.echo("  .mcp.json         — MCP servers registered")
+        click.echo("  ~/.claude/settings.json — Bash(cw:*) allow entry added")
+        click.echo("  .claude/settings.json  — SessionStart hook added")
+        click.echo("  CLAUDE.md              — cw snippet appended")
+
     click.echo()
     click.echo("Next steps:")
     click.echo(f"  cw start {name}              # Start a session")

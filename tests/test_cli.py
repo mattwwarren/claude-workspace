@@ -3408,6 +3408,96 @@ class TestInitCli:
         assert result.exit_code != 0
         assert "already exists" in result.output
 
+    def test_init_no_onboarding(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """--no-onboarding skips all four onboarding functions."""
+        repo = make_git_repo("my-repo")
+
+        with (
+            patch("cw.cli.register_mcp_servers") as mock_mcp,
+            patch("cw.cli.install_cw_allowlist") as mock_allow,
+            patch("cw.cli.install_sessionstart_hook") as mock_hook,
+            patch("cw.cli.install_claude_md_snippet") as mock_md,
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                ["init", "my-repo", "--path", str(repo), "--no-onboarding"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Added client 'my-repo'" in result.output
+        mock_mcp.assert_not_called()
+        mock_allow.assert_not_called()
+        mock_hook.assert_not_called()
+        mock_md.assert_not_called()
+
+    def test_init_onboard_only(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """--onboard-only calls onboarding functions and skips init_client."""
+        repo = make_git_repo("my-repo")
+
+        # Pre-register the client so --onboard-only can find it.
+        runner = CliRunner()
+        runner.invoke(
+            main,
+            ["init", "my-repo", "--path", str(repo), "--no-onboarding"],
+        )
+
+        with (
+            patch("cw.cli.register_mcp_servers") as mock_mcp,
+            patch("cw.cli.install_cw_allowlist") as mock_allow,
+            patch("cw.cli.install_sessionstart_hook") as mock_hook,
+            patch("cw.cli.install_claude_md_snippet") as mock_md,
+            patch("cw.cli.init_client") as mock_init,
+        ):
+            result = runner.invoke(
+                main,
+                ["init", "my-repo", "--onboard-only"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Onboarding complete" in result.output
+        mock_init.assert_not_called()
+        mock_mcp.assert_called_once()
+        mock_allow.assert_called_once()
+        mock_hook.assert_called_once()
+        mock_md.assert_called_once()
+
+    def test_init_onboard_only_missing_client(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """--onboard-only with nonexistent client name exits nonzero with error."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["init", "no-such-client", "--onboard-only"],
+        )
+
+        assert result.exit_code != 0
+        assert "no-such-client" in result.output
+
+    def test_init_onboard_only_missing_name(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """--onboard-only without a name exits nonzero with error."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["init", "--onboard-only"],
+        )
+
+        assert result.exit_code != 0
+        assert "Name is required" in result.output
+
 
 class TestQueueNextCli:
     def test_next_empty_queue(self, tmp_config_dir: Path) -> None:

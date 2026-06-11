@@ -2,7 +2,7 @@
   "mcpServers": {
     "cw-queue-events": {
       "command": "cw",
-      "args": ["queue-channel", "proxy", "--client-id", "your-session-id"],
+      "args": ["queue-channel", "proxy", "--client-id", "<client-name>"],
       "env": {
         "CW_QUEUE_EVENTS_BASE_URL": "http://127.0.0.1:8789"
       }
