@@ -95,7 +95,7 @@ from cw.queue import (
 )
 from cw.reconcile import (
     _csid_from_transcript,
-    _session_project_dir,
+    _locate_session_transcript,
     reconcile,
     resolve_headless_budget,
     resolve_idle_watchdog_budget,
@@ -1688,33 +1688,15 @@ def _transcript_age_seconds(
 ) -> float | None:
     """Return seconds since the session's transcript was last written, or None.
 
-    Returns None when the transcript file cannot be located.  Delegates to
-    ``_transcript_recently_active`` semantics but exposes the raw age so the
-    caller can compare against the budget.
+    Returns None when the transcript file cannot be located.  Uses
+    :func:`~cw.reconcile._locate_session_transcript` for precise per-session
+    lookup (surface_ref-prefix glob, #541).
     """
-    project_dir = _session_project_dir(session)
-    if project_dir is None or not project_dir.is_dir():
-        return None
     try:
-        if session.claude_session_id is not None:
-            transcript = project_dir / f"{session.claude_session_id}.jsonl"
-            if not transcript.is_file():
-                return None
-            mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
-            return (now - mtime).total_seconds()
-
-        # No csid yet — scan for the newest post-spawn .jsonl
-        candidates = sorted(
-            project_dir.glob("*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not candidates:
+        transcript = _locate_session_transcript(session)
+        if transcript is None:
             return None
-        newest = candidates[0]
-        mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
-        if mtime <= session.started_at:
-            return None
+        mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
         return (now - mtime).total_seconds()
     except OSError:
         return None
