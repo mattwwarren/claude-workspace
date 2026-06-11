@@ -428,7 +428,7 @@ def _run_onboarding_steps(workspace: Path, name: str) -> None:
     click.echo("  .mcp.json         — MCP servers registered")
     click.echo(f"  ~/.claude/settings.json — {CW_ALLOWLIST_ENTRY} allow entry added")
     click.echo("  .claude/settings.json  — SessionStart hook added")
-    click.echo("  CLAUDE.md              — cw snippet appended")
+    click.echo("  CLAUDE.md              — cw snippet step run")
 
 
 @main.command(name="init")
@@ -497,8 +497,8 @@ def init(
             )
             raise CwError(msg)
         workspace = client.workspace_path
-        click.echo(f"Onboarding complete for '{name}'.")
         _run_onboarding_steps(workspace, name)
+        click.echo(f"Onboarding complete for '{name}'.")
         return
 
     if name is None:

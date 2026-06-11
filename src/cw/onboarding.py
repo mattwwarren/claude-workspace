@@ -90,7 +90,7 @@ def install_cw_allowlist() -> None:
         except json.JSONDecodeError:
             click.echo(
                 "cw init: could not parse ~/.claude/settings.json — "
-                'add "Bash(cw:*)" to permissions.allow manually.'
+                f'add "{CW_ALLOWLIST_ENTRY}" to permissions.allow manually.'
             )
             return
 

@@ -11,6 +11,7 @@ from unittest.mock import patch
 from cw.onboarding import (
     _CLAUDE_MD_MARKER,
     _SESSIONSTART_COMMAND,
+    CW_ALLOWLIST_ENTRY,
     install_claude_md_snippet,
     install_cw_allowlist,
     install_sessionstart_hook,
@@ -115,7 +116,7 @@ class TestInstallCwAllowlist:
         install_cw_allowlist()
 
         data = json.loads(settings.read_text())
-        assert "Bash(cw:*)" in data["permissions"]["allow"]
+        assert CW_ALLOWLIST_ENTRY in data["permissions"]["allow"]
 
     def test_idempotent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         settings = tmp_path / "settings.json"
@@ -125,7 +126,7 @@ class TestInstallCwAllowlist:
         install_cw_allowlist()
 
         data = json.loads(settings.read_text())
-        assert data["permissions"]["allow"].count("Bash(cw:*)") == 1
+        assert data["permissions"]["allow"].count(CW_ALLOWLIST_ENTRY) == 1
 
     def test_absent_file_creates_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -137,7 +138,7 @@ class TestInstallCwAllowlist:
 
         assert settings.exists()
         data = json.loads(settings.read_text())
-        assert "Bash(cw:*)" in data["permissions"]["allow"]
+        assert CW_ALLOWLIST_ENTRY in data["permissions"]["allow"]
 
     def test_unparseable_json_echoes_manual_instruction_no_write(
         self,
@@ -168,7 +169,7 @@ class TestInstallCwAllowlist:
 
         data = json.loads(settings.read_text())
         allow = data["permissions"]["allow"]
-        assert "Bash(cw:*)" in allow
+        assert CW_ALLOWLIST_ENTRY in allow
         assert "Bash(git:*)" in allow
         assert "Bash(gh:*)" in allow
 
