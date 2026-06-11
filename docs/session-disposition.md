@@ -40,11 +40,16 @@ as test fixtures or copied from `auto-dev.md` for sentinel-related tickets.
 A naive "first match" false-terminates.
 
 **Rule:** take the **last** block that parses to a real terminal `AutoDevResult`,
-and only trust it after the worker has left the daemon roster. This is what
-`_parse_sentinel_from_transcript` does — it scans all assistant text blocks
-and returns the first parseable result (which lands at the end of the
-transcript, after all fixture/example output that precedes the real emit).
-If you are reading the transcript manually, take the final complete block.
+and only trust it after the worker has left the daemon roster.
+
+Note: `_parse_sentinel_from_transcript` itself scans forward and returns the
+**first** block with sentinel framing. That is safe on its `signal_stop` call
+path (it fires at process exit, when the real emit is normally the only
+sentinel present) — but it is NOT safe for manual disposition of
+sentinel-related tickets whose transcripts contain fixture blocks. When
+dispositioning manually, reuse its JSON-decoding walk
+(`_iter_assistant_text_blocks` + `extract_block`/`parse_stdout`) but take the
+final parseable block, not the first.
 
 ### Gotcha 2 — Sentinels are JSON-escaped in the transcript
 
@@ -64,10 +69,12 @@ does this via `_iter_assistant_text_blocks`. Never regex the raw JSONL.
 which fires only after the first reconcile tick. Before that tick, the field
 is None.
 
-**Rule:** if `claude_session_id` is None, call `_csid_from_transcript(session)`
-(`src/cw/reconcile.py`) to derive it from the transcript filename via the
-surface_ref-prefix glob. Only attempt transcript reads once a csid is
-available.
+**Rule:** locate the transcript via `_locate_session_transcript(session)`
+(`src/cw/reconcile.py`) — it handles `claude_session_id=None` via the
+surface_ref-prefix glob (§1). Note that `_parse_sentinel_from_transcript`
+takes `(cwd, claude_session_id)` and returns None when the csid is None — so
+for a csid-less session, resolve the path first (or derive the csid from the
+transcript filename via `_csid_from_transcript`), then parse.
 
 ---
 
@@ -111,9 +118,9 @@ dispatch tick will re-spawn it.
 
 **Observability:** reconcile emits `queue.session_reaped` on the queue-events
 bus (`cw event tail`) whenever it disposes of a session. The `reason` field
-uses the `ReapReason` taxonomy; see
-[`docs/headless-contract.md §BLOCKED_ON_USER`](headless-contract.md) for the
-full `ReapReason` table. Two hardening measures make false reaps less likely:
+uses the `ReapReason` taxonomy; see the "queue.session_reaped Bus Event"
+section of [`docs/headless-contract.md`](headless-contract.md) for the full
+`ReapReason` table. Two hardening measures make false reaps less likely:
 
 - **Confirm-before-reap** (`OrchestratorConfig.idle_confirm_observations`,
   default `2`): reconcile requires `session.idle_observation_count` to reach
