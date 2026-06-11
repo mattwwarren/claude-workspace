@@ -421,14 +421,24 @@ def upgrade_workers() -> None:
 
 def _run_onboarding_steps(workspace: Path, name: str) -> None:
     """Call all four onboarding functions and print the four status lines."""
-    register_mcp_servers(workspace, name)
-    install_cw_allowlist()
-    install_sessionstart_hook(workspace)
-    install_claude_md_snippet(workspace)
-    click.echo("  .mcp.json         — MCP servers registered")
-    click.echo(f"  ~/.claude/settings.json — {CW_ALLOWLIST_ENTRY} allow entry added")
-    click.echo("  .claude/settings.json  — SessionStart hook added")
-    click.echo("  CLAUDE.md              — cw snippet step run")
+    mcp_changed = register_mcp_servers(workspace, name)
+    allow_changed = install_cw_allowlist()
+    hook_changed = install_sessionstart_hook(workspace)
+    md_changed = install_claude_md_snippet(workspace)
+    mcp_status = "registered" if mcp_changed else "already configured"
+    click.echo(f"  .mcp.json              — MCP servers {mcp_status}")
+    click.echo(
+        f"  ~/.claude/settings.json — {CW_ALLOWLIST_ENTRY} allow entry "
+        f"{'added' if allow_changed else 'already configured'}"
+    )
+    click.echo(
+        f"  .claude/settings.json  — SessionStart hook "
+        f"{'added' if hook_changed else 'already configured'}"
+    )
+    click.echo(
+        f"  .claude/CLAUDE.md      — cw snippet "
+        f"{'written' if md_changed else 'already configured'}"
+    )
 
 
 @main.command(name="init")

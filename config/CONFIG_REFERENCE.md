@@ -276,6 +276,13 @@ are `null` when not applicable.
 }
 ```
 
+## MCP Server Configuration
+
+`cw init` automatically writes `cw-queue-events` and `cw-pr-events` entries into
+`<workspace>/.mcp.json`. The files `config/cw-queue-events.mcp.json.example` and
+`config/cw-pr-events.mcp.json.example` are for manual wiring only and are not
+required when using `cw init`.
+
 ## Managing Configuration
 
 ```bash

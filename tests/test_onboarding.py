@@ -32,8 +32,9 @@ class TestRegisterMcpServers:
         workspace = tmp_path / "repo"
         workspace.mkdir()
 
-        register_mcp_servers(workspace, "my-client")
+        changed = register_mcp_servers(workspace, "my-client")
 
+        assert changed is True
         mcp_path = workspace / ".mcp.json"
         assert mcp_path.exists()
         data = json.loads(mcp_path.read_text())
@@ -65,8 +66,9 @@ class TestRegisterMcpServers:
         first_content = mcp_path.read_text()
 
         # Second call must not change anything.
-        register_mcp_servers(workspace, "other-client")
+        changed = register_mcp_servers(workspace, "other-client")
 
+        assert changed is False
         second_content = mcp_path.read_text()
         # Keys were not overwritten; client-id still points to first call's value.
         assert first_content == second_content
@@ -100,6 +102,26 @@ class TestRegisterMcpServers:
 
         assert (workspace / ".mcp.json").exists()
 
+    def test_unparseable_mcp_json_refuses_with_manual_instruction(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Corrupt .mcp.json must not be overwritten; manual instruction emitted."""
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+        mcp_path = workspace / ".mcp.json"
+        corrupt = "{not valid json{{{"
+        mcp_path.write_text(corrupt)
+
+        changed = register_mcp_servers(workspace, "my-client")
+
+        assert changed is False
+        # File left untouched.
+        assert mcp_path.read_text() == corrupt
+        captured = capsys.readouterr()
+        assert "manually" in captured.out
+
 
 # ---------------------------------------------------------------------------
 # install_cw_allowlist
@@ -113,8 +135,9 @@ class TestInstallCwAllowlist:
         settings = tmp_path / "settings.json"
         monkeypatch.setattr("cw.onboarding._CLAUDE_SETTINGS_PATH", settings)
 
-        install_cw_allowlist()
+        changed = install_cw_allowlist()
 
+        assert changed is True
         data = json.loads(settings.read_text())
         assert CW_ALLOWLIST_ENTRY in data["permissions"]["allow"]
 
@@ -123,8 +146,9 @@ class TestInstallCwAllowlist:
         monkeypatch.setattr("cw.onboarding._CLAUDE_SETTINGS_PATH", settings)
 
         install_cw_allowlist()
-        install_cw_allowlist()
+        changed = install_cw_allowlist()
 
+        assert changed is False
         data = json.loads(settings.read_text())
         assert data["permissions"]["allow"].count(CW_ALLOWLIST_ENTRY) == 1
 
@@ -257,11 +281,13 @@ class TestInstallSessionstartHook:
 
 
 class TestInstallClaudeMdSnippet:
-    def test_cw_schema_fails_skips_with_warning(
+    def test_cw_schema_fails_writes_snippet_without_schema_lines(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """Schema probe fails: snippet written, schema lines omitted, no warning."""
         workspace = tmp_path / "repo"
         workspace.mkdir()
+        claude_md = workspace / ".claude" / "CLAUDE.md"
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
@@ -270,16 +296,49 @@ class TestInstallClaudeMdSnippet:
                 stdout=b"",
                 stderr=b"",
             )
-            install_claude_md_snippet(workspace)
+            changed = install_claude_md_snippet(workspace)
 
+        assert changed is True
+        assert claude_md.exists()
+        text = claude_md.read_text()
+        assert _CLAUDE_MD_MARKER in text
+        assert "cw Agent Integration" in text
+        # Schema lines must NOT be present when probe failed.
+        assert "cw schema" not in text
+        # No warning emitted.
         captured = capsys.readouterr()
-        assert "unavailable" in captured.out
-        assert not (workspace / "CLAUDE.md").exists()
+        assert captured.out == ""
+
+    def test_cw_schema_succeeds_writes_snippet_with_schema_lines(
+        self, tmp_path: Path
+    ) -> None:
+        """When cw schema list succeeds, snippet includes schema lines."""
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+        claude_md = workspace / ".claude" / "CLAUDE.md"
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["cw", "schema", "list"],
+                returncode=0,
+                stdout=b"",
+                stderr=b"",
+            )
+            changed = install_claude_md_snippet(workspace)
+
+        assert changed is True
+        assert claude_md.exists()
+        text = claude_md.read_text()
+        assert _CLAUDE_MD_MARKER in text
+        assert "cw schema" in text
+        assert "--json" in text
 
     def test_idempotent_marker_already_present(self, tmp_path: Path) -> None:
         workspace = tmp_path / "repo"
         workspace.mkdir()
-        claude_md = workspace / "CLAUDE.md"
+        claude_dir = workspace / ".claude"
+        claude_dir.mkdir()
+        claude_md = claude_dir / "CLAUDE.md"
         claude_md.write_text(f"# Existing\n\n{_CLAUDE_MD_MARKER}\nAlready here.\n")
 
         with patch("subprocess.run") as mock_run:
@@ -289,15 +348,18 @@ class TestInstallClaudeMdSnippet:
                 stdout=b"",
                 stderr=b"",
             )
-            install_claude_md_snippet(workspace)
+            changed = install_claude_md_snippet(workspace)
 
+        assert changed is False
         # Content must be unchanged.
         assert claude_md.read_text().count(_CLAUDE_MD_MARKER) == 1
 
     def test_appends_marker_when_absent(self, tmp_path: Path) -> None:
         workspace = tmp_path / "repo"
         workspace.mkdir()
-        claude_md = workspace / "CLAUDE.md"
+        claude_dir = workspace / ".claude"
+        claude_dir.mkdir()
+        claude_md = claude_dir / "CLAUDE.md"
         claude_md.write_text("# My Project\n\nExisting content.\n")
 
         with patch("subprocess.run") as mock_run:
@@ -326,32 +388,25 @@ class TestInstallClaudeMdSnippet:
             )
             install_claude_md_snippet(workspace)
 
-        claude_md = workspace / "CLAUDE.md"
+        claude_md = workspace / ".claude" / "CLAUDE.md"
         assert claude_md.exists()
         assert _CLAUDE_MD_MARKER in claude_md.read_text()
 
-    def test_cw_schema_fails_content_unchanged(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """When cw schema list fails, pre-existing CLAUDE.md must not be modified."""
+    def test_creates_claude_dir_when_absent(self, tmp_path: Path) -> None:
         workspace = tmp_path / "repo"
         workspace.mkdir()
-        claude_md = workspace / "CLAUDE.md"
-        original_content = "# Existing project\n\nSome content.\n"
-        claude_md.write_text(original_content)
+        assert not (workspace / ".claude").exists()
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 args=["cw", "schema", "list"],
-                returncode=1,
+                returncode=0,
                 stdout=b"",
                 stderr=b"",
             )
             install_claude_md_snippet(workspace)
 
-        assert claude_md.read_text() == original_content
-        captured = capsys.readouterr()
-        assert "unavailable" in captured.out
+        assert (workspace / ".claude" / "CLAUDE.md").exists()
 
 
 class TestInstallSessionstartHookExtra:
