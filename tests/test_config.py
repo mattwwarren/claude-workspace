@@ -985,21 +985,21 @@ class TestOrchestratorConfigUsageLimitBackoff:
 class TestMutateState:
     """Tests for mutate_state() — load-mutate-save under sessions_lock."""
 
-    def _make_session(self, sid: str) -> "Session":
+    def _make_session(self, sid: str) -> Session:
         from datetime import UTC, datetime
-        from pathlib import Path as P
+        from pathlib import Path
 
         return Session(
             id=sid,
             name=f"client-a/{sid}",
             client="client-a",
             purpose=SessionPurpose.IMPL,
-            workspace_path=P("/tmp/ws"),
+            workspace_path=Path("/tmp/ws"),
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
     def test_mutate_state_applies_callback_and_persists(
-        self, tmp_config_dir: "Path"
+        self, tmp_config_dir: Path
     ) -> None:
         """Callback mutation is reflected in reloaded state from disk."""
         s1 = self._make_session("ms-sess-1")
@@ -1018,13 +1018,14 @@ class TestMutateState:
         assert "ms-sess-2" in ids
 
     def test_mutate_state_releases_lock_on_exception(
-        self, tmp_config_dir: "Path"
+        self, tmp_config_dir: Path
     ) -> None:
         """Lock is released even when the callback raises; subsequent call succeeds."""
         save_state(CwState())
 
         def _raises(state: CwState) -> None:
-            raise ValueError("intentional error")
+            msg = "intentional error"
+            raise ValueError(msg)
 
         with pytest.raises(ValueError, match="intentional error"):
             mutate_state(_raises)
@@ -1040,9 +1041,7 @@ class TestMutateState:
         reloaded = load_state()
         assert any(sess.id == "ms-after-exc" for sess in reloaded.sessions)
 
-    def test_mutate_state_returns_mutated_state(
-        self, tmp_config_dir: "Path"
-    ) -> None:
+    def test_mutate_state_returns_mutated_state(self, tmp_config_dir: Path) -> None:
         """Return value is the post-mutation CwState, not the pre-mutation one."""
         save_state(CwState())
         s = self._make_session("ms-return-1")
