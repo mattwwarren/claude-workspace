@@ -5136,6 +5136,736 @@ class TestDevQueueWait:
         assert _WAIT_EXIT_TIMEOUT == 124
 
 
+# ---------------------------------------------------------------------------
+# TestDevQueueWaitSentinelAware (GitHub issue #535)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueWaitSentinelAware:
+    """Sentinel-aware ``cw dev-queue wait`` (GitHub issue #535).
+
+    Tests for the inline poll loop that reads AUTO_DEV_RESULT sentinels
+    from the transcript directly instead of relying solely on task-status
+    polling.  Exercises TERMINAL, HEARTBEAT→TERMINAL, ATTENTION, and the
+    spawn-window (session_id=None) grace path.
+    """
+
+    # --- shared sentinel text fixtures ---
+
+    _SHIPPED_SENTINEL = (
+        "<<<AUTO_DEV_RESULT\n"
+        "{\n"
+        '  "schema_version": 2,\n'
+        '  "ticket_id": "535",\n'
+        '  "status": "shipped",\n'
+        '  "stage_reached": "stage5_post_create",\n'
+        '  "scope": {"tier": "small", "files": 2, "lines_estimate": 30,\n'
+        '    "lines_actual": 25, "forbidden_touched": false},\n'
+        '  "plan_source": "linear_existing",\n'
+        '  "branch": "dev/535-fix",\n'
+        '  "worktree_path": null,\n'
+        '  "fork_point_sha": "abc535",\n'
+        '  "commits": ["def535"],\n'
+        '  "pr": {"number": 535, '
+        '"url": "https://github.com/foo/bar/pull/535", '
+        '"auto_merge": true, "base": "main"},\n'
+        '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+        '  "health": {"lowest_agent_confidence": "HIGH",'
+        ' "any_incomplete_risk": false,\n'
+        '    "shortcuts": [], "recommendation": "PROCEED",\n'
+        '    "downgrade_applied": false,'
+        ' "fix_loop_escalated": false},\n'
+        '  "friction_highlights": [],\n'
+        '  "blocker": null,\n'
+        '  "next_actions": []\n'
+        "}\n"
+        "AUTO_DEV_RESULT>>>"
+    )
+
+    def _write_transcript(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        assistant_text: str,
+        fake_home: Path,
+    ) -> Path:
+        """Write a transcript JSONL file and return the transcript path."""
+
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": assistant_text}],
+            },
+        }
+        transcript = project_dir / f"{claude_session_id}.jsonl"
+        transcript.write_text(json.dumps(record) + "\n")
+        return transcript
+
+    def _seed_running_task(
+        self,
+        ticket_id: str,
+        session_id: str | None,
+        client: str = "genhealth",
+    ) -> None:
+        """Write a RUNNING TicketTask to the dev queue."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client=client,
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session_id,
+                )
+            ]
+        )
+        save_dev_queue(store)
+
+    def _make_running_session(
+        self,
+        session_id: str,
+        worktree: Path,
+        claude_session_id: str | None = None,
+        surface_ref: str = "abcd1234",
+        started_at: datetime | None = None,
+    ) -> Session:
+        """Build an ACTIVE Session pointing at *worktree*."""
+        from cw.models import SessionOrigin, SessionPurpose, SessionStatus
+
+        return Session(
+            id=session_id,
+            name="genhealth/impl",
+            client="genhealth",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=worktree,
+            worktree_path=worktree,
+            surface_ref=surface_ref,
+            claude_session_id=claude_session_id,
+            started_at=started_at or datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+
+    def test_terminal_shipped_csid_set(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """TERMINAL: transcript has ``shipped`` sentinel, csid known → exit 0."""
+        import json as _json
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-535"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess535a"
+        csid = "uuid-535a-csid-set-1234"
+        self._write_transcript(worktree, csid, self._SHIPPED_SENTINEL, fake_home)
+        self._seed_running_task("GEN-535", session_id)
+
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id=csid
+        )
+        state = CwState(sessions=[session])
+        from cw.config import save_state as _save_state
+
+        _save_state(state)
+
+        # No real sleep/monotonic needed — sentinel found on first poll.
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-535", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "terminal"
+        assert payload["sentinel_status"] == "shipped"
+        assert payload["pr_url"] == "https://github.com/foo/bar/pull/535"
+        assert payload["ticket_id"] == "GEN-535"
+
+    def test_terminal_shipped_csid_none_resolved_via_glob(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """TERMINAL: csid=None on Session → resolved via surface_ref glob."""
+        import json as _json
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-535b"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess535b"
+        surface_ref = "abcd5350"  # 8-char hex
+        # csid starts with surface_ref (as per _csid_from_transcript glob)
+        csid = f"{surface_ref}-longer-uuid-suffix"
+
+        # Transcript written AFTER session.started_at so the mtime guard passes.
+        transcript = self._write_transcript(
+            worktree, csid, self._SHIPPED_SENTINEL, fake_home
+        )
+        # Ensure mtime is fresh (after started_at = epoch).
+        import os
+
+        os.utime(transcript, None)
+
+        self._seed_running_task("GEN-535B", session_id)
+
+        started = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        session = self._make_running_session(
+            session_id,
+            worktree,
+            claude_session_id=None,  # not yet set — will resolve via glob
+            surface_ref=surface_ref,
+            started_at=started,
+        )
+        state = CwState(sessions=[session])
+        from cw.config import save_state as _save_state
+
+        _save_state(state)
+
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-535B", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "terminal"
+        assert payload["sentinel_status"] == "shipped"
+
+    def test_heartbeat_then_terminal(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """HEARTBEAT → TERMINAL: first poll no sentinel, second poll shipped."""
+        import json as _json
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-535c"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess535c"
+        csid = "uuid-535c"
+        self._seed_running_task("GEN-535C", session_id)
+
+        started = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id=csid, started_at=started
+        )
+        state = CwState(sessions=[session])
+        from cw.config import save_state as _save_state
+
+        _save_state(state)
+
+        # First call: transcript exists (fresh, no sentinel) → keep polling.
+        # Second call: transcript has shipped sentinel → TERMINAL.
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        transcript = project_dir / f"{csid}.jsonl"
+
+        call_count = [0]
+
+        def _fake_sentinel(cwd: str, claude_session_id: str | None) -> object:
+            """Return None on first call, AutoDevResult on second."""
+            from cw.auto_dev_result import parse_stdout
+
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Write a fresh-mtime transcript (no sentinel) to prevent ATTENTION.
+                transcript.write_text(json.dumps({"type": "user"}) + "\n")
+                return None
+            # Second poll: inject the shipped sentinel.
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": self._SHIPPED_SENTINEL}
+                            ]
+                        },
+                    }
+                )
+                + "\n"
+            )
+            return parse_stdout(self._SHIPPED_SENTINEL)
+
+        monkeypatch.setattr("cw.cli._parse_sentinel_from_transcript", _fake_sentinel)
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+
+        # monotonic: first poll returns 0.0 (under deadline=300).
+        # After first sleep, return 10.0 (still under deadline).
+        monotonic_values = iter([0.0, 0.0, 10.0, 10.0])
+        monkeypatch.setattr(
+            "cw.cli.time.monotonic", lambda: next(monotonic_values, 10.0)
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-535C", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "terminal"
+        assert payload["sentinel_status"] == "shipped"
+        assert call_count[0] == 2
+
+    def test_attention_stale_not_in_roster(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """ATTENTION: stale + no sentinel + not in roster → exit 3."""
+        import json as _json
+
+        from cw.cli import _WAIT_EXIT_ATTENTION
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-535d"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess535d"
+        surface_ref = "deadbeef"  # 8-char hex
+        csid = "uuid-535d"
+
+        self._seed_running_task("GEN-535D", session_id)
+
+        # Session started at T=0; transcript last-written at T=1 (well within history).
+        # freeze_time at T=9999 makes the transcript very stale.
+        started = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        session = self._make_running_session(
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            surface_ref=surface_ref,
+            started_at=started,
+        )
+        state = CwState(sessions=[session])
+        from cw.config import save_state as _save_state
+
+        _save_state(state)
+
+        # Write a stale transcript (no sentinel).
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        transcript = project_dir / f"{csid}.jsonl"
+        transcript.write_text(json.dumps({"type": "user"}) + "\n")
+
+        # Freeze time at a point far in the future relative to the transcript mtime.
+        # The transcript mtime will be "now" (real time), but with freeze_time the
+        # datetime.now(UTC) call inside _transcript_age_seconds will return a future
+        # time, making the age appear large.
+        #
+        # Strategy: mock _transcript_age_seconds to return a large value directly,
+        # and mock _parse_sentinel_from_transcript to return None.
+        monkeypatch.setattr(
+            "cw.cli._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.cli._transcript_age_seconds",
+            lambda *_a, **_kw: 99999.0,  # very stale
+        )
+
+        # Daemon roster does NOT contain surface_ref.
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        fake_daemon = FakeNativeDaemonClient()
+        # Don't add surface_ref to roster → not in roster.
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: fake_daemon)
+
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-535D", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == _WAIT_EXIT_ATTENTION, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "attention"
+        assert payload["sentinel_status"] is None
+
+    def test_spawn_window_session_id_none_no_attention(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Spawn-window: session_id=None → keeps polling, never fires ATTENTION."""
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+
+        self._seed_running_task("GEN-535E", session_id=None)
+
+        # monotonic: first poll → 0.0; second call (deadline check) → 9999.0 (expired).
+        monotonic_calls = iter([0.0, 9999.0])
+        monkeypatch.setattr(
+            "cw.cli.time.monotonic", lambda: next(monotonic_calls, 9999.0)
+        )
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-535E", "--client", "genhealth"]
+        )
+        # Should timeout (124), NOT attention (3) — spawn-window grace.
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT, result.output
+
+    def test_wait_attention_exit_code_constant(self) -> None:
+        """_WAIT_EXIT_ATTENTION constant equals 3."""
+        from cw.cli import _WAIT_EXIT_ATTENTION
+
+        assert _WAIT_EXIT_ATTENTION == 3
+
+    def test_wait_json_terminal_via_queue_status_has_new_keys(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json COMPLETED queue status includes state/sentinel_status/pr_url."""
+        import json as _json
+
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-536",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            session_id="sess-536",
+        )
+        monkeypatch.setattr(
+            "cw.cli.wait_for_terminal",
+            lambda _ticket_id, _client, **_kw: task,
+        )
+        # Seed so load_dev_queue finds it on the fast-path.
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # No sleep/monotonic needed — fast path fires immediately.
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-536", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        # Backward-compat: old keys still present.
+        assert payload["ticket_id"] == "GEN-536"
+        assert payload["client"] == "genhealth"
+        assert payload["status"] == "completed"
+        assert payload["session_id"] == "sess-536"
+        # New keys present.
+        assert payload["state"] == "terminal"
+        assert "sentinel_status" in payload
+        assert "pr_url" in payload
+
+    def test_terminal_non_json_output(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """TERMINAL via sentinel without --json emits human-readable line."""
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-535f"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess535f"
+        csid = "uuid-535f"
+        self._write_transcript(worktree, csid, self._SHIPPED_SENTINEL, fake_home)
+        self._seed_running_task("GEN-535F", session_id)
+
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id=csid
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-535F", "--client", "genhealth"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "SHIPPED" in result.output
+
+    def test_attention_non_json_output(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """ATTENTION without --json emits human-readable line."""
+        from cw.cli import _WAIT_EXIT_ATTENTION
+
+        worktree = tmp_path / "wt" / "auto-dev-535g"
+        worktree.mkdir(parents=True)
+        session_id = "sess535g"
+        surface_ref = "cafe1234"
+
+        self._seed_running_task("GEN-535G", session_id)
+        session = self._make_running_session(
+            session_id, worktree, surface_ref=surface_ref
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr(
+            "cw.cli._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.cli._transcript_age_seconds", lambda *_a, **_kw: 99999.0
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        _fake_daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: _fake_daemon)
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-535G", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_ATTENTION
+        assert "ATTENTION" in result.output
+
+    def test_heartbeat_timeout_path(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """HEARTBEAT: transcript fresh, hard ceiling hit → exit 124."""
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+
+        worktree = tmp_path / "wt" / "auto-dev-535h"
+        worktree.mkdir(parents=True)
+        session_id = "sess535h"
+        surface_ref = "1234cafe"  # 8-char hex
+
+        self._seed_running_task("GEN-535H", session_id)
+        session = self._make_running_session(
+            session_id, worktree, surface_ref=surface_ref
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr(
+            "cw.cli._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+        )
+        # Fresh transcript (not stale) → no ATTENTION.
+        monkeypatch.setattr("cw.cli._transcript_age_seconds", lambda *_a, **_kw: 5.0)
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        _fake_d = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: _fake_d)
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+
+        # First monotonic() call (deadline init): 0.0.
+        # Subsequent calls (deadline checks): first returns 0.0 (alive),
+        # then 9999.0 (deadline exceeded after heartbeat).
+        mono_values = iter([0.0, 0.0, 9999.0])
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: next(mono_values, 9999.0))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-535H", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT, result.output
+
+    def test_transcript_age_seconds_no_project_dir(
+        self, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        """_transcript_age_seconds returns None when worktree_path is None."""
+        from cw.cli import _transcript_age_seconds
+
+        session = Session(
+            id="test-age-1",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=tmp_path,
+            worktree_path=None,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        result = _transcript_age_seconds(session, datetime.now(UTC))
+        assert result is None
+
+    def test_transcript_age_seconds_no_transcript_file(
+        self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_transcript_age_seconds returns None when transcript file is missing."""
+        from cw.cli import _transcript_age_seconds
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "no-transcript"
+        worktree.mkdir(parents=True)
+
+        session = Session(
+            id="test-age-2",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=worktree,
+            worktree_path=worktree,
+            claude_session_id="missing-csid",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        # project_dir will exist (fake_home/.claude/projects/...) but transcript won't.
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        result = _transcript_age_seconds(session, datetime.now(UTC))
+        assert result is None
+
+    def test_transcript_age_seconds_no_csid_no_candidates(
+        self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_transcript_age_seconds with no csid and no .jsonl files returns None."""
+        from cw.cli import _transcript_age_seconds
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "no-candidates"
+        worktree.mkdir(parents=True)
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id="test-age-3",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=worktree,
+            worktree_path=worktree,
+            claude_session_id=None,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        result = _transcript_age_seconds(session, datetime.now(UTC))
+        assert result is None
+
+    def test_transcript_age_seconds_stale_mtime_guard(
+        self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_transcript_age_seconds returns None when transcript mtime <= started_at."""
+        from cw.cli import _transcript_age_seconds
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "stale-mtime"
+        worktree.mkdir(parents=True)
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write a .jsonl file then set its mtime to BEFORE started_at.
+        transcript = project_dir / "someid.jsonl"
+        transcript.write_text("{}\n")
+        import os
+
+        # started_at = 2026-06-11T12:00:00 UTC; set mtime to 2026-01-01 (before).
+        os.utime(transcript, (1735689600.0, 1735689600.0))
+
+        started = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
+        session = Session(
+            id="test-age-4",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=worktree,
+            worktree_path=worktree,
+            claude_session_id=None,
+            started_at=started,
+        )
+        result = _transcript_age_seconds(session, datetime.now(UTC))
+        assert result is None
+
+    def test_spawn_window_session_not_in_state_polls_then_times_out(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """session_id set but session not in CwState → poll, eventually timeout."""
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+
+        self._seed_running_task("GEN-535I", session_id="orphan-sess")
+        # State has no sessions — session not found.
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[]))
+
+        # First call for deadline init: 0.0; sleep→continue loop;
+        # second deadline check (inside session-None branch): 9999.0 → timeout.
+        mono_values = iter([0.0, 9999.0])
+        monkeypatch.setattr("cw.cli.time.monotonic", lambda: next(mono_values, 9999.0))
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-535I", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT
+
+
 class TestResultValidate:
     def _valid_payload(self) -> dict[str, object]:
         return {
