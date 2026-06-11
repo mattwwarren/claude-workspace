@@ -177,7 +177,14 @@ def sessions_lock() -> Iterator[None]:
 
 
 def mutate_state(fn: Callable[[CwState], None]) -> CwState:
-    """Load state, apply fn in place under sessions_lock, save and return."""
+    """Load state, apply fn in place under sessions_lock, save and return.
+
+    Not reentrant: ``sessions_lock`` is a per-open-fd ``flock``, so calling
+    this while the caller already holds ``sessions_lock`` self-deadlocks.
+    Code running inside a ``with sessions_lock():`` block (e.g. anything
+    called from ``reconcile._reconcile_locked``) must mutate the loaded
+    state and ``save_state`` directly instead.
+    """
     with sessions_lock():
         state = load_state()
         fn(state)

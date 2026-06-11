@@ -19,7 +19,8 @@ daemon hiccup would otherwise irreversibly mark every session as CRASHED.
 Lock note: ``reconcile`` acquires ``sessions_lock`` (config.py) across its
 entire load_state → mutate → save_state sequence.  The helpers called from
 within the lock (``revert_stalled_headless_sessions``,
-``flag_silently_idle_daemon_sessions``) save_state directly without
+``flag_silently_idle_daemon_sessions``, ``revert_timed_out_tasks``,
+``revert_completed_silent_tasks``) save_state directly without
 re-acquiring; callers of those helpers must hold the lock themselves if
 called outside ``reconcile``.
 """
@@ -46,7 +47,6 @@ from cw.config import (
     get_client,
     load_orchestrator_config,
     load_state,
-    mutate_state,
     save_state,
     sessions_lock,
 )
@@ -1483,9 +1483,9 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     # before touching the queue, or a headless session completed without
     # the dispatch consumer processing it). TIMED_OUT/COMPLETED sessions are
     # already terminal; the only state mutation for these sessions is the
-    # reap_reason stamp performed above via mutate_state() in
-    # revert_timed_out_tasks / revert_completed_silent_tasks.
-    # This block handles queue revert only.
+    # reap_reason stamp inside revert_timed_out_tasks /
+    # revert_completed_silent_tasks (in-place + save_state, serialized by
+    # the sessions_lock this function runs under).
     timed_out_ticket_ids = revert_timed_out_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     all_reverted = list(
@@ -1940,6 +1940,9 @@ def revert_timed_out_tasks() -> list[str]:
     ``signal_stop`` crashed after writing TIMED_OUT status but before
     reverting the dev-queue task. Returns the list of ticket IDs reverted.
 
+    Caller must hold ``sessions_lock`` (all call sites are inside
+    ``_reconcile_locked``); the reap_reason stamp below relies on it.
+
     Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
     PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
     inspection (GitHub issue #421).
@@ -1971,14 +1974,16 @@ def revert_timed_out_tasks() -> list[str]:
         for t in store.tasks
         if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
     }
-    if backstop_session_ids:
-
-        def _stamp(state: CwState) -> None:
-            for s in state.sessions:
-                if s.id in backstop_session_ids and s.reap_reason is None:
-                    s.reap_reason = ReapReason.COMPLETED_BACKSTOP
-
-        mutate_state(_stamp)
+    # Why: stamp in place + save_state, NOT mutate_state — the caller
+    # already holds sessions_lock, and the lock is a per-open-fd flock,
+    # so re-acquiring it here self-deadlocks (#387 gate hang).
+    state_changed = False
+    for s in target_sessions:
+        if s.reap_reason is None and s.id in backstop_session_ids:
+            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
+            state_changed = True
+    if state_changed:
+        save_state(state)
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
@@ -1992,6 +1997,9 @@ def revert_completed_silent_tasks() -> list[str]:
     without reverting their dev-queue task (e.g. the session wrote COMPLETED
     status but the dispatch consumer had not yet processed it). Returns the
     list of ticket IDs reverted.
+
+    Caller must hold ``sessions_lock`` (all call sites are inside
+    ``_reconcile_locked``); the reap_reason stamp below relies on it.
 
     Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
     PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
@@ -2024,14 +2032,16 @@ def revert_completed_silent_tasks() -> list[str]:
         for t in store.tasks
         if t.status == QueueItemStatus.RUNNING and t.session_id in session_ids
     }
-    if backstop_session_ids:
-
-        def _stamp(state: CwState) -> None:
-            for s in state.sessions:
-                if s.id in backstop_session_ids and s.reap_reason is None:
-                    s.reap_reason = ReapReason.COMPLETED_BACKSTOP
-
-        mutate_state(_stamp)
+    # Why: stamp in place + save_state, NOT mutate_state — the caller
+    # already holds sessions_lock, and the lock is a per-open-fd flock,
+    # so re-acquiring it here self-deadlocks (#387 gate hang).
+    state_changed = False
+    for s in target_sessions:
+        if s.reap_reason is None and s.id in backstop_session_ids:
+            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
+            state_changed = True
+    if state_changed:
+        save_state(state)
     # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
     # _revert_running_tasks_for_sessions docstring).
     dirty_session_ids = _build_dirty_session_ids_and_notify(target_sessions)
