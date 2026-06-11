@@ -1374,10 +1374,11 @@ def signal_stop() -> None:
     "--once",
     is_flag=True,
     default=False,
+    expose_value=False,
     help="Accepted for backwards compatibility; has no effect.",
 )
 @handle_errors
-def daemon(once: bool) -> None:
+def daemon() -> None:
     """Deprecated shim — the PR-dispatch/watch role has been removed.
 
     This command now only emits a deprecation notice. The cw-pr-events
