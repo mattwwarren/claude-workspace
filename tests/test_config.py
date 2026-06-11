@@ -15,6 +15,7 @@ from cw.config import (
     load_clients,
     load_state,
     migrate_cw_state,
+    mutate_state,
     save_state,
     show_config,
 )
@@ -979,3 +980,77 @@ class TestOrchestratorConfigUsageLimitBackoff:
 
         config = OrchestratorConfig(usage_limit_backoff_seconds=7200)
         assert config.usage_limit_backoff_seconds == 7200
+
+
+class TestMutateState:
+    """Tests for mutate_state() — load-mutate-save under sessions_lock."""
+
+    def _make_session(self, sid: str) -> "Session":
+        from datetime import UTC, datetime
+        from pathlib import Path as P
+
+        return Session(
+            id=sid,
+            name=f"client-a/{sid}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=P("/tmp/ws"),
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    def test_mutate_state_applies_callback_and_persists(
+        self, tmp_config_dir: "Path"
+    ) -> None:
+        """Callback mutation is reflected in reloaded state from disk."""
+        s1 = self._make_session("ms-sess-1")
+        save_state(CwState(sessions=[s1]))
+
+        s2 = self._make_session("ms-sess-2")
+
+        def _append(state: CwState) -> None:
+            state.sessions.append(s2)
+
+        mutate_state(_append)
+
+        reloaded = load_state()
+        ids = {s.id for s in reloaded.sessions}
+        assert "ms-sess-1" in ids
+        assert "ms-sess-2" in ids
+
+    def test_mutate_state_releases_lock_on_exception(
+        self, tmp_config_dir: "Path"
+    ) -> None:
+        """Lock is released even when the callback raises; subsequent call succeeds."""
+        save_state(CwState())
+
+        def _raises(state: CwState) -> None:
+            raise ValueError("intentional error")
+
+        with pytest.raises(ValueError, match="intentional error"):
+            mutate_state(_raises)
+
+        # A second call must succeed — no deadlock from an unreleased lock.
+        s = self._make_session("ms-after-exc")
+
+        def _append(state: CwState) -> None:
+            state.sessions.append(s)
+
+        mutate_state(_append)
+
+        reloaded = load_state()
+        assert any(sess.id == "ms-after-exc" for sess in reloaded.sessions)
+
+    def test_mutate_state_returns_mutated_state(
+        self, tmp_config_dir: "Path"
+    ) -> None:
+        """Return value is the post-mutation CwState, not the pre-mutation one."""
+        save_state(CwState())
+        s = self._make_session("ms-return-1")
+
+        def _append(state: CwState) -> None:
+            state.sessions.append(s)
+
+        result = mutate_state(_append)
+
+        assert isinstance(result, CwState)
+        assert any(sess.id == "ms-return-1" for sess in result.sessions)
