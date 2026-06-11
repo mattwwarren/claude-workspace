@@ -5133,4 +5133,59 @@ class TestDevQueueWait:
 
         assert _WAIT_EXIT_FAILED == 1
         assert _WAIT_EXIT_BLOCKED == 2
+
+
+class TestResultValidate:
+    def _valid_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "ticket_id": "GEN-1234",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 3,
+                "lines_estimate": 42,
+                "lines_actual": 47,
+                "forbidden_touched": False,
+            },
+            "plan_source": "linear_existing",
+            "branch": "dev/gen-1234-fix-login",
+            "worktree_path": "/tmp/wt/gen-1234",
+            "fork_point_sha": "abc1234",
+            "commits": ["sha1", "sha2"],
+            "pr": {
+                "number": 42,
+                "url": "https://github.com/foo/bar/pull/42",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "MEDIUM",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+
+    def test_valid_json_stdin_exits_zero_with_normalized_json(self) -> None:
+        runner = CliRunner(mix_stderr=False)
+        valid_json = json.dumps(self._valid_payload())
+        result = runner.invoke(main, ["result", "validate", "-"], input=valid_json)
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed["status"] == "shipped"
+
+    def test_invalid_json_stdin_exits_nonzero_with_error_on_stderr(self) -> None:
+        runner = CliRunner(mix_stderr=False)
+        bad_payload = json.dumps({"status": "shipped", "schema_version": 1})
+        result = runner.invoke(main, ["result", "validate", "-"], input=bad_payload)
+        assert result.exit_code != 0
+        assert len(result.stderr) > 0
         assert _WAIT_EXIT_TIMEOUT == 124
