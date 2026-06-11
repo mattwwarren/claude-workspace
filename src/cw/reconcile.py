@@ -118,7 +118,11 @@ TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 300
 # A worker awaiting a subagent leaves the parent transcript quiet (subagent output
 # only lands on return). Treat a pending tool_use at the transcript tail as alive
 # for up to this long before concluding the subagent itself is hung. See #384.
-SUBAGENT_LIVENESS_WINDOW_SECONDS = 900
+# 1800 (30 min) — widened from 900 (#544): a large refactor can run a single tool
+# call quietly for 20-30 min; reaping at 15 min false-killed live workers (#543).
+# Data-safety: benefit-of-the-doubt is only extended when a *recent* pending
+# tool_use is present (strong alive signal). No pending tool_use → reaped normally.
+SUBAGENT_LIVENESS_WINDOW_SECONDS = 1800
 
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
