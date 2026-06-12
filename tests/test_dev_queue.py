@@ -1502,6 +1502,131 @@ class TestFindTicket:
         with pytest.raises(TimeoutError):
             wait_for_terminal("GEN-12", "genhealth", timeout=0, poll_interval=0)
 
+    def test_find_cancelled_plus_running_returns_running(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING task wins over old CANCELLED task — regression for #579."""
+        from datetime import UTC, datetime, timedelta
+
+        old_ts = datetime(2025, 1, 1, tzinfo=UTC)
+        new_ts = old_ts + timedelta(hours=1)
+        cancelled = TicketTask(
+            ticket_id="GEN-579",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+            created_at=old_ts,
+        )
+        running = TicketTask(
+            ticket_id="GEN-579",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-579",
+            created_at=new_ts,
+        )
+        store = DevQueueStore(tasks=[cancelled, running])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-579", "genhealth")
+        assert result.status == QueueItemStatus.RUNNING
+        assert result.session_id == "sess-579"
+
+    def test_find_completed_only_returns_completed(self, tmp_config_dir: Path) -> None:
+        """Only a COMPLETED task in queue → returns it (no live tasks)."""
+        task = TicketTask(
+            ticket_id="GEN-580",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-580", "genhealth")
+        assert result.status == QueueItemStatus.COMPLETED
+
+    def test_find_multi_live_returns_newest_and_warns(
+        self, tmp_config_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Two live PENDING tasks → newest created_at wins; warning on stderr."""
+        from datetime import UTC, datetime, timedelta
+
+        old_ts = datetime(2025, 2, 1, tzinfo=UTC)
+        new_ts = old_ts + timedelta(hours=2)
+        older = TicketTask(
+            ticket_id="GEN-581",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            created_at=old_ts,
+        )
+        newer = TicketTask(
+            ticket_id="GEN-581",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            created_at=new_ts,
+        )
+        store = DevQueueStore(tasks=[older, newer])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-581", "genhealth")
+        assert result.created_at == new_ts
+        captured = capsys.readouterr()
+        assert "Warning" in captured.err
+        assert "GEN-581" in captured.err
+
+    def test_find_blocked_on_user_beats_cancelled(self, tmp_config_dir: Path) -> None:
+        """BLOCKED_ON_USER wins over CANCELLED when no live (PENDING/RUNNING) task."""
+        from datetime import UTC, datetime, timedelta
+
+        old_ts = datetime(2025, 3, 1, tzinfo=UTC)
+        new_ts = old_ts + timedelta(minutes=30)
+        cancelled = TicketTask(
+            ticket_id="GEN-582",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+            created_at=old_ts,
+        )
+        blocked = TicketTask(
+            ticket_id="GEN-582",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            created_at=new_ts,
+        )
+        store = DevQueueStore(tasks=[cancelled, blocked])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-582", "genhealth")
+        assert result.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_find_explicit_created_at_tiebreak(self, tmp_config_dir: Path) -> None:
+        """Two RUNNING tasks → max created_at wins regardless of list position."""
+        from datetime import UTC, datetime, timedelta
+
+        base = datetime(2025, 4, 1, tzinfo=UTC)
+        earlier = TicketTask(
+            ticket_id="GEN-583",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-old",
+            created_at=base,
+        )
+        later = TicketTask(
+            ticket_id="GEN-583",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-new",
+            created_at=base + timedelta(hours=3),
+        )
+        # Put the later one FIRST in the list to confirm max() not index
+        store = DevQueueStore(tasks=[later, earlier])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-583", "genhealth")
+        assert result.session_id == "sess-new"
+
 
 # ---------------------------------------------------------------------------
 # TestMoveTicket

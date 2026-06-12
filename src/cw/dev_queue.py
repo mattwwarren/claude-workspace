@@ -367,23 +367,45 @@ def list_tickets(client: str | None = None) -> list[TicketTask]:
 def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask:
     """Return the TicketTask matching (ticket_id, client) or raise CwError.
 
-    Prefers the most-recent non-terminal (PENDING/RUNNING) record when
-    duplicates exist.
+    Selection priority: PENDING/RUNNING (live, newest created_at) →
+    BLOCKED_ON_USER (newest created_at) → terminal (newest created_at).
+    Re-resolved on every call — callers that poll (e.g. dev_queue_wait)
+    pick up re-enqueued tasks on the next tick automatically.
+
+    Emits a one-time stderr warning when multiple live PENDING/RUNNING tasks
+    exist for the same (ticket_id, client).
     """
-    # Why: add-after-terminal creates duplicate (client, ticket_id) rows
-    # (structurally removed by #507). Returning the oldest terminal record
-    # would cause wait_for_terminal to resolve immediately on a stale status
-    # while a fresh run of the same ticket is currently RUNNING.
+    # Why: add-after-terminal creates duplicate (client, ticket_id) rows.
+    # Returning the oldest terminal record would cause wait to resolve
+    # immediately on a stale status while a fresh RUNNING task is live.
+    import click
+
     matches = [
         t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
     ]
     if not matches:
         msg = f"No dev-queue task found for ticket '{ticket_id}' in client '{client}'."
         raise CwError(msg)
-    active = [t for t in matches if t.status not in _TERMINAL_STATUSES]
-    if active:
-        return active[-1]  # most-recent active record
-    return matches[-1]  # most-recent terminal when no active record exists
+
+    live = [
+        t
+        for t in matches
+        if t.status in {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
+    ]
+    if live:
+        if len(live) > 1:
+            click.echo(
+                f"Warning: {len(live)} live tasks for ticket '{ticket_id}' "
+                f"in client '{client}'; binding to newest.",
+                err=True,
+            )
+        return max(live, key=lambda t: t.created_at)
+
+    blocked = [t for t in matches if t.status == QueueItemStatus.BLOCKED_ON_USER]
+    if blocked:
+        return max(blocked, key=lambda t: t.created_at)
+
+    return max(matches, key=lambda t: t.created_at)
 
 
 def consume_completed_sessions() -> int:

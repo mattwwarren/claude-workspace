@@ -46,6 +46,7 @@ from cw.config import (
     show_config,
 )
 from cw.dev_queue import (
+    _find_ticket,
     add_ticket,
     cancel_task_for_session,
     cancel_ticket,
@@ -2233,7 +2234,10 @@ def dev_queue_wait(
     while True:
         # --- Step 1: fast path — task already terminal in the queue ---
         store = load_dev_queue()
-        task = next((t for t in store.tasks if t.ticket_id == ticket_id), None)
+        try:
+            task = _find_ticket(store, ticket_id, resolved)
+        except CwError:
+            task = None
         if task is None:
             # Fallback: delegate to wait_for_terminal so it can surface
             # "not found" errors (CwError) and handle TimeoutError.
