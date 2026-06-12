@@ -7,7 +7,8 @@ phases that run under ``sessions_lock`` (see ADR-0005):
 **Detect phase** — pure classification, no state writes.
 Three sweeps (stalled, idle/phantom, post-salvage) each call a
 ``_detect_*`` helper that returns :class:`ReapCandidate` objects.  After
-each sweep ``_emit_reap_proposed`` fires :attr:`OrchestratorEventType.SESSION_REAP_PROPOSED`
+each sweep ``_emit_reap_proposed`` fires
+:attr:`OrchestratorEventType.SESSION_REAP_PROPOSED`
 for every candidate whose :attr:`Session.reap_proposed_at` is ``None``,
 stamping that field to deduplicate across ticks.
 
