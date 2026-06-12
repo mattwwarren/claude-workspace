@@ -26,6 +26,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapPolicy,
     ReapReason,
     Session,
     SessionOrigin,
@@ -9196,7 +9197,7 @@ def test_act_on_stalled_revert_task_updates_state_and_queue(
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
 
-    reverted = _act_on_stalled_candidates(state, [candidate], now=now)
+    reverted = _act_on_stalled_candidates(state, [candidate], now=now, config=_auto_config())
 
     assert "act-revert-1" in reverted
     assert sess.status == SessionStatus.TIMED_OUT
@@ -9405,7 +9406,7 @@ def test_act_on_phantom_crash_routes_pending(
         worktree_path=None,
     )
 
-    result = _act_on_phantom_candidates(state, [candidate], now=now)
+    result = _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
     _, _, _, _, _ = result
 
     store = load_dev_queue()
@@ -9594,7 +9595,7 @@ def test_act_on_idle_revert_task_routes_pending_emits_timed_out(
         usage_limit_detected=False,
     )
 
-    _act_on_idle_candidates(state, [candidate], now=now)
+    _act_on_idle_candidates(state, [candidate], now=now, config=_auto_config())
 
     assert sess.status == SessionStatus.TIMED_OUT
     assert sess.reap_reason == ReapReason.IDLE_STALL
@@ -9643,7 +9644,7 @@ def test_act_on_idle_revert_task_usage_limit_detected_sets_cause(
         usage_limit_detected=True,
     )
 
-    _act_on_idle_candidates(state, [candidate], now=now)
+    _act_on_idle_candidates(state, [candidate], now=now, config=_auto_config())
 
     assert sess.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
 
@@ -9783,3 +9784,473 @@ def test_act_on_idle_salvage_git_persists_observation_counter(
     reloaded = load_state()
     s = next(s for s in reloaded.sessions if s.id == "idle-salv-git-ctr-1")
     assert s.idle_observation_count == 3
+
+
+# ---------------------------------------------------------------------------
+# _auto_config helper + ReapPolicy signal_only gate tests (#554)
+# ---------------------------------------------------------------------------
+
+
+def _auto_config(**kwargs: object) -> OrchestratorConfig:
+    """Return OrchestratorConfig with reap_policy=AUTO for tests that assert auto-revert."""
+    return OrchestratorConfig(reap_policy=ReapPolicy.AUTO, **kwargs)  # type: ignore[arg-type]
+
+
+class TestActOnStalledCandidatesSignalOnly:
+    """Under signal_only policy, REVERT_TASK stalled candidates → BLOCKED_ON_USER."""
+
+    def test_signal_only_routes_revert_task_to_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Under signal_only: REVERT_TASK → BLOCKED_ON_USER, no stop, no worktree-remove."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+        worktree = tmp_path / "wt-so-stalled"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        removed: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile.remove_worktree",
+            lambda _c, branch, **_kw: removed.append(branch),
+        )
+
+        sess = _mk_headless_daemon_session("so-stalled-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-stalled-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-stalled-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-stalled-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="so-stalled-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        # signal_only is the default — explicit for clarity
+        reverted = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # Should return early: no reverts
+        assert reverted == []
+        # Task routes to BLOCKED_ON_USER (not PENDING)
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-stalled-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        # Daemon stop NOT called
+        assert daemon.stop_calls == []
+        # Worktree NOT removed
+        assert removed == []
+
+    def test_signal_only_idempotent(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Second call with already-BLOCKED_ON_USER task → no additional save."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+        worktree = tmp_path / "wt-so-idem"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        sess = _mk_headless_daemon_session("so-idem-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        # Already BLOCKED_ON_USER — not RUNNING, so _apply_queue_mutations skips it
+        task = TicketTask(
+            ticket_id="so-idem-1",
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id="so-idem-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-idem-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="so-idem-1",
+            elapsed_seconds=3700.0,
+        )
+
+        # Call twice — second call is a no-op (task not RUNNING)
+        _act_on_stalled_candidates(state, [candidate], now=now, config=OrchestratorConfig())
+        _act_on_stalled_candidates(state, [candidate], now=now, config=OrchestratorConfig())
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-idem-1")
+        # Still BLOCKED_ON_USER — second call didn't double-write
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_auto_policy_still_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTO policy: REVERT_TASK still routes to PENDING (regression guard)."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+        worktree = tmp_path / "wt-auto-stalled"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_headless_daemon_session("auto-stalled-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="auto-stalled-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="auto-stalled-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="auto-stalled-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="auto-stalled-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        reverted = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert "auto-stalled-1" in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "auto-stalled-1")
+        assert t.status == QueueItemStatus.PENDING
+
+
+class TestActOnIdleCandidatesSignalOnly:
+    """Under signal_only policy, REVERT_TASK idle candidates → BLOCKED_ON_USER."""
+
+    def test_signal_only_routes_idle_revert_to_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal_only: idle REVERT_TASK → BLOCKED_ON_USER; daemon stop NOT called."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_live_idle_daemon_session(
+            "so-idle-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-idle-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-idle-1",
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-idle-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="so-idle-1",
+            elapsed_seconds=1000.0,
+            new_observation_count=2,
+        )
+
+        # signal_only is default
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert blocked == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-idle-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        # session_id preserved (not cleared) — operator review traceability
+        assert t.session_id == "so-idle-1"
+        # Daemon stop NOT called
+        assert daemon.stop_calls == []
+
+    def test_signal_only_park_candidates_pass_through(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PARK_BLOCKED_ON_USER is not gated — still processes under signal_only."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.fire_push_notification", lambda *_a: None
+        )
+
+        sess = _mk_live_idle_daemon_session(
+            "so-idle-park-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-idle-park-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-idle-park-1",
+            attempts=99,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-idle-park-1",
+            proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+            ticket_id="so-idle-park-1",
+            new_observation_count=2,
+        )
+
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # PARK_BLOCKED_ON_USER passes through; task is BLOCKED_ON_USER
+        assert "so-idle-park-1" in blocked
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-idle-park-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_auto_policy_idle_still_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTO policy: idle REVERT_TASK still routes to PENDING."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_live_idle_daemon_session(
+            "auto-idle-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="auto-idle-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="auto-idle-1",
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="auto-idle-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="auto-idle-1",
+            elapsed_seconds=1000.0,
+            new_observation_count=2,
+        )
+
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert blocked == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "auto-idle-1")
+        assert t.status == QueueItemStatus.PENDING
+
+
+class TestActOnPhantomCandidatesSignalOnly:
+    """Under signal_only, clean CRASH_COMPLETE phantoms → BLOCKED_ON_USER."""
+
+    def test_signal_only_routes_clean_crash_to_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal_only: clean-worktree CRASH_COMPLETE → BLOCKED_ON_USER (not PENDING)."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("so-phantom-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/so-phantom-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-phantom-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-phantom-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-phantom-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="so-phantom-1",
+            worktree_dirty=False,
+            client="client-a",
+        )
+
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # Return list contains only PENDING-routed; BLOCKED_ON_USER excluded
+        assert "so-phantom-1" not in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-phantom-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_signal_only_dirty_worktree_still_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dirty-worktree CRASH_COMPLETE: always BLOCKED_ON_USER (both policies)."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("dirty-phantom-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/dirty-phantom-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="dirty-phantom-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="dirty-phantom-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="dirty-phantom-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="dirty-phantom-1",
+            worktree_dirty=True,
+            client="client-a",
+        )
+
+        # Both signal_only and auto produce BLOCKED_ON_USER for dirty-worktree
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert "dirty-phantom-1" not in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "dirty-phantom-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_auto_policy_phantom_reverts_to_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTO policy: clean CRASH_COMPLETE → PENDING (regression guard)."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("auto-phantom-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/auto-phantom-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="auto-phantom-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="auto-phantom-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="auto-phantom-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="auto-phantom-1",
+            worktree_dirty=False,
+            client="client-a",
+        )
+
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert "auto-phantom-1" in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "auto-phantom-1")
+        assert t.status == QueueItemStatus.PENDING
