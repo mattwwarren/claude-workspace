@@ -236,6 +236,7 @@ def spawn_create_impl(
     permission_mode: str | None = None,
     task: TicketTask | None = None,
     wall_clock_budget_seconds: int | None = None,
+    lane: str | None = None,
 ) -> str:
     """Create a daemon-spawned session via the native Claude background daemon.
 
@@ -272,6 +273,7 @@ def spawn_create_impl(
         origin=SessionOrigin.DAEMON,
         workspace_path=client.workspace_path,
         worktree_path=worktree,
+        lane=lane,
     )
 
     # Inject Stop-hook config + correlation context into the worktree so
