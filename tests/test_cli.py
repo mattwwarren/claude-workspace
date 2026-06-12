@@ -4061,7 +4061,7 @@ class TestDevQueueRefreshAll:
 
         called_clients: list[str] = []
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4091,7 +4091,7 @@ class TestDevQueueRefreshAll:
 
         monkeypatch.setattr(
             "cw.cli.fast_forward_main",
-            lambda _c: (
+            lambda _c, **_kw: (
                 "abc123def456abc123def456abc123def456abc1",
                 "abc123def456abc123def456abc123def456abc1",
             ),
@@ -4115,7 +4115,7 @@ class TestDevQueueRefreshAll:
 
         monkeypatch.setattr(
             "cw.cli.fast_forward_main",
-            lambda _c: (
+            lambda _c, **_kw: (
                 "oldsha1oldsha1oldsha1oldsha1oldsha1oldsh",
                 "newsha2newsha2newsha2newsha2newsha2newsh",
             ),
@@ -4147,7 +4147,7 @@ class TestDevQueueRefreshAll:
 
         called_clients: list[str] = []
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4181,7 +4181,7 @@ class TestDevQueueRefreshAll:
 
         monkeypatch.setattr(
             "cw.cli.fast_forward_main",
-            lambda _c: ("aaa", "bbb"),
+            lambda _c, **_kw: ("aaa", "bbb"),
         )
 
         runner = CliRunner()
@@ -4215,7 +4215,7 @@ class TestDevQueueRefreshAll:
 
         called_clients: list[str] = []
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4245,7 +4245,7 @@ class TestDevQueueRefreshAll:
         ws = tmp_path / "nonexistent"
         self._write_clients_yaml(tmp_config_dir, [("client-a", str(ws))])
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             msg = "workspace missing for client-a"
             raise MissingWorkspaceError(msg)
 
@@ -4278,7 +4278,7 @@ class TestDevQueueRefreshAll:
             ],
         )
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4853,6 +4853,7 @@ class TestDevQueueRunQuiet:
             parent: object = None,
             native_daemon: object = None,
             emit: object = None,
+            auto_ff: bool = True,
         ) -> None:
             captured_emit.append(emit)
 
@@ -4880,6 +4881,7 @@ class TestDevQueueRunQuiet:
             parent: object = None,
             native_daemon: object = None,
             emit: object = None,
+            auto_ff: bool = True,
         ) -> None:
             captured_emit.append(emit)
 
