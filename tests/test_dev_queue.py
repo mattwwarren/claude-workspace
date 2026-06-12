@@ -31,6 +31,7 @@ from cw.dev_queue import (
 )
 from cw.exceptions import CwError
 from cw.models import (
+    DEFAULT_LANE,
     DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
@@ -1153,7 +1154,7 @@ class TestMigrateDevQueue:
             ],
         }
         migrated = migrate_dev_queue(raw)
-        assert migrated["tasks"][0]["lane"] == "default"  # type: ignore[index]
+        assert migrated["tasks"][0]["lane"] == DEFAULT_LANE
         assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
 
     def test_v3_lane_preserved_idempotently(self) -> None:
@@ -1172,7 +1173,7 @@ class TestMigrateDevQueue:
             ],
         }
         migrated = migrate_dev_queue(raw)
-        assert migrated["tasks"][0]["lane"] == "custom-lane"  # type: ignore[index]
+        assert migrated["tasks"][0]["lane"] == "custom-lane"
 
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""
@@ -1194,7 +1195,7 @@ class TestMigrateDevQueue:
         dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
         dev_queue_file().write_text(json.dumps(v2_data))
         store = load_dev_queue()
-        assert store.tasks[0].lane == "default"
+        assert store.tasks[0].lane == DEFAULT_LANE
         assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
 
     def test_revert_to_pending_preserves_lane(self, tmp_config_dir: Path) -> None:
