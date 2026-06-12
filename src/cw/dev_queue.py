@@ -19,6 +19,7 @@ from cw.config import (
 )
 from cw.exceptions import CwError
 from cw.models import (
+    DEFAULT_LANE,
     DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
@@ -114,6 +115,12 @@ def _fill_task_cost_default(task_raw: dict[str, Any]) -> None:
         task_raw["total_cost_usd"] = None
 
 
+def _fill_lane_default(task_raw: dict[str, Any]) -> None:
+    """Fill lane introduced in dev-queue schema v3."""
+    if "lane" not in task_raw:
+        task_raw["lane"] = DEFAULT_LANE
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -121,6 +128,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
         for task_raw in tasks:
             if isinstance(task_raw, dict):
                 _fill_task_cost_default(task_raw)
+                _fill_lane_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 
