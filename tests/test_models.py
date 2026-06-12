@@ -690,3 +690,34 @@ class TestClientConfigEffectiveLanes:
         assert len(lanes) == 2
         assert lanes[0].name == "fast"
         assert lanes[1].name == "slow"
+
+
+class TestOrchestratorConfigCeilingMigration:
+    """Migration of legacy per_client_max_parallel / default_max_parallel into
+    per_client_ceiling / default_ceiling fields (#558)."""
+
+    def test_legacy_per_client_max_parallel_lifted(self) -> None:
+        """Legacy per_client_max_parallel is migrated into per_client_ceiling."""
+        config = OrchestratorConfig(
+            per_client_max_parallel={"my-client": 3},
+            default_max_parallel=2,
+        )
+        assert config.per_client_ceiling == {"my-client": 3}
+        assert config.default_ceiling == 2
+
+    def test_new_fields_win_over_legacy(self) -> None:
+        """When both new and legacy fields are present, new fields win."""
+        config = OrchestratorConfig(
+            per_client_ceiling={"my-client": 5},
+            default_ceiling=4,
+            per_client_max_parallel={"my-client": 3},
+            default_max_parallel=2,
+        )
+        assert config.per_client_ceiling == {"my-client": 5}
+        assert config.default_ceiling == 4
+
+    def test_absent_legacy_keys_use_defaults(self) -> None:
+        """Without legacy keys, new fields default to empty dict and 1."""
+        config = OrchestratorConfig()
+        assert config.per_client_ceiling == {}
+        assert config.default_ceiling == 1
