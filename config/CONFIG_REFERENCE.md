@@ -49,6 +49,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
 

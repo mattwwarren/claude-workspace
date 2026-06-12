@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SessionPurpose(StrEnum):
@@ -75,7 +75,9 @@ class ReapReason(StrEnum):
 # v7: added Session.reap_reason (GitHub #380).
 # v8: added Session.reap_proposed_at (GitHub #555).
 CW_STATE_SCHEMA_VERSION = 8
-DEV_QUEUE_SCHEMA_VERSION = 2
+# v3: added TicketTask.lane (GitHub #557).
+DEV_QUEUE_SCHEMA_VERSION = 3
+DEFAULT_LANE: str = "default"
 
 
 class TaskSpec(BaseModel):
@@ -220,6 +222,9 @@ class TicketTask(BaseModel):
     # AutoDevResult sentinel without rediscovering it at runtime (#314).
     # Always None today; populated by a future dev-queue plan command.
     plan_source: str | None = None
+    # Lane this ticket is assigned to. Defaults to DEFAULT_LANE; set by
+    # orchestrate/dispatch in Phase 2 (#558).
+    lane: str = DEFAULT_LANE
 
 
 class DispatchPlan(BaseModel):
@@ -261,6 +266,29 @@ class ReapPolicy(StrEnum):
 
     SIGNAL_ONLY = "signal_only"
     AUTO = "auto"
+
+
+class LaneConfig(BaseModel):
+    """Configuration for a named dispatch lane.
+
+    Lanes provide a scheduling boundary for TicketTasks.
+    Phase 1 (data model only): no dispatch wiring yet — see #558.
+    """
+
+    name: str
+    max_parallel: int = 1
+    priority: int = 0
+    paused: bool = False
+    description: str = ""
+    reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
+
+    @field_validator("name")
+    @classmethod
+    def _name_nonempty(cls, v: str) -> str:
+        if not v:
+            msg = "lane name must be non-empty"
+            raise ValueError(msg)
+        return v
 
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
@@ -455,6 +483,14 @@ class ClientConfig(BaseModel):
     worker_model: str | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
+    lanes: list[LaneConfig] = Field(default_factory=list)
+
+    @property
+    def effective_lanes(self) -> list[LaneConfig]:
+        """Return declared lanes; synthesize a default lane when none are declared."""
+        if self.lanes:
+            return list(self.lanes)
+        return [LaneConfig(name=DEFAULT_LANE)]
 
     @model_validator(mode="after")
     def _validate_path_config(self) -> ClientConfig:
