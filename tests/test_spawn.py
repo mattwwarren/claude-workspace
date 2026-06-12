@@ -1957,3 +1957,62 @@ class TestWriteHookContextOriginShaSuccess:
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         assert context["world_state_snapshot"]["origin_main_sha_at_spawn"] == fake_sha
+
+
+def test_spawn_create_impl_orchestrate_purpose(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """spawn_create_impl with purpose=ORCHESTRATE stamps session.purpose and writes purpose.value to hook context."""
+    from cw.spawn import spawn_create_impl
+
+    client = _make_client(tmp_path)
+    daemon = FakeNativeDaemonClient()
+    worktree = make_git_repo("worktree-orchestrate-purpose")
+
+    session_id = spawn_create_impl(
+        client=client,
+        worktree=worktree,
+        prompt="You are the orchestrate session.",
+        label="orchestrate/impl",
+        native_daemon=daemon,
+        purpose=SessionPurpose.ORCHESTRATE,
+    )
+
+    state = load_state()
+    sess = state.find_by_name_or_id(session_id)
+    assert sess is not None
+    assert sess.purpose == SessionPurpose.ORCHESTRATE
+
+    context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+    assert context["purpose"] == "orchestrate"
+
+
+def test_spawn_create_impl_default_purpose(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """spawn_create_impl default path stamps IMPL."""
+    from cw.spawn import spawn_create_impl
+
+    client = _make_client(tmp_path)
+    daemon = FakeNativeDaemonClient()
+    worktree = make_git_repo("worktree-default-purpose")
+
+    session_id = spawn_create_impl(
+        client=client,
+        worktree=worktree,
+        prompt="Do the thing.",
+        label=None,
+        native_daemon=daemon,
+    )
+
+    state = load_state()
+    sess = state.find_by_name_or_id(session_id)
+    assert sess is not None
+    assert sess.purpose == SessionPurpose.IMPL
+
+    context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+    assert context["purpose"] == "impl"

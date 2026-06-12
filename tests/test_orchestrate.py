@@ -26,6 +26,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
@@ -1497,3 +1498,169 @@ class TestTickSummaryLanes:
         parsed = json.loads(snapshot.model_dump_json())
         assert "legacy-json-client" in parsed["last_tick_by_client"]
         assert parsed["last_tick_by_client"]["legacy-json-client"]["lanes"] == {}
+
+
+# ---------------------------------------------------------------------------
+# TestOrchestrateStart — Phase 4b: cw orchestrate start --lane
+# ---------------------------------------------------------------------------
+
+
+def _write_client_with_lane(tmp_config_dir: Path, lane_name: str = "impl") -> Path:
+    """Write a clients.yaml with one client declaring a named lane.
+
+    Returns the workspace path so callers can create sessions against it.
+    """
+    from cw.config import clients_file
+
+    workspace = tmp_config_dir / "workspace" / "test-client"
+    workspace.mkdir(parents=True, exist_ok=True)
+    clients_path = clients_file()
+    clients_path.parent.mkdir(parents=True, exist_ok=True)
+    clients_path.write_text(
+        f"clients:\n"
+        f"  test-client:\n"
+        f"    workspace_path: {workspace}\n"
+        f"    default_branch: main\n"
+        f"    lanes:\n"
+        f"      - name: {lane_name}\n"
+        f"        max_parallel: 1\n"
+    )
+    return workspace
+
+
+class TestOrchestrateStart:
+    """Tests for `cw orchestrate start --lane` command (Phase 4b)."""
+
+    def test_start_happy_path(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """start --lane <declared> spawns an ORCHESTRATE session with correct metadata."""
+        from cw.config import load_state
+        from cw.models import SessionPurpose
+
+        workspace = _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "start", "--lane", "impl"])
+
+        assert result.exit_code == 0, result.output
+        assert "impl" in result.output
+
+        state = load_state()
+        assert len(state.sessions) == 1
+        sess = state.sessions[0]
+        assert sess.purpose == SessionPurpose.ORCHESTRATE
+        assert sess.lane == "impl"
+        assert sess.client == "test-client"
+
+    def test_start_undeclared_lane(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """start --lane <undeclared> exits non-zero with LaneNotFoundError message."""
+        _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "start", "--lane", "no-such-lane"])
+
+        assert result.exit_code != 0
+        assert "no-such-lane" in result.output
+
+    def test_start_rejects_live_duplicate(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Second start on a lane with a live ORCHESTRATE session is rejected."""
+        from cw.config import save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        workspace = _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+
+        # Seed a live ORCHESTRATE session for the lane.
+        existing = Session(
+            id="orch-live-01",
+            name="test-client/orchestrate/impl",
+            client="test-client",
+            purpose=SessionPurpose.ORCHESTRATE,
+            status=SessionStatus.ACTIVE,
+            workspace_path=workspace,
+            lane="impl",
+        )
+        save_state(CwState(sessions=[existing]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "start", "--lane", "impl"])
+
+        assert result.exit_code != 0
+        assert "impl" in result.output
+        assert "orch-live-01" in result.output
+
+    def test_start_allows_rebind_on_terminal(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """start succeeds when prior ORCHESTRATE session for lane is COMPLETED."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, Session, SessionPurpose, SessionStatus
+
+        workspace = _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+
+        # Prior ORCHESTRATE session is COMPLETED (terminal) — rebind allowed.
+        old = Session(
+            id="orch-done-01",
+            name="test-client/orchestrate/impl",
+            client="test-client",
+            purpose=SessionPurpose.ORCHESTRATE,
+            status=SessionStatus.COMPLETED,
+            workspace_path=workspace,
+            lane="impl",
+        )
+        save_state(CwState(sessions=[old]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "start", "--lane", "impl"])
+
+        assert result.exit_code == 0, result.output
+        state = load_state()
+        # Two sessions now: the old completed one + new active one.
+        orch_sessions = [
+            s for s in state.sessions if s.purpose == SessionPurpose.ORCHESTRATE
+        ]
+        assert len(orch_sessions) == 2
+        new_sess = next(s for s in orch_sessions if s.id != "orch-done-01")
+        assert new_sess.lane == "impl"
+        assert new_sess.status == SessionStatus.ACTIVE
+
+    def test_start_json_output(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json emits parseable JSON with session_id, lane, client keys."""
+        _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["orchestrate", "start", "--lane", "impl", "--json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "session_id" in data
+        assert data["lane"] == "impl"
+        assert data["client"] == "test-client"
