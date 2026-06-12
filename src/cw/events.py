@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,8 @@ from cw.models import OrchestratorEvent, OrchestratorEventType
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _inbox_path() -> Path:
@@ -101,6 +104,30 @@ def advance_cursor(consumer: str, event_id: str) -> None:
     atomic_write_text(path, json.dumps(data))
 
 
+def _parse_lines(lines: list[str]) -> list[tuple[int, OrchestratorEvent]]:
+    """Parse JSONL lines into (index, event) pairs.
+
+    Tolerates a malformed trailing line (torn write): if the last non-empty
+    line fails JSON parsing, it is skipped with a warning.  Interior corrupt
+    lines re-raise so callers see real corruption.
+    """
+    results: list[tuple[int, OrchestratorEvent]] = []
+    for i, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        try:
+            raw = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            if i == len(lines) - 1:
+                # Tolerate malformed trailing line only (torn write)
+                logger.warning("skipping malformed trailing line in inbox: %s", exc)
+                continue
+            raise
+        results.append((i, OrchestratorEvent.model_validate(raw)))
+    return results
+
+
 def read_events(
     consumer: str | None = None,
     *,
@@ -116,6 +143,10 @@ def read_events(
 
     When *since_cursor* is provided (or derived from the consumer cursor),
     only events *after* the referenced event ID are returned.
+
+    At-least-once delivery contract: if a consumer's cursor is not found in the
+    inbox (e.g. due to inbox rotation or compaction), all events are replayed
+    from the beginning. Callers using a named consumer cursor must be idempotent.
 
     Args:
         consumer: Consumer name; used to load a persisted cursor when
@@ -134,19 +165,19 @@ def read_events(
         cursor = _load_cursor(consumer)
 
     inbox = _inbox_path()
-    if not inbox.exists():
+    with _inbox_lock():
+        raw_text = inbox.read_text() if inbox.exists() else ""
+
+    if not raw_text:
         return []
+
+    lines = raw_text.splitlines()
+    parsed = _parse_lines(lines)
 
     events: list[OrchestratorEvent] = []
     past_cursor = cursor is None  # If no cursor, start from beginning
 
-    for raw_line in inbox.read_text().splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        raw = json.loads(stripped)
-        event = OrchestratorEvent.model_validate(raw)
-
+    for _i, event in parsed:
         # Cursor-based skip: advance past the cursor event, then include from there
         if not past_cursor:
             if event.id == cursor:
@@ -159,6 +190,19 @@ def read_events(
             continue
 
         events.append(event)
+
+    # Cursor-not-found fallback: replay from the beginning
+    if cursor is not None and not past_cursor:
+        logger.warning(
+            "cursor %s not found in inbox; replaying from start", cursor
+        )
+        events = []
+        for _i, event in parsed:
+            if since_ts is not None and event.created_at < since_ts:
+                continue
+            if event_types is not None and event.type not in event_types:
+                continue
+            events.append(event)
 
     if limit is not None:
         events = events[:limit]
