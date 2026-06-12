@@ -2550,6 +2550,9 @@ class TestDispatchTickEvents:
         assert p["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         assert p["claimed"] == 0
         assert p["pending"] == 2  # both tasks were pending pre-claim
+        # Payload shape is consistent across all emit sites (#558 PM review):
+        # the freshness-gate event carries the per-lane breakdown too.
+        assert p["lanes"] == {"default": {"claimed": 0, "running": 0, "pending": 2}}
 
     def test_skip_reason_spawn_error_on_spawn_failure(
         self,
@@ -3187,6 +3190,59 @@ class TestTier1ClientSelection:
 
         # Both clients dispatched
         assert result.spawned == 2
+
+    def test_stale_client_does_not_consume_tier1_quota(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A freshness-gate-skipped client does not consume Tier-1 quota."""
+        ws_a = make_git_repo("workspace/client-a3")
+        ws_b = make_git_repo("workspace/client-b3")
+        client_a = ClientConfig(
+            name="client-a3",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-a3",
+        )
+        client_b = ClientConfig(
+            name="client-b3",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-b3",
+        )
+
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            f"  client-a3:\n"
+            f"    workspace_path: {client_a.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_a.worktree_base}\n"
+            f"  client-b3:\n"
+            f"    workspace_path: {client_b.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_b.worktree_base}\n"
+        )
+
+        add_ticket(TicketTask(ticket_id="T-A3", client="client-a3"))
+        add_ticket(TicketTask(ticket_id="T-B3", client="client-b3"))
+
+        # client-a3 is stale (skipped by the freshness gate); client-b3 fresh.
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda client: (client.name == "client-a3", "aaa", "bbb", 1),
+        )
+
+        config = OrchestratorConfig(max_parallel_clients=1, default_ceiling=1)
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(config, native_daemon=daemon, auto_ff=False)
+
+        # The stale client did not consume the single Tier-1 slot.
+        assert result.spawned == 1
 
 
 # ---------------------------------------------------------------------------

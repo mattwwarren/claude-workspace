@@ -74,8 +74,9 @@ CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30
-default_max_parallel: 2
-per_client_max_parallel: {}
+default_ceiling: 2
+per_client_ceiling: {}
+# max_parallel_clients: null  # uncomment to cap how many clients dispatch per tick
 linear_prefix_map: {}
 reap_policy: signal_only  # default: signal only; set to auto to restore self-healing
 """

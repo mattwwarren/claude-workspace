@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.models import (
+        ClientConfig,
         DevQueueStore,
         OrchestratorConfig,
         OrchestratorEvent,
@@ -139,6 +140,35 @@ def _claim_next_pending(
             save_dev_queue(store)
             return task
     return None
+
+
+def _lane_stats_for_client(
+    client: ClientConfig, queue_snapshot: DevQueueStore
+) -> dict[str, dict[str, int]]:
+    """Per-lane ``{claimed: 0, running, pending}`` counts for event payloads.
+
+    Why task-based running: RUNNING/BLOCKED_ON_USER tasks carry ``lane``;
+    sessions do not (``Session.lane`` is #560). BLOCKED_ON_USER occupies its
+    lane slot per ADR-0006, so it counts as running here.
+    """
+    stats: dict[str, dict[str, int]] = {}
+    for lane_cfg in client.effective_lanes:
+        running = sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client.name
+            and t.lane == lane_cfg.name
+            and t.status in (QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER)
+        )
+        pending = sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client.name
+            and t.lane == lane_cfg.name
+            and t.status == QueueItemStatus.PENDING
+        )
+        stats[lane_cfg.name] = {"claimed": 0, "running": running, "pending": pending}
+    return stats
 
 
 def dispatch_tick(
@@ -240,29 +270,8 @@ def dispatch_tick(
                 for t in queue_snapshot.tasks
                 if t.client == client.name and t.status == QueueItemStatus.PENDING
             )
-            # Compute per-lane breakdown for the event payload (claimed=0 for all).
-            backoff_lane_stats: dict[str, dict[str, int]] = {}
-            for lane_cfg in client.effective_lanes:
-                lane_running = sum(
-                    1
-                    for t in queue_snapshot.tasks
-                    if t.client == client.name
-                    and t.lane == lane_cfg.name
-                    and t.status
-                    in (QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER)
-                )
-                lane_pending = sum(
-                    1
-                    for t in queue_snapshot.tasks
-                    if t.client == client.name
-                    and t.lane == lane_cfg.name
-                    and t.status == QueueItemStatus.PENDING
-                )
-                backoff_lane_stats[lane_cfg.name] = {
-                    "claimed": 0,
-                    "running": lane_running,
-                    "pending": lane_pending,
-                }
+            # Per-lane breakdown for the event payload (claimed=0 for all).
+            backoff_lane_stats = _lane_stats_for_client(client, queue_snapshot)
             record_event(
                 OrchestratorEventType.DISPATCH_TICK,
                 {
@@ -385,10 +394,14 @@ def dispatch_tick(
                     "running": running_count,
                     "cap": cap,
                     "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+                    "lanes": _lane_stats_for_client(client, queue_snapshot),
                 },
             )
             continue
 
+        # Why: incremented only past the freshness gate — a stale/skipped
+        # client does not consume Tier-1 quota, so max_parallel_clients=N
+        # always grants N *dispatchable* clients per tick.
         dispatched_client_count += 1
         priority_ids = plan_order_by_client.get(client.name)
         client_spawned = 0
@@ -399,9 +412,9 @@ def dispatch_tick(
         # Build per-lane running count from tasks→sessions join.
         # Tasks in RUNNING or BLOCKED_ON_USER with an active session_id count
         # toward their lane's cap (ADR-0006: BLOCKED_ON_USER occupies the slot).
+        # Reuses the queue_snapshot taken above — nothing between the two
+        # points mutates the queue (auto-ff is git-only).
         running_by_lane: dict[str, int] = {}
-        with dev_queue_lock():
-            queue_snapshot = load_dev_queue()
         for qt in queue_snapshot.tasks:
             if qt.client != client.name:
                 continue
