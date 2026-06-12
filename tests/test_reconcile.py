@@ -14,7 +14,7 @@ import freezegun
 import pytest
 
 from cw._util import claude_project_dir
-from cw.config import load_state, save_state
+from cw.config import load_state, save_state, sessions_lock
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import WorktreeError
@@ -8442,3 +8442,46 @@ def test_reap_reason_not_stamped_when_task_already_completed_completed_silent(
     s = next(s for s in reloaded.sessions if s.id == "backstop-c-noop-1")
     # Task was not RUNNING so no revert happened — reap_reason must stay None.
     assert s.reap_reason is None
+
+
+def test_revert_timed_out_tasks_completes_while_holding_sessions_lock(
+    tmp_config_dir: Path,
+) -> None:
+    """Regression for the #387 self-deadlock: production calls
+    revert_timed_out_tasks() from _reconcile_locked, i.e. while already
+    holding sessions_lock. The reap_reason stamp must save in place rather
+    than re-acquire the lock (flock is per-open-fd, so re-acquiring
+    self-deadlocks)."""
+    sess = Session(
+        id="lockheld-to-1",
+        name="client-a/auto-dev/LOCKHELD-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.TIMED_OUT,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        completed_reason=CompletionReason.TIMED_OUT,
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="LOCKHELD-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="lockheld-to-1",
+                )
+            ]
+        )
+    )
+
+    with sessions_lock():
+        reverted = revert_timed_out_tasks()
+
+    assert reverted == ["LOCKHELD-1"]
+    reloaded = load_state()
+    stamped = next(s for s in reloaded.sessions if s.id == "lockheld-to-1")
+    assert stamped.reap_reason == ReapReason.COMPLETED_BACKSTOP

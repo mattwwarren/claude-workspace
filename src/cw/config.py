@@ -33,7 +33,7 @@ from cw.models import (
 from cw.native_daemon import SHORT_SESSION_ID_RE
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +174,22 @@ def sessions_lock() -> Iterator[None]:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
+
+
+def mutate_state(fn: Callable[[CwState], None]) -> CwState:
+    """Load state, apply fn in place under sessions_lock, save and return.
+
+    Not reentrant: ``sessions_lock`` is a per-open-fd ``flock``, so calling
+    this while the caller already holds ``sessions_lock`` self-deadlocks.
+    Code running inside a ``with sessions_lock():`` block (e.g. anything
+    called from ``reconcile._reconcile_locked``) must mutate the loaded
+    state and ``save_state`` directly instead.
+    """
+    with sessions_lock():
+        state = load_state()
+        fn(state)
+        save_state(state)
+        return state
 
 
 @contextlib.contextmanager
