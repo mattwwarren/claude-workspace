@@ -56,6 +56,14 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.DEV_PLAN_OUTPUT_DIR", state_dir / "plan_output")
     monkeypatch.setattr("cw.config.SESSIONS_LOCK", state_dir / ".sessions.lock")
     monkeypatch.setattr("cw.config.CLIENTS_LOCK", config_dir / ".clients.yaml.lock")
+    monkeypatch.setattr(
+        "cw.config.CONCURRENCY_OVERRIDE_FILE",
+        state_dir / "concurrency_overrides.json",
+    )
+    monkeypatch.setattr(
+        "cw.config.CONCURRENCY_OVERRIDE_LOCK",
+        state_dir / ".concurrency_overrides.lock",
+    )
 
     # Redirect the native-daemon roster path so tests don't read the
     # user's real ~/.claude/daemon/roster.json. RealNativeDaemonClient

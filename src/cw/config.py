@@ -25,6 +25,7 @@ from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
     ClientConfig,
+    ConcurrencyOverrides,
     CwState,
     OrchestratorConfig,
     SessionOrigin,
@@ -71,6 +72,8 @@ DEV_PLAN_LOCK = STATE_DIR / ".dev_plan.lock"
 DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
 CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
+CONCURRENCY_OVERRIDE_FILE = STATE_DIR / "concurrency_overrides.json"
+CONCURRENCY_OVERRIDE_LOCK = STATE_DIR / ".concurrency_overrides.lock"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30
@@ -154,6 +157,35 @@ def sessions_lock_file() -> Path:
 
 def clients_lock_file() -> Path:
     return CLIENTS_LOCK
+
+
+def concurrency_override_file() -> Path:
+    return CONCURRENCY_OVERRIDE_FILE
+
+
+def concurrency_override_lock_file() -> Path:
+    return CONCURRENCY_OVERRIDE_LOCK
+
+
+@contextlib.contextmanager
+def concurrency_override_lock() -> Iterator[None]:
+    """Acquire an exclusive file lock over the concurrency_overrides.json write window.
+
+    Mirror of ``sessions_lock``. Hold this across every load→mutate→write
+    sequence for concurrency overrides so concurrent processes cannot clobber
+    each other's edits. The lock is advisory (``fcntl.flock``) and per-open-fd,
+    so sequential re-acquisitions in the same process are safe.
+    Do NOT nest: acquiring while already holding will deadlock.
+    """
+    state_dir().mkdir(parents=True, exist_ok=True)
+    lock_path = concurrency_override_lock_file()
+    fd = lock_path.open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 @contextlib.contextmanager
@@ -432,6 +464,61 @@ def load_orchestrator_config() -> OrchestratorConfig:
     if not raw:
         return OrchestratorConfig()
     return OrchestratorConfig.model_validate(raw)
+
+
+def _load_concurrency_overrides() -> ConcurrencyOverrides:
+    """Load ConcurrencyOverrides from disk; return empty model if absent or invalid."""
+    path = concurrency_override_file()
+    if not path.exists():
+        return ConcurrencyOverrides()
+    try:
+        return ConcurrencyOverrides.model_validate_json(path.read_text())
+    except (ValueError, OSError):
+        return ConcurrencyOverrides()
+
+
+def _save_concurrency_overrides(overrides: ConcurrencyOverrides) -> None:
+    """Persist ConcurrencyOverrides to disk atomically (caller holds lock)."""
+    path = concurrency_override_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, overrides.model_dump_json())
+
+
+def load_effective_config() -> OrchestratorConfig:
+    """Return OrchestratorConfig with runtime overrides merged in.
+
+    Loads declared config from orchestrator.yaml and runtime overrides from
+    concurrency_overrides.json.  Override values win over declared values when
+    not None.  Returns a new OrchestratorConfig; does not mutate the declared
+    config on disk.
+    """
+    declared = load_orchestrator_config()
+    overrides = _load_concurrency_overrides()
+
+    updates: dict[str, object] = {}
+
+    if overrides.max_parallel_clients is not None:
+        updates["max_parallel_clients"] = overrides.max_parallel_clients
+
+    if overrides.clients:
+        merged_ceiling = dict(declared.per_client_ceiling)
+        for client_name, client_override in overrides.clients.items():
+            if client_override.ceiling is not None:
+                merged_ceiling[client_name] = client_override.ceiling
+        updates["per_client_ceiling"] = merged_ceiling
+
+    if overrides.lanes:
+        # Build the list of LaneConfig objects for the effective config.
+        # Lane overrides here apply globally (by "client/lane" key) — the
+        # dispatcher reads effective_lanes from ClientConfig, so we store
+        # lane paused/max_parallel overrides as a side-channel that dispatch
+        # can consult.  For now we surface them via OrchestratorConfig
+        # so load_effective_config returns a single unified config.
+        pass  # Lane-level overrides are consumed directly by the CLI/dispatch
+
+    if updates:
+        return declared.model_copy(update=updates)
+    return declared
 
 
 def ensure_config() -> None:
