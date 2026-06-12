@@ -23,6 +23,8 @@ within the lock (``revert_stalled_headless_sessions``,
 ``revert_completed_silent_tasks``) save_state directly without
 re-acquiring; callers of those helpers must hold the lock themselves if
 called outside ``reconcile``.
+
+See ADR-0006 for the detect/act phase invariant.
 """
 
 from __future__ import annotations
@@ -768,7 +770,6 @@ def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> boo
         return False
 
 
-
 def _detect_stalled_candidates(
     state: CwState,
     *,
@@ -801,7 +802,9 @@ def _detect_stalled_candidates(
                     session_id=session.id,
                     proposed_action=ProposedAction.SKIP_PARKED,
                     ticket_id=ticket_id,
-                    paused_status=str(actual_paused_status) if actual_paused_status else None,
+                    paused_status=str(actual_paused_status)
+                    if actual_paused_status
+                    else None,
                 )
             )
             continue
@@ -854,9 +857,15 @@ def _act_on_stalled_candidates(
         return []
 
     # Separate by action for batch processing.
-    skip_candidates = [c for c in candidates if c.proposed_action == ProposedAction.SKIP_PARKED]
-    salvage_candidates = [c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION]
-    revert_candidates = [c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK]
+    skip_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.SKIP_PARKED
+    ]
+    salvage_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
+    ]
+    revert_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK
+    ]
 
     # SKIP_PARKED: emit event only, no state/queue change.
     for candidate in skip_candidates:
@@ -879,9 +888,11 @@ def _act_on_stalled_candidates(
 
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
-        assert candidate.salvage_result is not None
-        assert candidate.salvage_csid is not None
-        _apply_salvaged_completion(session, candidate.salvage_result, candidate.salvage_csid, now=now)
+        if candidate.salvage_result is None or candidate.salvage_csid is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
+        _apply_salvaged_completion(
+            session, candidate.salvage_result, candidate.salvage_csid, now=now
+        )
 
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -937,7 +948,8 @@ def _act_on_stalled_candidates(
 
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
-        assert candidate.salvage_result is not None
+        if candidate.salvage_result is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result
         completed_payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,
@@ -1051,7 +1063,6 @@ def resolve_idle_retry_cap(
     return DEFAULT_IDLE_RETRY_CAP
 
 
-
 def _detect_idle_candidates(
     state: CwState,
     *,
@@ -1084,7 +1095,9 @@ def _detect_idle_candidates(
         if elapsed < budget:
             continue
         # Liveness check: if active, check for recovery of observation counter.
-        if _transcript_recently_active(session, now) or _awaiting_subagent(session, now):
+        if _transcript_recently_active(session, now) or _awaiting_subagent(
+            session, now
+        ):
             if session.idle_observation_count > 0:
                 candidates.append(
                     ReapCandidate(
@@ -1128,7 +1141,9 @@ def _detect_idle_candidates(
             branch = _checked_out_branch(session.worktree_path)
             if branch is not None:
                 post_review_clean = _detect_post_review_clean(session)
-                worktree_dirty = _worktree_dirty_by_path(session.client, session.worktree_path)
+                worktree_dirty = _worktree_dirty_by_path(
+                    session.client, session.worktree_path
+                )
                 candidates.append(
                     ReapCandidate(
                         session_id=session.id,
@@ -1185,13 +1200,26 @@ def _act_on_idle_candidates(
 
     session_by_id = {s.id: s for s in state.sessions}
 
-    counter_candidates = [c for c in candidates if c.proposed_action in (
-        ProposedAction.INCREMENT_COUNTER, ProposedAction.RECOVER_COUNTER
-    )]
-    salvage_candidates = [c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION]
-    revert_candidates = [c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK]
-    park_candidates = [c for c in candidates if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER]
-    salvage_git_candidates_list = [c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_GIT]
+    counter_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action
+        in (ProposedAction.INCREMENT_COUNTER, ProposedAction.RECOVER_COUNTER)
+    ]
+    salvage_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
+    ]
+    revert_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK
+    ]
+    park_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    ]
+    salvage_git_candidates_list = [
+        c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_GIT
+    ]
 
     # Counter-only updates: just update the counter and possibly save_state.
     counters_changed = False
@@ -1203,9 +1231,11 @@ def _act_on_idle_candidates(
     # Salvage completions.
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
-        assert candidate.salvage_result is not None
-        assert candidate.salvage_csid is not None
-        _apply_salvaged_completion(session, candidate.salvage_result, candidate.salvage_csid, now=now)
+        if candidate.salvage_result is None or candidate.salvage_csid is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
+        _apply_salvaged_completion(
+            session, candidate.salvage_result, candidate.salvage_csid, now=now
+        )
 
     # Recover (revert to PENDING for re-dispatch).
     for candidate in revert_candidates:
@@ -1225,7 +1255,12 @@ def _act_on_idle_candidates(
         session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
         session.reap_reason = ReapReason.RETRY_CAP_PARKED
 
-    has_dispositions = bool(salvage_candidates or revert_candidates or park_candidates or salvage_git_candidates_list)
+    has_dispositions = bool(
+        salvage_candidates
+        or revert_candidates
+        or park_candidates
+        or salvage_git_candidates_list
+    )
 
     if counters_changed or has_dispositions:
         save_state(state)
@@ -1307,7 +1342,8 @@ def _act_on_idle_candidates(
 
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
-        assert candidate.salvage_result is not None
+        if candidate.salvage_result is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result
         completed_payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,
@@ -1323,7 +1359,13 @@ def _act_on_idle_candidates(
             get_native_daemon_client().stop(session.surface_ref)
 
     salvage_git: list[_SalvageCandidate] = [
-        (c.session_id, c.ticket_id, c.branch or "", c.worktree_path_str or "", c.post_review_clean)
+        (
+            c.session_id,
+            c.ticket_id,
+            c.branch or "",
+            c.worktree_path_str or "",
+            c.post_review_clean,
+        )
         for c in salvage_git_candidates_list
         if c.branch is not None and c.worktree_path_str is not None
     ]
@@ -1419,7 +1461,10 @@ _SalvageCandidate = tuple[str, str | None, str, str, bool]
 
 
 class ProposedAction(StrEnum):
-    """Action the act dispatcher will take for a classified session. See GitHub #552, ADR-0006."""
+    """Action the act dispatcher will take for a classified session.
+
+    See GitHub #552, ADR-0006.
+    """
 
     REVERT_TASK = "revert_task"
     CRASH_COMPLETE = "crash_complete"
@@ -1433,7 +1478,10 @@ class ProposedAction(StrEnum):
 
 @dataclass(frozen=True)
 class ReapCandidate:
-    """Classification result from detect phase. Consumed by act dispatcher. See GitHub #552, ADR-0006."""
+    """Classification result from detect phase. Consumed by act dispatcher.
+
+    See GitHub #552, ADR-0006.
+    """
 
     session_id: str
     proposed_action: ProposedAction
@@ -1449,17 +1497,14 @@ class ReapCandidate:
     post_review_clean: bool = False
     paused_status: str | None = None
     new_observation_count: int = 0
-    # For phantom sweep: carry client + worktree_path for SESSION_PHANTOM_REVERTED payload
+    # Phantom sweep: carry client + worktree_path for SESSION_PHANTOM_REVERTED payload
     client: str | None = None
     worktree_path: Path | None = None
-
 
 
 def _detect_phantom_candidates(
     state: CwState,
     phantom_set: set[str],
-    *,
-    now: datetime,
 ) -> list[ReapCandidate]:
     """Pure classification phase for phantom sessions.
 
@@ -1528,8 +1573,12 @@ def _act_on_phantom_candidates(
 
     session_by_id = {s.id: s for s in state.sessions}
 
-    crash_candidates = [c for c in candidates if c.proposed_action == ProposedAction.CRASH_COMPLETE]
-    salvage_candidates = [c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION]
+    crash_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.CRASH_COMPLETE
+    ]
+    salvage_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
+    ]
 
     phantom_names: list[str] = []
     # ticket_ids to revert (only PENDING-routed, excludes dirty/BLOCKED_ON_USER)
@@ -1540,9 +1589,11 @@ def _act_on_phantom_candidates(
 
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
-        assert candidate.salvage_result is not None
-        assert candidate.salvage_csid is not None
-        _apply_salvaged_completion(session, candidate.salvage_result, candidate.salvage_csid, now=now)
+        if candidate.salvage_result is None or candidate.salvage_csid is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
+        _apply_salvaged_completion(
+            session, candidate.salvage_result, candidate.salvage_csid, now=now
+        )
         phantom_names.append(session.name)
         if candidate.ticket_id:
             salvaged_ticket_ids.append(candidate.ticket_id)
@@ -1584,8 +1635,13 @@ def _act_on_phantom_candidates(
     # Emit SESSION_PHANTOM_REVERTED for DAEMON-origin CRASH_COMPLETE candidates.
     dirty_ticket_ids: set[str] = set()
     for candidate in crash_candidates:
-        if candidate.ticket_id and session_by_id[candidate.session_id].origin is SessionOrigin.DAEMON:
-            wt_path_str: str | None = str(candidate.worktree_path) if candidate.worktree_path else None
+        if (
+            candidate.ticket_id
+            and session_by_id[candidate.session_id].origin is SessionOrigin.DAEMON
+        ):
+            wt_path_str: str | None = (
+                str(candidate.worktree_path) if candidate.worktree_path else None
+            )
             if candidate.worktree_dirty:
                 dirty_ticket_ids.add(candidate.ticket_id)
             queue_status = "blocked_on_user" if candidate.worktree_dirty else "pending"
@@ -1632,7 +1688,13 @@ def _act_on_phantom_candidates(
             if changed:
                 save_dev_queue(store)
 
-    return ticket_ids_to_revert, phantom_names, False, salvaged_ticket_ids, salvaged_result_by_ticket
+    return (
+        ticket_ids_to_revert,
+        phantom_names,
+        False,
+        salvaged_ticket_ids,
+        salvaged_result_by_ticket,
+    )
 
 
 def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
@@ -1727,7 +1789,7 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         ), salvage_git_candidates
 
     phantom_set = set(drift.phantom_session_ids)
-    phantom_candidates = _detect_phantom_candidates(state, phantom_set, now=now)
+    phantom_candidates = _detect_phantom_candidates(state, phantom_set)
     (
         reverted,
         phantom_names,

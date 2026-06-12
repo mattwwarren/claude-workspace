@@ -8507,7 +8507,7 @@ def test_detect_stalled_candidates_under_budget_returns_empty(
     tmp_path: Path,
 ) -> None:
     """Session with elapsed < budget → no candidate, bytes unchanged."""
-    from cw.reconcile import ProposedAction, ReapCandidate, _detect_stalled_candidates
+    from cw.reconcile import _detect_stalled_candidates
 
     worktree = tmp_path / "wt-under"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -8535,7 +8535,7 @@ def test_detect_stalled_candidates_revert_task_candidate(
     tmp_path: Path,
 ) -> None:
     """ACTIVE DAEMON headless session with elapsed > budget → REVERT_TASK candidate."""
-    from cw.reconcile import ProposedAction, ReapCandidate, _detect_stalled_candidates
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
 
     worktree = tmp_path / "wt-revert"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -8724,7 +8724,10 @@ def test_detect_idle_candidates_under_budget_returns_empty(
 def test_detect_idle_candidates_increment_counter_only(
     tmp_config_dir: Path,
 ) -> None:
-    """Session past budget, not recently active, count=0, threshold=2 → INCREMENT_COUNTER."""
+    """Session past budget, not recently active, count=0, threshold=2.
+
+    Expects INCREMENT_COUNTER candidate.
+    """
     from cw.reconcile import ProposedAction, _detect_idle_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -8752,7 +8755,7 @@ def test_detect_idle_candidates_increment_counter_only(
     assert _state_queue_snapshot() == snap
 
 
-def test_detect_idle_candidates_counter_NOT_written_by_detect(
+def test_detect_idle_candidates_counter_not_written_by_detect(
     tmp_config_dir: Path,
 ) -> None:
     """Explicit purity: after detect, load_state() → idle_observation_count still 0."""
@@ -8782,7 +8785,10 @@ def test_detect_idle_candidates_counter_NOT_written_by_detect(
 def test_detect_idle_candidates_threshold_reached_park(
     tmp_config_dir: Path,
 ) -> None:
-    """idle_observation_count at threshold-1 + task.attempts >= cap → PARK_BLOCKED_ON_USER."""
+    """idle_observation_count at threshold-1, task.attempts >= cap.
+
+    Expects PARK_BLOCKED_ON_USER candidate.
+    """
     from cw.reconcile import ProposedAction, _detect_idle_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -8876,9 +8882,9 @@ def test_detect_idle_candidates_recover_counter_when_liveness_restored(
 
     # Patch transcript recently active → True
     monkeypatch.setattr(
-        "cw.reconcile._transcript_recently_active", lambda s, n, **kw: True
+        "cw.reconcile._transcript_recently_active", lambda _s, _n, **_kw: True
     )
-    monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda s, n: False)
+    monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda _s, _n: False)
 
     candidates = _detect_idle_candidates(
         state,
@@ -8928,10 +8934,10 @@ def test_detect_idle_candidates_salvage_git(
     snap = _state_queue_snapshot()
 
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda p: "auto-dev/idle-sgit-1"
+        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/idle-sgit-1"
     )
-    monkeypatch.setattr("cw.reconcile._detect_post_review_clean", lambda s: False)
-    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda c, p: False)
+    monkeypatch.setattr("cw.reconcile._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda _c, _p: False)
 
     candidates = _detect_idle_candidates(
         state,
@@ -8978,7 +8984,7 @@ def test_detect_idle_candidates_worktree_dirty_flag(
     save_dev_queue(DevQueueStore(tasks=[task]))
     snap = _state_queue_snapshot()
 
-    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda c, p: True)
+    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda _c, _p: True)
 
     candidates = _detect_idle_candidates(
         state,
@@ -9025,7 +9031,6 @@ def test_detect_phantom_candidates_crash_complete(
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
     sess = _mk_phantom_daemon_session("phantom-crash-1", started_at)
     state = CwState(sessions=[sess])
     save_state(state)
@@ -9035,7 +9040,6 @@ def test_detect_phantom_candidates_crash_complete(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
-        now=now,
     )
 
     assert len(candidates) == 1
@@ -9058,10 +9062,12 @@ def test_detect_phantom_candidates_salvage_on_terminal_sentinel(
     monkeypatch.setenv("HOME", str(home))
     worktree = tmp_path / "wt-phantom-salv"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
     # surface_ref must match the prefix used by _write_salvage_transcript
     sess = _mk_phantom_daemon_session(
-        "phantom-salv-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+        "phantom-salv-1",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
     )
     payload = _shipped_salvage_payload()
     payload["ticket_id"] = "phantom-salv-1"
@@ -9074,7 +9080,6 @@ def test_detect_phantom_candidates_salvage_on_terminal_sentinel(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
-        now=now,
     )
 
     assert len(candidates) == 1
@@ -9089,7 +9094,6 @@ def test_detect_phantom_candidates_user_origin_crash_no_ticket(
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
     sess = Session(
         id="phantom-user-1",
         name="client-a/impl",  # no auto-dev/ prefix → no ticket_id
@@ -9109,7 +9113,6 @@ def test_detect_phantom_candidates_user_origin_crash_no_ticket(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
-        now=now,
     )
 
     assert len(candidates) == 1
@@ -9124,11 +9127,10 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phantom with dirty worktree → candidate.worktree_dirty == True; bytes unchanged."""
+    """Phantom with dirty worktree → candidate.worktree_dirty True; bytes unchanged."""
     from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
     wt = tmp_path / "wt-dirty"
     wt.mkdir()
     sess = _mk_phantom_daemon_session("phantom-dirty-1", started_at, worktree_path=wt)
@@ -9137,12 +9139,11 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     save_dev_queue(DevQueueStore(tasks=[]))
     snap = _state_queue_snapshot()
 
-    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda c, p: True)
+    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda _c, _p: True)
 
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
-        now=now,
     )
 
     assert len(candidates) == 1
@@ -9158,7 +9159,7 @@ def test_act_on_stalled_revert_task_updates_state_and_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """REVERT_TASK candidate → session TIMED_OUT, queue PENDING, SESSION_TIMED_OUT emitted."""
+    """REVERT_TASK candidate → TIMED_OUT session, PENDING queue, event emitted."""
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
 
     worktree = tmp_path / "wt-act-revert"
@@ -9167,11 +9168,14 @@ def test_act_on_stalled_revert_task_updates_state_and_queue(
 
     monkeypatch.setattr(
         "cw.reconcile.get_native_daemon_client",
-        lambda: FakeNativeDaemonClient(),
+        FakeNativeDaemonClient,
     )
-    monkeypatch.setattr("cw.reconcile.get_client", lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"))
+    monkeypatch.setattr(
+        "cw.reconcile.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
     monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
-    monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *a, **kw: None)
+    monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
 
     sess = _mk_headless_daemon_session("act-revert-1", worktree, started_at)
     state = CwState(sessions=[sess])
@@ -9225,7 +9229,7 @@ def test_act_on_stalled_salvage_completion(
 
     monkeypatch.setattr(
         "cw.reconcile.get_native_daemon_client",
-        lambda: FakeNativeDaemonClient(),
+        FakeNativeDaemonClient,
     )
 
     worktree = tmp_path / "wt-act-salv"
@@ -9314,7 +9318,9 @@ def test_act_on_idle_park_routes_blocked_on_user(
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
 
-    sess = _mk_live_idle_daemon_session("idle-act-park-1", "live-ref", started_at, idle_observation_count=1)
+    sess = _mk_live_idle_daemon_session(
+        "idle-act-park-1", "live-ref", started_at, idle_observation_count=1
+    )
     state = CwState(sessions=[sess])
     save_state(state)
     task = TicketTask(
@@ -9349,7 +9355,9 @@ def test_act_on_idle_increments_observation_counter(
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
 
-    sess = _mk_live_idle_daemon_session("idle-act-inc-1", "live-ref", started_at, idle_observation_count=0)
+    sess = _mk_live_idle_daemon_session(
+        "idle-act-inc-1", "live-ref", started_at, idle_observation_count=0
+    )
     state = CwState(sessions=[sess])
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
@@ -9372,7 +9380,7 @@ def test_act_on_idle_increments_observation_counter(
 def test_act_on_phantom_crash_routes_pending(
     tmp_config_dir: Path,
 ) -> None:
-    """CRASH_COMPLETE candidate, worktree_dirty=False → queue PENDING, SESSION_PHANTOM_REVERTED."""
+    """CRASH_COMPLETE (dirty=False) → queue PENDING + SESSION_PHANTOM_REVERTED."""
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -9398,7 +9406,7 @@ def test_act_on_phantom_crash_routes_pending(
     )
 
     result = _act_on_phantom_candidates(state, [candidate], now=now)
-    ticket_ids_to_revert, phantom_names, usage_limited, salvaged_ticket_ids, _ = result
+    _, _, _, _, _ = result
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "phantom-act-1")
@@ -9415,7 +9423,7 @@ def test_act_on_phantom_crash_routes_pending(
 def test_act_on_phantom_dirty_routes_blocked(
     tmp_config_dir: Path,
 ) -> None:
-    """CRASH_COMPLETE candidate, worktree_dirty=True → queue BLOCKED_ON_USER, SESSION_PHANTOM_REVERTED."""
+    """CRASH_COMPLETE (dirty=True) → BLOCKED_ON_USER + SESSION_PHANTOM_REVERTED."""
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
