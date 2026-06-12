@@ -554,6 +554,30 @@ class TestBackgroundSession:
         assert "Warning" in output
         assert "notify" in output.lower()
 
+    def test_auto_flag_persists(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        state = CwState(
+            sessions=[
+                Session(
+                    id="autobg01",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                )
+            ]
+        )
+        save_state(state)
+
+        background_session("test-client/impl", auto=True)
+
+        updated = load_state()
+        assert updated.sessions[0].auto_backgrounded is True
+
 
 # ---------------------------------------------------------------------------
 # TestResumeSession
@@ -1346,7 +1370,9 @@ class TestStartSessionParentLinkage:
                 msg = "Simulated disk failure"
                 raise OSError(msg)
 
-        monkeypatch.setattr("cw.session.save_state", failing_save)
+        # mutate_state (in cw.config) calls save_state directly from its own
+        # module; patch the config-level name so the failure is intercepted.
+        monkeypatch.setattr("cw.config.save_state", failing_save)
 
         with pytest.raises(OSError, match="Simulated disk failure"):
             start_session(
