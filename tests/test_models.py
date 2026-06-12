@@ -699,10 +699,8 @@ class TestOrchestratorConfigCeilingMigration:
     def test_legacy_per_client_max_parallel_lifted(self) -> None:
         """Legacy per_client_max_parallel is migrated into per_client_ceiling."""
         config = OrchestratorConfig(
-            **{
-                "per_client_max_parallel": {"my-client": 3},
-                "default_max_parallel": 2,
-            }
+            per_client_max_parallel={"my-client": 3},
+            default_max_parallel=2,
         )
         assert config.per_client_ceiling == {"my-client": 3}
         assert config.default_ceiling == 2
@@ -710,12 +708,10 @@ class TestOrchestratorConfigCeilingMigration:
     def test_new_fields_win_over_legacy(self) -> None:
         """When both new and legacy fields are present, new fields win."""
         config = OrchestratorConfig(
-            **{
-                "per_client_ceiling": {"my-client": 5},
-                "default_ceiling": 4,
-                "per_client_max_parallel": {"my-client": 3},
-                "default_max_parallel": 2,
-            }
+            per_client_ceiling={"my-client": 5},
+            default_ceiling=4,
+            per_client_max_parallel={"my-client": 3},
+            default_max_parallel=2,
         )
         assert config.per_client_ceiling == {"my-client": 5}
         assert config.default_ceiling == 4

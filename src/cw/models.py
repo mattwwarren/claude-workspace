@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -343,6 +344,46 @@ class OrchestratorConfig(BaseModel):
     # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
     # pre-#554 self-healing behavior. See ADR-0006 invariant 4 and GitHub #554.
     reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
+    # RFC 0004 Phase 2 — two-knob scheduler (#558)
+    # Tier-1: limit how many clients are eligible per tick.
+    # None = no limit (today's behavior preserved).
+    max_parallel_clients: int | None = None
+    # Tier-2: per-client ceiling across all lanes. Takes precedence over the
+    # legacy per_client_max_parallel / default_max_parallel fields; those are
+    # migrated on load via _migrate_legacy_ceiling_fields and kept as deprecated
+    # aliases for one release.
+    per_client_ceiling: dict[str, int] = Field(default_factory=dict)
+    default_ceiling: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_ceiling_fields(cls, data: object) -> object:
+        """Lift legacy per_client_max_parallel / default_max_parallel into new fields.
+
+        The new per_client_ceiling / default_ceiling fields take precedence when
+        both are present. Legacy fields are kept as deprecated aliases and still
+        populate OrchestratorConfig for one release — callers using the legacy
+        field name directly will see the same value via the new field.
+        """
+        if not isinstance(data, dict):
+            return data
+        has_new_ceiling = "per_client_ceiling" in data or "default_ceiling" in data
+        legacy_per_client = data.get("per_client_max_parallel")
+        legacy_default = data.get("default_max_parallel")
+        if not has_new_ceiling:
+            if isinstance(legacy_per_client, dict) and legacy_per_client:
+                data.setdefault("per_client_ceiling", dict(legacy_per_client))
+                logging.getLogger(__name__).warning(
+                    "OrchestratorConfig: per_client_max_parallel is deprecated; "
+                    "use per_client_ceiling instead"
+                )
+            if isinstance(legacy_default, int):
+                data.setdefault("default_ceiling", legacy_default)
+                logging.getLogger(__name__).warning(
+                    "OrchestratorConfig: default_max_parallel is deprecated; "
+                    "use default_ceiling instead"
+                )
+        return data
 
     @model_validator(mode="before")
     @classmethod
