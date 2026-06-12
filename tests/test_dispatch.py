@@ -9,8 +9,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 
-from cw.config import load_orchestrator_config, load_state, orchestrator_config_file, save_state
+from cw.config import (
+    load_orchestrator_config,
+    load_state,
+    orchestrator_config_file,
+    save_state,
+)
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue, save_plan
 from cw.dispatch import (
     DispatchTickResult,
@@ -2776,12 +2782,16 @@ class TestConfigReloadedEachTick:
         run_dispatch_loop(once=True, native_daemon=daemon)
         assert len(daemon.spawn_calls) == 2  # cap=2: both tickets spawned
 
-        # Reset queue to PENDING so tick 2 has a clean slate
+        # Reset queue to PENDING and clear sessions so tick 2 has a clean slate
         queue = load_dev_queue()
         for task in queue.tasks:
             task.status = QueueItemStatus.PENDING
             task.session_id = None
         save_dev_queue(queue)
+        # Clear daemon sessions from state so running_count resets to 0
+        state = load_state()
+        state.sessions = []
+        save_state(state)
 
         # Rewrite config: cap drops to 1
         config_path.write_text("per_client_max_parallel:\n  test-client: 1\n")
@@ -2796,23 +2806,29 @@ class TestConfigReloadedEachTick:
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Corrupt orchestrator.yaml logs WARNING and loop continues with last-good config."""
+        """In-loop reload failure logs WARNING and continues with last-good config."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
-        config_path = orchestrator_config_file()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+        real_load = load_orchestrator_config
+        call_count = 0
 
-        # Write valid config; tick 1 succeeds
-        config_path.write_text("per_client_max_parallel:\n  test-client: 1\n")
+        def patched_load() -> OrchestratorConfig:
+            nonlocal call_count
+            call_count += 1
+            # First call (startup): succeed normally
+            # Second call (in-loop reload): simulate a corrupt YAML file
+            if call_count >= 2:
+                msg = "simulated corrupt yaml"
+                raise yaml.YAMLError(msg)
+            return real_load()
+
+        monkeypatch.setattr("cw.dispatch.load_orchestrator_config", patched_load)
+
         daemon = FakeNativeDaemonClient()
-        run_dispatch_loop(once=True, native_daemon=daemon)
-
-        # Corrupt the file between ticks
-        config_path.write_text(": : invalid: yaml: {{{{")
-
-        # Tick 2: should NOT raise; should log WARNING
+        # Should NOT raise despite the in-loop reload failing
         with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
             run_dispatch_loop(once=True, native_daemon=daemon)
 

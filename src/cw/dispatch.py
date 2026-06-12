@@ -5,12 +5,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-
-import pydantic
-import yaml
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+
+import pydantic
+import yaml
 
 from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
@@ -758,6 +758,17 @@ def run_dispatch_loop(
     usage_limited_until: datetime | None = None
 
     while True:
+        try:
+            config = load_orchestrator_config()
+            if max_parallel is not None:
+                clients = load_clients()
+                overridden = dict.fromkeys(clients, max_parallel)
+                config = config.model_copy(
+                    update={"per_client_max_parallel": overridden}
+                )
+        except (yaml.YAMLError, pydantic.ValidationError):
+            _log.warning("dispatch: config reload failed; using last-good config")
+
         consume_completed_sessions()
         result = dispatch_tick(
             config,
