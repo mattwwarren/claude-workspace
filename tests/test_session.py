@@ -1203,6 +1203,12 @@ def test_start_session_reaps_phantom_before_existing_check(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    from cw.models import OrchestratorConfig, ReapPolicy
+
+    monkeypatch.setattr(
+        "cw.reconcile.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
 
     monkeypatch.setattr("cw.session._write_hook_context", _noop)
 

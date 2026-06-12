@@ -1089,6 +1089,12 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    from cw.models import OrchestratorConfig, ReapPolicy
+
+    monkeypatch.setattr(
+        "cw.reconcile.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
 
     spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
     assert spawned == 1
@@ -1160,6 +1166,12 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     monkeypatch.setattr(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    from cw.models import OrchestratorConfig, ReapPolicy
+
+    monkeypatch.setattr(
+        "cw.reconcile.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
     daemon = FakeNativeDaemonClient()
 
