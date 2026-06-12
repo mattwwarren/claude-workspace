@@ -22,7 +22,6 @@ from cw.models import (
     QueueItemStatus,
     ReapPolicy,
     Session,
-    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TicketTask,
@@ -36,7 +35,7 @@ class TestSessionPurpose:
         assert SessionPurpose.DEBT.value == "debt"
 
     def test_all_values(self) -> None:
-        assert len(SessionPurpose) == 3
+        assert len(SessionPurpose) == 4
 
 
 class TestSessionStatus:

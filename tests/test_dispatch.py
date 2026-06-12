@@ -293,12 +293,14 @@ class TestDispatchTickSpawnsSession:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """dispatch_tick passes task.lane to spawn_create_impl, stamping Session.lane."""
+        """dispatch_tick passes task.lane to spawn_create_impl, stamps Session.lane."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Use DEFAULT_LANE so the task matches the client's effective lane and
+        # gets dispatched. Lane is stamped verbatim on the spawned session.
         task = TicketTask(
             ticket_id="GEN-LANE",
             client="test-client",
-            lane="my-lane",
+            lane=DEFAULT_LANE,
         )
         add_ticket(task)
 
@@ -307,7 +309,7 @@ class TestDispatchTickSpawnsSession:
 
         state = load_state()
         assert len(state.sessions) == 1
-        assert state.sessions[0].lane == "my-lane"
+        assert state.sessions[0].lane == DEFAULT_LANE
 
 
 # ---------------------------------------------------------------------------
