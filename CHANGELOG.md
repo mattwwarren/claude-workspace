@@ -6,6 +6,78 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-12
+
+Lane-aware dispatch, gated reaping, and state-integrity hardening.
+
+### Added
+
+- **RFC 0004 lane system — Phases 1–4** (#575/#576/#577/#581): First-class
+  `lane` routing throughout the dispatch pipeline.
+  - **Phase 1** (#575): `TicketTask.lane` field (default `"default"`);
+    DEV_QUEUE_SCHEMA_VERSION v3.
+  - **Phase 2** (#576): Two-tier lane-aware scheduler — per-lane concurrency
+    caps, pause/resume, priority ordering.
+  - **Phase 3** (#581): `cw lane` CLI (`create`, `pause`, `resume`, `list`,
+    `show`, `set-concurrency`); `--lane` flag on `cw dev-queue add`; runtime
+    concurrency overrides persisted in `ConcurrencyOverrides` outside
+    `orchestrator.yaml`.
+  - **Phase 4** (#577): Lane-aware `cw status` / dashboard grouping; consumer
+    audit.
+- **`SESSION_REAP_PROPOSED` event + gated-act authorization** (#573): reconciler
+  emits `session.reap_proposed` before any destructive reap; the owning task is
+  routed to `BLOCKED_ON_USER` under the default `signal_only` policy.
+- **`ReapPolicy` enum** (#572): `signal_only` (default) keeps surfaces intact
+  and waits for operator action; `auto` enables self-healing (stop daemon, revert
+  task to PENDING, clean worktree).
+- **Per-lane `reap_policy` resolution** (#582): each lane can override the
+  client-level reap policy; the reconciler resolves the effective policy per
+  session by checking lane → client → global in order.
+- **Auto fast-forward local main** (#569): `cw dev-queue` fast-forwards the
+  local main branch when it is behind origin before dispatching, preventing
+  stale-base merges.
+- **CI status + mergeable in `MonitoredPR`** (#571): `cw status` surfaces
+  `ci_status` and `mergeable` for each open PR alongside the existing fields.
+- **Agent onboarding wiring** (#562): `cw install` now registers the MCP server,
+  adds the `cw` allowlist entry, wires the SessionStart hook, and appends the
+  `CLAUDE.md` snippet in a single command.
+- **Route emitted-but-unrouted sentinels** (#584): reconciler now routes
+  `AUTO_DEV_RESULT` sentinels that were emitted before the idle watchdog fires,
+  preventing orphaned successful results from blocking further dispatch.
+
+### Fixed
+
+- **dev-queue wait resolves oldest terminal duplicate** (#585): `cw dev-queue
+  wait` now resolves the oldest terminal-state duplicate task rather than a live
+  one, preventing premature wait-exit when duplicate entries exist.
+- **Inbox cursor-not-found wedge + torn-read** (#565): event-history reader no
+  longer wedges when the inbox cursor points past the end of a rotated file; torn
+  reads under concurrent writers are also closed.
+- **Config re-resolved each tick** (#566): `run_watcher_tick` re-reads
+  `clients.yaml` on every dispatch tick so hot-edited config takes effect without
+  restarting the watcher.
+
+### Refactored
+
+- **Migrate remaining `sessions.json` writers to `mutate_state()`** (#567): all
+  state mutations now go through the single-lock path introduced in v0.14.2,
+  closing the last direct-write windows.
+
+### Schema
+
+- **v8** (#573): added `Session.reap_proposed_at`. Purely additive; defaults to
+  `None`. Auto-migrates on first load.
+- **DEV_QUEUE v3** (#575): added `TicketTask.lane`. Purely additive; defaults to
+  `"default"`. Auto-migrates on first load.
+
+### Documentation
+
+- **ADR-0006**: reaping is gated by an authority, not automatic.
+- **State-integrity audit** (#38042be): ADR-0005, RFC 0004 §State integrity,
+  implementation plans.
+- **Headless post-sentinel hardening** (#580): salvage-ship recipe and
+  turn-end hardening notes for headless sessions.
+
 ## [1.0.0] — 2026-06-11
 
 First stable release: the multiplexer layer (cmux/tmux) is deleted entirely,
