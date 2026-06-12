@@ -9460,3 +9460,326 @@ def test_act_on_phantom_dirty_routes_blocked(
     )
     assert len(events) == 1
     assert events[0].payload["worktree_dirty"] is True
+
+
+# ---------------------------------------------------------------------------
+# Additional act-phase tests addressing coverage gaps (GitHub #552 fix cycle 1)
+# ---------------------------------------------------------------------------
+
+
+def test_act_on_stalled_salvage_completion_emits_session_completed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SALVAGE_COMPLETION → SESSION_COMPLETED event emitted with salvaged=True."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+
+    worktree = tmp_path / "wt-salv-evt"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("act-salv-evt-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "act-salv-evt-1"
+    result = AutoDevResult.model_validate(payload)
+    candidate = ReapCandidate(
+        session_id="act-salv-evt-1",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="act-salv-evt-1",
+        salvage_result=result,
+        salvage_csid="csid-salv-evt",
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now)
+
+    events = read_events(
+        consumer="test-act-salv-evt-1",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["salvaged"] is True
+    assert events[0].payload["crashed"] is False
+
+
+def test_act_on_idle_park_emits_needs_attention_and_sets_reap_reason(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """PARK_BLOCKED_ON_USER → SESSION_NEEDS_ATTENTION emitted + reap_reason set."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = _mk_live_idle_daemon_session(
+        "idle-park-evt-1", "live-ref", started_at, idle_observation_count=1
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-park-evt-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-park-evt-1",
+        attempts=99,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="idle-park-evt-1",
+        proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+        ticket_id="idle-park-evt-1",
+        new_observation_count=2,
+    )
+
+    _act_on_idle_candidates(state, [candidate], now=now)
+
+    assert sess.reap_reason == ReapReason.RETRY_CAP_PARKED
+
+    events = read_events(
+        consumer="test-idle-park-evt-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    assert events[0].payload["paused_status"] == _SILENTLY_IDLE_REASON
+
+
+def test_act_on_idle_revert_task_routes_pending_emits_timed_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVERT_TASK → queue PENDING + SESSION_TIMED_OUT + daemon stopped."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = _mk_live_idle_daemon_session(
+        "idle-revert-evt-1", "live-ref", started_at, idle_observation_count=3
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-revert-evt-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-revert-evt-1",
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="idle-revert-evt-1",
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id="idle-revert-evt-1",
+        elapsed_seconds=1500.0,
+        new_observation_count=4,
+        usage_limit_detected=False,
+    )
+
+    _act_on_idle_candidates(state, [candidate], now=now)
+
+    assert sess.status == SessionStatus.TIMED_OUT
+    assert sess.reap_reason == ReapReason.IDLE_STALL
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "idle-revert-evt-1")
+    assert t.status == QueueItemStatus.PENDING
+
+    events = read_events(
+        consumer="test-idle-revert-evt-1",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert len(events) == 1
+    assert events[0].payload["cause"] == "idle_stall_recovered"
+
+
+def test_act_on_idle_revert_task_usage_limit_detected_sets_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVERT_TASK with usage_limit_detected=True → cause=usage_limit_cutoff."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = _mk_live_idle_daemon_session(
+        "idle-revert-usage-1", "live-ref", started_at, idle_observation_count=3
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidate = ReapCandidate(
+        session_id="idle-revert-usage-1",
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id="idle-revert-usage-1",
+        elapsed_seconds=1500.0,
+        new_observation_count=4,
+        usage_limit_detected=True,
+    )
+
+    _act_on_idle_candidates(state, [candidate], now=now)
+
+    assert sess.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+    events = read_events(
+        consumer="test-idle-revert-usage-1",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert len(events) == 1
+    assert events[0].payload["cause"] == "usage_limit_cutoff"
+
+
+def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SALVAGE_COMPLETION phantom → session COMPLETED, queue COMPLETED, event."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_phantom_daemon_session("phantom-salv-act-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-salv-act-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-salv-act-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "phantom-salv-act-1"
+    result = AutoDevResult.model_validate(payload)
+    candidate = ReapCandidate(
+        session_id="phantom-salv-act-1",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="phantom-salv-act-1",
+        salvage_result=result,
+        salvage_csid="csid-phantom-salv",
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _, _, _, salvaged_ids, _ = _act_on_phantom_candidates(state, [candidate], now=now)
+
+    assert sess.status == SessionStatus.COMPLETED
+    assert "phantom-salv-act-1" in salvaged_ids
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "phantom-salv-act-1")
+    assert t.status == QueueItemStatus.COMPLETED
+
+    events = read_events(
+        consumer="test-phantom-salv-act-1",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["salvaged"] is True
+    assert events[0].payload["crashed"] is False
+
+
+def test_detect_stalled_needs_salvage_reason_skip_parked(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """session.last_result with _NEEDS_SALVAGE_REASON → SKIP_PARKED candidate."""
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+    worktree = tmp_path / "wt-needs-salvage"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("needs-salvage-1", worktree, started_at)
+    sess.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.SKIP_PARKED
+    assert candidates[0].paused_status == _NEEDS_SALVAGE_REASON
+    assert _state_queue_snapshot() == snap
+
+
+def test_act_on_idle_salvage_git_persists_observation_counter(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """SALVAGE_GIT candidate → idle_observation_count persisted to disk."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    wt = tmp_path / "wt-git-salv"
+
+    sess = _mk_live_idle_daemon_session(
+        "idle-salv-git-ctr-1",
+        "live-ref",
+        started_at,
+        idle_observation_count=2,
+        worktree_path=wt,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidate = ReapCandidate(
+        session_id="idle-salv-git-ctr-1",
+        proposed_action=ProposedAction.SALVAGE_GIT,
+        ticket_id="idle-salv-git-ctr-1",
+        branch="auto-dev/idle-salv-git-ctr-1",
+        worktree_path_str=str(wt),
+        post_review_clean=False,
+        new_observation_count=3,
+    )
+
+    _act_on_idle_candidates(state, [candidate], now=now)
+
+    # Counter must be written to disk by act — process restart resilience.
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "idle-salv-git-ctr-1")
+    assert s.idle_observation_count == 3

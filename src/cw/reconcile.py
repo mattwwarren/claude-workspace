@@ -1168,6 +1168,7 @@ def _detect_idle_candidates(
                     elapsed_seconds=elapsed,
                     worktree_dirty=worktree_dirty,
                     new_observation_count=new_count,
+                    usage_limit_detected=_detect_usage_limit(session),
                 )
             )
         else:
@@ -1204,7 +1205,13 @@ def _act_on_idle_candidates(
         c
         for c in candidates
         if c.proposed_action
-        in (ProposedAction.INCREMENT_COUNTER, ProposedAction.RECOVER_COUNTER)
+        in (
+            ProposedAction.INCREMENT_COUNTER,
+            ProposedAction.RECOVER_COUNTER,
+            # SALVAGE_GIT reaches the threshold — persist new_observation_count so
+            # a process restart between ticks does not replay the observation as fresh.
+            ProposedAction.SALVAGE_GIT,
+        )
     ]
     salvage_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
@@ -1245,7 +1252,7 @@ def _act_on_idle_candidates(
         session.completed_reason = CompletionReason.TIMED_OUT
         session.reap_reason = (
             ReapReason.USAGE_LIMIT_CUTOFF
-            if _detect_usage_limit(session)
+            if candidate.usage_limit_detected
             else ReapReason.IDLE_STALL
         )
 
@@ -1362,8 +1369,8 @@ def _act_on_idle_candidates(
         (
             c.session_id,
             c.ticket_id,
-            c.branch or "",
-            c.worktree_path_str or "",
+            c.branch,
+            c.worktree_path_str,
             c.post_review_clean,
         )
         for c in salvage_git_candidates_list
@@ -1538,6 +1545,11 @@ def _detect_phantom_candidates(
             )
             continue
         # Dirty-check for DAEMON sessions only; USER sessions have no worktree.
+        # Why: this check runs inside sessions_lock before the queue mutation, but
+        # the orphaned claude --bg process may still be alive and could write to the
+        # worktree between here and the BLOCKED_ON_USER routing in
+        # _act_on_phantom_candidates (TOCTOU). Accepted tradeoff: block > clobber —
+        # narrow the window, accept the race. See _act_on_phantom_candidates.
         worktree_dirty = (
             _worktree_dirty_by_path(session.client, session.worktree_path)
             if session.origin is SessionOrigin.DAEMON
