@@ -833,3 +833,91 @@ class TestBuildWatchRows:
         rows = _build_watch_rows(status, frozen_now)
         # Only one row (merged), not two
         assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: lane suffix in _tickets_table + _group_by_client (issue #561)
+# ---------------------------------------------------------------------------
+
+
+class TestTicketsTableLane:
+    def _render_tickets(
+        self,
+        tickets: list[TicketSummary],
+        *,
+        level: DetailLevel = DetailLevel.DEFAULT,
+    ) -> str:
+        """Render _tickets_table to a string for assertion."""
+        from cw.tui import _tickets_table
+
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        con.print(_tickets_table(tickets, level=level))
+        return buf.getvalue()
+
+    def test_tickets_table_non_default_lane_shows_suffix(
+        self, frozen_now: datetime
+    ) -> None:
+        """A ticket in a non-default lane renders with [lane] suffix in ticket cell."""
+        tickets = [
+            TicketSummary(
+                ticket_id="MW-300",
+                client="personal",
+                priority=5,
+                status="pending",
+                created_at=frozen_now,
+                lane="fast",
+            )
+        ]
+        output = self._render_tickets(tickets)
+        assert "[fast]" in output
+
+    def test_tickets_table_default_lane_no_suffix(self, frozen_now: datetime) -> None:
+        """A ticket in the default lane does NOT render [default] suffix."""
+        tickets = [
+            TicketSummary(
+                ticket_id="MW-301",
+                client="personal",
+                priority=5,
+                status="pending",
+                created_at=frozen_now,
+                lane="default",
+            )
+        ]
+        output = self._render_tickets(tickets)
+        assert "[default]" not in output
+
+    def test_group_by_client_stays_client_keyed(self, frozen_now: datetime) -> None:
+        """_group_by_client groups by client regardless of lane (regression pin)."""
+        from cw.tui import _group_by_client
+
+        tickets = [
+            TicketSummary(
+                ticket_id="MW-400",
+                client="client-a",
+                priority=5,
+                status="pending",
+                created_at=frozen_now,
+                lane="fast",
+            ),
+            TicketSummary(
+                ticket_id="MW-401",
+                client="client-a",
+                priority=3,
+                status="pending",
+                created_at=frozen_now,
+                lane="slow",
+            ),
+            TicketSummary(
+                ticket_id="MW-402",
+                client="client-b",
+                priority=5,
+                status="pending",
+                created_at=frozen_now,
+            ),
+        ]
+        clients = _group_by_client([], tickets)
+        assert "client-a" in clients
+        assert "client-b" in clients
+        # client-a appears first (more tickets)
+        assert clients[0] == "client-a"

@@ -30,6 +30,7 @@ from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
     PRDispatchRecord,
+    TickSummary,
     WorkerEntry,
     clear_completed_pr_sessions,
     orchestrator_parent,
@@ -1364,3 +1365,135 @@ class TestClearCompletedPrSessions:
         """No error when dispatch record is empty."""
         state = CwState(sessions=[])
         clear_completed_pr_sessions(state)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Tests: TickSummary.lanes field + _extract_lanes helper (issue #561)
+# ---------------------------------------------------------------------------
+
+
+class TestTickSummaryLanes:
+    def test_tick_summary_lanes_defaults_empty(self) -> None:
+        """TickSummary without lanes kwarg has lanes == {}."""
+        tick = TickSummary(
+            claimed=0,
+            pending=0,
+            running=0,
+            cap=1,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+        )
+        assert tick.lanes == {}
+
+    def test_tick_summary_lanes_round_trip(self) -> None:
+        """TickSummary with lanes serialises and deserialises with lanes intact."""
+        tick = TickSummary(
+            claimed=0,
+            pending=0,
+            running=0,
+            cap=1,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            lanes={"fast": {"claimed": 1, "running": 0, "pending": 2}},
+        )
+        parsed = json.loads(tick.model_dump_json())
+        assert parsed["lanes"]["fast"]["claimed"] == 1
+        assert parsed["lanes"]["fast"]["pending"] == 2
+
+    def test_latest_tick_by_client_preserves_lanes(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK event with lanes key populates TickSummary.lanes."""
+        from cw.events import read_events
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "lane-client",
+                "claimed": 1,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                "lanes": {"fast": {"claimed": 1, "running": 0, "pending": 1}},
+            },
+        )
+        events = read_events()
+        result = _latest_tick_by_client(events)
+        assert "lane-client" in result
+        assert result["lane-client"].lanes == {
+            "fast": {"claimed": 1, "running": 0, "pending": 1}
+        }
+
+    def test_latest_tick_by_client_legacy_event_no_lanes_key(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK event without lanes key yields TickSummary.lanes == {}."""
+        from cw.events import read_events
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "legacy-client",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                # no "lanes" key — pre-#558 format
+            },
+        )
+        events = read_events()
+        result = _latest_tick_by_client(events)
+        assert "legacy-client" in result
+        assert result["legacy-client"].lanes == {}
+
+    def test_orchestrate_status_json_guard(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """orchestrator_status snapshot includes lanes when present in tick event."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "json-client",
+                "claimed": 1,
+                "pending": 0,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+                "lanes": {"fast": {"claimed": 1, "running": 1, "pending": 0}},
+            },
+        )
+        snapshot = orchestrator_status()
+        parsed = json.loads(snapshot.model_dump_json())
+        assert "json-client" in parsed["last_tick_by_client"]
+        assert "lanes" in parsed["last_tick_by_client"]["json-client"]
+        fast_lane = parsed["last_tick_by_client"]["json-client"]["lanes"]["fast"]
+        assert fast_lane["claimed"] == 1
+
+    def test_orchestrate_status_json_legacy_lanes_empty(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """orchestrator_status snapshot has lanes == {} for legacy tick events."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "legacy-json-client",
+                "claimed": 0,
+                "pending": 2,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                # no lanes key
+            },
+        )
+        snapshot = orchestrator_status()
+        parsed = json.loads(snapshot.model_dump_json())
+        assert "legacy-json-client" in parsed["last_tick_by_client"]
+        assert parsed["last_tick_by_client"]["legacy-json-client"]["lanes"] == {}
