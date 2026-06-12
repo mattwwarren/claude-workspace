@@ -144,7 +144,7 @@ cw list
 - **Keystroke injection**: `cw bg` injects `/session-done` into active Claude sessions. Fragile but zero-coupling to Claude Code internals.
 - **Flat JSON state**: Simple, human-readable. Single-user tool.
 - **Native daemon backend**: Workers are spawned via `claude --bg` and tracked by short hex session id in `~/.claude/daemon/roster.json`. No multiplexer required.
-- **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms — sessions in state but no longer in the daemon roster — and reap them (DAEMON-origin tickets revert RUNNING → PENDING for retry). Explicit force via `cw doctor --reap`. No background daemon needed.
+- **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms (sessions in state but absent from the daemon roster). By default (`reap_policy: signal_only`, per ADR-0006) detection emits `SESSION_REAP_PROPOSED` and routes the task to `BLOCKED_ON_USER` — no destructive mutation. Destructive act (RUNNING→PENDING revert, daemon stop, worktree removal) requires `reap_policy: auto` for the lane, or an explicit `cw doctor --reap`. No background daemon needed.
 - **File-based locking**: Prevents concurrent state corruption from parallel session operations.
 - **Event history**: Audit trail for session lifecycle transitions.
 

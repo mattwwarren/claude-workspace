@@ -1,30 +1,44 @@
 """Reconcile cw session state with the native Claude daemon.
 
 A cw session is "live" if its ``surface_ref`` appears in the roster
-returned by ``claude agents --json``. :func:`compute_drift` checks the
-live set and returns a :class:`ReconcileReport` naming sessions whose
-``surface_ref`` is absent. :func:`reconcile` applies the report.
+returned by ``claude agents --json``.  ``reconcile()`` is split into two
+phases that run under ``sessions_lock`` (see ADR-0005):
 
-The split is deliberate: ``compute_drift`` is pure and testable in
-isolation; ``reconcile`` does the side-effecting work (state mutation,
-event emission, dev-queue revert).
+**Detect phase** — pure classification, no state writes.
+Three sweeps (stalled, idle/phantom, post-salvage) each call a
+``_detect_*`` helper that returns :class:`ReapCandidate` objects.  After
+each sweep ``_emit_reap_proposed`` fires
+:attr:`OrchestratorEventType.SESSION_REAP_PROPOSED`
+for every candidate whose :attr:`Session.reap_proposed_at` is ``None``,
+stamping that field to deduplicate across ticks.
 
-Transient-outage safety: ``reconcile`` refuses to mutate state when the
-daemon cannot be reached (``_claude_agents_json`` raises
-``CalledProcessError``) or returns an empty roster while the persisted
-state still contains ACTIVE/IDLE sessions with surface refs. A transient
-daemon hiccup would otherwise irreversibly mark every session as CRASHED.
-``compute_drift`` stays pure and does not apply this guard.
+Emitting before the act phase keeps the event visible even when the act
+phase is suppressed by ``signal_only`` — consumers (the lane's ORCHESTRATE
+session or the operator) see the proposal and decide.
 
-Lock note: ``reconcile`` acquires ``sessions_lock`` (config.py) across its
-entire load_state → mutate → save_state sequence.  The helpers called from
-within the lock (``revert_stalled_headless_sessions``,
-``flag_silently_idle_daemon_sessions``, ``revert_timed_out_tasks``,
-``revert_completed_silent_tasks``) save_state directly without
-re-acquiring; callers of those helpers must hold the lock themselves if
-called outside ``reconcile``.
+**Act phase** — gated by ``reap_policy`` (ADR-0006).
+Under the default ``signal_only`` policy the act phase routes the owning
+:class:`TicketTask` to ``BLOCKED_ON_USER`` but performs no destructive
+mutation (no daemon stop, no worktree removal, no RUNNING→PENDING revert).
+Destructive acts require either ``reap_policy: auto`` on the session's lane
+*or* an explicit operator command (``cw doctor --reap``).
 
-See ADR-0006 for the detect/act phase invariant.
+Lock note: act-phase helpers call ``save_state()`` directly — not
+``mutate_state()`` (ADR-0005) — because ``_reconcile_locked()`` already
+holds ``sessions_lock`` and re-acquiring the same per-open-fd flock would
+self-deadlock (#387).  Serialisation against concurrent Stop-hook writes
+is enforced by the held lock.
+
+Transient-outage guard: ``reconcile`` skips the act phase entirely when
+``claude agents --json`` fails or returns an empty roster while
+ACTIVE/IDLE sessions with surface refs exist — a hiccup must not mass-reap.
+
+``_reconcile_locked()`` runs the above sequence while ``sessions_lock``
+is held; helper functions called from within it (``revert_stalled_*``,
+``flag_silently_idle_*``) ``save_state`` directly without re-acquiring.
+
+See ADR-0005 (single state lock) and ADR-0006 (reaping is gated by an
+authority) for the invariants this module enforces.
 """
 
 from __future__ import annotations
