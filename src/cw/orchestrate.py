@@ -42,6 +42,7 @@ from cw.dev_queue import load_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
+    DEFAULT_LANE,
     CompletionReason,
     OrchestratorEvent,
     OrchestratorEventType,
@@ -362,6 +363,7 @@ class TicketSummary(BaseModel):
     status: str
     created_at: datetime
     scope_hint: str | None = None
+    lane: str = DEFAULT_LANE
 
 
 class EventSummary(BaseModel):
@@ -383,6 +385,7 @@ class TickSummary(BaseModel):
     cap: int
     skip_reason: str
     tick_at: datetime
+    lanes: dict[str, dict[str, int]] = Field(default_factory=dict)
 
 
 class OrchestratorStatus(BaseModel):
@@ -409,6 +412,7 @@ def _summarise_ticket(task: TicketTask) -> TicketSummary:
         status=task.status.value,
         created_at=task.created_at,
         scope_hint=task.scope_hint,
+        lane=task.lane,
     )
 
 
@@ -461,6 +465,25 @@ def _summarise_event(event: OrchestratorEvent) -> EventSummary:
     )
 
 
+def _extract_lanes(raw: object) -> dict[str, dict[str, int]]:
+    """Safely extract lanes dict from DISPATCH_TICK payload.
+
+    Tolerates pre-#558 events where the key is absent or malformed.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, int]] = {}
+    for lane_name, stats in raw.items():
+        if not isinstance(lane_name, str) or not isinstance(stats, dict):
+            continue
+        result[lane_name] = {
+            k: int(v)
+            for k, v in stats.items()
+            if isinstance(k, str) and isinstance(v, (int, float))
+        }
+    return result
+
+
 def _latest_tick_by_client(
     events: list[OrchestratorEvent],
 ) -> dict[str, TickSummary]:
@@ -482,6 +505,7 @@ def _latest_tick_by_client(
                     cap=int(ev.payload.get("cap", 0)),
                     skip_reason=str(ev.payload.get("skip_reason", "none")),
                     tick_at=ev.created_at,
+                    lanes=_extract_lanes(ev.payload.get("lanes")),
                 )
             except (TypeError, ValueError):
                 continue
