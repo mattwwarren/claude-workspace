@@ -334,6 +334,8 @@ class MonitoredPR(BaseModel):
     role: str
     status: str
     unresolved_threads: int
+    ci_status: str | None = None  # GH check rollup: pending, success, failure, error, action_required, expected, stale
+    mergeable: bool | None = None
 
 
 class SessionSummary(BaseModel):
@@ -524,6 +526,8 @@ def _load_monitored_prs() -> list[MonitoredPR]:
                     role=str(pr_data.get("role", "author")),
                     status=str(pr_data.get("status", "watching")),
                     unresolved_threads=_count_unresolved(thread_status),
+                    ci_status=pr_data.get("ci_status"),
+                    mergeable=pr_data.get("mergeable"),
                 )
             )
     return monitored
