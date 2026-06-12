@@ -193,9 +193,7 @@ def read_events(
 
     # Cursor-not-found fallback: replay from the beginning
     if cursor is not None and not past_cursor:
-        logger.warning(
-            "cursor %s not found in inbox; replaying from start", cursor
-        )
+        logger.warning("cursor %s not found in inbox; replaying from start", cursor)
         events = []
         for _i, event in parsed:
             if since_ts is not None and event.created_at < since_ts:
