@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.config import load_state, save_state
+from cw.config import load_orchestrator_config, load_state, orchestrator_config_file, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue, save_plan
 from cw.dispatch import (
     DispatchTickResult,
@@ -2721,3 +2721,103 @@ class TestDispatchUsageLimitBackoff:
         # DispatchTickResult.usage_limit_detected=True but no backoff state set
         assert isinstance(result, DispatchTickResult)
         assert result.usage_limit_detected is True
+
+
+# ---------------------------------------------------------------------------
+# TestConfigReloadedEachTick
+# ---------------------------------------------------------------------------
+
+
+class TestConfigReloadedEachTick:
+    def test_config_reloaded_each_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop re-calls load_orchestrator_config on every tick."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        call_count = 0
+        real_load = load_orchestrator_config
+
+        def counting_load() -> OrchestratorConfig:
+            nonlocal call_count
+            call_count += 1
+            return real_load()
+
+        monkeypatch.setattr("cw.dispatch.load_orchestrator_config", counting_load)
+
+        daemon = FakeNativeDaemonClient()
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+        # With once=True: pre-loop startup load + 1 in-loop reload = call_count >= 2
+        # (Before fix: call_count == 1 — in-loop reload is missing → FAILS pre-fix)
+        assert call_count >= 2
+
+    def test_config_reload_takes_effect(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """A cap change written between ticks is honored on the next tick."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Resolve the write path via the fixture-patched accessor
+        config_path = orchestrator_config_file()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Tick 1: cap=2, 2 tickets queued — both should spawn
+        config_path.write_text("per_client_max_parallel:\n  test-client: 2\n")
+        add_ticket(TicketTask(ticket_id="GEN-CFG-1", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-CFG-2", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        run_dispatch_loop(once=True, native_daemon=daemon)
+        assert len(daemon.spawn_calls) == 2  # cap=2: both tickets spawned
+
+        # Reset queue to PENDING so tick 2 has a clean slate
+        queue = load_dev_queue()
+        for task in queue.tasks:
+            task.status = QueueItemStatus.PENDING
+            task.session_id = None
+        save_dev_queue(queue)
+
+        # Rewrite config: cap drops to 1
+        config_path.write_text("per_client_max_parallel:\n  test-client: 1\n")
+
+        spawns_before = len(daemon.spawn_calls)
+        run_dispatch_loop(once=True, native_daemon=daemon)
+        # Under broken code (frozen cap=2): would spawn 2 more → total 4
+        # Under correct code (reloaded cap=1): spawns exactly 1 → total 3
+        assert len(daemon.spawn_calls) == spawns_before + 1
+
+    def test_config_last_good_on_corrupt(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Corrupt orchestrator.yaml logs WARNING and loop continues with last-good config."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        config_path = orchestrator_config_file()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write valid config; tick 1 succeeds
+        config_path.write_text("per_client_max_parallel:\n  test-client: 1\n")
+        daemon = FakeNativeDaemonClient()
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+        # Corrupt the file between ticks
+        config_path.write_text(": : invalid: yaml: {{{{")
+
+        # Tick 2: should NOT raise; should log WARNING
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert any(
+            "config reload failed" in record.message
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        )
