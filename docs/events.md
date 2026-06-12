@@ -288,6 +288,46 @@ must not be auto-retried; the operator must manually clear or close it.
 `reason` is an open enum — consumers MUST tolerate unknown values.
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 
+### `session.reap_proposed`
+
+**Emitter:** `_emit_reap_proposed` in `cw.reconcile`
+**Payload v1:**
+```json
+{
+  "session_id": "<str>",
+  "session_name": "<str>",
+  "client": "<str>",
+  "ticket_id": "<str | null>",
+  "proposed_action": "revert_task | crash_complete | park_blocked_on_user",
+  "reason": "<ReapReason value | null>",
+  "evidence": {
+    "elapsed_seconds": "<float>",
+    "in_roster": "<bool>",
+    "transcript_age_seconds": "<float | null>"
+  }
+}
+```
+**Semantics:** Emitted by `_emit_reap_proposed` after each detect phase in
+`_reconcile_locked`, before the corresponding act phase. Satisfies ADR-0006
+invariant 3 (propose before act). Only emitted for `REVERT_TASK`,
+`CRASH_COMPLETE`, and `PARK_BLOCKED_ON_USER` proposed actions; counter
+increments, salvage completions, and skip-parked candidates do not produce
+this event.
+
+Dedup: `session.reap_proposed_at` is stamped on the session object at
+emission time. Subsequent reconcile ticks skip sessions already stamped,
+preventing duplicate events across ticks for the same session.
+
+`correlation_id` is the `ticket_id` when resolvable, else the `session_id`.
+
+**Deferral:** No `lane` field in v1 — RFC 0004 scope deferred to a
+follow-up issue.
+
+**Consumer note:** This event is written to the orchestrator event inbox
+(`events/inbox.jsonl`) as a state-snapshot delta. It does NOT appear in the
+channel-server queue-events channel; the queue-events channel only carries
+actionable queue mutations.
+
 ## CLI
 
 ### Record an event
