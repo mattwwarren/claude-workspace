@@ -1919,6 +1919,14 @@ The Friction/Health checks remain useful for diagnostics and post-mortems, but t
 
 In headless mode, after all pipeline logic completes, emit `stage.entered` (`done`) then emit the sentinel-delimited JSON block as the final lines of stdout. The narrative friction reports remain above (still useful for tmux scrollback / post-mortem); this block is the parsing contract for `cw`.
 
+**The sentinel is the LAST thing you do — end the turn immediately after it.**
+The closing `AUTO_DEV_RESULT>>>` frame must be the final characters of your
+final message: no trailing prose, no "next steps" summary, no further tool
+calls, no background tasks left running (kill or await them BEFORE the
+sentinel). The Stop hook fires only when the turn completes; anything that
+keeps the turn open after the sentinel leaves the session wedged `working`
+and the queue task unrouted (#578 — observed four times in the 1.1 waves).
+
 **Headless only — before emitting the sentinel, emit `stage.entered` (`done`):**
 ```bash
 cw event record stage.entered \

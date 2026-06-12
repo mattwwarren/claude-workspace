@@ -188,6 +188,33 @@ followup: #136 → no_op, closed citing PR #154
 followup: #170 → merge_gate_blocked, rebased to origin/main, PR #194 opened
 ```
 
+## Salvage-ship (wedged or dead session, work complete)
+
+The recurring case the sentinel statuses don't cover (#578): the worker
+pushed its branch and emitted a clean sentinel (or finished gates), but the
+session wedged before/at turn-end — task left RUNNING, or watchdog-reverted
+to PENDING, while the work is done. Symptoms: transcript silent >20 min with
+the sentinel (or "gates green") as the last event, session still `working`
+in the daemon roster, no PR.
+
+Recipe (validated 4× in the 1.1 waves — #387, #552, #554, #558):
+
+1. **Verify the work before touching anything**: `git ls-remote origin | grep <ticket>`
+   for the pushed branch; `git log origin/main..origin/<branch> --oneline` for the
+   commit stack; read the sentinel from the transcript for the review verdict +
+   open SHOULD_FIX list.
+2. **Close the session** (`cw spawn close <short-id>`) and **sweep the queue**
+   (`cw dev-queue remove <ticket> -c <client> --all` — the task is stale however
+   it was routed; the PR record becomes the source of truth).
+3. **Disposition the sentinel** as if it had routed normally:
+   `review_pending_approval` with SHOULD_FIX-only → assess the items; ship as-is
+   (note them in the PR body as deferred follow-ups) or apply 1–4 surgical fixes
+   inline in the worker's worktree (`/home/matthew/.cw/wt/<hash>/auto-dev-<n>`),
+   re-run the full gate suite, commit, push to the same branch.
+4. **Open the PR yourself** from the sentinel's branch with auto-merge; the body
+   carries the sentinel's review summary + the salvage note. Never re-dispatch a
+   ticket whose work is already pushed — a fresh worker redoes the hour.
+
 ## Failure modes
 
 - **Cannot resolve session** — print the session ref + sessions.json hint; do not guess. The user may have the wrong session id.
