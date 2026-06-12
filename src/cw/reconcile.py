@@ -768,6 +768,193 @@ def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> boo
         return False
 
 
+
+def _detect_stalled_candidates(
+    state: CwState,
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask],
+) -> list[ReapCandidate]:
+    """Pure classification phase for stalled headless DAEMON sessions.
+
+    Returns a list of ReapCandidate objects. Makes zero writes to state,
+    queue, or event bus. See GitHub #552, ADR-0006.
+    """
+    candidates: list[ReapCandidate] = []
+    for session in state.sessions:
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if not _is_headless(session):
+            continue
+        # Park-marker check: sessions already parked by the idle watchdog.
+        # Detect returns SKIP_PARKED candidate; act emits the skip event.
+        if isinstance(session.last_result, dict) and session.last_result.get(
+            "paused_status"
+        ) in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON):
+            actual_paused_status = session.last_result.get("paused_status")
+            ticket_id = ticket_id_for_session(session.name)
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.SKIP_PARKED,
+                    ticket_id=ticket_id,
+                    paused_status=str(actual_paused_status) if actual_paused_status else None,
+                )
+            )
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        task = task_by_ticket.get(ticket_id) if ticket_id else None
+        budget = resolve_headless_budget(task, session, config)
+        elapsed = (now - session.started_at).total_seconds()
+        if elapsed < budget:
+            continue
+        # Try terminal-sentinel salvage before declaring timeout.
+        salvage = _salvage_terminal_result(session)
+        if salvage is not None:
+            result, claude_session_id = salvage
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.SALVAGE_COMPLETION,
+                    ticket_id=ticket_id,
+                    salvage_result=result,
+                    salvage_csid=claude_session_id,
+                    elapsed_seconds=elapsed,
+                )
+            )
+            continue
+        candidates.append(
+            ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.REVERT_TASK,
+                ticket_id=ticket_id,
+                elapsed_seconds=elapsed,
+                reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+            )
+        )
+    return candidates
+
+
+def _act_on_stalled_candidates(
+    state: CwState,
+    candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+) -> list[str]:
+    """Act phase for stalled headless sessions: apply all mutations.
+
+    Consumes ReapCandidate objects from _detect_stalled_candidates.
+    Mirrors the side-effect logic in revert_stalled_headless_sessions.
+    Returns the list of ticket IDs reverted to PENDING.
+    """
+    if not candidates:
+        return []
+
+    # Separate by action for batch processing.
+    skip_candidates = [c for c in candidates if c.proposed_action == ProposedAction.SKIP_PARKED]
+    salvage_candidates = [c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION]
+    revert_candidates = [c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK]
+
+    # SKIP_PARKED: emit event only, no state/queue change.
+    for candidate in skip_candidates:
+        record_event(
+            OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
+            {
+                "session_id": candidate.session_id,
+                "ticket_id": candidate.ticket_id,
+                "reason": _SALVAGE_SKIP_REASON,
+                "paused_status": candidate.paused_status,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
+    if not salvage_candidates and not revert_candidates:
+        return []
+
+    # Apply state mutations for salvage and revert.
+    session_by_id = {s.id: s for s in state.sessions}
+
+    for candidate in salvage_candidates:
+        session = session_by_id[candidate.session_id]
+        assert candidate.salvage_result is not None
+        assert candidate.salvage_csid is not None
+        _apply_salvaged_completion(session, candidate.salvage_result, candidate.salvage_csid, now=now)
+
+    for candidate in revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
+
+    save_state(state)
+
+    timed_out_ticket_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
+    salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
+    salvaged_result_by_ticket = {
+        c.ticket_id: c.salvage_result
+        for c in salvage_candidates
+        if c.ticket_id and c.salvage_result
+    }
+    reverted: list[str] = []
+    if timed_out_ticket_ids or salvaged_ticket_ids_set:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            changed = False
+            for task in store.tasks:
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                if task.ticket_id in timed_out_ticket_ids:
+                    task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    reverted.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in salvaged_ticket_ids_set:
+                    result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(result)
+                    changed = True
+            if changed:
+                save_dev_queue(store)
+
+    for candidate in revert_candidates:
+        session = session_by_id[candidate.session_id]
+        payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "elapsed_seconds": candidate.elapsed_seconds,
+            "last_assistant_message_excerpt": "",
+        }
+        record_event(OrchestratorEventType.SESSION_TIMED_OUT, payload)
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        _cleanup_timed_out_worktree(session, candidate.ticket_id)
+
+    for candidate in salvage_candidates:
+        session = session_by_id[candidate.session_id]
+        assert candidate.salvage_result is not None
+        completed_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "crashed": False,
+            "salvaged": True,
+            "status": candidate.salvage_result.status,
+        }
+        record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+
+    return reverted
+
+
 def revert_stalled_headless_sessions(
     state: CwState,
     *,
@@ -798,130 +985,12 @@ def revert_stalled_headless_sessions(
     Returns the list of ticket IDs whose TicketTask was reverted to PENDING.
     See GitHub issue #185, #265.
     """
-    # Read-only dev-queue load for budget lookups — no lock needed here.
-    # Use the caller-supplied index when available (avoids a second filesystem
-    # read when reconcile() shares one load across the stalled + idle sweeps).
     if task_by_ticket is None:
         task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-
-    pending: list[tuple[Session, str | None]] = []
-    salvaged: list[tuple[Session, str | None, AutoDevResult]] = []
-    for session in state.sessions:
-        if session.status not in _LIVE_STATUSES:
-            continue
-        if session.origin is not SessionOrigin.DAEMON:
-            continue
-        if not _is_headless(session):
-            continue
-        # Skip sessions that were parked by flag_silently_idle_daemon_sessions
-        # (#431). Their last_result is {"paused_status": _SILENTLY_IDLE_REASON}
-        # and they are BLOCKED_ON_USER in the queue already; wall-clock revert
-        # would re-dispatch already-parked work.
-        if isinstance(session.last_result, dict) and session.last_result.get(
-            "paused_status"
-        ) in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON):
-            salvage_skip_ticket_id = ticket_id_for_session(session.name)
-            actual_paused_status = session.last_result.get("paused_status")
-            record_event(
-                OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
-                {
-                    "session_id": session.id,
-                    "ticket_id": salvage_skip_ticket_id,
-                    "reason": _SALVAGE_SKIP_REASON,
-                    "paused_status": actual_paused_status,
-                },
-                correlation_id=salvage_skip_ticket_id,
-            )
-            continue
-        ticket_id = ticket_id_for_session(session.name)
-        task = task_by_ticket.get(ticket_id) if ticket_id else None
-        budget = resolve_headless_budget(task, session, config)
-        elapsed = (now - session.started_at).total_seconds()
-        if elapsed < budget:
-            continue
-        # Before declaring a timeout, try to recover a terminal-success
-        # sentinel the worker emitted before stalling (e.g. waiting on CI).
-        # If found, the session is dispositioned by that sentinel and its
-        # ticket is NOT reverted for re-dispatch. See GitHub issue #372.
-        salvage = _salvage_terminal_result(session)
-        if salvage is not None:
-            result, claude_session_id = salvage
-            _apply_salvaged_completion(session, result, claude_session_id, now=now)
-            salvaged.append((session, ticket_id, result))
-            continue
-        session.status = SessionStatus.TIMED_OUT
-        session.completed_at = now
-        session.completed_reason = CompletionReason.TIMED_OUT
-        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
-        pending.append((session, ticket_id))
-
-    if not pending and not salvaged:
-        return []
-
-    save_state(state)
-
-    timed_out_ticket_ids = {tid for _, tid in pending if tid}
-    salvaged_ticket_ids = {tid for _, tid, _ in salvaged if tid}
-    salvaged_result_by_ticket = {tid: result for _, tid, result in salvaged if tid}
-    reverted: list[str] = []
-    if timed_out_ticket_ids or salvaged_ticket_ids:
-        with dev_queue_lock():
-            store = load_dev_queue()
-            changed = False
-            for task in store.tasks:
-                if task.status != QueueItemStatus.RUNNING:
-                    continue
-                if task.ticket_id in timed_out_ticket_ids:
-                    task.status = QueueItemStatus.PENDING
-                    task.session_id = None
-                    reverted.append(task.ticket_id)
-                    changed = True
-                elif task.ticket_id in salvaged_ticket_ids:
-                    # Terminal-success salvage: retire the task so the
-                    # COMPLETED-silent backstop does not revert it to PENDING
-                    # and re-dispatch already-finished work (#372).
-                    # Paused statuses (ambiguities_pending_resolution,
-                    # premises_pending_verification) route to BLOCKED_ON_USER
-                    # so downstream operators know human input is needed (#471).
-                    result = salvaged_result_by_ticket[task.ticket_id]
-                    task.status = _queue_status_for_salvaged(result)
-                    changed = True
-            if changed:
-                save_dev_queue(store)
-
-    for session, ticket_id in pending:
-        payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "elapsed_seconds": (now - session.started_at).total_seconds(),
-            "last_assistant_message_excerpt": "",
-        }
-        record_event(OrchestratorEventType.SESSION_TIMED_OUT, payload)
-        if session.surface_ref is not None:
-            get_native_daemon_client().stop(session.surface_ref)
-        # Stale-worktree cleanup: the task was reverted to PENDING above, so
-        # the retry must not inherit this run's worktree state (#404).
-        _cleanup_timed_out_worktree(session, ticket_id)
-
-    for session, ticket_id, result in salvaged:
-        completed_payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "crashed": False,
-            "salvaged": True,
-            "status": result.status,
-        }
-        record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
-        if session.surface_ref is not None:
-            get_native_daemon_client().stop(session.surface_ref)
-
-    return reverted
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket=task_by_ticket
+    )
+    return _act_on_stalled_candidates(state, candidates, now=now)
 
 
 def _has_terminal_sentinel(session: Session) -> bool:
