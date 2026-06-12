@@ -249,6 +249,18 @@ class DevQueueStore(BaseModel):
         return [t for t in self.tasks if t.client == client]
 
 
+class ReapPolicy(StrEnum):
+    """Policy controlling whether the reconciler destroys a stalled session.
+
+    Under ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,
+    leave session/worktree/daemon surface intact.  Requires operator action to clear.
+    Under ``AUTO``: self-healing — stop daemon, revert task to PENDING, clean worktree.
+    """
+
+    SIGNAL_ONLY = "signal_only"
+    AUTO = "auto"
+
+
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
 
 
@@ -296,6 +308,22 @@ class OrchestratorConfig(BaseModel):
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.
     idle_confirm_observations: int = 2
+    # Gating policy for destructive reap actions (stop daemon, revert task to
+    # PENDING, remove worktree). Default ``signal_only`` routes stalled/phantom
+    # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
+    # pre-#554 self-healing behavior. See ADR-0006 invariant 4 and GitHub #554.
+    reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_reap_policy(cls, data: object) -> object:
+        """Coerce invalid/absent reap_policy to signal_only (fail-safe, ADR-0006)."""
+        if not isinstance(data, dict):
+            return data
+        val = data.get("reap_policy")
+        if not isinstance(val, str) or val not in {p.value for p in ReapPolicy}:
+            data["reap_policy"] = ReapPolicy.SIGNAL_ONLY
+        return data
 
     @model_validator(mode="before")
     @classmethod
