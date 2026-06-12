@@ -1531,9 +1531,7 @@ class TestFindTicket:
         assert result.status == QueueItemStatus.RUNNING
         assert result.session_id == "sess-579"
 
-    def test_find_completed_only_returns_completed(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_find_completed_only_returns_completed(self, tmp_config_dir: Path) -> None:
         """Only a COMPLETED task in queue → returns it (no live tasks)."""
         task = TicketTask(
             ticket_id="GEN-580",
@@ -1577,9 +1575,7 @@ class TestFindTicket:
         assert "Warning" in captured.err
         assert "GEN-581" in captured.err
 
-    def test_find_blocked_on_user_beats_cancelled(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_find_blocked_on_user_beats_cancelled(self, tmp_config_dir: Path) -> None:
         """BLOCKED_ON_USER wins over CANCELLED when no live (PENDING/RUNNING) task."""
         from datetime import UTC, datetime, timedelta
 
@@ -1604,9 +1600,7 @@ class TestFindTicket:
         result = _find_ticket(loaded, "GEN-582", "genhealth")
         assert result.status == QueueItemStatus.BLOCKED_ON_USER
 
-    def test_find_explicit_created_at_tiebreak(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_find_explicit_created_at_tiebreak(self, tmp_config_dir: Path) -> None:
         """Two RUNNING tasks → max created_at wins regardless of list position."""
         from datetime import UTC, datetime, timedelta
 

@@ -6378,7 +6378,7 @@ class TestDevQueueWaitDuplicateResolution:
     def test_wait_resolves_live_task_over_cancelled(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CANCELLED + RUNNING for same ticket → wait does not short-circuit on CANCELLED.
+        """CANCELLED + RUNNING for same ticket — fast-path must not short-circuit.
 
         With --timeout 0, a non-terminal task triggers exit 124 (timeout).
         If the fast-path mistakenly binds to CANCELLED it would exit 1.
