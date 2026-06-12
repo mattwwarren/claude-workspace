@@ -13,6 +13,7 @@ from cw.cli import main
 from cw.config import load_orchestrator_config
 from cw.dev_queue import (
     _find_ticket,
+    _lock,
     add_ticket,
     cancel_task_for_session,
     cancel_ticket,
@@ -1136,6 +1137,92 @@ class TestMigrateDevQueue:
         raw: dict[str, object] = {"schema_version": 1}
         migrated = migrate_dev_queue(raw)
         assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_v2_to_v3_fills_lane_default(self) -> None:
+        """migrate_dev_queue fills lane on tasks missing it."""
+        raw: dict[str, object] = {
+            "schema_version": 2,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-10",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["lane"] == "default"  # type: ignore[index]
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_v3_lane_preserved_idempotently(self) -> None:
+        """Existing lane values survive a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 3,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-11",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                    "lane": "custom-lane",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["lane"] == "custom-lane"  # type: ignore[index]
+
+    def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
+        """load_dev_queue applies lane migration when loading a v2 file from disk."""
+        import json
+
+        from cw.config import dev_queue_file
+
+        v2_data = {
+            "schema_version": 2,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-12",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        dev_queue_file().write_text(json.dumps(v2_data))
+        store = load_dev_queue()
+        assert store.tasks[0].lane == "default"
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_revert_to_pending_preserves_lane(self, tmp_config_dir: Path) -> None:
+        """Lane value is preserved when a RUNNING task is reverted to PENDING."""
+        task = TicketTask(
+            ticket_id="LANE-RT-1",
+            client="test-client",
+            lane="batch",
+            status=QueueItemStatus.RUNNING,
+        )
+        with _lock():
+            store = load_dev_queue()
+            store.tasks.append(task)
+            save_dev_queue(store)
+
+        # Simulate revert: mutate status in place (as _apply_queue_mutations does)
+        with _lock():
+            store = load_dev_queue()
+            for t in store.tasks:
+                if t.ticket_id == "LANE-RT-1":
+                    t.status = QueueItemStatus.PENDING
+            save_dev_queue(store)
+
+        # Reload and verify lane preserved
+        store = load_dev_queue()
+        reverted = next(t for t in store.tasks if t.ticket_id == "LANE-RT-1")
+        assert reverted.lane == "batch"
+        assert reverted.status == QueueItemStatus.PENDING
 
 
 # ---------------------------------------------------------------------------
