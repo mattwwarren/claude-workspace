@@ -10,6 +10,7 @@ assert on specific checks.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import json
 import subprocess as _sp
@@ -29,6 +30,8 @@ from cw.config import (
     load_clients,
     load_state,
     orchestrator_config_file,
+    save_state,
+    sessions_lock,
     state_file,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
@@ -36,13 +39,14 @@ from cw.events import read_events
 from cw.exceptions import CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
+    CompletionReason,
     DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
 )
-from cw.native_daemon import _ROSTER_PATH
+from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.reconcile import SPAWN_GRACE_SECONDS, reconcile, ticket_id_for_session
 from cw.worktree import _git_dir
 
@@ -685,6 +689,58 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
             )
 
     return results
+
+
+def _reap_session_by_selector(selector: str) -> bool:
+    """Reap a single session by short id or name prefix, regardless of reap_policy.
+
+    Called directly from the CLI ``doctor --reap <SESSION>`` targeted path.
+    Does NOT go through ``run_doctor`` to avoid changing its return type.
+    Uses the same write primitives as the normal reconcile act phase.
+
+    Returns True when the session was found (even if already terminal).
+    Returns False when no session matches *selector*.
+    """
+    with sessions_lock():
+        state = load_state()
+        target = next(
+            (
+                s for s in state.sessions
+                if s.id == selector or s.name == selector
+            ),
+            None,
+        )
+        if target is None:
+            return False
+        if target.status not in (SessionStatus.ACTIVE, SessionStatus.IDLE):
+            # Already terminal — idempotent.
+            return True
+        now = datetime.now(UTC)
+        target.status = SessionStatus.COMPLETED
+        target.completed_at = now
+        target.completed_reason = CompletionReason.USER
+        save_state(state)
+
+    # Stop daemon surface after releasing sessions_lock.
+    if target.surface_ref is not None:
+        with contextlib.suppress(Exception):
+            get_native_daemon_client().stop(target.surface_ref)
+
+    # Revert owning TicketTask to PENDING — separate lock per established pattern.
+    ticket_id = ticket_id_for_session(target.name)
+    if ticket_id:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id == ticket_id
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    save_dev_queue(store)
+                    break
+    return True
 
 
 def run_doctor(*, reap: bool = False) -> DoctorReport:
