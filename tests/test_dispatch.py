@@ -17,7 +17,13 @@ from cw.config import (
     orchestrator_config_file,
     save_state,
 )
-from cw.dev_queue import add_ticket, dev_queue_lock, load_dev_queue, save_dev_queue, save_plan
+from cw.dev_queue import (
+    add_ticket,
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    save_plan,
+)
 from cw.dispatch import (
     DispatchTickResult,
     _accumulate_task_cost,
@@ -29,9 +35,9 @@ from cw.dispatch import (
 from cw.events import read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
+    DEFAULT_LANE,
     ClientConfig,
     CwState,
-    DEFAULT_LANE,
     DevQueueStore,
     DispatchPlan,
     DispatchSkipReason,
@@ -3093,19 +3099,24 @@ class TestTier1ClientSelection:
     def test_max_parallel_clients_limits_eligible_clients(
         self,
         tmp_dispatch_dirs: Path,
-        sample_client_config: ClientConfig,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
-        """With max_parallel_clients=1 and two clients, only one client is dispatched."""
+        """With max_parallel_clients=1 and two clients, only one is dispatched."""
+        ws_a = make_git_repo("workspace/client-a")
+        ws_b = make_git_repo("workspace/client-b")
         client_a = ClientConfig(
             name="client-a",
-            workspace_path=tmp_dispatch_dirs / "workspace" / "client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-a",
         )
         client_b = ClientConfig(
             name="client-b",
-            workspace_path=tmp_dispatch_dirs / "workspace" / "client-b",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-b",
         )
-        client_a.workspace_path.mkdir(parents=True, exist_ok=True)
-        client_b.workspace_path.mkdir(parents=True, exist_ok=True)
 
         config_dir = tmp_dispatch_dirs / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -3114,9 +3125,11 @@ class TestTier1ClientSelection:
             f"  client-a:\n"
             f"    workspace_path: {client_a.workspace_path}\n"
             f"    default_branch: main\n"
+            f"    worktree_base: {client_a.worktree_base}\n"
             f"  client-b:\n"
             f"    workspace_path: {client_b.workspace_path}\n"
             f"    default_branch: main\n"
+            f"    worktree_base: {client_b.worktree_base}\n"
         )
 
         add_ticket(TicketTask(ticket_id="T-A1", client="client-a"))
@@ -3132,34 +3145,41 @@ class TestTier1ClientSelection:
     def test_max_parallel_clients_none_dispatches_all(
         self,
         tmp_dispatch_dirs: Path,
-        sample_client_config: ClientConfig,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
     ) -> None:
-        """With max_parallel_clients=None (default), all eligible clients are dispatched."""
+        """With max_parallel_clients=None (default), all eligible clients dispatched."""
+        ws_a = make_git_repo("workspace/client-a2")
+        ws_b = make_git_repo("workspace/client-b2")
         client_a = ClientConfig(
-            name="client-a",
-            workspace_path=tmp_dispatch_dirs / "workspace" / "client-a",
+            name="client-a2",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-a2",
         )
         client_b = ClientConfig(
-            name="client-b",
-            workspace_path=tmp_dispatch_dirs / "workspace" / "client-b",
+            name="client-b2",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-b2",
         )
-        client_a.workspace_path.mkdir(parents=True, exist_ok=True)
-        client_b.workspace_path.mkdir(parents=True, exist_ok=True)
 
         config_dir = tmp_dispatch_dirs / ".config" / "cw"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "clients.yaml").write_text(
             "clients:\n"
-            f"  client-a:\n"
+            f"  client-a2:\n"
             f"    workspace_path: {client_a.workspace_path}\n"
             f"    default_branch: main\n"
-            f"  client-b:\n"
+            f"    worktree_base: {client_a.worktree_base}\n"
+            f"  client-b2:\n"
             f"    workspace_path: {client_b.workspace_path}\n"
             f"    default_branch: main\n"
+            f"    worktree_base: {client_b.worktree_base}\n"
         )
 
-        add_ticket(TicketTask(ticket_id="T-A1", client="client-a"))
-        add_ticket(TicketTask(ticket_id="T-B1", client="client-b"))
+        add_ticket(TicketTask(ticket_id="T-A2", client="client-a2"))
+        add_ticket(TicketTask(ticket_id="T-B2", client="client-b2"))
 
         config = OrchestratorConfig(max_parallel_clients=None, default_ceiling=1)
         daemon = FakeNativeDaemonClient()
@@ -3182,8 +3202,11 @@ class TestTier2LaneAllocation:
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
-        """Two lanes each with max_parallel=1; two tasks in different lanes → 2 spawned."""
-        lanes = [LaneConfig(name="impl", max_parallel=1), LaneConfig(name="idea", max_parallel=1)]
+        """Two lanes max_parallel=1 each; two tasks in different lanes → 2 spawned."""
+        lanes = [
+            LaneConfig(name="impl", max_parallel=1),
+            LaneConfig(name="idea", max_parallel=1),
+        ]
         client = ClientConfig(
             name="test-client",
             workspace_path=sample_client_config.workspace_path,
@@ -3207,7 +3230,10 @@ class TestTier2LaneAllocation:
         sample_client_config: ClientConfig,
     ) -> None:
         """Lane 'impl' is at capacity; lane 'idea' still spawns."""
-        lanes = [LaneConfig(name="impl", max_parallel=1), LaneConfig(name="idea", max_parallel=1)]
+        lanes = [
+            LaneConfig(name="impl", max_parallel=1),
+            LaneConfig(name="idea", max_parallel=1),
+        ]
         client = ClientConfig(
             name="test-client",
             workspace_path=sample_client_config.workspace_path,
@@ -3217,7 +3243,9 @@ class TestTier2LaneAllocation:
         _make_clients_yaml(tmp_dispatch_dirs, client)
 
         # Seed an active session for the 'impl' lane task
-        impl_task = TicketTask(ticket_id="IMPL-RUNNING", client="test-client", lane="impl")
+        impl_task = TicketTask(
+            ticket_id="IMPL-RUNNING", client="test-client", lane="impl"
+        )
         impl_task.status = QueueItemStatus.RUNNING
         impl_task.session_id = "sess-impl-1"
         with dev_queue_lock():
@@ -3248,7 +3276,11 @@ class TestTier2LaneAllocation:
         # Only idea-lane task spawned; impl lane is saturated
         assert result.spawned == 1
         store = load_dev_queue()
-        running = [t for t in store.tasks if t.status == QueueItemStatus.RUNNING and t.session_id != "sess-impl-1"]
+        running = [
+            t
+            for t in store.tasks
+            if t.status == QueueItemStatus.RUNNING and t.session_id != "sess-impl-1"
+        ]
         assert len(running) == 1
         assert running[0].ticket_id == "IDEA-1"
 
@@ -3258,7 +3290,10 @@ class TestTier2LaneAllocation:
         sample_client_config: ClientConfig,
     ) -> None:
         """_claim_next_pending with lane filter only claims tasks in that lane."""
-        lanes = [LaneConfig(name="impl", max_parallel=1), LaneConfig(name="idea", max_parallel=1)]
+        lanes = [
+            LaneConfig(name="impl", max_parallel=1),
+            LaneConfig(name="idea", max_parallel=1),
+        ]
         client = ClientConfig(
             name="test-client",
             workspace_path=sample_client_config.workspace_path,
@@ -3268,8 +3303,22 @@ class TestTier2LaneAllocation:
         _make_clients_yaml(tmp_dispatch_dirs, client)
 
         # Higher-priority task in wrong lane
-        add_ticket(TicketTask(ticket_id="IMPL-HIGH", client="test-client", lane="impl", priority=10))
-        add_ticket(TicketTask(ticket_id="IDEA-LOW", client="test-client", lane="idea", priority=0))
+        add_ticket(
+            TicketTask(
+                ticket_id="IMPL-HIGH",
+                client="test-client",
+                lane="impl",
+                priority=10,
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="IDEA-LOW",
+                client="test-client",
+                lane="idea",
+                priority=0,
+            )
+        )
 
         config = OrchestratorConfig(default_ceiling=2)
         daemon = FakeNativeDaemonClient()
@@ -3348,7 +3397,7 @@ class TestLaneCapCountingWithBlockedOnUser:
 
 
 class TestSingleLaneBackwardCompat:
-    """No-lanes client uses synthesized default lane; behavior byte-identical to pre-#558."""
+    """No-lanes client: synthesized default lane; byte-identical to pre-#558."""
 
     def test_no_lanes_config_dispatches_same_as_before(
         self,
@@ -3356,7 +3405,7 @@ class TestSingleLaneBackwardCompat:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """A client with no lanes: config dispatches exactly as before (1 task, 1 session)."""
+        """A client with no lanes: dispatches exactly as before (1 task, 1 session)."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="COMPAT-1", client="test-client"))
 
@@ -3387,7 +3436,7 @@ class TestSingleLaneBackwardCompat:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """No-lanes client: second tick with cap=1 and running session does not over-spawn."""
+        """No-lanes client: second tick, cap=1, running session → does not overspawn."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="COMPAT-A", client="test-client"))
         add_ticket(TicketTask(ticket_id="COMPAT-B", client="test-client"))

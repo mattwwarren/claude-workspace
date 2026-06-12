@@ -91,13 +91,14 @@ class DispatchTickResult:
 def _claim_next_pending(
     client_name: str,
     *,
+    lane: str,
     priority_ticket_ids: list[str] | None = None,
 ) -> TicketTask | None:
-    """Atomically claim the next PENDING task for a client.
+    """Atomically claim the next PENDING task for a client in a specific lane.
 
     Acquires the dev-queue file lock, loads the queue, marks the first
-    PENDING task for *client_name* as RUNNING, saves, and returns it.
-    Returns None if no pending task exists for the client.
+    PENDING task for *client_name* in *lane* as RUNNING, saves, and returns it.
+    Returns None if no pending task exists for the client in the lane.
 
     If *priority_ticket_ids* is provided, prefer claiming PENDING tasks in
     that order (only those whose ticket_id appears in the list).  Tasks not
@@ -114,6 +115,7 @@ def _claim_next_pending(
                     if (
                         task.client == client_name
                         and task.ticket_id == ticket_id
+                        and task.lane == lane
                         and task.status == QueueItemStatus.PENDING
                     ):
                         task.status = QueueItemStatus.RUNNING
@@ -124,7 +126,9 @@ def _claim_next_pending(
             [
                 t
                 for t in store.tasks
-                if t.client == client_name and t.status == QueueItemStatus.PENDING
+                if t.client == client_name
+                and t.lane == lane
+                and t.status == QueueItemStatus.PENDING
             ],
             key=lambda t: (-t.priority, t.created_at),
         )
@@ -228,9 +232,7 @@ def dispatch_tick(
                 and s.origin == SessionOrigin.DAEMON
                 and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
             )
-            cap = config.per_client_max_parallel.get(
-                client.name, config.default_max_parallel
-            )
+            cap = config.per_client_ceiling.get(client.name, config.default_ceiling)
             with dev_queue_lock():
                 queue_snapshot = load_dev_queue()
             pending_count = sum(
@@ -238,6 +240,29 @@ def dispatch_tick(
                 for t in queue_snapshot.tasks
                 if t.client == client.name and t.status == QueueItemStatus.PENDING
             )
+            # Compute per-lane breakdown for the event payload (claimed=0 for all).
+            backoff_lane_stats: dict[str, dict[str, int]] = {}
+            for lane_cfg in client.effective_lanes:
+                lane_running = sum(
+                    1
+                    for t in queue_snapshot.tasks
+                    if t.client == client.name
+                    and t.lane == lane_cfg.name
+                    and t.status
+                    in (QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER)
+                )
+                lane_pending = sum(
+                    1
+                    for t in queue_snapshot.tasks
+                    if t.client == client.name
+                    and t.lane == lane_cfg.name
+                    and t.status == QueueItemStatus.PENDING
+                )
+                backoff_lane_stats[lane_cfg.name] = {
+                    "claimed": 0,
+                    "running": lane_running,
+                    "pending": lane_pending,
+                }
             record_event(
                 OrchestratorEventType.DISPATCH_TICK,
                 {
@@ -247,11 +272,20 @@ def dispatch_tick(
                     "running": running_count,
                     "cap": cap,
                     "skip_reason": DispatchSkipReason.USAGE_LIMITED,
+                    "lanes": backoff_lane_stats,
                 },
             )
         return DispatchTickResult(spawned=0, usage_limit_detected=False)
 
+    # Tier-1: optionally cap how many clients are eligible per tick.
+    # max_parallel_clients=None preserves the original behaviour (all clients).
+    dispatched_client_count = 0
     for client in clients.values():
+        if (
+            config.max_parallel_clients is not None
+            and dispatched_client_count >= config.max_parallel_clients
+        ):
+            break
         # --- Freshness gate ---
         # Check whether the client's local default branch is behind origin
         # before claiming any ticket.  Stale repos cause sessions to exit
@@ -282,9 +316,12 @@ def dispatch_tick(
             and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
         )
 
-        cap = config.per_client_max_parallel.get(
-            client.name, config.default_max_parallel
+        # Tier-2 ceiling: per-client slot budget across all lanes.
+        client_ceiling = config.per_client_ceiling.get(
+            client.name, config.default_ceiling
         )
+        # Keep legacy cap alias for freshness-gate and back-off event payloads.
+        cap = client_ceiling
 
         # Pre-claim pending count for dispatch.tick payload. Single lock
         # acquisition — reused for stale_tasks when stale=True (avoids a
@@ -352,192 +389,267 @@ def dispatch_tick(
             )
             continue
 
+        dispatched_client_count += 1
         priority_ids = plan_order_by_client.get(client.name)
         client_spawned = 0
-        cap_full = running_count >= cap
+        cap_full = running_count >= client_ceiling
         spawn_error = False
         usage_limit_detected = False
-        while running_count < cap:
-            task: TicketTask | None = _claim_next_pending(
-                client.name,
-                priority_ticket_ids=priority_ids,
-            )
-            if task is None:
+
+        # Build per-lane running count from tasks→sessions join.
+        # Tasks in RUNNING or BLOCKED_ON_USER with an active session_id count
+        # toward their lane's cap (ADR-0006: BLOCKED_ON_USER occupies the slot).
+        running_by_lane: dict[str, int] = {}
+        with dev_queue_lock():
+            queue_snapshot = load_dev_queue()
+        for qt in queue_snapshot.tasks:
+            if qt.client != client.name:
+                continue
+            if qt.status not in (
+                QueueItemStatus.RUNNING,
+                QueueItemStatus.BLOCKED_ON_USER,
+            ):
+                continue
+            lane_key = qt.lane
+            running_by_lane[lane_key] = running_by_lane.get(lane_key, 0) + 1
+
+        # Resolve effective lanes. For clients with no declared lanes, use the
+        # synthesized default lane but override its max_parallel with the client
+        # ceiling so backward-compat behaviour is preserved.
+        effective_lanes = client.effective_lanes
+        if not client.lanes:
+            effective_lanes = [
+                effective_lanes[0].model_copy(update={"max_parallel": client_ceiling})
+            ]
+
+        # Tier-1 client slot budget: use the session-based running_count (not
+        # the task-based total_running) so pre-existing DAEMON sessions without
+        # a corresponding task still occupy slots (backward compat). The per-
+        # lane running_by_lane counts govern per-lane grants within this budget.
+        available_client_slots = client_ceiling - running_count
+        lane_stats: dict[str, dict[str, int]] = {}
+
+        for lane_cfg in effective_lanes:
+            if available_client_slots <= 0:
                 break
+            if lane_cfg.paused:
+                continue
+            running_in_lane = running_by_lane.get(lane_cfg.name, 0)
+            pending_in_lane = sum(
+                1
+                for t in queue_snapshot.tasks
+                if t.client == client.name
+                and t.lane == lane_cfg.name
+                and t.status == QueueItemStatus.PENDING
+            )
+            grant = min(
+                lane_cfg.max_parallel - running_in_lane,
+                pending_in_lane,
+                available_client_slots,
+            )
+            lane_claimed = 0
+            for _ in range(max(0, grant)):
+                task: TicketTask | None = _claim_next_pending(
+                    client.name,
+                    lane=lane_cfg.name,
+                    priority_ticket_ids=priority_ids,
+                )
+                if task is None:
+                    break
 
-            try:
-                branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
-                # Create a real git worktree (idempotent — returns existing
-                # path if already created). Replaces a previous bug where
-                # dispatch made an empty directory and relied on
-                # ``claude -w`` to turn it into a worktree, which never
-                # worked because that flag takes a name rather than a path.
                 try:
-                    worktree_path = create_worktree(client, branch)
-                except StaleWorktreeError:
-                    # A stale worktree (wrong branch / not a worktree) refused
-                    # reuse (#404). No session exists yet, so reconcile's
-                    # TIMED_OUT cleanup will never fire for it — without
-                    # removing it here the task reverts to PENDING and re-hits
-                    # the same stale tree every tick (an infinite spin). Force-
-                    # remove it (best-effort) so the next claim rebuilds fresh,
-                    # then re-raise into the handler below to revert to PENDING.
-                    # Caught narrowly as StaleWorktreeError (not WorktreeError)
-                    # so the main-checkout guard never triggers a removal.
-                    #
-                    # Dirty-check guard (#425): if the stale tree contains
-                    # unsaved work, skip the removal and park the task as
-                    # BLOCKED_ON_USER instead of PENDING so the operator can
-                    # inspect. The outer except handler will not overwrite
-                    # BLOCKED_ON_USER (it checks status == RUNNING before
-                    # reverting).
-                    if worktree_has_unsaved_work(client, branch):
-                        _log.warning(
-                            "dispatch: stale worktree %s/%s has unsaved work"
-                            " — leaving for operator inspection; parking as"
-                            " BLOCKED_ON_USER",
-                            client.name,
-                            branch,
-                        )
-                        with dev_queue_lock():
-                            store = load_dev_queue()
-                            for stored_task in store.tasks:
-                                if (
-                                    stored_task.ticket_id == task.ticket_id
-                                    and stored_task.client == client.name
-                                    and stored_task.status == QueueItemStatus.RUNNING
-                                ):
-                                    stored_task.status = QueueItemStatus.BLOCKED_ON_USER
-                                    stored_task.session_id = None
-                                    break
-                            save_dev_queue(store)
-                    else:
-                        with contextlib.suppress(WorktreeError, OSError):
-                            remove_worktree(client, branch, force=True)
-                    raise
+                    branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
+                    # Create a real git worktree (idempotent — returns existing
+                    # path if already created). Replaces a previous bug where
+                    # dispatch made an empty directory and relied on
+                    # ``claude -w`` to turn it into a worktree, which never
+                    # worked because that flag takes a name rather than a path.
+                    try:
+                        worktree_path = create_worktree(client, branch)
+                    except StaleWorktreeError:
+                        # A stale worktree (wrong branch / not a worktree) refused
+                        # reuse (#404). No session exists yet, so reconcile's
+                        # TIMED_OUT cleanup will never fire for it — without
+                        # removing it here the task reverts to PENDING and re-hits
+                        # the same stale tree every tick (an infinite spin). Force-
+                        # remove it (best-effort) so the next claim rebuilds fresh,
+                        # then re-raise into the handler below to revert to PENDING.
+                        # Caught narrowly as StaleWorktreeError (not WorktreeError)
+                        # so the main-checkout guard never triggers a removal.
+                        #
+                        # Dirty-check guard (#425): if the stale tree contains
+                        # unsaved work, skip the removal and park the task as
+                        # BLOCKED_ON_USER instead of PENDING so the operator can
+                        # inspect. The outer except handler will not overwrite
+                        # BLOCKED_ON_USER (it checks status == RUNNING before
+                        # reverting).
+                        if worktree_has_unsaved_work(client, branch):
+                            _log.warning(
+                                "dispatch: stale worktree %s/%s has unsaved work"
+                                " — leaving for operator inspection; parking as"
+                                " BLOCKED_ON_USER",
+                                client.name,
+                                branch,
+                            )
+                            with dev_queue_lock():
+                                store = load_dev_queue()
+                                for stored_task in store.tasks:
+                                    if (
+                                        stored_task.ticket_id == task.ticket_id
+                                        and stored_task.client == client.name
+                                        and stored_task.status
+                                        == QueueItemStatus.RUNNING
+                                    ):
+                                        stored_task.status = (
+                                            QueueItemStatus.BLOCKED_ON_USER
+                                        )
+                                        stored_task.session_id = None
+                                        break
+                                save_dev_queue(store)
+                        else:
+                            with contextlib.suppress(WorktreeError, OSError):
+                                remove_worktree(client, branch, force=True)
+                        raise
 
-                # Guard against the #300 regression: if create_worktree
-                # returns the main checkout path (degenerate path-computation
-                # or symlink indirection), refuse the spawn.  create_worktree
-                # normally catches this itself, but a mocked or buggy
-                # implementation could still return the same path.
-                check_not_main_checkout(worktree_path, client)
+                    # Guard against the #300 regression: if create_worktree
+                    # returns the main checkout path (degenerate path-computation
+                    # or symlink indirection), refuse the spawn.  create_worktree
+                    # normally catches this itself, but a mocked or buggy
+                    # implementation could still return the same path.
+                    check_not_main_checkout(worktree_path, client)
 
-                label = branch
-                session_id = spawn_create_impl(
-                    client=client,
-                    worktree=worktree_path,
-                    prompt=f"/auto-dev {task.ticket_id} --headless",
-                    label=label,
-                    native_daemon=resolved_native_daemon,
-                    parent=parent,
-                    ticket_id=task.ticket_id,
-                    headless=True,
-                    task=task,
-                    wall_clock_budget_seconds=resolve_headless_budget(
-                        task, None, config
-                    ),
-                )
-
-                # Stamp session_id on the queued task so the completion
-                # consumer can match SESSION_COMPLETED events to the
-                # correct (current) session and reject stale events from
-                # prior crashed sessions for the same ticket. See GitHub
-                # issue #97.
-                with dev_queue_lock():
-                    store = load_dev_queue()
-                    for stored_task in store.tasks:
-                        if (
-                            stored_task.ticket_id == task.ticket_id
-                            and stored_task.client == client.name
-                            and stored_task.status == QueueItemStatus.RUNNING
-                        ):
-                            stored_task.session_id = session_id
-                            break
-                    save_dev_queue(store)
-
-                record_event(
-                    OrchestratorEventType.SESSION_SPAWNED,
-                    {
-                        "ticket_id": task.ticket_id,
-                        "client": client.name,
-                        "session_id": session_id,
-                    },
-                )
-
-                if emit is not None:
-                    emit(
-                        f"SPAWN {client.name}/{task.ticket_id}"
-                        f" session={session_id}"
-                        f" worktree={worktree_path}"
+                    label = branch
+                    session_id = spawn_create_impl(
+                        client=client,
+                        worktree=worktree_path,
+                        prompt=f"/auto-dev {task.ticket_id} --headless",
+                        label=label,
+                        native_daemon=resolved_native_daemon,
+                        parent=parent,
+                        ticket_id=task.ticket_id,
+                        headless=True,
+                        task=task,
+                        wall_clock_budget_seconds=resolve_headless_budget(
+                            task, None, config
+                        ),
                     )
 
-                running_count += 1
-                spawned += 1
-                client_spawned += 1
-            except UsageLimitError:
-                # Narrow catch for fleet-wide usage limits. Raised by
-                # spawn_create_impl → NativeDaemonClient.spawn_bg when the
-                # claude output matches USAGE_LIMIT_RE. The task was claimed
-                # to RUNNING but no session_id was assigned (spawn failed);
-                # revert it explicitly to PENDING below, then break so no
-                # further slots are tried this tick.
-                usage_limit_detected = True
-                any_usage_limit_detected = True
-                _log.warning(
-                    "dispatch_tick: usage limit detected for %s/%s; setting back-off",
-                    client.name,
-                    task.ticket_id,
-                )
-                # Revert the claimed task back to PENDING — spawn never succeeded.
-                with dev_queue_lock():
-                    store = load_dev_queue()
-                    for stored_task in store.tasks:
-                        if (
-                            stored_task.ticket_id == task.ticket_id
-                            and stored_task.client == client.name
-                            and stored_task.status == QueueItemStatus.RUNNING
-                        ):
-                            stored_task.status = QueueItemStatus.PENDING
-                            stored_task.session_id = None
-                            break
-                    save_dev_queue(store)
-                break  # do not retry other slots this tick
-            except Exception:  # noqa: BLE001
-                # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
-                # Paired tests: TestDispatchTickSpawnErrors in
-                # tests/test_dispatch.py:1097+ (asserts the loop survives
-                # spawn failures and the task is reverted to PENDING).
-                #
-                # Catch broad like the reconcile guard above: a backend
-                # outage (tmux pane exhaustion, transient daemon failure,
-                # OSError from the adapter) must NOT kill the loop. The
-                # task was just claimed RUNNING by _claim_next_pending; it
-                # would otherwise be left in a half-state (status=RUNNING,
-                # session_id=None) requiring manual repair. Revert to
-                # PENDING + clear session_id so the next tick (or
-                # reconcile) can retry. Break to skip this client's
-                # remaining slots this tick — re-trying the same failing
-                # backend immediately would just spin. See GitHub issue
-                # #149.
-                spawn_error = True
-                _log.exception(
-                    "dispatch_tick: spawn failed for %s/%s; reverting task to PENDING",
-                    client.name,
-                    task.ticket_id,
-                )
-                with dev_queue_lock():
-                    store = load_dev_queue()
-                    for stored_task in store.tasks:
-                        if (
-                            stored_task.ticket_id == task.ticket_id
-                            and stored_task.client == client.name
-                            and stored_task.status == QueueItemStatus.RUNNING
-                        ):
-                            stored_task.status = QueueItemStatus.PENDING
-                            stored_task.session_id = None
-                            break
-                    save_dev_queue(store)
+                    # Stamp session_id on the queued task so the completion
+                    # consumer can match SESSION_COMPLETED events to the
+                    # correct (current) session and reject stale events from
+                    # prior crashed sessions for the same ticket. See GitHub
+                    # issue #97.
+                    with dev_queue_lock():
+                        store = load_dev_queue()
+                        for stored_task in store.tasks:
+                            if (
+                                stored_task.ticket_id == task.ticket_id
+                                and stored_task.client == client.name
+                                and stored_task.status == QueueItemStatus.RUNNING
+                            ):
+                                stored_task.session_id = session_id
+                                break
+                        save_dev_queue(store)
+
+                    record_event(
+                        OrchestratorEventType.SESSION_SPAWNED,
+                        {
+                            "ticket_id": task.ticket_id,
+                            "client": client.name,
+                            "session_id": session_id,
+                            "lane": task.lane,
+                        },
+                    )
+
+                    if emit is not None:
+                        emit(
+                            f"SPAWN {client.name}/{task.ticket_id}"
+                            f" session={session_id}"
+                            f" worktree={worktree_path}"
+                        )
+
+                    running_count += 1
+                    spawned += 1
+                    client_spawned += 1
+                    lane_claimed += 1
+                    available_client_slots -= 1
+                except UsageLimitError:
+                    # Narrow catch for fleet-wide usage limits. Raised by
+                    # spawn_create_impl → NativeDaemonClient.spawn_bg when the
+                    # claude output matches USAGE_LIMIT_RE. The task was claimed
+                    # to RUNNING but no session_id was assigned (spawn failed);
+                    # revert it explicitly to PENDING below, then break so no
+                    # further slots are tried this tick.
+                    usage_limit_detected = True
+                    any_usage_limit_detected = True
+                    _log.warning(
+                        "dispatch_tick: usage limit detected for"
+                        " %s/%s; setting back-off",
+                        client.name,
+                        task.ticket_id,
+                    )
+                    # Revert the claimed task back to PENDING — spawn never succeeded.
+                    with dev_queue_lock():
+                        store = load_dev_queue()
+                        for stored_task in store.tasks:
+                            if (
+                                stored_task.ticket_id == task.ticket_id
+                                and stored_task.client == client.name
+                                and stored_task.status == QueueItemStatus.RUNNING
+                            ):
+                                stored_task.status = QueueItemStatus.PENDING
+                                stored_task.session_id = None
+                                break
+                        save_dev_queue(store)
+                    break  # do not retry other slots this tick
+                except Exception:  # noqa: BLE001
+                    # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
+                    # Paired tests: TestDispatchTickSpawnErrors in
+                    # tests/test_dispatch.py:1097+ (asserts the loop survives
+                    # spawn failures and the task is reverted to PENDING).
+                    #
+                    # Catch broad like the reconcile guard above: a backend
+                    # outage (tmux pane exhaustion, transient daemon failure,
+                    # OSError from the adapter) must NOT kill the loop. The
+                    # task was just claimed RUNNING by _claim_next_pending; it
+                    # would otherwise be left in a half-state (status=RUNNING,
+                    # session_id=None) requiring manual repair. Revert to
+                    # PENDING + clear session_id so the next tick (or
+                    # reconcile) can retry. Break to skip this client's
+                    # remaining slots this tick — re-trying the same failing
+                    # backend immediately would just spin. See GitHub issue
+                    # #149.
+                    spawn_error = True
+                    _log.exception(
+                        "dispatch_tick: spawn failed for %s/%s;"
+                        " reverting task to PENDING",
+                        client.name,
+                        task.ticket_id,
+                    )
+                    with dev_queue_lock():
+                        store = load_dev_queue()
+                        for stored_task in store.tasks:
+                            if (
+                                stored_task.ticket_id == task.ticket_id
+                                and stored_task.client == client.name
+                                and stored_task.status == QueueItemStatus.RUNNING
+                            ):
+                                stored_task.status = QueueItemStatus.PENDING
+                                stored_task.session_id = None
+                                break
+                        save_dev_queue(store)
+                    break
+
+                if usage_limit_detected or spawn_error:
+                    break
+
+            lane_stats[lane_cfg.name] = {
+                "claimed": lane_claimed,
+                "running": running_in_lane,
+                "pending": pending_in_lane,
+            }
+
+            if usage_limit_detected or spawn_error:
                 break
 
         if emit is not None:
@@ -570,6 +682,7 @@ def dispatch_tick(
                 "running": running_count,
                 "cap": cap,
                 "skip_reason": skip_reason,
+                "lanes": lane_stats,
             },
         )
 
@@ -802,9 +915,7 @@ def run_dispatch_loop(
             if max_parallel is not None:
                 clients = load_clients()
                 overridden = dict.fromkeys(clients, max_parallel)
-                config = config.model_copy(
-                    update={"per_client_max_parallel": overridden}
-                )
+                config = config.model_copy(update={"per_client_ceiling": overridden})
         except (yaml.YAMLError, pydantic.ValidationError):
             _log.warning("dispatch: config reload failed; using last-good config")
 
