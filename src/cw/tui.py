@@ -31,10 +31,12 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 from rich.console import Console, Group
 from rich.live import Live
+from rich.markup import escape as markup_escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from cw.models import DEFAULT_LANE
 from cw.orchestrate import (
     EventSummary,
     MonitoredPR,
@@ -161,7 +163,13 @@ def _tickets_table(
         tickets,
         key=lambda t: (-t.priority, t.created_at),
     ):
-        row = [ticket.ticket_id, str(ticket.priority)]
+        raw = (
+            ticket.ticket_id
+            if ticket.lane == DEFAULT_LANE
+            else f"{ticket.ticket_id} [{ticket.lane}]"
+        )
+        ticket_id_display = markup_escape(raw)
+        row = [ticket_id_display, str(ticket.priority)]
         if level is DetailLevel.VERBOSE:
             row.append(ticket.scope_hint or "—")
         table.add_row(*row)

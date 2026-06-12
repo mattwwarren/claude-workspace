@@ -63,6 +63,7 @@ from cw.doctor import (
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
+    DEFAULT_LANE,
     ClientConfig,
     CompletionReason,
     OrchestratorEventType,
@@ -1609,6 +1610,32 @@ def dev_queue_clear(client: str, status_filter: str | None) -> None:
     click.echo(f"Cleared {count} dev-queue task(s) for {client}.")
 
 
+def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
+    """Print indented lane lines for tasks when multi-lane or non-default lanes used.
+
+    Groups tasks by lane and emits one line per lane showing pending, running,
+    and blocked counts.  Skipped when all tasks share the single default lane.
+    """
+    # Collect lanes that are either non-default OR appear alongside other lanes
+    lanes_seen: set[str] = {t.lane for t in tasks}
+    if len(lanes_seen) <= 1 and lanes_seen == {DEFAULT_LANE}:
+        return
+    by_lane: dict[str, list[TicketTask]] = {}
+    for task in tasks:
+        by_lane.setdefault(task.lane, []).append(task)
+    for lane_name in sorted(by_lane):
+        lane_tasks = by_lane[lane_name]
+        pending = sum(1 for t in lane_tasks if t.status == QueueItemStatus.PENDING)
+        running = sum(1 for t in lane_tasks if t.status == QueueItemStatus.RUNNING)
+        blocked = sum(
+            1 for t in lane_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER
+        )
+        click.echo(
+            f"    lane {lane_name}:"
+            f" pending={pending} running={running} blocked={blocked}"
+        )
+
+
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
 @handle_errors
@@ -1663,6 +1690,7 @@ def dev_queue_status(client: str | None) -> None:
                     f"  running={tick.running}/{tick.cap}"
                     f"  skip={tick.skip_reason}"
                 )
+                _emit_dev_queue_lane_breakdown(by_client[client_name])
 
 
 @dev_queue.command(name="run")
@@ -2118,6 +2146,15 @@ def orchestrate() -> None:
     """Orchestrator pipeline: status snapshot and PR retirement."""
 
 
+def _should_show_lane_breakdown(lanes: dict[str, dict[str, int]]) -> bool:
+    """Return True when lane breakdown adds information beyond the top-level totals."""
+    if not lanes:
+        return False
+    if len(lanes) > 1:
+        return True
+    return next(iter(lanes)) != DEFAULT_LANE
+
+
 def _format_status_human(status: OrchestratorStatus) -> str:
     """Render an OrchestratorStatus as a human-readable string."""
     ts = status.generated_at.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2138,6 +2175,13 @@ def _format_status_human(status: OrchestratorStatus) -> str:
                 f"  skip={tick.skip_reason}"
                 f"  at={tick.tick_at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
             )
+            if _should_show_lane_breakdown(tick.lanes):
+                for lane_name, stats in sorted(tick.lanes.items()):
+                    lines.append(
+                        f"    {lane_name}: claimed={stats.get('claimed', 0)}"
+                        f" running={stats.get('running', 0)}"
+                        f" pending={stats.get('pending', 0)}"
+                    )
     else:
         lines.append("  (no dispatch ticks recorded)")
 

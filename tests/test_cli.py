@@ -5095,6 +5095,76 @@ class TestFormatStatusHuman:
         assert "ci=(none)" in output
         assert "mergeable=(none)" in output
 
+    def test_format_status_human_multi_lane_shows_indented_lines(self) -> None:
+        """Multi-lane tick renders indented lane lines after the client summary."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import OrchestratorStatus, TickSummary
+
+        tick = TickSummary(
+            claimed=1,
+            pending=2,
+            running=1,
+            cap=3,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            lanes={
+                "fast": {"claimed": 1, "running": 1, "pending": 0},
+                "slow": {"claimed": 0, "running": 0, "pending": 2},
+            },
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            last_tick_by_client={"lane-client": tick},
+        )
+        output = _format_status_human(status)
+        assert "    fast: claimed=1 running=1 pending=0" in output
+        assert "    slow: claimed=0 running=0 pending=2" in output
+
+    def test_format_status_human_single_default_lane_no_indented_lines(self) -> None:
+        """Single 'default' lane tick does not render indented lane lines."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import OrchestratorStatus, TickSummary
+
+        tick = TickSummary(
+            claimed=1,
+            pending=0,
+            running=1,
+            cap=2,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            lanes={"default": {"claimed": 1, "running": 1, "pending": 0}},
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            last_tick_by_client={"single-client": tick},
+        )
+        output = _format_status_human(status)
+        # No indented lane breakdown when the only lane is DEFAULT_LANE
+        assert "    default:" not in output
+        assert "    fast:" not in output
+
+    def test_format_status_human_empty_lanes_no_indented_lines(self) -> None:
+        """Empty lanes dict renders no indented lane lines (legacy events)."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import OrchestratorStatus, TickSummary
+
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=2,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            lanes={},
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            last_tick_by_client={"empty-lanes-client": tick},
+        )
+        output = _format_status_human(status)
+        # No lane breakdown lines at all
+        assert "    " not in output.split("Last dispatch tick")[1].split("\n\n")[0]
+
 
 class TestDevQueueStatusWithTick:
     def test_dev_queue_status_shows_last_tick(
@@ -5132,6 +5202,123 @@ class TestDevQueueStatusWithTick:
         assert "tick-client" in result.output
         assert "claimed=1" in result.output
         assert "skip=cap_full" in result.output
+
+    def test_dev_queue_status_multi_lane_shows_indented_lines(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Multi-lane tasks produce indented lane breakdown after client summary."""
+        from cw.dev_queue import add_ticket
+        from cw.events import record_event
+        from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1",
+                client="multi-client",
+                priority=5,
+                status=QueueItemStatus.PENDING,
+                lane="fast",
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-2",
+                client="multi-client",
+                priority=3,
+                status=QueueItemStatus.PENDING,
+                lane="slow",
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "multi-client",
+                "claimed": 0,
+                "pending": 2,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                "lanes": {
+                    "fast": {"claimed": 0, "running": 0, "pending": 1},
+                    "slow": {"claimed": 0, "running": 0, "pending": 1},
+                },
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "    lane fast:" in result.output
+        assert "    lane slow:" in result.output
+
+    def test_dev_queue_status_single_default_lane_no_indented_lines(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Single default-lane tick renders no indented lane lines."""
+        from cw.dev_queue import add_ticket
+        from cw.events import record_event
+        from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-3",
+                client="default-client",
+                priority=5,
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "default-client",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                "lanes": {"default": {"claimed": 0, "running": 0, "pending": 1}},
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        # No indented lane breakdown for single default lane
+        assert "    lane default:" not in result.output
+        assert "    lane fast:" not in result.output
+
+    def test_dev_queue_status_blocked_on_user_shows_in_lane(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """BLOCKED_ON_USER task in non-default lane shows blocked=1 in lane line."""
+        from cw.dev_queue import add_ticket
+        from cw.events import record_event
+        from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-4",
+                client="blocked-client",
+                priority=5,
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                lane="fast",
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "blocked-client",
+                "claimed": 0,
+                "pending": 0,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                "lanes": {"fast": {"claimed": 0, "running": 0, "pending": 0}},
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "    lane fast:" in result.output
+        assert "blocked=1" in result.output
 
 
 # ---------------------------------------------------------------------------
