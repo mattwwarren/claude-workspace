@@ -1561,9 +1561,11 @@ class TestOrchestrateStart:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """start --lane <declared> spawns an ORCHESTRATE session with correct metadata."""
-        workspace = _write_client_with_lane(tmp_config_dir, "impl")
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+        """start --lane <declared> spawns ORCHESTRATE session with correct metadata."""
+        _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr(
+            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+        )
 
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrate", "start", "--lane", "impl"])
@@ -1586,7 +1588,9 @@ class TestOrchestrateStart:
     ) -> None:
         """start --lane <undeclared> exits non-zero with LaneNotFoundError message."""
         _write_client_with_lane(tmp_config_dir, "impl")
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+        monkeypatch.setattr(
+            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+        )
 
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrate", "start", "--lane", "no-such-lane"])
@@ -1602,7 +1606,9 @@ class TestOrchestrateStart:
     ) -> None:
         """Second start on a lane with a live ORCHESTRATE session is rejected."""
         workspace = _write_client_with_lane(tmp_config_dir, "impl")
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+        monkeypatch.setattr(
+            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+        )
 
         # Seed a live ORCHESTRATE session for the lane.
         existing = Session(
@@ -1631,7 +1637,9 @@ class TestOrchestrateStart:
     ) -> None:
         """start succeeds when prior ORCHESTRATE session for lane is COMPLETED."""
         workspace = _write_client_with_lane(tmp_config_dir, "impl")
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+        monkeypatch.setattr(
+            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+        )
 
         # Prior ORCHESTRATE session is COMPLETED (terminal) — rebind allowed.
         old = Session(
@@ -1667,7 +1675,9 @@ class TestOrchestrateStart:
     ) -> None:
         """--json emits parseable JSON with session_id, lane, client keys."""
         _write_client_with_lane(tmp_config_dir, "impl")
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
+        monkeypatch.setattr(
+            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+        )
 
         runner = CliRunner()
         result = runner.invoke(

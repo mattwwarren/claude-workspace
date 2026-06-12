@@ -68,7 +68,12 @@ from cw.doctor import (
     run_doctor,
 )
 from cw.events import advance_cursor, read_events, record_event
-from cw.exceptions import CwError, LaneNotFoundError, MissingWorkspaceError, WorktreeError
+from cw.exceptions import (
+    CwError,
+    LaneNotFoundError,
+    MissingWorkspaceError,
+    WorktreeError,
+)
 from cw.models import (
     DEFAULT_LANE,
     WORKER_PURPOSES,
@@ -2704,7 +2709,11 @@ def orchestrate_start(lane: str, client_name: str | None, as_json: bool) -> None
 
     # R5: Reject if a live ORCHESTRATE session already exists for (client, lane)
     state = load_state()
-    live_statuses = {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
+    live_statuses = {
+        SessionStatus.ACTIVE,
+        SessionStatus.IDLE,
+        SessionStatus.BACKGROUNDED,
+    }
     existing = next(
         (
             s
@@ -2743,7 +2752,9 @@ def orchestrate_start(lane: str, client_name: str | None, as_json: bool) -> None
 
     if as_json:
         click.echo(
-            json.dumps({"session_id": session_id, "lane": lane, "client": client_cfg.name})
+            json.dumps(
+                {"session_id": session_id, "lane": lane, "client": client_cfg.name}
+            )
         )
     else:
         click.echo(f"Spawned orchestrate session for lane '{lane}': {session_id}")

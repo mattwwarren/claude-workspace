@@ -1964,7 +1964,7 @@ def test_spawn_create_impl_orchestrate_purpose(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """spawn_create_impl with purpose=ORCHESTRATE stamps session.purpose and writes purpose.value to hook context."""
+    """spawn_create_impl(purpose=ORCHESTRATE) stamps session.purpose and context."""
     from cw.spawn import spawn_create_impl
 
     client = _make_client(tmp_path)
