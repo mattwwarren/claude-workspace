@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from cw.exceptions import MissingWorkspaceError, StaleWorktreeError, WorktreeError
 
@@ -506,7 +506,65 @@ def is_main_behind_origin(
     return (behind_count > 0, local_sha, origin_sha, behind_count)
 
 
-def fast_forward_main(client: ClientConfig) -> tuple[str, str]:
+def check_main_ff_safety(
+    client: ClientConfig,
+) -> Literal["equal", "behind", "ahead", "diverged", "detached"]:
+    """Classify local main's relationship to origin for dispatch auto-ff.
+
+    Returns one of:
+      "behind"   — local main is strictly behind origin; fast-forward is safe
+      "equal"    — local main matches origin; no action needed
+      "ahead"    — local main has unpushed commits; operator action required
+      "diverged" — local main has both new commits and is behind; needs reconciliation
+      "detached" — HEAD is detached; fast-forward would be unsafe
+
+    Operative outcomes from the dispatch path (when stale=True is already
+    established): "behind" triggers auto-ff; "diverged" and "detached" fall
+    through to TICKET_NEEDS_SYNC + warn. "equal" and "ahead" exist for
+    defensive completeness but are not reachable from the stale=True path.
+    """
+    git_dir = _git_dir(client)
+    default_branch = client.default_branch
+
+    # Detached HEAD check — symbolic-ref exits non-zero when detached.
+    # Prior art: _checked_out_branch() at line 148; fast_forward_main() below.
+    sym = _run_git("symbolic-ref", "--short", "HEAD", cwd=git_dir, check=False)
+    if sym.returncode != 0:
+        return "detached"
+
+    # Two merge-base --is-ancestor calls for directional classification.
+    main_behind = _run_git(
+        "merge-base",
+        "--is-ancestor",
+        default_branch,
+        f"origin/{default_branch}",
+        cwd=git_dir,
+        check=False,
+    )
+    origin_behind = _run_git(
+        "merge-base",
+        "--is-ancestor",
+        f"origin/{default_branch}",
+        default_branch,
+        cwd=git_dir,
+        check=False,
+    )
+    # returncode 0 means the first arg is a reachable ancestor of the second.
+    is_main_ancestor = main_behind.returncode == 0  # main ≤ origin → behind
+    is_origin_ancestor = origin_behind.returncode == 0  # origin ≤ main → ahead
+
+    if is_main_ancestor and is_origin_ancestor:
+        return "equal"
+    if is_main_ancestor:
+        return "behind"
+    if is_origin_ancestor:
+        return "ahead"
+    return "diverged"
+
+
+def fast_forward_main(
+    client: ClientConfig, *, ignore_untracked: bool = False
+) -> tuple[str, str]:
     """Fast-forward the client's local default branch to origin.
 
     Runs ``git pull --ff-only origin <default_branch>`` in the client's git
@@ -537,9 +595,15 @@ def fast_forward_main(client: ClientConfig) -> tuple[str, str]:
         )
         raise WorktreeError(msg)
 
-    # Guard 2: ensure the working tree is clean.
-    status_out = _run_git("status", "--porcelain", cwd=git_dir).stdout.strip()
-    if status_out:
+    # Guard 2: ensure the working tree is clean (or only has untracked files).
+    status_out = _run_git("status", "--porcelain", cwd=git_dir).stdout
+    status_lines = status_out.splitlines()
+    if ignore_untracked:
+        # Why: dispatch auto-ff may run against a workspace with untracked runtime
+        # artifacts (.claude/scheduled_tasks.lock etc.); git pull --ff-only is
+        # safe with untracked files because ff-only never rewrites the working tree.
+        status_lines = [line for line in status_lines if line[:2] != "??"]
+    if status_lines:
         msg = (
             f"Refusing to fast-forward {client.name}: working tree is dirty "
             f"(git status --porcelain reported changes). "
