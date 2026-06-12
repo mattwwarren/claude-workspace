@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -491,6 +492,85 @@ def test_cli_event_tail_type_filter_stage_entered(tmp_events_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "stage.entered" in result.output
     assert "pr.merged" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Robustness: cursor-not-found fallback + torn-read guard (issue #393)
+# ---------------------------------------------------------------------------
+
+
+def test_read_events_cursor_not_found_replays_from_start(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """cursor pointing at nonexistent event id replays all events from the start."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+    ev3 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 3})
+
+    # Persist a cursor pointing at a nonexistent event id
+    nonexistent_id = "deadbeef-0000-1111-2222-333333333333"
+    advance_cursor("stale_consumer", nonexistent_id)
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        result = read_events(consumer="stale_consumer")
+
+    assert len(result) == 3
+    assert result[0].id == ev1.id
+    assert result[1].id == ev2.id
+    assert result[2].id == ev3.id
+    assert any(nonexistent_id in record.message for record in caplog.records)
+
+
+def test_read_events_torn_final_line_skipped(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Malformed trailing line (torn write) is skipped with a warning."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+
+    # Append partial JSON with NO trailing newline (simulate torn write)
+    inbox = tmp_events_dir / "inbox.jsonl"
+    with inbox.open("a") as f:
+        f.write('{"type": "pr.registered", "incomplete"')  # no trailing newline
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        result = read_events()
+
+    assert len(result) == 2
+    assert result[0].id == ev1.id
+    assert result[1].id == ev2.id
+    assert any("malformed" in record.message for record in caplog.records)
+
+
+def test_read_events_torn_interior_line_raises(tmp_events_dir: Path) -> None:
+    """Interior corrupt line (with trailing newline) raises JSONDecodeError."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    # Append invalid JSON with trailing newline — interior (not last line)
+    inbox = tmp_events_dir / "inbox.jsonl"
+    with inbox.open("a") as f:
+        f.write('{"type": "bad", "broken"\n')  # trailing newline = interior
+
+    events_record_event(OrchestratorEventType.PR_MERGED, {"n": 3})
+
+    with pytest.raises(json.JSONDecodeError):
+        read_events()
+
+
+def test_read_events_normal_cursor_semantics_unchanged(tmp_events_dir: Path) -> None:
+    """Normal cursor semantics: only events after the cursor are returned."""
+    ev_a = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev_b = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+    ev_c = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 3})
+
+    advance_cursor("normal_consumer", ev_b.id)
+    result = read_events(consumer="normal_consumer")
+
+    assert len(result) == 1
+    assert result[0].id == ev_c.id
+    ids = {e.id for e in result}
+    assert ev_a.id not in ids
+    assert ev_b.id not in ids
 
 
 def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:

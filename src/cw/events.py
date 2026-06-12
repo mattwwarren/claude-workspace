@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,8 @@ from cw.models import OrchestratorEvent, OrchestratorEventType
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _inbox_path() -> Path:
@@ -101,6 +104,47 @@ def advance_cursor(consumer: str, event_id: str) -> None:
     atomic_write_text(path, json.dumps(data))
 
 
+def _event_matches(
+    event: OrchestratorEvent,
+    *,
+    since_ts: datetime | None,
+    event_types: list[OrchestratorEventType] | None,
+) -> bool:
+    """Return True if *event* passes the timestamp and type filters."""
+    if since_ts is not None and event.created_at < since_ts:
+        return False
+    return event_types is None or event.type in event_types
+
+
+def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
+    """Parse JSONL lines into a list of events.
+
+    Tolerates a malformed trailing line (torn write): if the last non-empty
+    line fails JSON parsing, it is skipped with a warning.  Interior corrupt
+    lines re-raise so callers see real corruption.
+    """
+    # Precompute last non-empty index so trailing blank lines don't cause the
+    # torn-write check to misfire on an interior corrupt line.
+    last_nonempty_idx = max(
+        (j for j, line in enumerate(lines) if line.strip()), default=-1
+    )
+    results: list[OrchestratorEvent] = []
+    for i, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        try:
+            raw = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            if i == last_nonempty_idx:
+                # Tolerate malformed trailing line only (torn write)
+                logger.warning("skipping malformed trailing line in inbox: %s", exc)
+                continue
+            raise
+        results.append(OrchestratorEvent.model_validate(raw))
+    return results
+
+
 def read_events(
     consumer: str | None = None,
     *,
@@ -116,6 +160,10 @@ def read_events(
 
     When *since_cursor* is provided (or derived from the consumer cursor),
     only events *after* the referenced event ID are returned.
+
+    At-least-once delivery contract: if a consumer's cursor is not found in the
+    inbox (e.g. due to inbox rotation or compaction), all events are replayed
+    from the beginning. Callers using a named consumer cursor must be idempotent.
 
     Args:
         consumer: Consumer name; used to load a persisted cursor when
@@ -134,31 +182,41 @@ def read_events(
         cursor = _load_cursor(consumer)
 
     inbox = _inbox_path()
-    if not inbox.exists():
+    with _inbox_lock():
+        raw_text = inbox.read_text() if inbox.exists() else ""
+
+    if not raw_text:
         return []
+
+    lines = raw_text.splitlines()
+    parsed = _parse_lines(lines)
 
     events: list[OrchestratorEvent] = []
     past_cursor = cursor is None  # If no cursor, start from beginning
 
-    for raw_line in inbox.read_text().splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        raw = json.loads(stripped)
-        event = OrchestratorEvent.model_validate(raw)
-
+    for event in parsed:
         # Cursor-based skip: advance past the cursor event, then include from there
         if not past_cursor:
             if event.id == cursor:
                 past_cursor = True
             continue
 
-        if since_ts is not None and event.created_at < since_ts:
-            continue
-        if event_types is not None and event.type not in event_types:
+        if not _event_matches(event, since_ts=since_ts, event_types=event_types):
             continue
 
         events.append(event)
+
+    # Cursor-not-found fallback: replay from the beginning.
+    # Why: callers are idempotent — orchestrate_retire guards on sess.status ==
+    # COMPLETED, dispatch consumer skips non-RUNNING tasks, and event tail is
+    # display-only — so replaying from the start is safe.
+    if cursor is not None and not past_cursor:
+        logger.warning("cursor %s not found in inbox; replaying from start", cursor)
+        events = [
+            event
+            for event in parsed
+            if _event_matches(event, since_ts=since_ts, event_types=event_types)
+        ]
 
     if limit is not None:
         events = events[:limit]
