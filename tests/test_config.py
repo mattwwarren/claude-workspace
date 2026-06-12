@@ -1174,3 +1174,32 @@ class TestLoadEffectiveConfig:
 
         o = ConcurrencyOverrides(max_parallel_clients=3)
         assert o.max_parallel_clients == 3
+
+    def test_corrupt_override_file_returns_empty(self, tmp_config_dir: Path) -> None:
+        """Corrupt JSON in override file returns empty ConcurrencyOverrides."""
+        from cw.config import concurrency_override_file, load_effective_config
+
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        concurrency_override_file().write_text("not-valid-json{{{")
+        effective = load_effective_config()
+        # Should not raise; falls back to declared config unchanged
+        assert effective is not None
+
+    def test_lanes_override_populated_does_not_crash(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Non-empty overrides.lanes does not crash load_effective_config."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            concurrency_override_file,
+            load_effective_config,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        overrides = ConcurrencyOverrides(
+            lanes={"acme/default": LaneConcurrencyOverride(paused=True)}
+        )
+        _save_concurrency_overrides(overrides)
+        effective = load_effective_config()
+        assert effective is not None

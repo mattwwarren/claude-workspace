@@ -1604,3 +1604,15 @@ class TestMoveTicket:
 
         with pytest.raises(LaneNotFoundError):
             move_ticket("GEN-203", "genhealth", "undeclared-lane")
+
+    def test_move_ticket_not_found_raises_cw_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Non-existent ticket raises CwError."""
+        from cw.dev_queue import move_ticket
+
+        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        with pytest.raises(CwError, match="No dev-queue task found"):
+            move_ticket("GEN-MISSING", "genhealth", "fast")

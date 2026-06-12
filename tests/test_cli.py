@@ -6834,6 +6834,37 @@ class TestConfigGroup:
         effective = load_effective_config()
         assert effective.max_parallel_clients is None
 
+    def test_config_concurrency_set_no_equals_fails(self, tmp_config_dir: Path) -> None:
+        """cw config concurrency set without = in assignment exits non-zero."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["config", "concurrency", "set", "max_parallel_clients4"]
+        )
+        assert result.exit_code != 0
+        assert "key=value" in result.output or "Expected" in result.output
+
+    def test_config_concurrency_set_unknown_key_fails(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """cw config concurrency set unknown_key=1 exits non-zero."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["config", "concurrency", "set", "unknown_key=1"])
+        assert result.exit_code != 0
+        assert (
+            "Unknown concurrency key" in result.output or "Supported" in result.output
+        )
+
+    def test_config_concurrency_set_non_integer_fails(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """cw config concurrency set max_parallel_clients=abc exits non-zero."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["config", "concurrency", "set", "max_parallel_clients=abc"]
+        )
+        assert result.exit_code != 0
+        assert "integer" in result.output or "must be" in result.output
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueAddLane — cw dev-queue add --lane
