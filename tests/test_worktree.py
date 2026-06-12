@@ -16,6 +16,7 @@ from cw.models import ClientConfig
 from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
+    check_main_ff_safety,
     check_not_main_checkout,
     create_worktree,
     fast_forward_main,
@@ -1292,6 +1293,219 @@ class TestFastForwardMain:
         assert before == old_sha
         assert after == new_sha
         assert pull_called[0], "pull MUST be called for clean on-branch checkout"
+
+    def test_untracked_only_with_ignore_untracked_proceeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ignore_untracked=True: untracked-only status does not block ff."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        old_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        new_sha = "ffffffffffffffffffffffffffffffffffffffff"
+        pull_called = [False]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = "main\n"
+            elif "status" in args and "--porcelain" in args:
+                result.stdout = "?? artifact.lock\n"  # untracked only
+            elif "pull" in args:
+                pull_called[0] = True
+                result.stdout = ""
+            elif "rev-parse" in args:
+                result.stdout = (old_sha if not pull_called[0] else new_sha) + "\n"
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        before, after = fast_forward_main(client, ignore_untracked=True)
+        assert before == old_sha
+        assert after == new_sha
+        assert pull_called[0], "pull MUST be called when only untracked files present"
+
+    def test_untracked_only_without_ignore_untracked_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ignore_untracked, untracked files still block ff (default=False)."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        pull_called = [False]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "pull" in args:
+                pull_called[0] = True
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = "main\n"
+            elif "status" in args and "--porcelain" in args:
+                result.stdout = "?? artifact.lock\n"  # untracked only
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with pytest.raises(WorktreeError, match="dirty"):
+            fast_forward_main(client)
+
+        assert not pull_called[0], "pull must NOT be called when ignore_untracked=False"
+
+    def test_mixed_dirty_with_ignore_untracked_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ignore_untracked=True + modified file still blocks ff."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+        pull_called = [False]
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "pull" in args:
+                pull_called[0] = True
+            result = MagicMock()
+            result.stderr = ""
+            if "symbolic-ref" in args:
+                result.stdout = "main\n"
+            elif "status" in args and "--porcelain" in args:
+                # untracked + modified — modified must still block
+                result.stdout = "?? artifact.lock\n M src/cw/foo.py\n"
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with pytest.raises(WorktreeError, match="dirty"):
+            fast_forward_main(client, ignore_untracked=True)
+
+        assert not pull_called[0], "pull must NOT be called when modified files present"
+
+
+class TestCheckMainFfSafety:
+    """Tests for check_main_ff_safety — classifies local/origin divergence."""
+
+    @staticmethod
+    def _make_client(tmp_path: Path) -> ClientConfig:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        return ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+
+    @staticmethod
+    def _make_mock(
+        *,
+        detached: bool = False,
+        main_is_ancestor: bool = False,
+        origin_is_ancestor: bool = False,
+    ) -> object:
+        """Build a _run_git mock for check_main_ff_safety calls.
+
+        symbolic-ref exits non-zero when detached.
+        merge-base --is-ancestor: returncode 0 = true, 1 = false.
+        """
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.stderr = ""
+            result.stdout = ""
+            if "symbolic-ref" in args:
+                if detached:
+                    result.returncode = 1
+                    result.stdout = ""
+                    # simulate check=False path: do NOT raise
+                else:
+                    result.returncode = 0
+                    result.stdout = "main\n"
+            elif "merge-base" in args and "--is-ancestor" in args:
+                # Determine which call: main→origin or origin→main
+                # args: ("merge-base", "--is-ancestor", X, Y)
+                subject = args[2] if len(args) > 2 else ""
+                if subject == "main":
+                    # main is ancestor of origin/main?
+                    result.returncode = 0 if main_is_ancestor else 1
+                else:
+                    # origin/main is ancestor of main?
+                    result.returncode = 0 if origin_is_ancestor else 1
+            return result
+
+        return mock_run
+
+    def test_detached_head_returns_detached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Detached HEAD → 'detached'."""
+        client = self._make_client(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._make_mock(detached=True),
+        )
+        assert check_main_ff_safety(client) == "detached"
+
+    def test_behind_returns_behind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main is ancestor of origin/main only → 'behind'."""
+        client = self._make_client(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._make_mock(main_is_ancestor=True, origin_is_ancestor=False),
+        )
+        assert check_main_ff_safety(client) == "behind"
+
+    def test_ahead_returns_ahead(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """origin/main is ancestor of main only → 'ahead'."""
+        client = self._make_client(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._make_mock(main_is_ancestor=False, origin_is_ancestor=True),
+        )
+        assert check_main_ff_safety(client) == "ahead"
+
+    def test_equal_returns_equal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both are mutual ancestors (equal SHAs) → 'equal'."""
+        client = self._make_client(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._make_mock(main_is_ancestor=True, origin_is_ancestor=True),
+        )
+        assert check_main_ff_safety(client) == "equal"
+
+    def test_diverged_returns_diverged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Neither is ancestor of the other → 'diverged'."""
+        client = self._make_client(tmp_path)
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            self._make_mock(main_is_ancestor=False, origin_is_ancestor=False),
+        )
+        assert check_main_ff_safety(client) == "diverged"
 
 
 class TestFetchDefaultBranch:
