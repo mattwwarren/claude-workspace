@@ -33,6 +33,7 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1262,6 +1263,42 @@ def reconcile() -> ReconcileReport:
 
 
 _SalvageCandidate = tuple[str, str | None, str, str, bool]
+
+
+class ProposedAction(StrEnum):
+    """Action the act dispatcher will take for a classified session. See GitHub #552, ADR-0006."""
+
+    REVERT_TASK = "revert_task"
+    CRASH_COMPLETE = "crash_complete"
+    SALVAGE_COMPLETION = "salvage_completion"
+    PARK_BLOCKED_ON_USER = "park_blocked_on_user"
+    SALVAGE_GIT = "salvage_git"
+    SKIP_PARKED = "skip_parked"
+    INCREMENT_COUNTER = "increment_counter"
+    RECOVER_COUNTER = "recover_counter"
+
+
+@dataclass(frozen=True)
+class ReapCandidate:
+    """Classification result from detect phase. Consumed by act dispatcher. See GitHub #552, ADR-0006."""
+
+    session_id: str
+    proposed_action: ProposedAction
+    ticket_id: str | None = None
+    worktree_dirty: bool = False
+    salvage_result: AutoDevResult | None = None
+    salvage_csid: str | None = None
+    usage_limit_detected: bool = False
+    elapsed_seconds: float = 0.0
+    reap_reason: ReapReason | None = None
+    branch: str | None = None
+    worktree_path_str: str | None = None
+    post_review_clean: bool = False
+    paused_status: str | None = None
+    new_observation_count: int = 0
+    # For phantom sweep: carry client + worktree_path for SESSION_PHANTOM_REVERTED payload
+    client: str | None = None
+    worktree_path: Path | None = None
 
 
 def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
