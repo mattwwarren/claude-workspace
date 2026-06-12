@@ -6203,3 +6203,100 @@ class TestResultValidate:
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)
         assert parsed["status"] == "shipped"
+
+
+# ---------------------------------------------------------------------------
+# cw doctor --reap <SESSION> targeted reap tests (GitHub #555)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorTargetedReap:
+    """cw doctor --reap <SESSION> reaps a specific session by id or name."""
+
+    def test_targeted_reap_by_id(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--reap <id> reaps session and exits 0."""
+        from pathlib import Path as _Path
+
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        from cw.models import Session
+
+        sess = Session(
+            id="cli-reap-1",
+            name="client-a/auto-dev/cli-ticket-1",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=_Path("/tmp/ws"),
+        )
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id="cli-ticket-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="cli-reap-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--reap", "cli-reap-1"])
+
+        assert result.exit_code == 0, result.output
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "cli-reap-1")
+        assert updated.status == SessionStatus.COMPLETED
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "cli-ticket-1")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_targeted_reap_not_found_exits_1(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """--reap <non-existent> exits 1 with error message."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore
+
+        save_state(CwState(sessions=[]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--reap", "no-such-session"])
+
+        assert result.exit_code == 1
+        assert "no-such-session" in result.output
+
+    def test_regression_542_doctor_reap_without_session_still_works(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--reap without SESSION arg invokes run_doctor (no regression)."""
+        from cw.doctor import CheckResult
+
+        monkeypatch.setattr(
+            "cw.doctor._check_claude_version",
+            lambda: CheckResult("claude-version", ok=True, detail="stubbed"),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["doctor", "--reap"])
+
+        # exits 0 on healthy env (stub ensures claude version check passes)
+        assert result.exit_code == 0, result.output

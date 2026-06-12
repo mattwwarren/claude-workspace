@@ -3144,3 +3144,179 @@ class TestCheckCwVersion:
         report = run_doctor()
         check_names = [c.name for c in report.checks]
         assert _CW_VERSION_CHECK_NAME in check_names
+
+
+# ---------------------------------------------------------------------------
+# _reap_session_by_selector tests (GitHub #555)
+# ---------------------------------------------------------------------------
+
+
+class TestReapSessionBySelector:
+    """_reap_session_by_selector reaps a single session by id or name prefix."""
+
+    def test_reap_session_by_id_active(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Selector matching session.id → session set COMPLETED, task reverted."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CompletionReason,
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        from cw.models import Session
+
+        sess = Session(
+            id="abcd1234",
+            name="client-a/auto-dev/my-ticket",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id="my-ticket",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="abcd1234",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = _reap_session_by_selector("abcd1234")
+
+        assert result is True
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "abcd1234")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.USER
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "my-ticket")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_reap_session_by_name_active(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Selector matching session.name → session set COMPLETED."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        from cw.models import Session
+
+        sess = Session(
+            id="eeee5555",
+            name="client-b/auto-dev/ticket-x",
+            client="client-b",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+        )
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id="ticket-x",
+            client="client-b",
+            status=QueueItemStatus.RUNNING,
+            session_id="eeee5555",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = _reap_session_by_selector("client-b/auto-dev/ticket-x")
+
+        assert result is True
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "eeee5555")
+        assert updated.status == SessionStatus.COMPLETED
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "ticket-x")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_reap_session_not_found_returns_false(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """Non-matching selector → returns False, no state mutation."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import CwState, DevQueueStore
+
+        save_state(CwState(sessions=[]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        result = _reap_session_by_selector("no-such-session")
+
+        assert result is False
+
+    def test_reap_session_already_terminal_returns_true(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Already-COMPLETED session → idempotent, returns True."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        from cw.models import Session
+
+        sess = Session(
+            id="done-sess",
+            name="client-a/done-sess",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.COMPLETED,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        result = _reap_session_by_selector("done-sess")
+
+        assert result is True
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "done-sess")
+        # Status unchanged
+        assert updated.status == SessionStatus.COMPLETED
