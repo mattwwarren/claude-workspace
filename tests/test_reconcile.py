@@ -8485,3 +8485,969 @@ def test_revert_timed_out_tasks_completes_while_holding_sessions_lock(
     reloaded = load_state()
     stamped = next(s for s in reloaded.sessions if s.id == "lockheld-to-1")
     assert stamped.reap_reason == ReapReason.COMPLETED_BACKSTOP
+
+
+# ---------------------------------------------------------------------------
+# Phase detect/act split tests (GitHub #552)
+# ---------------------------------------------------------------------------
+
+
+def _state_queue_snapshot() -> bytes:
+    """Read state + queue bytes for detect-purity assertions."""
+    from cw.config import dev_queue_file, state_file
+
+    return state_file().read_bytes() + dev_queue_file().read_bytes()
+
+
+# --- _detect_stalled_candidates ---
+
+
+def test_detect_stalled_candidates_under_budget_returns_empty(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Session with elapsed < budget → no candidate, bytes unchanged."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _detect_stalled_candidates
+
+    worktree = tmp_path / "wt-under"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("under-detect", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert candidates == []
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_stalled_candidates_revert_task_candidate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """ACTIVE DAEMON headless session with elapsed > budget → REVERT_TASK candidate."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _detect_stalled_candidates
+
+    worktree = tmp_path / "wt-revert"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("revert-detect-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    task = TicketTask(
+        ticket_id="revert-detect-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="revert-detect-1",
+    )
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(),
+        task_by_ticket={"revert-detect-1": task},
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.REVERT_TASK
+    assert c.ticket_id == "revert-detect-1"
+    assert c.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+    # Purity: no writes
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_stalled_candidates_skip_parked_candidate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """session.last_result = {"paused_status": "silently_idle"} → SKIP_PARKED."""
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+    worktree = tmp_path / "wt-skip"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("skip-parked-1", worktree, started_at)
+    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.SKIP_PARKED
+    assert candidates[0].paused_status == _SILENTLY_IDLE_REASON
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_stalled_candidates_salvage_completion_candidate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session past budget with terminal sentinel → SALVAGE_COMPLETION."""
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-salvage"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salv-detect-1", worktree, started_at)
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "salv-detect-1"
+    _write_salvage_transcript(home, worktree, "csid-uuid", payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.SALVAGE_COMPLETION
+    assert c.salvage_result is not None
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_stalled_candidates_skips_user_origin(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """USER-origin session → not in returned list; bytes unchanged."""
+    from cw.reconcile import _detect_stalled_candidates
+
+    worktree = tmp_path / "wt-user"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("user-origin-1", worktree, started_at)
+    sess.origin = SessionOrigin.USER
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert candidates == []
+    assert _state_queue_snapshot() == snap
+
+
+# --- _detect_idle_candidates ---
+
+
+def _mk_live_idle_daemon_session(
+    sid: str,
+    surface_ref: str,
+    started_at: datetime,
+    idle_observation_count: int = 0,
+    worktree_path: Path | None = None,
+) -> Session:
+    """Build a live DAEMON ACTIVE session suitable for idle watchdog tests."""
+    return Session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=surface_ref,
+        started_at=started_at,
+        idle_observation_count=idle_observation_count,
+        worktree_path=worktree_path,
+    )
+
+
+def test_detect_idle_candidates_under_budget_returns_empty(
+    tmp_config_dir: Path,
+) -> None:
+    """Session elapsed < idle budget → no candidate."""
+    from cw.reconcile import _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
+    sess = _mk_live_idle_daemon_session("idle-under-1", "live-ref", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert candidates == []
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_idle_candidates_increment_counter_only(
+    tmp_config_dir: Path,
+) -> None:
+    """Session past budget, not recently active, count=0, threshold=2 → INCREMENT_COUNTER."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    sess = _mk_live_idle_daemon_session("idle-inc-1", "live-ref", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=config,
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.INCREMENT_COUNTER
+    assert c.new_observation_count == 1
+    # Purity: bytes unchanged
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_idle_candidates_counter_NOT_written_by_detect(
+    tmp_config_dir: Path,
+) -> None:
+    """Explicit purity: after detect, load_state() → idle_observation_count still 0."""
+    from cw.reconcile import _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    sess = _mk_live_idle_daemon_session("idle-nowrit-1", "live-ref", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=config,
+        task_by_ticket={},
+    )
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "idle-nowrit-1")
+    assert s.idle_observation_count == 0
+
+
+def test_detect_idle_candidates_threshold_reached_park(
+    tmp_config_dir: Path,
+) -> None:
+    """idle_observation_count at threshold-1 + task.attempts >= cap → PARK_BLOCKED_ON_USER."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    sess = _mk_live_idle_daemon_session(
+        "idle-park-1", "live-ref", started_at, idle_observation_count=1
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    # task.attempts >= cap → park
+    task = TicketTask(
+        ticket_id="idle-park-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-park-1",
+        attempts=99,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=config,
+        task_by_ticket={"idle-park-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_idle_candidates_threshold_reached_recover(
+    tmp_config_dir: Path,
+) -> None:
+    """idle_observation_count at threshold-1 + task.attempts < cap → REVERT_TASK."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    sess = _mk_live_idle_daemon_session(
+        "idle-recover-1", "live-ref", started_at, idle_observation_count=1
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    # task.attempts=0 < cap=2 → recover
+    task = TicketTask(
+        ticket_id="idle-recover-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-recover-1",
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=config,
+        task_by_ticket={"idle-recover-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.REVERT_TASK
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_idle_candidates_recover_counter_when_liveness_restored(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """idle_observation_count=1 + transcript recently active → RECOVER_COUNTER."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    sess = _mk_live_idle_daemon_session(
+        "idle-recov-cnt-1", "live-ref", started_at, idle_observation_count=1
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    # Patch transcript recently active → True
+    monkeypatch.setattr(
+        "cw.reconcile._transcript_recently_active", lambda s, n, **kw: True
+    )
+    monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda s, n: False)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=config,
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.RECOVER_COUNTER
+    assert c.new_observation_count == 0
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_idle_candidates_salvage_git(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session at threshold with worktree_path + branch → SALVAGE_GIT."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    wt_path = tmp_path / "wt-salvage-git"
+    wt_path.mkdir(parents=True)
+    sess = _mk_live_idle_daemon_session(
+        "idle-sgit-1",
+        "live-ref",
+        started_at,
+        idle_observation_count=1,
+        worktree_path=wt_path,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-sgit-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-sgit-1",
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    snap = _state_queue_snapshot()
+
+    monkeypatch.setattr(
+        "cw.reconcile._checked_out_branch", lambda p: "auto-dev/idle-sgit-1"
+    )
+    monkeypatch.setattr("cw.reconcile._detect_post_review_clean", lambda s: False)
+    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda c, p: False)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=config,
+        task_by_ticket={"idle-sgit-1": task},
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.SALVAGE_GIT
+    assert c.branch == "auto-dev/idle-sgit-1"
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_idle_candidates_worktree_dirty_flag(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dirty worktree → candidate.worktree_dirty == True; bytes unchanged."""
+    from cw.reconcile import _detect_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    config = OrchestratorConfig(idle_confirm_observations=2)
+    sess = _mk_live_idle_daemon_session(
+        "idle-dirty-1",
+        "live-ref",
+        started_at,
+        idle_observation_count=1,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    # task.attempts=99 >= cap → PARK path, which checks dirty
+    task = TicketTask(
+        ticket_id="idle-dirty-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-dirty-1",
+        attempts=99,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    snap = _state_queue_snapshot()
+
+    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda c, p: True)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"live-ref"},
+        config=config,
+        task_by_ticket={"idle-dirty-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].worktree_dirty is True
+    assert _state_queue_snapshot() == snap
+
+
+# --- _detect_phantom_candidates ---
+
+
+def _mk_phantom_daemon_session(
+    sid: str,
+    started_at: datetime,
+    surface_ref: str = "dead-ref",
+    worktree_path: Path | None = None,
+) -> Session:
+    return Session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref=surface_ref,
+        started_at=started_at,
+        worktree_path=worktree_path,
+    )
+
+
+def test_detect_phantom_candidates_crash_complete(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON session in phantom_set, no sentinel → CRASH_COMPLETE."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-crash-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=now,
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.ticket_id == "phantom-crash-1"
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_phantom_candidates_salvage_on_terminal_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DAEMON session in phantom_set with terminal sentinel → SALVAGE_COMPLETION."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-phantom-salv"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session(
+        "phantom-salv-1", started_at, worktree_path=worktree
+    )
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "phantom-salv-1"
+    _write_salvage_transcript(home, worktree, "csid-salv", payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=now,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.SALVAGE_COMPLETION
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_phantom_candidates_user_origin_crash_no_ticket(
+    tmp_config_dir: Path,
+) -> None:
+    """USER session in phantom_set → CRASH_COMPLETE, ticket_id is None."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = Session(
+        id="phantom-user-1",
+        name="client-a/impl",  # no auto-dev/ prefix → no ticket_id
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        surface_ref="dead-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=now,
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.ticket_id is None
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_phantom_candidates_worktree_dirty_on_candidate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom with dirty worktree → candidate.worktree_dirty == True; bytes unchanged."""
+    from cw.reconcile import _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    wt = tmp_path / "wt-dirty"
+    wt.mkdir()
+    sess = _mk_phantom_daemon_session("phantom-dirty-1", started_at, worktree_path=wt)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda c, p: True)
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=now,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].worktree_dirty is True
+    assert _state_queue_snapshot() == snap
+
+
+# --- Act dispatcher tests ---
+
+
+def test_act_on_stalled_revert_task_updates_state_and_queue(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVERT_TASK candidate → session TIMED_OUT, queue PENDING, SESSION_TIMED_OUT emitted."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    worktree = tmp_path / "wt-act-revert"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_native_daemon_client",
+        lambda: FakeNativeDaemonClient(),
+    )
+    monkeypatch.setattr("cw.reconcile.get_client", lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"))
+    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *a, **kw: None)
+
+    sess = _mk_headless_daemon_session("act-revert-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="act-revert-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="act-revert-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="act-revert-1",
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id="act-revert-1",
+        elapsed_seconds=3700.0,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+    )
+
+    reverted = _act_on_stalled_candidates(state, [candidate], now=now)
+
+    assert "act-revert-1" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "act-revert-1")
+    assert t.status == QueueItemStatus.PENDING
+
+    events = read_events(
+        consumer="test-act-revert-1",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert len(events) == 1
+    # Must NOT emit SESSION_COMPLETED for REVERT_TASK path
+    completed_events = read_events(
+        consumer="test-act-revert-1-completed",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(completed_events) == 0
+
+
+def test_act_on_stalled_salvage_completion(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SALVAGE_COMPLETION candidate → session COMPLETED, queue COMPLETED."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile.get_native_daemon_client",
+        lambda: FakeNativeDaemonClient(),
+    )
+
+    worktree = tmp_path / "wt-act-salv"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("act-salv-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="act-salv-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="act-salv-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    result = AutoDevResult.model_validate(_shipped_salvage_payload())
+    candidate = ReapCandidate(
+        session_id="act-salv-1",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="act-salv-1",
+        salvage_result=result,
+        salvage_csid="csid-act-salv",
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now)
+
+    assert sess.status == SessionStatus.COMPLETED
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "act-salv-1")
+    assert t.status == QueueItemStatus.COMPLETED
+
+
+def test_act_on_stalled_skip_parked_emits_event_no_queue_change(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """SKIP_PARKED candidate → SESSION_SALVAGE_SKIPPED emitted; queue unchanged."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    worktree = tmp_path / "wt-skip-act"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("act-skip-1", worktree, started_at)
+    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="act-skip-1",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        session_id="act-skip-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="act-skip-1",
+        proposed_action=ProposedAction.SKIP_PARKED,
+        ticket_id="act-skip-1",
+        paused_status=_SILENTLY_IDLE_REASON,
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now)
+
+    # Queue must be unchanged
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "act-skip-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    events = read_events(
+        consumer="test-act-skip-1",
+        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+    )
+    assert len(events) == 1
+
+
+def test_act_on_idle_park_routes_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """PARK_BLOCKED_ON_USER candidate → queue BLOCKED_ON_USER."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = _mk_live_idle_daemon_session("idle-act-park-1", "live-ref", started_at, idle_observation_count=1)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-act-park-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-act-park-1",
+        attempts=99,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="idle-act-park-1",
+        proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+        ticket_id="idle-act-park-1",
+        new_observation_count=2,
+    )
+
+    _act_on_idle_candidates(state, [candidate], now=now)
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "idle-act-park-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_act_on_idle_increments_observation_counter(
+    tmp_config_dir: Path,
+) -> None:
+    """INCREMENT_COUNTER candidate → session.idle_observation_count updated."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = _mk_live_idle_daemon_session("idle-act-inc-1", "live-ref", started_at, idle_observation_count=0)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidate = ReapCandidate(
+        session_id="idle-act-inc-1",
+        proposed_action=ProposedAction.INCREMENT_COUNTER,
+        ticket_id="idle-act-inc-1",
+        new_observation_count=2,
+    )
+
+    _act_on_idle_candidates(state, [candidate], now=now)
+
+    # Counter must be written by act
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "idle-act-inc-1")
+    assert s.idle_observation_count == 2
+
+
+def test_act_on_phantom_crash_routes_pending(
+    tmp_config_dir: Path,
+) -> None:
+    """CRASH_COMPLETE candidate, worktree_dirty=False → queue PENDING, SESSION_PHANTOM_REVERTED."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-act-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-act-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-act-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-act-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-act-1",
+        worktree_dirty=False,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    result = _act_on_phantom_candidates(state, [candidate], now=now)
+    ticket_ids_to_revert, phantom_names, usage_limited, salvaged_ticket_ids, _ = result
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "phantom-act-1")
+    assert t.status == QueueItemStatus.PENDING
+
+    events = read_events(
+        consumer="test-phantom-act-1",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["worktree_dirty"] is False
+
+
+def test_act_on_phantom_dirty_routes_blocked(
+    tmp_config_dir: Path,
+) -> None:
+    """CRASH_COMPLETE candidate, worktree_dirty=True → queue BLOCKED_ON_USER, SESSION_PHANTOM_REVERTED."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-act-dirty-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-act-dirty-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-act-dirty-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-act-dirty-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-act-dirty-1",
+        worktree_dirty=True,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _act_on_phantom_candidates(state, [candidate], now=now)
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "phantom-act-dirty-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    events = read_events(
+        consumer="test-phantom-dirty-1",
+        event_types=[OrchestratorEventType.SESSION_PHANTOM_REVERTED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["worktree_dirty"] is True
