@@ -12,9 +12,9 @@ each sweep ``_emit_reap_proposed`` fires
 for every candidate whose :attr:`Session.reap_proposed_at` is ``None``,
 stamping that field to deduplicate across ticks.
 
-# Why: emitting before the act phase keeps the event visible even when the
-# act phase is suppressed by ``signal_only`` policy — consumers (the lane's
-# ORCHESTRATE session or the operator) see the proposal and decide.
+Emitting before the act phase keeps the event visible even when the act
+phase is suppressed by ``signal_only`` — consumers (the lane's ORCHESTRATE
+session or the operator) see the proposal and decide.
 
 **Act phase** — gated by ``reap_policy`` (ADR-0006).
 Under the default ``signal_only`` policy the act phase routes the owning
@@ -23,9 +23,11 @@ mutation (no daemon stop, no worktree removal, no RUNNING→PENDING revert).
 Destructive acts require either ``reap_policy: auto`` on the session's lane
 *or* an explicit operator command (``cw doctor --reap``).
 
-All state mutations inside the act phase go through ``mutate_state()``
-(ADR-0005) so concurrent Stop-hook writes are serialised against the
-reconcile tick.
+Lock note: act-phase helpers call ``save_state()`` directly — not
+``mutate_state()`` (ADR-0005) — because ``_reconcile_locked()`` already
+holds ``sessions_lock`` and re-acquiring the same per-open-fd flock would
+self-deadlock (#387).  Serialisation against concurrent Stop-hook writes
+is enforced by the held lock.
 
 Transient-outage guard: ``reconcile`` skips the act phase entirely when
 ``claude agents --json`` fails or returns an empty roster while
