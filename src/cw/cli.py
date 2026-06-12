@@ -2131,11 +2131,13 @@ def _format_status_human(status: OrchestratorStatus) -> str:
         lines.append(line)
 
     lines.extend(("", f"Monitored PRs:     {len(status.monitored_prs)}"))
-    lines.extend(
-        f"  - {pr.repo}#{pr.pr_number}  role={pr.role}  status={pr.status}"
-        f"  unresolved={pr.unresolved_threads}"
-        for pr in status.monitored_prs
-    )
+    for pr in status.monitored_prs:
+        ci = pr.ci_status if pr.ci_status is not None else "(none)"
+        mg = str(pr.mergeable) if pr.mergeable is not None else "(none)"
+        lines.append(
+            f"  - {pr.repo}#{pr.pr_number}  role={pr.role}  status={pr.status}"
+            f"  unresolved={pr.unresolved_threads}  ci={ci}  mergeable={mg}"
+        )
 
     lines.extend(("", f"Recent events:     {len(status.recent_events)}"))
     lines.extend(

@@ -169,6 +169,7 @@ def _tickets_table(
 
 
 def _prs_table(prs: list[MonitoredPR], *, level: DetailLevel) -> RenderableType:
+    # Why: ci_status/mergeable surfaced in plain-text path only; TUI deferred
     """Render a table of monitored PRs for one client."""
     if not prs:
         return Text("  (no monitored PRs)", style="dim")

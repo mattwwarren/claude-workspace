@@ -5036,6 +5036,53 @@ class TestFormatStatusHuman:
         output = _format_status_human(status)
         assert "role=author" in output
 
+    def test_format_status_human_pr_renders_ci_and_mergeable_populated(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_format_status_human includes ci_status and mergeable when populated."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import MonitoredPR, OrchestratorStatus
+
+        pr = MonitoredPR(
+            repo="owner/repo",
+            pr_number=7,
+            role="author",
+            status="watching",
+            unresolved_threads=0,
+            ci_status="success",
+            mergeable=True,
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+            monitored_prs=[pr],
+        )
+        output = _format_status_human(status)
+        assert "ci=success" in output
+        assert "mergeable=True" in output
+
+    def test_format_status_human_pr_ci_none_renders_as_placeholder(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_format_status_human renders (none) for None ci_status and mergeable."""
+        from cw.cli import _format_status_human
+        from cw.orchestrate import MonitoredPR, OrchestratorStatus
+
+        pr = MonitoredPR(
+            repo="owner/repo",
+            pr_number=8,
+            role="author",
+            status="watching",
+            unresolved_threads=0,
+            # ci_status and mergeable default to None
+        )
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC),
+            monitored_prs=[pr],
+        )
+        output = _format_status_human(status)
+        assert "ci=(none)" in output
+        assert "mergeable=(none)" in output
+
 
 class TestDevQueueStatusWithTick:
     def test_dev_queue_status_shows_last_tick(
