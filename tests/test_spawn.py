@@ -300,6 +300,59 @@ class TestSpawnCreate:
         assert state.sessions == []
         assert daemon.spawn_calls == []
 
+    def test_spawn_create_impl_stamps_lane(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """spawn_create_impl(lane='x') stamps session.lane == 'x'."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-lane-stamp")
+
+        session_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-42 --headless",
+            label="auto-dev-GEN-42",
+            native_daemon=daemon,
+            lane="test-lane",
+        )
+
+        state = load_state()
+        sess = state.find_by_name_or_id(session_id)
+        assert sess is not None
+        assert sess.lane == "test-lane"
+
+    def test_spawn_create_impl_default_lane_none(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """spawn_create_impl with no lane kwarg leaves session.lane as None."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-lane-default")
+
+        session_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-43 --headless",
+            label="auto-dev-GEN-43",
+            native_daemon=daemon,
+        )
+
+        state = load_state()
+        sess = state.find_by_name_or_id(session_id)
+        assert sess is not None
+        assert sess.lane is None
+
 
 class TestSpawnCreateImplWorkerModel:
     """Tests for ClientConfig.worker_model forwarding through spawn_create_impl

@@ -71,6 +71,7 @@ from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
+    WORKER_PURPOSES,
     ClientConfig,
     CompletionReason,
     ConcurrencyOverrides,
@@ -222,7 +223,7 @@ def main(verbose: int) -> None:
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
     "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
+    type=click.Choice([p.value for p in WORKER_PURPOSES]),
     default="impl",
     help="Session purpose.",
 )
@@ -250,7 +251,7 @@ def start(client: str, purpose: str, worktree: str | None, parent: str | None) -
 @click.option(
     "--notify",
     "-n",
-    type=click.Choice([e.value for e in SessionPurpose]),
+    type=click.Choice([p.value for p in WORKER_PURPOSES]),
     default=None,
     help="Notify a sibling session after backgrounding.",
 )
@@ -1029,7 +1030,7 @@ def queue() -> None:
 @click.argument("description")
 @click.option(
     "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
+    type=click.Choice([p.value for p in WORKER_PURPOSES]),
     default="debt",
     help="Queue purpose.",
 )
@@ -1078,7 +1079,7 @@ def _print_queue_table(items: list[QueueItem]) -> None:
 @click.argument("client", required=False, default=None, shell_complete=_complete_client)
 @click.option(
     "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
+    type=click.Choice([p.value for p in WORKER_PURPOSES]),
     default=None,
     help="Filter by purpose.",
 )
@@ -1132,7 +1133,7 @@ def queue_remove(client: str, item_id: str) -> None:
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
     "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
+    type=click.Choice([p.value for p in WORKER_PURPOSES]),
     default=None,
     help="Clear only items with this purpose.",
 )
@@ -1150,7 +1151,7 @@ def queue_clear(client: str, purpose: str | None, completed: bool) -> None:
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
     "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
+    type=click.Choice([p.value for p in WORKER_PURPOSES]),
     default=None,
     help="Filter by purpose.",
 )
@@ -1176,7 +1177,7 @@ def queue_next(client: str, purpose: str | None, as_json: bool) -> None:
 @click.argument("client", shell_complete=_complete_client)
 @click.option(
     "--purpose",
-    type=click.Choice([e.value for e in SessionPurpose]),
+    type=click.Choice([p.value for p in WORKER_PURPOSES]),
     default=None,
     help="Filter by purpose.",
 )

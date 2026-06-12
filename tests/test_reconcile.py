@@ -19,6 +19,7 @@ from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import WorktreeError
 from cw.models import (
+    CW_STATE_SCHEMA_VERSION,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -3065,7 +3066,7 @@ def test_confirm_before_reap_v5_state_round_trips(
         )
     )
     loaded = load_state()
-    assert loaded.schema_version == 8
+    assert loaded.schema_version == CW_STATE_SCHEMA_VERSION
     assert loaded.sessions[0].idle_observation_count == 0
 
 

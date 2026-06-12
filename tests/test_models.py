@@ -35,7 +35,7 @@ class TestSessionPurpose:
         assert SessionPurpose.DEBT.value == "debt"
 
     def test_all_values(self) -> None:
-        assert len(SessionPurpose) == 3
+        assert len(SessionPurpose) == 4
 
 
 class TestSessionStatus:
@@ -721,3 +721,45 @@ class TestOrchestratorConfigCeilingMigration:
         config = OrchestratorConfig()
         assert config.per_client_ceiling == {}
         assert config.default_ceiling == 1
+
+
+# --- SessionPurpose.ORCHESTRATE and WORKER_PURPOSES ---
+
+
+def test_session_purpose_orchestrate_exists() -> None:
+    """SessionPurpose.ORCHESTRATE has value 'orchestrate'."""
+    assert SessionPurpose.ORCHESTRATE == "orchestrate"
+    assert SessionPurpose.ORCHESTRATE.value == "orchestrate"
+
+
+def test_worker_purposes_excludes_orchestrate() -> None:
+    """WORKER_PURPOSES tuple contains IMPL/IDEA/DEBT but not ORCHESTRATE."""
+    from cw.models import WORKER_PURPOSES
+
+    assert SessionPurpose.ORCHESTRATE not in WORKER_PURPOSES
+    assert SessionPurpose.IMPL in WORKER_PURPOSES
+    assert SessionPurpose.IDEA in WORKER_PURPOSES
+    assert SessionPurpose.DEBT in WORKER_PURPOSES
+
+
+def test_session_lane_defaults_to_none() -> None:
+    """Session.lane defaults to None when not provided."""
+    sess = Session(
+        name="test/impl",
+        client="test",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp"),
+    )
+    assert sess.lane is None
+
+
+def test_session_lane_round_trips() -> None:
+    """Session(lane='x') stores and returns the lane value."""
+    sess = Session(
+        name="test/impl",
+        client="test",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp"),
+        lane="my-lane",
+    )
+    assert sess.lane == "my-lane"

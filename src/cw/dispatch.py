@@ -149,8 +149,10 @@ def _lane_stats_for_client(
     """Per-lane ``{claimed: 0, running, pending}`` counts for event payloads.
 
     Why task-based running: RUNNING/BLOCKED_ON_USER tasks carry ``lane``;
-    sessions do not (``Session.lane`` is #560). BLOCKED_ON_USER occupies its
-    lane slot per ADR-0006, so it counts as running here.
+    sessions carry ``lane`` as of #594, but occupancy counting stays task-join
+    based per ADR-0006 / Phase 4a scope (stamped-but-not-read by the
+    scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so it
+    counts as running here.
     """
     stats: dict[str, dict[str, int]] = {}
     for lane_cfg in client.effective_lanes:
@@ -546,6 +548,7 @@ def dispatch_tick(
                         wall_clock_budget_seconds=resolve_headless_budget(
                             task, None, config
                         ),
+                        lane=task.lane,
                     )
 
                     # Stamp session_id on the queued task so the completion
