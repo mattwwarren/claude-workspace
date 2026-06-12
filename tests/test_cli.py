@@ -6977,4 +6977,3 @@ class TestDevQueueMove:
             ["dev-queue", "move", "ACM-11", "-c", "acme", "--to", "fast"],
         )
         assert result.exit_code != 0
-        assert result.exit_code == 0
