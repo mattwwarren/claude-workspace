@@ -1523,11 +1523,7 @@ class TestMoveTicket:
             f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
         )
         (config_dir / "clients.yaml").write_text(
-            f"clients:\n"
-            f"  genhealth:\n"
-            f"    workspace_path: {ws}\n"
-            f"    lanes:\n"
-            f"{lane_yaml}"
+            f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
         )
 
     def test_move_ticket_pending_success(

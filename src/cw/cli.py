@@ -1900,16 +1900,21 @@ def dev_queue_add(
     config = load_orchestrator_config()
     for ticket_id in tickets:
         resolved = resolve_client(ticket_id, config, client)
-        # Validate lane against client's declared lanes
-        client_cfg = get_client(resolved)
-        declared_lane_names = [ln.name for ln in client_cfg.effective_lanes]
-        if lane_name not in declared_lane_names:
-            msg = (
-                f"Lane '{lane_name}' is not declared for client '{resolved}'."
-                f" Declared lanes: {', '.join(declared_lane_names)}."
-                f" Run: cw lane add {resolved} {lane_name}"
-            )
-            raise CwError(msg)
+        # Validate lane against client's declared lanes (skip if client not in
+        # clients.yaml — dispatch will surface the unknown-client error later).
+        try:
+            client_cfg = get_client(resolved)
+        except CwError:
+            pass  # Unknown client — lane validation deferred to dispatch
+        else:
+            declared_lane_names = [ln.name for ln in client_cfg.effective_lanes]
+            if lane_name not in declared_lane_names:
+                msg = (
+                    f"Lane '{lane_name}' is not declared for client '{resolved}'."
+                    f" Declared lanes: {', '.join(declared_lane_names)}."
+                    f" Run: cw lane add {resolved} {lane_name}"
+                )
+                raise CwError(msg)
         task = TicketTask(
             ticket_id=ticket_id,
             client=resolved,

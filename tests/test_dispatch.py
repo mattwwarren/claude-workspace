@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from cw.config import (
-    load_orchestrator_config,
+    load_effective_config,
     load_state,
     orchestrator_config_file,
     save_state,
@@ -2771,18 +2771,18 @@ class TestConfigReloadedEachTick:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """run_dispatch_loop re-calls load_orchestrator_config on every tick."""
+        """run_dispatch_loop re-calls load_effective_config on every tick."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         call_count = 0
-        real_load = load_orchestrator_config
+        real_load = load_effective_config
 
         def counting_load() -> OrchestratorConfig:
             nonlocal call_count
             call_count += 1
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch.load_orchestrator_config", counting_load)
+        monkeypatch.setattr("cw.dispatch.load_effective_config", counting_load)
 
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
@@ -2842,7 +2842,7 @@ class TestConfigReloadedEachTick:
         """In-loop reload failure logs WARNING and continues with last-good config."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
-        real_load = load_orchestrator_config
+        real_load = load_effective_config
         call_count = 0
 
         def patched_load() -> OrchestratorConfig:
@@ -2855,7 +2855,7 @@ class TestConfigReloadedEachTick:
                 raise yaml.YAMLError(msg)
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch.load_orchestrator_config", patched_load)
+        monkeypatch.setattr("cw.dispatch.load_effective_config", patched_load)
 
         daemon = FakeNativeDaemonClient()
         # Should NOT raise despite the in-loop reload failing
