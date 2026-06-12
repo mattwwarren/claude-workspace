@@ -374,6 +374,11 @@ class OrchestratorConfig(BaseModel):
     # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
     # pre-#554 self-healing behavior. See ADR-0006 invariant 4 and GitHub #554.
     reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
+    # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
+    # sentinel (signal_stop never fired). Shorter than the idle watchdog budget
+    # because an emitted sentinel is positive evidence the worker completed.
+    # See GitHub #578.
+    sentinel_unrouted_check_seconds: int = 300
     # RFC 0004 Phase 2 — two-knob scheduler (#558)
     # Tier-1: limit how many clients are eligible per tick.
     # None = no limit (today's behavior preserved).

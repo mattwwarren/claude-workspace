@@ -1820,10 +1820,10 @@ class TestSignalStop:
         """
         import datetime as dt
 
-        from cw.cli import _VALIDATION_FAILED_MAX_ATTEMPTS
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
+        from cw.reconcile import _VALIDATION_FAILED_MAX_ATTEMPTS
 
         worktree, session = self._setup_headless_session(
             tmp_path, "sess-251-vf-cap", "worktree-251-vf-cap"

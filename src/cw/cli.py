@@ -23,11 +23,6 @@ from cw import __version__
 from cw._util import _iter_assistant_text_blocks, claude_project_dir
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import (
-    BLOCKER_REASON_NO_RESULT_EMITTED,
-    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
-    BLOCKER_REASON_VALIDATION_FAILED,
-    PAUSED_FOR_USER_INPUT_STATUSES,
-    SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     BlockedResult,
     Status,
@@ -121,6 +116,7 @@ from cw.queue import (
     remove_item,
 )
 from cw.reconcile import (
+    _apply_sentinel_to_task,
     _csid_from_transcript,
     _locate_session_transcript,
     reconcile,
@@ -1364,113 +1360,6 @@ def event_tail(
     if consumer is not None and events:
         advance_cursor(consumer, events[-1].id)
         click.echo(f"Cursor advanced to: {events[-1].id}", err=True)
-
-
-# Max dispatch attempts before a validation_failed sentinel caps the task as
-# FAILED rather than reverting to PENDING. See issue #251 Bug B.
-_VALIDATION_FAILED_MAX_ATTEMPTS = 3
-
-# BlockedResult reason codes that are deterministic — the running parser binary
-# will produce the same result on every retry, so there is no point retrying.
-# Route these to FAILED on first occurrence.  See GitHub issue #263.
-_DETERMINISTIC_PARSE_FAILURES: frozenset[str] = frozenset(
-    {BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED}
-)
-
-# BlockedResult reason codes that are transient — the failure condition could
-# resolve on a fresh dispatch (e.g. worker crashed before emitting a sentinel).
-_TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
-    {BLOCKER_REASON_NO_RESULT_EMITTED}
-)
-
-# AutoDevResult statuses that represent terminal outcomes the dev-queue should
-# never auto-retry. Marking these COMPLETED prevents the race described in
-# issue #251 Bug A where revert_completed_silent_tasks reverts a task to
-# PENDING before consume_completed_sessions can process the SESSION_COMPLETED
-# event — causing no_op and similar outcomes to trigger infinite re-dispatch.
-# Also covers ambiguities_pending_resolution and premises_pending_verification
-# (issue #316): these are terminal-pending-user, not retry candidates.
-#
-# Defined in auto_dev_result.py as SALVAGE_TERMINAL_STATUSES; imported here
-# so reconcile.py and cli.py share a single source of truth. See #431.
-_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
-
-
-def _apply_sentinel_to_task(
-    ticket_id: str,
-    cw_session_id: str,
-    sentinel: AutoDevResult | BlockedResult,
-) -> None:
-    """Directly update the matching dev-queue task based on the sentinel result.
-
-    Called from signal_stop *before* the session is marked COMPLETED so the
-    task is already in its terminal state when revert_completed_silent_tasks
-    runs. This closes the race window where:
-
-      1. signal_stop marks session COMPLETED (save_state)
-      2. dispatch loop reconcile fires: sees COMPLETED session + RUNNING task
-         → reverts task to PENDING
-      3. consume_completed_sessions reads the SESSION_COMPLETED event but
-         finds task is PENDING (not RUNNING) → skips it
-      4. next tick re-dispatches the ticket (infinite loop for no_op)
-
-    See GitHub issue #251.
-    """
-    with dev_queue_lock():
-        store = load_dev_queue()
-        target: TicketTask | None = None
-        for task in store.tasks:
-            if (
-                task.ticket_id == ticket_id
-                and task.session_id == cw_session_id
-                and task.status == QueueItemStatus.RUNNING
-            ):
-                target = task
-                break
-        if target is None:
-            return
-
-        if isinstance(sentinel, AutoDevResult):
-            if sentinel.status in PAUSED_FOR_USER_INPUT_STATUSES:
-                target.status = QueueItemStatus.BLOCKED_ON_USER
-            elif sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
-                target.status = QueueItemStatus.COMPLETED
-            elif sentinel.status == "blocked":
-                retry = (
-                    sentinel.blocker is not None
-                    and sentinel.blocker.retry_eligible is True
-                )
-                if retry:
-                    target.status = QueueItemStatus.PENDING
-                    target.session_id = None
-                else:
-                    target.status = QueueItemStatus.COMPLETED
-            else:
-                target.status = QueueItemStatus.COMPLETED
-        else:
-            # BlockedResult: sentinel failed to parse or was malformed.
-            if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
-                # Deterministic failure — retrying the same binary won't help.
-                target.status = QueueItemStatus.FAILED
-            elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
-                if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
-                    target.status = QueueItemStatus.FAILED
-                else:
-                    target.status = QueueItemStatus.PENDING
-                    target.session_id = None
-            elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
-                target.status = QueueItemStatus.PENDING
-                target.session_id = None
-            else:
-                # Known codes that intentionally fall here:
-                # BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
-                # BLOCKER_REASON_STATUS_UNKNOWN.
-                # Both are terminal (retry won't fix them); COMPLETED avoids
-                # re-burning dispatch cycles.  The else also catches any future
-                # unknown reason code conservatively.
-                target.status = QueueItemStatus.COMPLETED
-
-        save_dev_queue(store)
 
 
 def _parse_sentinel_from_transcript(
