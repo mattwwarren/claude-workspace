@@ -10,14 +10,17 @@ import pytest
 
 from cw.models import (
     DEFAULT_AUTO_PURPOSES,
+    DEFAULT_LANE,
     ClientConfig,
     CompletionReason,
     CwState,
     DevQueueStore,
+    LaneConfig,
     OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapPolicy,
     Session,
     SessionPurpose,
     SessionStatus,
@@ -634,3 +637,58 @@ class TestCostFields:
         dumped = task.model_dump(mode="json")
         restored = TicketTask.model_validate(dumped)
         assert restored.total_cost_usd == pytest.approx(3.14)
+
+
+class TestLaneConfig:
+    def test_default_fields(self) -> None:
+        """LaneConfig has correct defaults when instantiated with only name."""
+        lane = LaneConfig(name="default")
+        assert lane.max_parallel == 1
+        assert lane.priority == 0
+        assert lane.paused is False
+        assert lane.description == ""
+        assert lane.reap_policy == ReapPolicy.SIGNAL_ONLY
+
+    def test_reap_policy_uses_enum(self) -> None:
+        """reap_policy is a ReapPolicy instance, not raw str."""
+        lane = LaneConfig(name="fast")
+        assert isinstance(lane.reap_policy, ReapPolicy)
+        assert lane.reap_policy == ReapPolicy.SIGNAL_ONLY
+
+    def test_name_required(self) -> None:
+        """LaneConfig without name raises ValidationError."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LaneConfig()  # type: ignore[call-arg]
+
+    def test_empty_name_raises(self) -> None:
+        """Empty lane name raises ValidationError."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LaneConfig(name="")
+
+
+class TestClientConfigEffectiveLanes:
+    def test_effective_lanes_empty_synthesizes_default(
+        self, tmp_path: object
+    ) -> None:
+        """ClientConfig with no lanes returns synthesized default lane."""
+        config = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        lanes = config.effective_lanes
+        assert len(lanes) == 1
+        assert lanes[0].name == DEFAULT_LANE
+
+    def test_effective_lanes_explicit_list_passed_through(
+        self, tmp_path: object
+    ) -> None:
+        """ClientConfig with explicit lanes returns them unchanged."""
+        explicit = [LaneConfig(name="fast"), LaneConfig(name="slow")]
+        config = ClientConfig(
+            name="test", workspace_path=Path("/dev/null"), lanes=explicit
+        )
+        lanes = config.effective_lanes
+        assert len(lanes) == 2
+        assert lanes[0].name == "fast"
+        assert lanes[1].name == "slow"
