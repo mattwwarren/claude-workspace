@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -502,8 +503,6 @@ def test_read_events_cursor_not_found_replays_from_start(
     tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """cursor pointing at nonexistent event id replays all events from the start."""
-    import logging
-
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
     ev3 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 3})
@@ -526,8 +525,6 @@ def test_read_events_torn_final_line_skipped(
     tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Malformed trailing line (torn write) is skipped with a warning."""
-    import logging
-
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
 

@@ -104,14 +104,31 @@ def advance_cursor(consumer: str, event_id: str) -> None:
     atomic_write_text(path, json.dumps(data))
 
 
-def _parse_lines(lines: list[str]) -> list[tuple[int, OrchestratorEvent]]:
-    """Parse JSONL lines into (index, event) pairs.
+def _event_matches(
+    event: OrchestratorEvent,
+    *,
+    since_ts: datetime | None,
+    event_types: list[OrchestratorEventType] | None,
+) -> bool:
+    """Return True if *event* passes the timestamp and type filters."""
+    if since_ts is not None and event.created_at < since_ts:
+        return False
+    return event_types is None or event.type in event_types
+
+
+def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
+    """Parse JSONL lines into a list of events.
 
     Tolerates a malformed trailing line (torn write): if the last non-empty
     line fails JSON parsing, it is skipped with a warning.  Interior corrupt
     lines re-raise so callers see real corruption.
     """
-    results: list[tuple[int, OrchestratorEvent]] = []
+    # Precompute last non-empty index so trailing blank lines don't cause the
+    # torn-write check to misfire on an interior corrupt line.
+    last_nonempty_idx = max(
+        (j for j, line in enumerate(lines) if line.strip()), default=-1
+    )
+    results: list[OrchestratorEvent] = []
     for i, raw_line in enumerate(lines):
         stripped = raw_line.strip()
         if not stripped:
@@ -119,12 +136,12 @@ def _parse_lines(lines: list[str]) -> list[tuple[int, OrchestratorEvent]]:
         try:
             raw = json.loads(stripped)
         except json.JSONDecodeError as exc:
-            if i == len(lines) - 1:
+            if i == last_nonempty_idx:
                 # Tolerate malformed trailing line only (torn write)
                 logger.warning("skipping malformed trailing line in inbox: %s", exc)
                 continue
             raise
-        results.append((i, OrchestratorEvent.model_validate(raw)))
+        results.append(OrchestratorEvent.model_validate(raw))
     return results
 
 
@@ -177,30 +194,29 @@ def read_events(
     events: list[OrchestratorEvent] = []
     past_cursor = cursor is None  # If no cursor, start from beginning
 
-    for _i, event in parsed:
+    for event in parsed:
         # Cursor-based skip: advance past the cursor event, then include from there
         if not past_cursor:
             if event.id == cursor:
                 past_cursor = True
             continue
 
-        if since_ts is not None and event.created_at < since_ts:
-            continue
-        if event_types is not None and event.type not in event_types:
+        if not _event_matches(event, since_ts=since_ts, event_types=event_types):
             continue
 
         events.append(event)
 
-    # Cursor-not-found fallback: replay from the beginning
+    # Cursor-not-found fallback: replay from the beginning.
+    # Why: callers are idempotent — orchestrate_retire guards on sess.status ==
+    # COMPLETED, dispatch consumer skips non-RUNNING tasks, and event tail is
+    # display-only — so replaying from the start is safe.
     if cursor is not None and not past_cursor:
         logger.warning("cursor %s not found in inbox; replaying from start", cursor)
-        events = []
-        for _i, event in parsed:
-            if since_ts is not None and event.created_at < since_ts:
-                continue
-            if event_types is not None and event.type not in event_types:
-                continue
-            events.append(event)
+        events = [
+            event
+            for event in parsed
+            if _event_matches(event, since_ts=since_ts, event_types=event_types)
+        ]
 
     if limit is not None:
         events = events[:limit]
