@@ -1505,15 +1505,39 @@ class TestTickSummaryLanes:
 # ---------------------------------------------------------------------------
 
 
-def _write_client_with_lane(tmp_config_dir: Path, lane_name: str = "impl") -> Path:
+def _write_client_with_lane(
+    tmp_config_dir: Path,
+    lane_name: str = "impl",
+) -> Path:
     """Write a clients.yaml with one client declaring a named lane.
 
-    Returns the workspace path so callers can create sessions against it.
+    Initialises the workspace as a minimal git repo so _validate_worktree
+    inside spawn_create_impl accepts it. Returns the workspace path.
     """
+    import os
+    import subprocess
+
     from cw.config import clients_file
 
     workspace = tmp_config_dir / "workspace" / "test-client"
     workspace.mkdir(parents=True, exist_ok=True)
+
+    # Initialise a bare-minimum git repo (validate_worktree runs git rev-parse).
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(workspace), *args],
+            capture_output=True,
+            check=True,
+            env=clean_env,
+        )
+
+    _git("init", "-b", "main")
+    _git("config", "user.email", "test@example.com")
+    _git("config", "user.name", "cw test")
+    _git("commit", "--allow-empty", "-m", "initial")
+
     clients_path = clients_file()
     clients_path.parent.mkdir(parents=True, exist_ok=True)
     clients_path.write_text(
@@ -1538,9 +1562,6 @@ class TestOrchestrateStart:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """start --lane <declared> spawns an ORCHESTRATE session with correct metadata."""
-        from cw.config import load_state
-        from cw.models import SessionPurpose
-
         workspace = _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
 
@@ -1580,9 +1601,6 @@ class TestOrchestrateStart:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Second start on a lane with a live ORCHESTRATE session is rejected."""
-        from cw.config import save_state
-        from cw.models import CwState, Session, SessionPurpose, SessionStatus
-
         workspace = _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
 
@@ -1612,9 +1630,6 @@ class TestOrchestrateStart:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """start succeeds when prior ORCHESTRATE session for lane is COMPLETED."""
-        from cw.config import load_state, save_state
-        from cw.models import CwState, Session, SessionPurpose, SessionStatus
-
         workspace = _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: mock_native_daemon)
 

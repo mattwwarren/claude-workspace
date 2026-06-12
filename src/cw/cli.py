@@ -68,7 +68,7 @@ from cw.doctor import (
     run_doctor,
 )
 from cw.events import advance_cursor, read_events, record_event
-from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
+from cw.exceptions import CwError, LaneNotFoundError, MissingWorkspaceError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
     WORKER_PURPOSES,
@@ -2669,6 +2669,84 @@ def orchestrate_parent(worker_id: str, as_json: bool) -> None:
     else:
         surface = entry.surface_ref if entry.surface_ref is not None else "(none)"
         click.echo(f"{entry.id}  status={entry.status}  surface_ref={surface}")
+
+
+@orchestrate.command(name="start")
+@click.option(
+    "--lane",
+    "lane",
+    required=True,
+    help="Lane name to bind the ORCHESTRATE session to.",
+)
+@click.option(
+    "--client",
+    "client_name",
+    default=None,
+    help="Client name (defaults to first configured client).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+@handle_errors
+def orchestrate_start(lane: str, client_name: str | None, as_json: bool) -> None:
+    """Spawn an ORCHESTRATE-purpose session bound to a lane.
+
+    Records the lane-authority binding for use by Phase 4c.
+    At most one live ORCHESTRATE session is allowed per (client, lane).
+    """
+    client_cfg = _resolve_client(client_name)
+    declared = [ln.name for ln in client_cfg.effective_lanes]
+    if lane not in declared:
+        msg = (
+            f"Lane '{lane}' is not declared for client '{client_cfg.name}'. "
+            f"Declared lanes: {', '.join(declared)}. "
+            f"Run: cw lane add {client_cfg.name} {lane}"
+        )
+        raise LaneNotFoundError(msg)
+
+    # R5: Reject if a live ORCHESTRATE session already exists for (client, lane)
+    state = load_state()
+    live_statuses = {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
+    existing = next(
+        (
+            s
+            for s in state.sessions
+            if s.client == client_cfg.name
+            and s.purpose == SessionPurpose.ORCHESTRATE
+            and s.lane == lane
+            and s.status in live_statuses
+        ),
+        None,
+    )
+    if existing is not None:
+        msg = (
+            f"An ORCHESTRATE session for lane '{lane}' already exists: "
+            f"{existing.id!r} (status: {existing.status.value}). "
+            f"Clear it first with: cw spawn complete {existing.id} --status completed"
+        )
+        raise CwError(msg)
+
+    native_daemon = get_native_daemon_client()
+    session_id = spawn_create_impl(
+        client=client_cfg,
+        worktree=client_cfg.workspace_path,
+        prompt=(
+            f"You are the lane-authority binding for lane '{lane}' on client "
+            f"'{client_cfg.name}'. This session records the binding; the "
+            "event-consumption loop is added separately (Phase 4c). "
+            "You may end your turn now."
+        ),
+        label=f"orchestrate/{lane}",
+        purpose=SessionPurpose.ORCHESTRATE,
+        lane=lane,
+        permission_mode="acceptEdits",
+        native_daemon=native_daemon,
+    )
+
+    if as_json:
+        click.echo(
+            json.dumps({"session_id": session_id, "lane": lane, "client": client_cfg.name})
+        )
+    else:
+        click.echo(f"Spawned orchestrate session for lane '{lane}': {session_id}")
 
 
 # --- Spawn command group ---
