@@ -2854,7 +2854,10 @@ class TestFreshnessGateAutoFF:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """safety='behind' + successful ff → TICKET_NEEDS_SYNC NOT emitted, task claimed."""
+        """safety='behind' + successful ff → task claimed.
+
+        TICKET_NEEDS_SYNC must NOT be emitted; spawned=1.
+        """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(ticket_id="CW-100", client="test-client")
         add_ticket(task)
@@ -2882,7 +2885,8 @@ class TestFreshnessGateAutoFF:
             consumer="test-auto-ff-behind",
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
-        assert len(events) == 0, "TICKET_NEEDS_SYNC must NOT be emitted after successful ff"
+        # TICKET_NEEDS_SYNC must NOT be emitted after a successful auto-ff.
+        assert len(events) == 0
 
     def test_auto_ff_ahead_skips_with_ticket_needs_sync(
         self,
@@ -2985,7 +2989,10 @@ class TestFreshnessGateAutoFF:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """safety='behind' but fast_forward_main raises WorktreeError → TICKET_NEEDS_SYNC."""
+        """safety='behind' but fast_forward_main raises WorktreeError.
+
+        Exception must be swallowed; TICKET_NEEDS_SYNC emitted as fallback.
+        """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(ticket_id="CW-104", client="test-client")
         add_ticket(task)
@@ -3006,7 +3013,7 @@ class TestFreshnessGateAutoFF:
         monkeypatch.setattr("cw.dispatch.fast_forward_main", _boom)
 
         daemon = FakeNativeDaemonClient()
-        # Must NOT raise — exception must be swallowed and fall through to TICKET_NEEDS_SYNC
+        # Exception must be swallowed; falls through to TICKET_NEEDS_SYNC.
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert result.spawned == 0
@@ -3045,7 +3052,8 @@ class TestFreshnessGateAutoFF:
         result = dispatch_tick(simple_config, auto_ff=False, native_daemon=daemon)
 
         assert result.spawned == 0
-        assert not check_called[0], "check_main_ff_safety must NOT be called when auto_ff=False"
+        # check_main_ff_safety must NOT be called when auto_ff=False.
+        assert not check_called[0]
         events = read_events(
             consumer="test-auto-ff-disabled",
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
