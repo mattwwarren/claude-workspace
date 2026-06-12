@@ -26,7 +26,12 @@ from cw.config import (
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
-from cw.exceptions import StaleWorktreeError, UsageLimitError, WorktreeError
+from cw.exceptions import (
+    MissingWorkspaceError,
+    StaleWorktreeError,
+    UsageLimitError,
+    WorktreeError,
+)
 from cw.models import (
     DispatchSkipReason,
     OrchestratorEventType,
@@ -43,8 +48,10 @@ from cw.reconcile import (
 )
 from cw.spawn import spawn_create_impl
 from cw.worktree import (
+    check_main_ff_safety,
     check_not_main_checkout,
     create_worktree,
+    fast_forward_main,
     is_main_behind_origin,
     remove_worktree,
     worktree_has_unsaved_work,
@@ -139,6 +146,7 @@ def dispatch_tick(
     emit: Callable[[str], None] | None = None,
     warned_stale: set[tuple[str, str]] | None = None,
     usage_limited_until: datetime | None = None,
+    auto_ff: bool = True,
 ) -> DispatchTickResult:
     """Run one dispatch tick.
 
@@ -168,6 +176,12 @@ def dispatch_tick(
             caller (:func:`run_dispatch_loop`) when a
             :class:`~cw.exceptions.UsageLimitError` is detected.
             Single-tick (``--once``) mode does not set back-off.
+        auto_ff: When True (default), attempt to fast-forward local main
+            automatically before emitting TICKET_NEEDS_SYNC. Only fires
+            when ``check_main_ff_safety`` returns ``"behind"``; other
+            states (``"ahead"``, ``"diverged"``, ``"detached"``) still
+            fall through to the stale-block path. Pass ``False`` to
+            restore legacy block-only behavior.
 
     Returns:
         :class:`DispatchTickResult` with ``spawned`` count and
@@ -245,7 +259,7 @@ def dispatch_tick(
         # On any error, log and proceed so a transient network issue never
         # blocks the whole loop.
         try:
-            stale, _local_sha, _origin_sha, _behind = is_main_behind_origin(client)
+            stale, local_sha, origin_sha, behind_count = is_main_behind_origin(client)
         except Exception:  # noqa: BLE001
             # Defense-in-depth: _fetch_default_branch now handles
             # FileNotFoundError/PermissionError internally; this catches
@@ -282,6 +296,31 @@ def dispatch_tick(
             for t in queue_snapshot.tasks
             if t.client == client.name and t.status == QueueItemStatus.PENDING
         )
+
+        if stale and auto_ff:
+            ff_safety = check_main_ff_safety(client)
+            if ff_safety == "behind":
+                try:
+                    fast_forward_main(client, ignore_untracked=True)
+                    # Why: double-fetch accepted — is_main_behind_origin fetches
+                    # and git pull --ff-only fetches again. Acceptable for a
+                    # single-user tool.
+                    _log.info(
+                        "auto-ff: %s/main: %s..%s (%d commits)",
+                        client.name,
+                        local_sha[:8],
+                        origin_sha[:8],
+                        behind_count,
+                    )
+                    stale = False
+                except (WorktreeError, MissingWorkspaceError) as exc:
+                    _log.warning(
+                        "auto-ff: fast-forward failed for %s: %s",
+                        client.name,
+                        exc,
+                    )
+                # Why: no git-level lock — concurrent dispatch loops are safe;
+                # git pull --ff-only is idempotent when already current.
 
         if stale:
             stale_tasks = [
@@ -723,6 +762,7 @@ def run_dispatch_loop(
     parent: str | None = None,
     native_daemon: NativeDaemonClient | None = None,
     emit: Callable[[str], None] | None = None,
+    auto_ff: bool = True,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -742,6 +782,10 @@ def run_dispatch_loop(
             When None, all human-readable output is suppressed (quiet
             mode for cron/scripted use).  Typically ``click.echo`` in
             CLI context.
+        auto_ff: Passed through to each ``dispatch_tick`` call.  When
+            True (default), stale-but-behind repos are fast-forwarded
+            automatically. Pass False to restore legacy block-only
+            behavior (``--no-auto-ff`` CLI flag).
     """
     config = load_orchestrator_config()
 
@@ -773,6 +817,7 @@ def run_dispatch_loop(
             emit=emit,
             warned_stale=warned_stale,
             usage_limited_until=usage_limited_until,
+            auto_ff=auto_ff,
         )
 
         if result.usage_limit_detected and not once:

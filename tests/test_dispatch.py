@@ -2837,3 +2837,225 @@ class TestConfigReloadedEachTick:
             for record in caplog.records
             if record.levelno == logging.WARNING
         )
+
+
+# ---------------------------------------------------------------------------
+# TestFreshnessGateAutoFF
+# ---------------------------------------------------------------------------
+
+
+class TestFreshnessGateAutoFF:
+    """Auto-ff tests: stale+behind triggers fast-forward; other states block."""
+
+    def test_auto_ff_behind_succeeds_claims_ticket(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='behind' + successful ff → task claimed.
+
+        TICKET_NEEDS_SYNC must NOT be emitted; spawned=1.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-100", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "abc12345" * 5, "def67890" * 5, 3),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client: "behind",
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.fast_forward_main",
+            lambda _client, **_kwargs: ("abc12345" * 5, "def67890" * 5),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        # ff succeeded → stale cleared → task should be spawned
+        assert result.spawned == 1
+
+        events = read_events(
+            consumer="test-auto-ff-behind",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        # TICKET_NEEDS_SYNC must NOT be emitted after a successful auto-ff.
+        assert len(events) == 0
+
+    def test_auto_ff_ahead_skips_with_ticket_needs_sync(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='ahead' → TICKET_NEEDS_SYNC emitted, claim blocked."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-101", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client: "ahead",
+        )
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        events = read_events(
+            consumer="test-auto-ff-ahead",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "CW-101"
+
+    def test_auto_ff_diverged_skips(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='diverged' → TICKET_NEEDS_SYNC emitted, claim blocked."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-102", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client: "diverged",
+        )
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        events = read_events(
+            consumer="test-auto-ff-diverged",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+
+    def test_auto_ff_detached_skips(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='detached' → TICKET_NEEDS_SYNC emitted, claim blocked."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-103", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client: "detached",
+        )
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        events = read_events(
+            consumer="test-auto-ff-detached",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+
+    def test_auto_ff_ff_raises_falls_through_to_ticket_needs_sync(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='behind' but fast_forward_main raises WorktreeError.
+
+        Exception must be swallowed; TICKET_NEEDS_SYNC emitted as fallback.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-104", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client: "behind",
+        )
+
+        def _boom(_client: object, **_kwargs: object) -> tuple[str, str]:
+            msg = "git pull failed"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.fast_forward_main", _boom)
+
+        daemon = FakeNativeDaemonClient()
+        # Exception must be swallowed; falls through to TICKET_NEEDS_SYNC.
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        events = read_events(
+            consumer="test-auto-ff-raises",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1
+
+    def test_auto_ff_false_keeps_ticket_needs_sync(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """auto_ff=False preserves legacy block-only behavior even when 'behind'."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-105", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client: (True, "aaa", "bbb", 3),
+        )
+        # check_main_ff_safety must NOT be called; if it is called that's a bug
+        check_called = [False]
+
+        def _check_boom(_client: object) -> str:
+            check_called[0] = True
+            return "behind"
+
+        monkeypatch.setattr("cw.dispatch.check_main_ff_safety", _check_boom)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, auto_ff=False, native_daemon=daemon)
+
+        assert result.spawned == 0
+        # check_main_ff_safety must NOT be called when auto_ff=False.
+        assert not check_called[0]
+        events = read_events(
+            consumer="test-auto-ff-disabled",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(events) == 1

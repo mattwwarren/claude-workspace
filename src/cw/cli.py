@@ -1685,6 +1685,12 @@ def dev_queue_status(client: str | None) -> None:
     default=False,
     help="Suppress per-tick operator output (for cron/scripted use).",
 )
+@click.option(
+    "--auto-ff/--no-auto-ff",
+    "auto_ff",
+    default=True,
+    help="Disable automatic fast-forward of local main (legacy block-only behavior).",
+)
 @handle_errors
 def dev_queue_run(
     max_parallel: int | None,
@@ -1692,6 +1698,7 @@ def dev_queue_run(
     use_plan: bool,
     parent: str | None,
     quiet: bool,
+    auto_ff: bool,
 ) -> None:
     """Run the dispatch loop, spawning sessions for pending tickets."""
     run_dispatch_loop(
@@ -1700,6 +1707,7 @@ def dev_queue_run(
         use_plan=use_plan,
         parent=parent,
         emit=None if quiet else click.echo,
+        auto_ff=auto_ff,
     )
 
 
@@ -2063,7 +2071,7 @@ def dev_queue_refresh_all() -> None:
     had_error = False
     for client in clients.values():
         try:
-            before, after = fast_forward_main(client)
+            before, after = fast_forward_main(client, ignore_untracked=True)
             if before == after:
                 click.echo(f"{client.name}: already up to date ({before[:8]})")
             else:

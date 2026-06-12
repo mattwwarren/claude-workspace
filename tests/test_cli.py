@@ -4061,7 +4061,7 @@ class TestDevQueueRefreshAll:
 
         called_clients: list[str] = []
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4091,7 +4091,7 @@ class TestDevQueueRefreshAll:
 
         monkeypatch.setattr(
             "cw.cli.fast_forward_main",
-            lambda _c: (
+            lambda _c, **_kw: (
                 "abc123def456abc123def456abc123def456abc1",
                 "abc123def456abc123def456abc123def456abc1",
             ),
@@ -4115,7 +4115,7 @@ class TestDevQueueRefreshAll:
 
         monkeypatch.setattr(
             "cw.cli.fast_forward_main",
-            lambda _c: (
+            lambda _c, **_kw: (
                 "oldsha1oldsha1oldsha1oldsha1oldsha1oldsh",
                 "newsha2newsha2newsha2newsha2newsha2newsh",
             ),
@@ -4147,7 +4147,7 @@ class TestDevQueueRefreshAll:
 
         called_clients: list[str] = []
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4181,7 +4181,7 @@ class TestDevQueueRefreshAll:
 
         monkeypatch.setattr(
             "cw.cli.fast_forward_main",
-            lambda _c: ("aaa", "bbb"),
+            lambda _c, **_kw: ("aaa", "bbb"),
         )
 
         runner = CliRunner()
@@ -4215,7 +4215,7 @@ class TestDevQueueRefreshAll:
 
         called_clients: list[str] = []
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4245,7 +4245,7 @@ class TestDevQueueRefreshAll:
         ws = tmp_path / "nonexistent"
         self._write_clients_yaml(tmp_config_dir, [("client-a", str(ws))])
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             msg = "workspace missing for client-a"
             raise MissingWorkspaceError(msg)
 
@@ -4278,7 +4278,7 @@ class TestDevQueueRefreshAll:
             ],
         )
 
-        def _mock_ff(client: object) -> tuple[str, str]:
+        def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             from cw.models import ClientConfig
 
             assert isinstance(client, ClientConfig)
@@ -4853,6 +4853,7 @@ class TestDevQueueRunQuiet:
             parent: object = None,
             native_daemon: object = None,
             emit: object = None,
+            auto_ff: bool = True,
         ) -> None:
             captured_emit.append(emit)
 
@@ -4880,6 +4881,7 @@ class TestDevQueueRunQuiet:
             parent: object = None,
             native_daemon: object = None,
             emit: object = None,
+            auto_ff: bool = True,
         ) -> None:
             captured_emit.append(emit)
 
@@ -4891,6 +4893,62 @@ class TestDevQueueRunQuiet:
         assert len(captured_emit) == 1
         assert callable(captured_emit[0]), (
             f"Expected callable emit but got: {captured_emit[0]!r}"
+        )
+
+    def test_auto_ff_on_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bare invocation passes auto_ff=True to run_dispatch_loop."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        captured_auto_ff: list[bool] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+            auto_ff: bool = True,
+        ) -> None:
+            captured_auto_ff.append(auto_ff)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "run", "--once"])
+        assert result.exit_code == 0, result.output
+        assert captured_auto_ff == [True], (
+            f"Expected auto_ff=True by default but got: {captured_auto_ff!r}"
+        )
+
+    def test_no_auto_ff_flag_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--no-auto-ff passes auto_ff=False to run_dispatch_loop."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        captured_auto_ff: list[bool] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+            auto_ff: bool = True,
+        ) -> None:
+            captured_auto_ff.append(auto_ff)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "run", "--once", "--no-auto-ff"])
+        assert result.exit_code == 0, result.output
+        assert captured_auto_ff == [False], (
+            f"Expected auto_ff=False with --no-auto-ff but got: {captured_auto_ff!r}"
         )
 
 
