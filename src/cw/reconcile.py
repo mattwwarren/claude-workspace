@@ -55,9 +55,13 @@ from typing import TYPE_CHECKING
 
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
+    BLOCKER_REASON_NO_RESULT_EMITTED,
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
+    BLOCKER_REASON_VALIDATION_FAILED,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
+    BlockedResult,
     parse_stdout,
 )
 from cw.config import (
@@ -415,6 +419,17 @@ def _is_headless(session: Session) -> bool:
 # so reconcile.py and cli.py cannot drift apart. See GitHub issues #372, #431.
 _SALVAGE_TERMINAL_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
+# Constants for _apply_sentinel_to_task (moved from cli.py; shared by both
+# signal_stop and the ROUTE_EMITTED_SENTINEL reconcile path). See GitHub #578.
+_VALIDATION_FAILED_MAX_ATTEMPTS = 3
+_DETERMINISTIC_PARSE_FAILURES: frozenset[str] = frozenset(
+    {BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED}
+)
+_TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
+    {BLOCKER_REASON_NO_RESULT_EMITTED}
+)
+_TERMINAL_NO_RETRY_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
+
 
 def _assistant_text_from_transcript(path: Path) -> str:
     """Concatenate the text of every assistant message in a jsonl transcript.
@@ -491,6 +506,93 @@ def _salvage_terminal_result(
     ):
         return result, transcript.stem
     return None
+
+
+def _parse_any_sentinel_from_transcript(
+    session: Session,
+) -> tuple[AutoDevResult | BlockedResult, str] | None:
+    """Parse any sentinel from the transcript, regardless of status.
+
+    Like :func:`_salvage_terminal_result` but applies no status filter — returns
+    the result for any valid parse including PAUSED_FOR_USER_INPUT statuses that
+    :func:`_salvage_terminal_result` would skip.  Returns None only when no
+    sentinel framing is present (BLOCKER_REASON_NO_RESULT_EMITTED).
+
+    Used by the ROUTE_EMITTED_SENTINEL detection path for sessions where the
+    sentinel was emitted but the Stop hook never fired.  See GitHub #578.
+    """
+    transcript = _locate_session_transcript(session)
+    if transcript is None:
+        return None
+    result = parse_stdout(_assistant_text_from_transcript(transcript))
+    if (
+        isinstance(result, BlockedResult)
+        and result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+    ):
+        return None
+    return result, transcript.stem
+
+
+def _apply_sentinel_to_task(
+    ticket_id: str,
+    cw_session_id: str,
+    sentinel: AutoDevResult | BlockedResult,
+) -> None:
+    """Update the matching dev-queue task based on the sentinel result.
+
+    Shared by signal_stop (cli.py) and the ROUTE_EMITTED_SENTINEL reconcile
+    path so both use the same sentinel→QueueItemStatus mapping.  Called before
+    marking the session COMPLETED so the task is in its terminal state when
+    revert_completed_silent_tasks runs.  See GitHub issues #251, #578.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        target: TicketTask | None = None
+        for task in store.tasks:
+            if (
+                task.ticket_id == ticket_id
+                and task.session_id == cw_session_id
+                and task.status == QueueItemStatus.RUNNING
+            ):
+                target = task
+                break
+        if target is None:
+            return
+
+        if isinstance(sentinel, AutoDevResult):
+            if sentinel.status in PAUSED_FOR_USER_INPUT_STATUSES:
+                target.status = QueueItemStatus.BLOCKED_ON_USER
+            elif sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
+                target.status = QueueItemStatus.COMPLETED
+            elif sentinel.status == "blocked":
+                retry = (
+                    sentinel.blocker is not None
+                    and sentinel.blocker.retry_eligible is True
+                )
+                if retry:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+                else:
+                    target.status = QueueItemStatus.COMPLETED
+            else:
+                target.status = QueueItemStatus.COMPLETED
+        else:
+            # BlockedResult: sentinel failed to parse or was malformed.
+            if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+                target.status = QueueItemStatus.FAILED
+            elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
+                if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
+                    target.status = QueueItemStatus.FAILED
+                else:
+                    target.status = QueueItemStatus.PENDING
+                    target.session_id = None
+            elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+                target.status = QueueItemStatus.PENDING
+                target.session_id = None
+            else:
+                target.status = QueueItemStatus.COMPLETED
+
+        save_dev_queue(store)
 
 
 def _session_project_dir(session: Session) -> Path | None:
@@ -1181,6 +1283,31 @@ def _detect_idle_candidates(
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
         budget = resolve_idle_watchdog_budget(task, config)
+        # ROUTE_EMITTED_SENTINEL: fires before the full idle-budget check.
+        # An emitted sentinel is positive evidence the worker completed; the
+        # 300 s threshold (sentinel_unrouted_check_seconds) is shorter than
+        # the watchdog budget to route the task before a reap fires.
+        # Guard: last_result is None means signal_stop never ran — prevents
+        # double-routing. Exempt from signal_only (constructive, not a reap).
+        # See GitHub #578.
+        unrouted_check = config.sentinel_unrouted_check_seconds
+        if session.last_result is None and elapsed >= unrouted_check:
+            routed = _parse_any_sentinel_from_transcript(session)
+            if routed is not None:
+                _routed_result, _csid = routed
+                candidates.append(
+                    ReapCandidate(
+                        session_id=session.id,
+                        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+                        ticket_id=ticket_id,
+                        routed_sentinel=_routed_result,
+                        salvage_csid=_csid,
+                        elapsed_seconds=elapsed,
+                        lane=task.lane if task else DEFAULT_LANE,
+                        client=session.client,
+                    )
+                )
+                continue
         if elapsed < budget:
             continue
         # Liveness check: if active, check for recovery of observation counter.
@@ -1357,6 +1484,28 @@ def _act_on_idle_candidates(
     salvage_git_candidates_list = [
         c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_GIT
     ]
+    routed_sentinel_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    ]
+
+    # ROUTE_EMITTED_SENTINEL queue routing: _apply_sentinel_to_task acquires its
+    # own dev_queue_lock so it runs BEFORE the shared lock block below.  Session
+    # state is mutated here; save_state picks it up in the combined flush below.
+    for candidate in routed_sentinel_candidates:
+        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
+            continue
+        if candidate.ticket_id:
+            _apply_sentinel_to_task(
+                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
+            )
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
+        session.claude_session_id = candidate.salvage_csid
 
     # Counter-only updates: just update the counter and possibly save_state.
     counters_changed = False
@@ -1397,6 +1546,7 @@ def _act_on_idle_candidates(
         or revert_candidates
         or park_candidates
         or salvage_git_candidates_list
+        or routed_sentinel_candidates
     )
 
     if counters_changed or has_dispositions:
@@ -1492,6 +1642,24 @@ def _act_on_idle_candidates(
             "status": candidate.salvage_result.status,
         }
         record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+
+    for candidate in routed_sentinel_candidates:
+        if candidate.routed_sentinel is None:
+            continue
+        session = session_by_id[candidate.session_id]
+        routed_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "crashed": False,
+            "salvaged": True,
+            "status": candidate.routed_sentinel.status,
+        }
+        record_event(OrchestratorEventType.SESSION_COMPLETED, routed_payload)
         if session.surface_ref is not None:
             get_native_daemon_client().stop(session.surface_ref)
 
@@ -1611,6 +1779,10 @@ class ProposedAction(StrEnum):
     SKIP_PARKED = "skip_parked"
     INCREMENT_COUNTER = "increment_counter"
     RECOVER_COUNTER = "recover_counter"
+    # Emitted sentinel that signal_stop never routed (turn never completed).
+    # Fires at sentinel_unrouted_check_seconds; exempt from signal_only.
+    # See GitHub #578.
+    ROUTE_EMITTED_SENTINEL = "route_emitted_sentinel"
 
 
 @dataclass(frozen=True)
@@ -1626,6 +1798,8 @@ class ReapCandidate:
     worktree_dirty: bool = False
     salvage_result: AutoDevResult | None = None
     salvage_csid: str | None = None
+    # ROUTE_EMITTED_SENTINEL carries the full parsed result (any status).
+    routed_sentinel: AutoDevResult | BlockedResult | None = None
     usage_limit_detected: bool = False
     elapsed_seconds: float = 0.0
     reap_reason: ReapReason | None = None
