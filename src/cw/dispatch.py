@@ -19,6 +19,7 @@ from cw.auto_dev_result import (
 )
 from cw.config import (
     load_clients,
+    load_effective_clients,
     load_effective_config,
     load_state,
     save_state,
@@ -238,7 +239,7 @@ def dispatch_tick(
         _log.exception("reconcile failed during dispatch_tick; continuing")
     if reconcile_report is not None and reconcile_report.usage_limited:
         any_usage_limit_detected = True
-    clients = load_clients()
+    clients = load_effective_clients()
     state = load_state()
     spawned = 0
 

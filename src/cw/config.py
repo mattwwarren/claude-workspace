@@ -27,6 +27,7 @@ from cw.models import (
     ClientConfig,
     ConcurrencyOverrides,
     CwState,
+    LaneConfig,
     OrchestratorConfig,
     SessionOrigin,
     SessionPurpose,
@@ -507,18 +508,47 @@ def load_effective_config() -> OrchestratorConfig:
                 merged_ceiling[client_name] = client_override.ceiling
         updates["per_client_ceiling"] = merged_ceiling
 
-    if overrides.lanes:
-        # Build the list of LaneConfig objects for the effective config.
-        # Lane overrides here apply globally (by "client/lane" key) — the
-        # dispatcher reads effective_lanes from ClientConfig, so we store
-        # lane paused/max_parallel overrides as a side-channel that dispatch
-        # can consult.  For now we surface them via OrchestratorConfig
-        # so load_effective_config returns a single unified config.
-        pass  # Lane-level overrides are consumed directly by the CLI/dispatch
+    # Lane-level overrides (paused, max_parallel) are per-ClientConfig, not
+    # per-OrchestratorConfig.  They are applied by load_effective_clients().
 
     if updates:
         return declared.model_copy(update=updates)
     return declared
+
+
+def load_effective_clients() -> dict[str, ClientConfig]:
+    """Return clients with lane-level runtime overrides (pause, max_parallel) merged in.
+
+    Reads declared clients from clients.yaml and applies lane-level overrides
+    from concurrency_overrides.json.  Override wins when not None.  Returns new
+    ClientConfig objects; does not mutate clients.yaml on disk.
+
+    Use this instead of load_clients() wherever the scheduler makes per-lane
+    dispatch decisions so that cw lane pause/resume affects running dispatches.
+    """
+    clients = load_clients()
+    overrides = _load_concurrency_overrides()
+    if not overrides.lanes:
+        return clients
+    result: dict[str, ClientConfig] = {}
+    for name, client in clients.items():
+        patched: list[LaneConfig] = []
+        any_changed = False
+        for lane_cfg in client.effective_lanes:
+            key = f"{name}/{lane_cfg.name}"
+            lane_override = overrides.lanes.get(key)
+            if lane_override is not None and lane_override.paused is not None:
+                patched.append(
+                    lane_cfg.model_copy(update={"paused": lane_override.paused})
+                )
+                any_changed = True
+            else:
+                patched.append(lane_cfg)
+        if any_changed:
+            result[name] = client.model_copy(update={"lanes": patched})
+        else:
+            result[name] = client
+    return result
 
 
 def ensure_config() -> None:

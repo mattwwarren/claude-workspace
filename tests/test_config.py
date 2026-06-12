@@ -1203,3 +1203,101 @@ class TestLoadEffectiveConfig:
         _save_concurrency_overrides(overrides)
         effective = load_effective_config()
         assert effective is not None
+
+
+# ---------------------------------------------------------------------------
+# TestLoadEffectiveClients
+# ---------------------------------------------------------------------------
+
+
+class TestLoadEffectiveClients:
+    """Tests for load_effective_clients() — lane pause override propagation."""
+
+    def _write_clients_yaml(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+            f"    lanes:\n      - name: default\n        max_parallel: 1\n"
+            f"      - name: fast\n        max_parallel: 2\n"
+        )
+
+    def test_no_overrides_returns_declared(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No override file → effective clients equal declared clients."""
+        from cw.config import load_effective_clients
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        clients = load_effective_clients()
+        assert "acme" in clients
+        lane_names = [ln.name for ln in clients["acme"].effective_lanes]
+        assert "default" in lane_names
+        assert "fast" in lane_names
+        assert not any(ln.paused for ln in clients["acme"].effective_lanes)
+
+    def test_lane_pause_override_applied(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Override paused=True for a lane propagates to effective client lanes."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            concurrency_override_file,
+            load_effective_clients,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        overrides = ConcurrencyOverrides(
+            lanes={"acme/fast": LaneConcurrencyOverride(paused=True)}
+        )
+        _save_concurrency_overrides(overrides)
+
+        clients = load_effective_clients()
+        lane_map = {ln.name: ln for ln in clients["acme"].effective_lanes}
+        assert lane_map["fast"].paused is True
+        assert lane_map["default"].paused is False
+
+    def test_lane_resume_override_clears_yaml_pause(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Override paused=False re-enables a lane that was paused in yaml."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            concurrency_override_file,
+            load_effective_clients,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+            "    lanes:\n"
+            "      - name: default\n"
+            "        max_parallel: 1\n"
+            "        paused: true\n"
+        )
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        overrides = ConcurrencyOverrides(
+            lanes={"acme/default": LaneConcurrencyOverride(paused=False)}
+        )
+        _save_concurrency_overrides(overrides)
+
+        clients = load_effective_clients()
+        lane_map = {ln.name: ln for ln in clients["acme"].effective_lanes}
+        assert lane_map["default"].paused is False
+
+    def test_no_lane_overrides_returns_same_objects(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No lane overrides → load_effective_clients returns load_clients result."""
+        from cw.config import load_clients, load_effective_clients
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        assert load_effective_clients() == load_clients()

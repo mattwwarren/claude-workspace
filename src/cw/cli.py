@@ -10,14 +10,18 @@ import sys
 import time
 from collections import deque
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, get_args
 
 import click
 from click.shell_completion import CompletionItem
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 from cw import __version__
 from cw._util import _iter_assistant_text_blocks, claude_project_dir
+from cw.atomic import atomic_write_text
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
@@ -33,6 +37,7 @@ from cw.auto_dev_result import (
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
+    clients_file,
     clients_lock,
     concurrency_override_lock,
     get_client,
@@ -73,6 +78,7 @@ from cw.models import (
     ClientConfig,
     CompletionReason,
     ConcurrencyOverrides,
+    LaneConcurrencyOverride,
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
@@ -505,13 +511,6 @@ def lane_add(
     priority: int | None,
 ) -> None:
     """Add a lane named NAME to CLIENT."""
-    from io import StringIO  # noqa: PLC0415
-
-    from ruamel.yaml import YAML  # noqa: PLC0415
-    from ruamel.yaml.comments import CommentedMap  # noqa: PLC0415
-
-    from cw.config import clients_file  # noqa: PLC0415
-
     effective_max_parallel = max_parallel if max_parallel is not None else 1
     effective_priority = priority if priority is not None else 0
 
@@ -549,8 +548,6 @@ def lane_add(
         lanes_list.append(new_lane)
         buf = StringIO()
         rt.dump(doc, buf)
-        from cw.atomic import atomic_write_text  # noqa: PLC0415
-
         atomic_write_text(clients_path, buf.getvalue())
 
     record_event(
@@ -574,12 +571,6 @@ def lane_rm(client: str, name: str) -> None:
 
     Fails if any PENDING, RUNNING, or BLOCKED_ON_USER tasks are in that lane.
     """
-    from io import StringIO  # noqa: PLC0415
-
-    from ruamel.yaml import YAML  # noqa: PLC0415
-
-    from cw.config import clients_file  # noqa: PLC0415
-
     _active_statuses = frozenset(
         [
             QueueItemStatus.PENDING,
@@ -636,8 +627,6 @@ def lane_rm(client: str, name: str) -> None:
             client_entry["lanes"] = new_lanes
             buf = StringIO()
             rt.dump(doc, buf)
-            from cw.atomic import atomic_write_text  # noqa: PLC0415
-
             atomic_write_text(clients_path, buf.getvalue())
 
     click.echo(f"Lane '{name}' removed from client '{client}'.")
@@ -649,8 +638,6 @@ def lane_rm(client: str, name: str) -> None:
 @handle_errors
 def lane_pause(client: str, name: str) -> None:
     """Pause lane NAME for CLIENT (stops new dispatches to this lane)."""
-    from cw.models import LaneConcurrencyOverride  # noqa: PLC0415
-
     client_cfg = get_client(client)
     declared_names = [ln.name for ln in client_cfg.effective_lanes]
     if name not in declared_names:
@@ -678,8 +665,6 @@ def lane_pause(client: str, name: str) -> None:
 @handle_errors
 def lane_resume(client: str, name: str) -> None:
     """Resume paused lane NAME for CLIENT."""
-    from cw.models import LaneConcurrencyOverride  # noqa: PLC0415
-
     client_cfg = get_client(client)
     declared_names = [ln.name for ln in client_cfg.effective_lanes]
     if name not in declared_names:
