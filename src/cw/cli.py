@@ -54,7 +54,12 @@ from cw.dev_queue import (
     wait_for_terminal,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
-from cw.doctor import _reap_session_by_selector, format_report, format_report_json, run_doctor
+from cw.doctor import (
+    _reap_session_by_selector,
+    format_report,
+    format_report_json,
+    run_doctor,
+)
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (

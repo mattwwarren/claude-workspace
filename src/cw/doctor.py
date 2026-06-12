@@ -704,10 +704,7 @@ def _reap_session_by_selector(selector: str) -> bool:
     with sessions_lock():
         state = load_state()
         target = next(
-            (
-                s for s in state.sessions
-                if s.id == selector or s.name == selector
-            ),
+            (s for s in state.sessions if s.id == selector or s.name == selector),
             None,
         )
         if target is None:

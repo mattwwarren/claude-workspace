@@ -3294,12 +3294,11 @@ class TestReapSessionBySelector:
         from cw.models import (
             CwState,
             DevQueueStore,
+            Session,
             SessionOrigin,
             SessionPurpose,
             SessionStatus,
         )
-
-        from cw.models import Session
 
         sess = Session(
             id="done-sess",

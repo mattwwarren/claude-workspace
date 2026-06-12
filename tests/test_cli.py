@@ -6267,9 +6267,7 @@ class TestDoctorTargetedReap:
         t = next(t for t in store.tasks if t.ticket_id == "cli-ticket-1")
         assert t.status == QueueItemStatus.PENDING
 
-    def test_targeted_reap_not_found_exits_1(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_targeted_reap_not_found_exits_1(self, tmp_config_dir: Path) -> None:
         """--reap <non-existent> exits 1 with error message."""
         from cw.config import save_state
         from cw.dev_queue import save_dev_queue

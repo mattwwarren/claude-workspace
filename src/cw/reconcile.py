@@ -1822,11 +1822,13 @@ def _act_on_phantom_candidates(
     )
 
 
-_REAP_PROPOSED_ACTIONS: frozenset[ProposedAction] = frozenset({
-    ProposedAction.REVERT_TASK,
-    ProposedAction.CRASH_COMPLETE,
-    ProposedAction.PARK_BLOCKED_ON_USER,
-})
+_REAP_PROPOSED_ACTIONS: frozenset[ProposedAction] = frozenset(
+    {
+        ProposedAction.REVERT_TASK,
+        ProposedAction.CRASH_COMPLETE,
+        ProposedAction.PARK_BLOCKED_ON_USER,
+    }
+)
 
 
 def _emit_reap_proposed(
@@ -1861,8 +1863,7 @@ def _emit_reap_proposed(
 
         # Compute in_roster
         in_roster = (
-            session.surface_ref is not None
-            and session.surface_ref in native_live
+            session.surface_ref is not None and session.surface_ref in native_live
         )
 
         # Compute transcript_age_seconds (best-effort, nullable)

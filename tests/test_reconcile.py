@@ -3040,7 +3040,8 @@ def test_confirm_before_reap_v5_state_round_trips(
 ) -> None:
     """v5 state payload (no idle_observation_count key) round-trips through load.
 
-    Counter defaults 0; schema_version stamped 7 after migration. (#545, #380)
+    Counter defaults 0; schema_version stamped to current after migration.
+    (#545, #380, #555)
     """
     import json
 
@@ -3064,7 +3065,7 @@ def test_confirm_before_reap_v5_state_round_trips(
         )
     )
     loaded = load_state()
-    assert loaded.schema_version == 7
+    assert loaded.schema_version == 8
     assert loaded.sessions[0].idle_observation_count == 0
 
 
@@ -10297,7 +10298,7 @@ class TestEmitReapProposed:
         tmp_config_dir: Path,
         tmp_path: Path,
     ) -> None:
-        """REVERT_TASK candidate → SESSION_REAP_PROPOSED event emitted, session stamped."""
+        """REVERT_TASK candidate → SESSION_REAP_PROPOSED event emitted, stamped."""
         from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
 
         worktree = tmp_path / "wt-prop-revert"
