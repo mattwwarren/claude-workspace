@@ -10561,3 +10561,657 @@ class TestEmitReapProposed:
         _emit_reap_proposed(state, [], native_live=set(), now=now)
 
         assert _state_queue_snapshot() == snap
+
+
+# ---------------------------------------------------------------------------
+# Per-lane reap_policy tests (GitHub #560)
+# ---------------------------------------------------------------------------
+
+
+def _client_with_lane(
+    client_name: str,
+    lane_name: str,
+    lane_policy: ReapPolicy,
+    *,
+    workspace_path: Path | None = None,
+) -> ClientConfig:
+    """Build a ClientConfig with one lane carrying a specific reap_policy."""
+    from cw.models import LaneConfig
+
+    return ClientConfig(
+        name=client_name,
+        workspace_path=workspace_path or Path("/tmp/ws"),
+        lanes=[LaneConfig(name=lane_name, reap_policy=lane_policy)],
+    )
+
+
+class TestResolveReapPolicy:
+    """resolve_reap_policy respects lane → global → SIGNAL_ONLY precedence."""
+
+    def test_lane_policy_beats_global(self) -> None:
+        """Lane AUTO overrides global SIGNAL_ONLY."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients = {
+            "client-a": _client_with_lane("client-a", "fast", ReapPolicy.AUTO),
+        }
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY)
+        candidate = ReapCandidate(
+            session_id="s1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t1",
+            lane="fast",
+            client="client-a",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+    def test_global_used_when_lane_not_in_client(self) -> None:
+        """Lane name absent from client's lanes → falls back to global."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients = {
+            "client-a": _client_with_lane("client-a", "slow", ReapPolicy.SIGNAL_ONLY),
+        }
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
+        candidate = ReapCandidate(
+            session_id="s2",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t2",
+            lane="fast",  # not in client's lanes
+            client="client-a",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+    def test_global_used_when_client_not_in_dict(self) -> None:
+        """Unknown client → falls back to global."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients: dict[str, ClientConfig] = {}
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
+        candidate = ReapCandidate(
+            session_id="s3",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t3",
+            lane="fast",
+            client="unknown-client",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+    def test_signal_only_failsafe_when_no_client(self) -> None:
+        """candidate.client=None + global defaults → SIGNAL_ONLY."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients: dict[str, ClientConfig] = {}
+        cfg = OrchestratorConfig()  # default: SIGNAL_ONLY
+        candidate = ReapCandidate(
+            session_id="s4",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t4",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.SIGNAL_ONLY
+
+    def test_default_lane_resolves_via_global(self) -> None:
+        """DEFAULT_LANE not in custom lanes → global policy used."""
+        from cw.models import DEFAULT_LANE
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        lane_cfg = _client_with_lane("client-a", "custom-lane", ReapPolicy.SIGNAL_ONLY)
+        clients = {"client-a": lane_cfg}
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
+        candidate = ReapCandidate(
+            session_id="s5",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t5",
+            lane=DEFAULT_LANE,
+            client="client-a",
+        )
+        # "default" lane not in client's declared lanes → global AUTO
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+
+class TestActOnStalledCandidatesPerLane:
+    """Per-lane reap_policy overrides global for stalled candidates."""
+
+    def test_lane_auto_global_signal_acts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane AUTO + global SIGNAL_ONLY: REVERT_TASK candidate routed to PENDING."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-lane-auto-stalled"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        _fast_client = _client_with_lane(
+            "client-a", "fast", ReapPolicy.AUTO, workspace_path=tmp_path / "ws"
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.load_effective_clients",
+            lambda: {"client-a": _fast_client},
+        )
+
+        sess = _mk_headless_daemon_session("lane-auto-stall-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="lane-auto-stall-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="lane-auto-stall-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="lane-auto-stall-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="lane-auto-stall-1",
+            elapsed_seconds=3700.0,
+            lane="fast",
+            client="client-a",
+        )
+
+        # Global is SIGNAL_ONLY but lane is AUTO → should ACT (reverts to PENDING)
+        reverted = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert "lane-auto-stall-1" in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "lane-auto-stall-1")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_lane_signal_global_auto_signals(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane SIGNAL_ONLY + global AUTO: REVERT_TASK candidate → BLOCKED_ON_USER."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-lane-sig-stalled"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        _slow_client = _client_with_lane(
+            "client-a", "slow", ReapPolicy.SIGNAL_ONLY, workspace_path=tmp_path / "ws"
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.load_effective_clients",
+            lambda: {"client-a": _slow_client},
+        )
+
+        sess = _mk_headless_daemon_session("lane-sig-stall-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="lane-sig-stall-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="lane-sig-stall-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="lane-sig-stall-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="lane-sig-stall-1",
+            elapsed_seconds=3700.0,
+            lane="slow",
+            client="client-a",
+        )
+
+        # Global is AUTO but lane is SIGNAL_ONLY → routes to BLOCKED_ON_USER
+        reverted = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert reverted == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "lane-sig-stall-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+class TestActOnIdleCandidatesPerLane:
+    """Per-lane reap_policy overrides global for idle candidates."""
+
+    def test_lane_auto_global_signal_idle_acts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane AUTO + global SIGNAL_ONLY: idle REVERT_TASK → PENDING."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_idle_candidates,
+        )
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        _fast_client_idle = _client_with_lane(
+            "client-a", "fast", ReapPolicy.AUTO, workspace_path=tmp_path / "ws"
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.load_effective_clients",
+            lambda: {"client-a": _fast_client_idle},
+        )
+
+        sess = _mk_live_idle_daemon_session(
+            "lane-auto-idle-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="lane-auto-idle-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="lane-auto-idle-1",
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="lane-auto-idle-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="lane-auto-idle-1",
+            elapsed_seconds=1000.0,
+            new_observation_count=2,
+            lane="fast",
+            client="client-a",
+        )
+
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert blocked == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "lane-auto-idle-1")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_lane_signal_global_auto_idle_signals(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane SIGNAL_ONLY + global AUTO: idle REVERT_TASK → BLOCKED_ON_USER."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_idle_candidates,
+        )
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        _slow_client_idle = _client_with_lane(
+            "client-a", "slow", ReapPolicy.SIGNAL_ONLY, workspace_path=tmp_path / "ws"
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.load_effective_clients",
+            lambda: {"client-a": _slow_client_idle},
+        )
+
+        sess = _mk_live_idle_daemon_session(
+            "lane-sig-idle-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="lane-sig-idle-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="lane-sig-idle-1",
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="lane-sig-idle-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="lane-sig-idle-1",
+            elapsed_seconds=1000.0,
+            new_observation_count=2,
+            lane="slow",
+            client="client-a",
+        )
+
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert blocked == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "lane-sig-idle-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+class TestActOnPhantomCandidatesPerLane:
+    """Per-lane reap_policy overrides global for phantom candidates."""
+
+    def test_lane_auto_global_signal_phantom_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane AUTO + global SIGNAL_ONLY: clean CRASH_COMPLETE → PENDING."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        _fast_ph_client = _client_with_lane(
+            "client-a", "fast", ReapPolicy.AUTO, workspace_path=tmp_path / "ws"
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.load_effective_clients",
+            lambda: {"client-a": _fast_ph_client},
+        )
+
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("lane-auto-ph-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/lane-auto-ph-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="lane-auto-ph-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="lane-auto-ph-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="lane-auto-ph-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="lane-auto-ph-1",
+            worktree_dirty=False,
+            client="client-a",
+            lane="fast",
+        )
+
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert "lane-auto-ph-1" in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "lane-auto-ph-1")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_lane_signal_global_auto_phantom_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane SIGNAL_ONLY + global AUTO: clean CRASH_COMPLETE → BLOCKED_ON_USER."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        _slow_ph_client = _client_with_lane(
+            "client-a", "slow", ReapPolicy.SIGNAL_ONLY, workspace_path=tmp_path / "ws"
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.load_effective_clients",
+            lambda: {"client-a": _slow_ph_client},
+        )
+
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("lane-sig-ph-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/lane-sig-ph-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="lane-sig-ph-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="lane-sig-ph-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="lane-sig-ph-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="lane-sig-ph-1",
+            worktree_dirty=False,
+            client="client-a",
+            lane="slow",
+        )
+
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert "lane-sig-ph-1" not in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "lane-sig-ph-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+class TestMixedLanePolicySingleTick:
+    """Single reconcile tick with two candidates on different lane policies."""
+
+    def test_mixed_policy_stalled_one_acts_one_signals(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane A (auto) acts while lane B (signal_only) routes BLOCKED_ON_USER."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree_a = tmp_path / "wt-mixed-a"
+        worktree_b = tmp_path / "wt-mixed-b"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        from cw.models import LaneConfig
+
+        client = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path / "ws",
+            lanes=[
+                LaneConfig(name="fast", reap_policy=ReapPolicy.AUTO),
+                LaneConfig(name="slow", reap_policy=ReapPolicy.SIGNAL_ONLY),
+            ],
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.load_effective_clients",
+            lambda: {"client-a": client},
+        )
+
+        sess_a = _mk_headless_daemon_session("mixed-auto-1", worktree_a, started_at)
+        sess_b = _mk_headless_daemon_session("mixed-sig-1", worktree_b, started_at)
+        state = CwState(sessions=[sess_a, sess_b])
+        save_state(state)
+        task_a = TicketTask(
+            ticket_id="mixed-auto-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="mixed-auto-1",
+        )
+        task_b = TicketTask(
+            ticket_id="mixed-sig-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="mixed-sig-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_a, task_b]))
+
+        candidate_a = ReapCandidate(
+            session_id="mixed-auto-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="mixed-auto-1",
+            elapsed_seconds=3700.0,
+            lane="fast",
+            client="client-a",
+        )
+        candidate_b = ReapCandidate(
+            session_id="mixed-sig-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="mixed-sig-1",
+            elapsed_seconds=3700.0,
+            lane="slow",
+            client="client-a",
+        )
+
+        # Global is SIGNAL_ONLY; lane A is AUTO, lane B is SIGNAL_ONLY
+        reverted = _act_on_stalled_candidates(
+            state,
+            [candidate_a, candidate_b],
+            now=now,
+            config=OrchestratorConfig(),
+        )
+
+        # Lane A (fast/AUTO): reverted to PENDING
+        assert "mixed-auto-1" in reverted
+        # Lane B (slow/SIGNAL_ONLY): routes to BLOCKED_ON_USER
+        assert "mixed-sig-1" not in reverted
+
+        store = load_dev_queue()
+        t_a = next(t for t in store.tasks if t.ticket_id == "mixed-auto-1")
+        t_b = next(t for t in store.tasks if t.ticket_id == "mixed-sig-1")
+        assert t_a.status == QueueItemStatus.PENDING
+        assert t_b.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+class TestReapProposedPayloadLane:
+    """SESSION_REAP_PROPOSED payload includes lane field (GitHub #560)."""
+
+    def test_reap_proposed_payload_includes_lane(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Candidate with lane='fast' → payload has lane='fast'."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-lane-payload"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("lane-payload-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="lane-payload-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="lane-payload-1",
+            elapsed_seconds=3700.0,
+            lane="fast",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["lane"] == "fast"
+
+    def test_reap_proposed_default_lane_in_payload(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Candidate with default lane → payload has lane='default'."""
+        from cw.models import DEFAULT_LANE
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-default-lane-payload"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("default-lane-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="default-lane-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="default-lane-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["lane"] == DEFAULT_LANE

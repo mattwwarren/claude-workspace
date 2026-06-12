@@ -291,13 +291,14 @@ must not be auto-retried; the operator must manually clear or close it.
 ### `session.reap_proposed`
 
 **Emitter:** `_emit_reap_proposed` in `cw.reconcile`
-**Payload v1:**
+**Payload v2:**
 ```json
 {
   "session_id": "<str>",
   "session_name": "<str>",
   "client": "<str>",
   "ticket_id": "<str | null>",
+  "lane": "<str>",
   "proposed_action": "revert_task | crash_complete | park_blocked_on_user",
   "reason": "<ReapReason value | null>",
   "evidence": {
@@ -320,8 +321,8 @@ preventing duplicate events across ticks for the same session.
 
 `correlation_id` is the `ticket_id` when resolvable, else the `session_id`.
 
-**Deferral:** No `lane` field in v1 — RFC 0004 scope deferred to a
-follow-up issue.
+`lane` is the owning task's lane name, or `"default"` for candidates not
+associated with a task (phantom sessions without a matching queue entry).
 
 **Consumer note:** This event is written to the orchestrator event inbox
 (`events/inbox.jsonl`) as a state-snapshot delta. It does NOT appear in the

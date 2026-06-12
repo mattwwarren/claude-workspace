@@ -647,11 +647,11 @@ class TestLaneConfig:
         assert lane.priority == 0
         assert lane.paused is False
         assert lane.description == ""
-        assert lane.reap_policy == ReapPolicy.SIGNAL_ONLY
+        assert lane.reap_policy is None
 
     def test_reap_policy_uses_enum(self) -> None:
-        """reap_policy is a ReapPolicy instance, not raw str."""
-        lane = LaneConfig(name="fast")
+        """reap_policy is a ReapPolicy instance when explicitly set."""
+        lane = LaneConfig(name="fast", reap_policy=ReapPolicy.SIGNAL_ONLY)
         assert isinstance(lane.reap_policy, ReapPolicy)
         assert lane.reap_policy == ReapPolicy.SIGNAL_ONLY
 

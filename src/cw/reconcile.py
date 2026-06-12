@@ -62,6 +62,7 @@ from cw.auto_dev_result import (
 )
 from cw.config import (
     get_client,
+    load_effective_clients,
     load_orchestrator_config,
     load_state,
     save_state,
@@ -76,6 +77,8 @@ from cw.gh import (
     pr_is_merged_for_ticket,
 )
 from cw.models import (
+    DEFAULT_LANE,
+    ClientConfig,
     CompletionReason,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -812,6 +815,8 @@ def _detect_stalled_candidates(
         ) in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON):
             actual_paused_status = session.last_result.get("paused_status")
             ticket_id = ticket_id_for_session(session.name)
+            # Stamp lane for SKIP_PARKED too so act phase has a consistent candidate.
+            skip_task = task_by_ticket.get(ticket_id) if ticket_id else None
             candidates.append(
                 ReapCandidate(
                     session_id=session.id,
@@ -820,6 +825,8 @@ def _detect_stalled_candidates(
                     paused_status=str(actual_paused_status)
                     if actual_paused_status
                     else None,
+                    lane=skip_task.lane if skip_task else DEFAULT_LANE,
+                    client=session.client,
                 )
             )
             continue
@@ -841,6 +848,8 @@ def _detect_stalled_candidates(
                     salvage_result=result,
                     salvage_csid=claude_session_id,
                     elapsed_seconds=elapsed,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
                 )
             )
             continue
@@ -851,6 +860,8 @@ def _detect_stalled_candidates(
                 ticket_id=ticket_id,
                 elapsed_seconds=elapsed,
                 reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
             )
         )
     return candidates
@@ -907,24 +918,32 @@ def _act_on_stalled_candidates(
     Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
     routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
     candidates (SALVAGE_*, SKIP_PARKED) are unaffected and pass through.
+    Per-lane resolution: each REVERT_TASK candidate's effective policy is
+    resolved individually via resolve_reap_policy (GitHub #560).
     """
     if not candidates:
         return []
 
     effective_config = config if config is not None else OrchestratorConfig()
-    if effective_config.reap_policy is ReapPolicy.SIGNAL_ONLY:
-        signal_mutations = {
-            c.ticket_id: QueueItemStatus.BLOCKED_ON_USER
-            for c in candidates
-            if c.ticket_id and c.proposed_action == ProposedAction.REVERT_TASK
-        }
+    clients = load_effective_clients()
+    # Route each REVERT_TASK candidate individually based on its lane's policy.
+    signal_mutations: dict[str, QueueItemStatus] = {}
+    auto_candidates: list[ReapCandidate] = []
+    for c in candidates:
+        if c.proposed_action == ProposedAction.REVERT_TASK:
+            policy = resolve_reap_policy(c, clients, effective_config)
+            if policy is ReapPolicy.SIGNAL_ONLY:
+                if c.ticket_id:
+                    signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+            else:
+                auto_candidates.append(c)
+        else:
+            auto_candidates.append(c)
+    if signal_mutations:
         _apply_queue_mutations(signal_mutations, clear_session_id=set())
-        # Fall through: non-REVERT candidates (SALVAGE_*, SKIP_PARKED) still processed.
-        candidates = [
-            c for c in candidates if c.proposed_action != ProposedAction.REVERT_TASK
-        ]
-        if not candidates:
-            return []
+    candidates = auto_candidates
+    if not candidates:
+        return []
 
     # Separate by action for batch processing.
     skip_candidates = [
@@ -1175,6 +1194,8 @@ def _detect_idle_candidates(
                         proposed_action=ProposedAction.RECOVER_COUNTER,
                         ticket_id=ticket_id,
                         new_observation_count=0,
+                        lane=task.lane if task else DEFAULT_LANE,
+                        client=session.client,
                     )
                 )
             continue
@@ -1190,6 +1211,8 @@ def _detect_idle_candidates(
                     salvage_result=result,
                     salvage_csid=claude_session_id,
                     elapsed_seconds=elapsed,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
                 )
             )
             continue
@@ -1202,6 +1225,8 @@ def _detect_idle_candidates(
                     proposed_action=ProposedAction.INCREMENT_COUNTER,
                     ticket_id=ticket_id,
                     new_observation_count=new_count,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
                 )
             )
             continue
@@ -1224,6 +1249,8 @@ def _detect_idle_candidates(
                         post_review_clean=post_review_clean,
                         worktree_dirty=worktree_dirty,
                         new_observation_count=new_count,
+                        lane=task.lane if task else DEFAULT_LANE,
+                        client=session.client,
                     )
                 )
                 continue
@@ -1239,6 +1266,8 @@ def _detect_idle_candidates(
                     worktree_dirty=worktree_dirty,
                     new_observation_count=new_count,
                     usage_limit_detected=_detect_usage_limit(session),
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
                 )
             )
         else:
@@ -1249,6 +1278,8 @@ def _detect_idle_candidates(
                     ticket_id=ticket_id,
                     worktree_dirty=worktree_dirty,
                     new_observation_count=new_count,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
                 )
             )
     return candidates
@@ -1271,24 +1302,32 @@ def _act_on_idle_candidates(
     routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
     candidates (SALVAGE_*, INCREMENT_COUNTER, RECOVER_COUNTER,
     PARK_BLOCKED_ON_USER) are unaffected and pass through.
+    Per-lane resolution: each REVERT_TASK candidate's effective policy is
+    resolved individually via resolve_reap_policy (GitHub #560).
     """
     if not candidates:
         return [], []
 
     effective_config = config if config is not None else OrchestratorConfig()
-    if effective_config.reap_policy is ReapPolicy.SIGNAL_ONLY:
-        signal_mutations = {
-            c.ticket_id: QueueItemStatus.BLOCKED_ON_USER
-            for c in candidates
-            if c.ticket_id and c.proposed_action == ProposedAction.REVERT_TASK
-        }
+    clients = load_effective_clients()
+    # Route each REVERT_TASK candidate individually based on its lane's policy.
+    signal_mutations: dict[str, QueueItemStatus] = {}
+    auto_candidates: list[ReapCandidate] = []
+    for c in candidates:
+        if c.proposed_action == ProposedAction.REVERT_TASK:
+            policy = resolve_reap_policy(c, clients, effective_config)
+            if policy is ReapPolicy.SIGNAL_ONLY:
+                if c.ticket_id:
+                    signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+            else:
+                auto_candidates.append(c)
+        else:
+            auto_candidates.append(c)
+    if signal_mutations:
         _apply_queue_mutations(signal_mutations, clear_session_id=set())
-        # Fall through to process non-REVERT candidates (counters, park, salvage).
-        candidates = [
-            c for c in candidates if c.proposed_action != ProposedAction.REVERT_TASK
-        ]
-        if not candidates:
-            return [], []
+    candidates = auto_candidates
+    if not candidates:
+        return [], []
 
     session_by_id = {s.id: s for s in state.sessions}
 
@@ -1595,26 +1634,64 @@ class ReapCandidate:
     post_review_clean: bool = False
     paused_status: str | None = None
     new_observation_count: int = 0
-    # Phantom sweep: carry client + worktree_path for SESSION_PHANTOM_REVERTED payload
+    # Lane the owning task is assigned to; stamped from task.lane in detect phase.
+    # Candidates without an owning task carry DEFAULT_LANE. Used by
+    # resolve_reap_policy to select per-lane reap_policy over the global default.
+    lane: str = DEFAULT_LANE
+    # Phantom sweep: carry client + worktree_path for SESSION_PHANTOM_REVERTED payload.
+    # Also stamped in stalled/idle detect from session.client so resolve_reap_policy
+    # can look up the lane config for this candidate.
     client: str | None = None
     worktree_path: Path | None = None
+
+
+def resolve_reap_policy(
+    candidate: ReapCandidate,
+    clients: dict[str, ClientConfig],
+    global_cfg: OrchestratorConfig,
+) -> ReapPolicy:
+    """Resolve the effective reap_policy for a candidate.
+
+    Precedence (highest to lowest):
+      1. Lane-level LaneConfig.reap_policy in the candidate's client config.
+      2. Global OrchestratorConfig.reap_policy.
+      3. ReapPolicy.SIGNAL_ONLY fail-safe (built into OrchestratorConfig default).
+
+    A candidate whose client is absent from *clients* or whose lane name is not
+    declared in that client's lanes falls through to the global config. This
+    keeps behaviour identical to the pre-#560 flat read for any candidate that
+    predates lane stamping.
+    """
+    client_cfg = clients.get(candidate.client) if candidate.client else None
+    if client_cfg is not None:
+        for lane_cfg in client_cfg.effective_lanes:
+            if lane_cfg.name == candidate.lane and lane_cfg.reap_policy is not None:
+                return lane_cfg.reap_policy
+    return global_cfg.reap_policy
 
 
 def _detect_phantom_candidates(
     state: CwState,
     phantom_set: set[str],
+    task_by_ticket: dict[str, TicketTask] | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for phantom sessions.
 
     Returns a list of ReapCandidate objects. Makes zero writes.
     The worktree_dirty check for DAEMON sessions is performed here
     so the act phase does not need to repeat it. See GitHub #552, ADR-0006.
+
+    task_by_ticket is used to stamp candidate.lane from the owning task's lane
+    (GitHub #560). When None or the ticket has no task, lane defaults to DEFAULT_LANE.
     """
+    _task_by_ticket = task_by_ticket or {}
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
         ticket_id = ticket_id_for_session(session.name)
+        task = _task_by_ticket.get(ticket_id) if ticket_id else None
+        lane = task.lane if task else DEFAULT_LANE
         # Try sentinel salvage before declaring crashed (DAEMON only).
         salvage = (
             _salvage_terminal_result(session)
@@ -1630,6 +1707,7 @@ def _detect_phantom_candidates(
                     ticket_id=ticket_id,
                     salvage_result=result,
                     salvage_csid=claude_session_id,
+                    lane=lane,
                     client=session.client,
                     worktree_path=session.worktree_path,
                 )
@@ -1652,6 +1730,7 @@ def _detect_phantom_candidates(
                 proposed_action=ProposedAction.CRASH_COMPLETE,
                 ticket_id=ticket_id,
                 worktree_dirty=worktree_dirty,
+                lane=lane,
                 client=session.client,
                 worktree_path=session.worktree_path,
             )
@@ -1677,34 +1756,33 @@ def _act_on_phantom_candidates(
     stop/remove.  Dirty-worktree CRASH_COMPLETE already routes to
     BLOCKED_ON_USER in both policies — the gate only affects clean phantoms.
     SALVAGE_COMPLETION candidates pass through unaffected.
+    Per-lane resolution: each clean CRASH_COMPLETE candidate's effective policy
+    is resolved individually via resolve_reap_policy (GitHub #560).
     """
     if not candidates:
         return [], [], False, [], {}
 
     effective_config = config if config is not None else OrchestratorConfig()
-    if effective_config.reap_policy is ReapPolicy.SIGNAL_ONLY:
-        # Signal-only for CRASH_COMPLETE candidates where worktree is NOT dirty.
-        # Dirty phantoms already route to BLOCKED_ON_USER in both policies, so
-        # exclude them here to avoid double-processing.
-        signal_mutations = {
-            c.ticket_id: QueueItemStatus.BLOCKED_ON_USER
-            for c in candidates
-            if (
-                c.ticket_id
-                and c.proposed_action == ProposedAction.CRASH_COMPLETE
-                and not c.worktree_dirty
-            )
-        }
+    clients = load_effective_clients()
+    # Route each clean CRASH_COMPLETE candidate individually based on its lane's policy.
+    # Dirty phantoms always go to BLOCKED_ON_USER regardless of policy.
+    signal_mutations: dict[str, QueueItemStatus] = {}
+    auto_candidates: list[ReapCandidate] = []
+    for c in candidates:
+        if c.proposed_action == ProposedAction.CRASH_COMPLETE and not c.worktree_dirty:
+            policy = resolve_reap_policy(c, clients, effective_config)
+            if policy is ReapPolicy.SIGNAL_ONLY:
+                if c.ticket_id:
+                    signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+            else:
+                auto_candidates.append(c)
+        else:
+            auto_candidates.append(c)
+    if signal_mutations:
         _apply_queue_mutations(signal_mutations, clear_session_id=set())
-        # Keep only SALVAGE_COMPLETION and dirty-CRASH_COMPLETE candidates.
-        candidates = [
-            c
-            for c in candidates
-            if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
-            or (c.proposed_action == ProposedAction.CRASH_COMPLETE and c.worktree_dirty)
-        ]
-        if not candidates:
-            return [], [], False, [], {}
+    candidates = auto_candidates
+    if not candidates:
+        return [], [], False, [], {}
 
     session_by_id = {s.id: s for s in state.sessions}
 
@@ -1893,6 +1971,7 @@ def _emit_reap_proposed(
             "session_name": session.name,
             "client": session.client,
             "ticket_id": candidate.ticket_id,
+            "lane": candidate.lane,
             "proposed_action": candidate.proposed_action.value,
             "reason": candidate.reap_reason.value if candidate.reap_reason else None,
             "evidence": {
@@ -2017,7 +2096,9 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         ), salvage_git_candidates
 
     phantom_set = set(drift.phantom_session_ids)
-    phantom_candidates = _detect_phantom_candidates(state, phantom_set)
+    phantom_candidates = _detect_phantom_candidates(
+        state, phantom_set, task_by_ticket=shared_task_by_ticket
+    )
     _emit_reap_proposed(state, phantom_candidates, native_live=native_live, now=now)
     (
         reverted,
