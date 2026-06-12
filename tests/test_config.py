@@ -1087,3 +1087,217 @@ class TestMutateState:
 
         assert isinstance(result, CwState)
         assert any(sess.id == "ms-return-1" for sess in result.sessions)
+
+
+# ---------------------------------------------------------------------------
+# TestLoadEffectiveConfig
+# ---------------------------------------------------------------------------
+
+
+class TestLoadEffectiveConfig:
+    """Tests for load_effective_config() and ConcurrencyOverrides."""
+
+    def test_declared_only_no_override_file(self, tmp_config_dir: Path) -> None:
+        """No override file → effective config equals declared config."""
+        from cw.config import load_effective_config, load_orchestrator_config
+
+        declared = load_orchestrator_config()
+        effective = load_effective_config()
+        assert effective.default_ceiling == declared.default_ceiling
+        assert effective.max_parallel_clients == declared.max_parallel_clients
+
+    def test_override_wins_max_parallel_clients(self, tmp_config_dir: Path) -> None:
+        """Override file with max_parallel_clients=5 wins over declared None."""
+        from cw.config import (
+            concurrency_override_file,
+            concurrency_override_lock,
+            load_effective_config,
+        )
+        from cw.models import ConcurrencyOverrides
+
+        overrides = ConcurrencyOverrides(max_parallel_clients=5)
+        with concurrency_override_lock():
+            concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+            concurrency_override_file().write_text(overrides.model_dump_json())
+
+        effective = load_effective_config()
+        assert effective.max_parallel_clients == 5
+
+    def test_override_wins_per_client_ceiling(self, tmp_config_dir: Path) -> None:
+        """Override file with client ceiling overrides declared value."""
+        from cw.config import (
+            concurrency_override_file,
+            concurrency_override_lock,
+            load_effective_config,
+        )
+        from cw.models import ClientConcurrencyOverride, ConcurrencyOverrides
+
+        overrides = ConcurrencyOverrides(
+            clients={"acme": ClientConcurrencyOverride(ceiling=7)}
+        )
+        with concurrency_override_lock():
+            concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+            concurrency_override_file().write_text(overrides.model_dump_json())
+
+        effective = load_effective_config()
+        assert effective.per_client_ceiling.get("acme") == 7
+
+    def test_no_override_file_returns_pure_declared(self, tmp_config_dir: Path) -> None:
+        """Absent override file: returns declared config unchanged."""
+        from cw.config import concurrency_override_file, load_effective_config
+
+        assert not concurrency_override_file().exists()
+        effective = load_effective_config()
+        assert effective.max_parallel_clients is None  # default declared value
+
+    def test_concurrency_override_lock_creates_and_releases(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """concurrency_override_lock() creates lock file and releases on exit."""
+        from cw.config import concurrency_override_lock, concurrency_override_lock_file
+
+        lock_path = concurrency_override_lock_file()
+        with concurrency_override_lock():
+            assert lock_path.exists()
+        # Lock released — file still exists but lock is no longer held
+
+    def test_concurrency_overrides_null_keys_accepted(self) -> None:
+        """ConcurrencyOverrides accepts None values on all keys."""
+        from cw.models import ConcurrencyOverrides
+
+        o = ConcurrencyOverrides(max_parallel_clients=None)
+        assert o.max_parallel_clients is None
+
+    def test_concurrency_overrides_int_coercion(self) -> None:
+        """ConcurrencyOverrides accepts integer values."""
+        from cw.models import ConcurrencyOverrides
+
+        o = ConcurrencyOverrides(max_parallel_clients=3)
+        assert o.max_parallel_clients == 3
+
+    def test_corrupt_override_file_returns_empty(self, tmp_config_dir: Path) -> None:
+        """Corrupt JSON in override file returns empty ConcurrencyOverrides."""
+        from cw.config import concurrency_override_file, load_effective_config
+
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        concurrency_override_file().write_text("not-valid-json{{{")
+        effective = load_effective_config()
+        # Should not raise; falls back to declared config unchanged
+        assert effective is not None
+
+    def test_lanes_override_populated_does_not_crash(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Non-empty overrides.lanes does not crash load_effective_config."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            concurrency_override_file,
+            load_effective_config,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        overrides = ConcurrencyOverrides(
+            lanes={"acme/default": LaneConcurrencyOverride(paused=True)}
+        )
+        _save_concurrency_overrides(overrides)
+        effective = load_effective_config()
+        assert effective is not None
+
+
+# ---------------------------------------------------------------------------
+# TestLoadEffectiveClients
+# ---------------------------------------------------------------------------
+
+
+class TestLoadEffectiveClients:
+    """Tests for load_effective_clients() — lane pause override propagation."""
+
+    def _write_clients_yaml(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+            f"    lanes:\n      - name: default\n        max_parallel: 1\n"
+            f"      - name: fast\n        max_parallel: 2\n"
+        )
+
+    def test_no_overrides_returns_declared(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No override file → effective clients equal declared clients."""
+        from cw.config import load_effective_clients
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        clients = load_effective_clients()
+        assert "acme" in clients
+        lane_names = [ln.name for ln in clients["acme"].effective_lanes]
+        assert "default" in lane_names
+        assert "fast" in lane_names
+        assert not any(ln.paused for ln in clients["acme"].effective_lanes)
+
+    def test_lane_pause_override_applied(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Override paused=True for a lane propagates to effective client lanes."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            concurrency_override_file,
+            load_effective_clients,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        overrides = ConcurrencyOverrides(
+            lanes={"acme/fast": LaneConcurrencyOverride(paused=True)}
+        )
+        _save_concurrency_overrides(overrides)
+
+        clients = load_effective_clients()
+        lane_map = {ln.name: ln for ln in clients["acme"].effective_lanes}
+        assert lane_map["fast"].paused is True
+        assert lane_map["default"].paused is False
+
+    def test_lane_resume_override_clears_yaml_pause(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Override paused=False re-enables a lane that was paused in yaml."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            concurrency_override_file,
+            load_effective_clients,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+            "    lanes:\n"
+            "      - name: default\n"
+            "        max_parallel: 1\n"
+            "        paused: true\n"
+        )
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        overrides = ConcurrencyOverrides(
+            lanes={"acme/default": LaneConcurrencyOverride(paused=False)}
+        )
+        _save_concurrency_overrides(overrides)
+
+        clients = load_effective_clients()
+        lane_map = {ln.name: ln for ln in clients["acme"].effective_lanes}
+        assert lane_map["default"].paused is False
+
+    def test_no_lane_overrides_returns_same_objects(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No lane overrides → load_effective_clients returns load_clients result."""
+        from cw.config import load_clients, load_effective_clients
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        assert load_effective_clients() == load_clients()

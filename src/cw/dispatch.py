@@ -19,7 +19,8 @@ from cw.auto_dev_result import (
 )
 from cw.config import (
     load_clients,
-    load_orchestrator_config,
+    load_effective_clients,
+    load_effective_config,
     load_state,
     save_state,
     sessions_lock,
@@ -238,7 +239,7 @@ def dispatch_tick(
         _log.exception("reconcile failed during dispatch_tick; continuing")
     if reconcile_report is not None and reconcile_report.usage_limited:
         any_usage_limit_detected = True
-    clients = load_clients()
+    clients = load_effective_clients()
     state = load_state()
     spawned = 0
 
@@ -370,7 +371,7 @@ def dispatch_tick(
 
         if stale:
             stale_tasks = [
-                {"ticket_id": t.ticket_id, "client": client.name}
+                {"ticket_id": t.ticket_id, "client": client.name, "lane": t.lane}
                 for t in queue_snapshot.tasks
                 if t.client == client.name and t.status == QueueItemStatus.PENDING
             ]
@@ -913,7 +914,7 @@ def run_dispatch_loop(
             automatically. Pass False to restore legacy block-only
             behavior (``--no-auto-ff`` CLI flag).
     """
-    config = load_orchestrator_config()
+    config = load_effective_config()
 
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
@@ -924,7 +925,7 @@ def run_dispatch_loop(
 
     while True:
         try:
-            config = load_orchestrator_config()
+            config = load_effective_config()
             if max_parallel is not None:
                 clients = load_clients()
                 overridden = dict.fromkeys(clients, max_parallel)

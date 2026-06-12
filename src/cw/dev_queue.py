@@ -13,11 +13,12 @@ from cw.config import (
     dev_plan_file,
     dev_plan_lock,
     dev_queue_file,
+    get_client,
 )
 from cw.config import (
     dev_queue_lock as _dev_queue_lock_file,
 )
-from cw.exceptions import CwError
+from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError
 from cw.models import (
     DEFAULT_LANE,
     DEV_QUEUE_SCHEMA_VERSION,
@@ -246,6 +247,63 @@ def cancel_task_for_session(session_id: str) -> bool:
                 save_dev_queue(store)
                 return True
     return False
+
+
+_UNMOVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER]
+)
+
+
+def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
+    """Move a pending ticket to a different lane.
+
+    Returns the previous lane name (from_lane) for event emission by the caller.
+
+    Raises:
+        CwError: if no matching task is found for (ticket_id, client_name).
+        LaneNotFoundError: if to_lane is not declared for the client.
+        LaneMoveError: if the task status is RUNNING or BLOCKED_ON_USER.
+
+    Note: record_event is NOT called here — the CLI layer fires TICKET_MOVED.
+    """
+    with _lock():
+        store = load_dev_queue()
+        task = next(
+            (
+                t
+                for t in store.tasks
+                if t.ticket_id == ticket_id and t.client == client_name
+            ),
+            None,
+        )
+        if task is None:
+            msg = (
+                f"No dev-queue task found for ticket '{ticket_id}'"
+                f" in client '{client_name}'."
+            )
+            raise CwError(msg)
+
+        client = get_client(client_name)
+        declared_lane_names = [ln.name for ln in client.effective_lanes]
+        if to_lane not in declared_lane_names:
+            msg = (
+                f"Lane '{to_lane}' is not declared for client '{client_name}'."
+                f" Declared lanes: {', '.join(declared_lane_names)}."
+                f" Run: cw lane add {client_name} {to_lane}"
+            )
+            raise LaneNotFoundError(msg)
+
+        if task.status in _UNMOVABLE_STATUSES:
+            msg = (
+                f"Cannot move ticket '{ticket_id}': task is {task.status.value}."
+                " Only PENDING tasks can be moved between lanes."
+            )
+            raise LaneMoveError(msg)
+
+        from_lane = task.lane
+        task.lane = to_lane
+        save_dev_queue(store)
+    return from_lane
 
 
 def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:

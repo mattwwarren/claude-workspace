@@ -1501,3 +1501,118 @@ class TestFindTicket:
         # timeout=0 means it should time out (not resolve early on stale record)
         with pytest.raises(TimeoutError):
             wait_for_terminal("GEN-12", "genhealth", timeout=0, poll_interval=0)
+
+
+# ---------------------------------------------------------------------------
+# TestMoveTicket
+# ---------------------------------------------------------------------------
+
+
+class TestMoveTicket:
+    """Tests for move_ticket()."""
+
+    def _setup_client_with_lanes(
+        self, tmp_config_dir: Path, tmp_path: Path, lanes: list[str]
+    ) -> None:
+        """Write clients.yaml with named lanes for 'genhealth'."""
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        lane_yaml = "".join(
+            f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
+        )
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
+        )
+
+    def test_move_ticket_pending_success(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """PENDING ticket moves to target lane; returns old from_lane."""
+        from cw.dev_queue import move_ticket
+
+        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        task = TicketTask(
+            ticket_id="GEN-200",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            lane="default",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from_lane = move_ticket("GEN-200", "genhealth", "fast")
+
+        assert from_lane == "default"
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "GEN-200")
+        assert moved.lane == "fast"
+
+    def test_move_ticket_running_raises_lane_move_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """RUNNING ticket raises LaneMoveError."""
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneMoveError
+
+        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        task = TicketTask(
+            ticket_id="GEN-201",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            lane="default",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(LaneMoveError):
+            move_ticket("GEN-201", "genhealth", "fast")
+
+    def test_move_ticket_blocked_on_user_raises_lane_move_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """BLOCKED_ON_USER ticket raises LaneMoveError."""
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneMoveError
+
+        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        task = TicketTask(
+            ticket_id="GEN-202",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            lane="default",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(LaneMoveError):
+            move_ticket("GEN-202", "genhealth", "fast")
+
+    def test_move_ticket_undeclared_lane_raises_lane_not_found_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Undeclared target lane raises LaneNotFoundError."""
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneNotFoundError
+
+        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        task = TicketTask(
+            ticket_id="GEN-203",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            lane="default",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(LaneNotFoundError):
+            move_ticket("GEN-203", "genhealth", "undeclared-lane")
+
+    def test_move_ticket_not_found_raises_cw_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Non-existent ticket raises CwError."""
+        from cw.dev_queue import move_ticket
+
+        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        with pytest.raises(CwError, match="No dev-queue task found"):
+            move_ticket("GEN-MISSING", "genhealth", "fast")

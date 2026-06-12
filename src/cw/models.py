@@ -132,6 +132,32 @@ class QueueStore(BaseModel):
         return None
 
 
+class LaneConcurrencyOverride(BaseModel):
+    """Per-lane overrides from the concurrency override store."""
+
+    max_parallel: int | None = None
+    paused: bool | None = None
+
+
+class ClientConcurrencyOverride(BaseModel):
+    """Per-client ceiling override from the concurrency override store."""
+
+    ceiling: int | None = None
+
+
+class ConcurrencyOverrides(BaseModel):
+    """Runtime concurrency overrides persisted outside orchestrator.yaml.
+
+    Written by ``cw config concurrency set`` and ``cw lane pause/resume``.
+    Merged with the declared config by ``load_effective_config()``.
+    NOT added to schema.REGISTRY — test_schema.py must stay unchanged.
+    """
+
+    max_parallel_clients: int | None = None
+    clients: dict[str, ClientConcurrencyOverride] = Field(default_factory=dict)
+    lanes: dict[str, LaneConcurrencyOverride] = Field(default_factory=dict)
+
+
 class OrchestratorEventType(StrEnum):
     """Event types for the orchestrator-level event bus.
 
@@ -155,6 +181,10 @@ class OrchestratorEventType(StrEnum):
     SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
     SESSION_REAP_PROPOSED = "session.reap_proposed"
+    LANE_CREATED = "lane.created"
+    LANE_PAUSED = "lane.paused"
+    LANE_RESUMED = "lane.resumed"
+    TICKET_MOVED = "ticket.moved"
 
 
 class DispatchSkipReason(StrEnum):

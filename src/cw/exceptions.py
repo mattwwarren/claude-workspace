@@ -84,6 +84,18 @@ class DisclaimerNotAcceptedError(CwError):
     __slots__ = ()
 
 
+class LaneMoveError(CwError):
+    """Raised when a ticket cannot be moved due to its current status."""
+
+    __slots__ = ()
+
+
+class LaneNotFoundError(CwError):
+    """Raised when a target lane is not declared for the client."""
+
+    __slots__ = ()
+
+
 class UsageLimitError(CwError):
     """Raised when ``claude --bg`` fails because a fleet-wide usage limit is active.
 
