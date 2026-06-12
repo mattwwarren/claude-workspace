@@ -6367,6 +6367,75 @@ class TestDevQueueWaitSentinelAware:
         assert result.exit_code == _WAIT_EXIT_TIMEOUT
 
 
+# ---------------------------------------------------------------------------
+# TestDevQueueWaitDuplicateResolution (GitHub issue #579)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueWaitDuplicateResolution:
+    """Fast-path uses _find_ticket to prefer live task over stale terminal."""
+
+    def test_wait_resolves_live_task_over_cancelled(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CANCELLED + RUNNING for same ticket → wait does not short-circuit on CANCELLED.
+
+        With --timeout 0, a non-terminal task triggers exit 124 (timeout).
+        If the fast-path mistakenly binds to CANCELLED it would exit 1.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        old_ts = datetime(2025, 5, 1, tzinfo=UTC)
+        new_ts = old_ts + timedelta(hours=1)
+
+        store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="GEN-579C",
+                    client="genhealth",
+                    status=QueueItemStatus.CANCELLED,
+                    created_at=old_ts,
+                ),
+                TicketTask(
+                    ticket_id="GEN-579C",
+                    client="genhealth",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="sess-live",
+                    created_at=new_ts,
+                ),
+            ]
+        )
+        save_dev_queue(store)
+
+        # Prevent consume_completed_sessions from doing real dispatch work
+        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
+        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "wait",
+                "GEN-579C",
+                "--client",
+                "genhealth",
+                "--timeout",
+                "0",
+            ],
+        )
+        # exit 124 = timeout hit on non-terminal task (RUNNING was found)
+        # exit 1   = CANCELLED was resolved as the fast-path result (the bug)
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT, (
+            f"Expected timeout (124) but got {result.exit_code}.\n"
+            f"Output: {result.output}"
+        )
+
+
 class TestResultValidate:
     def _valid_payload(self) -> dict[str, object]:
         return {
