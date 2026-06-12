@@ -311,7 +311,7 @@ class LaneConfig(BaseModel):
     priority: int = 0
     paused: bool = False
     description: str = ""
-    reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
+    reap_policy: ReapPolicy | None = None
 
     @field_validator("name")
     @classmethod
