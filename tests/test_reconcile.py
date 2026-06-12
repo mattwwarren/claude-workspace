@@ -3040,7 +3040,8 @@ def test_confirm_before_reap_v5_state_round_trips(
 ) -> None:
     """v5 state payload (no idle_observation_count key) round-trips through load.
 
-    Counter defaults 0; schema_version stamped 7 after migration. (#545, #380)
+    Counter defaults 0; schema_version stamped to current after migration.
+    (#545, #380, #555)
     """
     import json
 
@@ -3064,7 +3065,7 @@ def test_confirm_before_reap_v5_state_round_trips(
         )
     )
     loaded = load_state()
-    assert loaded.schema_version == 7
+    assert loaded.schema_version == 8
     assert loaded.sessions[0].idle_observation_count == 0
 
 
@@ -8490,10 +8491,12 @@ def test_revert_timed_out_tasks_completes_while_holding_sessions_lock(
 
 
 def _state_queue_snapshot() -> bytes:
-    """Read state + queue bytes for detect-purity assertions."""
-    from cw.config import dev_queue_file, state_file
+    """Read state + queue + events-inbox bytes for detect/propose-purity assertions."""
+    from cw.config import dev_queue_file, events_dir, state_file
 
-    return state_file().read_bytes() + dev_queue_file().read_bytes()
+    inbox = events_dir() / "inbox.jsonl"
+    inbox_bytes = inbox.read_bytes() if inbox.exists() else b""
+    return state_file().read_bytes() + dev_queue_file().read_bytes() + inbox_bytes
 
 
 # --- _detect_stalled_candidates ---
@@ -10280,3 +10283,281 @@ class TestActOnPhantomCandidatesSignalOnly:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "auto-phantom-1")
         assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# SESSION_REAP_PROPOSED emission tests (GitHub #555)
+# ---------------------------------------------------------------------------
+
+
+class TestEmitReapProposed:
+    """_emit_reap_proposed emits SESSION_REAP_PROPOSED and stamps reap_proposed_at."""
+
+    def test_reap_proposed_emits_event_for_revert_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """REVERT_TASK candidate → SESSION_REAP_PROPOSED event emitted, stamped."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-revert"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-revert-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-revert-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-revert-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        # Event was emitted
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        ev = reap_events[0]
+        assert ev.payload["session_id"] == "prop-revert-1"
+        assert ev.payload["proposed_action"] == "revert_task"
+        assert ev.payload["reason"] == "wall_clock_budget"
+        assert ev.correlation_id == "prop-revert-1"
+
+        # Session stamped
+        assert sess.reap_proposed_at == now
+
+    def test_reap_proposed_emits_event_for_crash_complete(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """CRASH_COMPLETE candidate → SESSION_REAP_PROPOSED event emitted."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-crash-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/prop-crash-1"
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-crash-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="prop-crash-1",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["proposed_action"] == "crash_complete"
+        assert sess.reap_proposed_at == now
+
+    def test_reap_proposed_emits_for_park_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """PARK_BLOCKED_ON_USER candidate → SESSION_REAP_PROPOSED event emitted."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-park-1", "live-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-park-1",
+            proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+            ticket_id="prop-park-1",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["proposed_action"] == "park_blocked_on_user"
+
+    def test_reap_proposed_skips_non_reap_actions(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """INCREMENT_COUNTER / SKIP_PARKED candidates → no event emitted."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-skip-1", "live-ref")
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        snap = _state_queue_snapshot()
+
+        candidate = ReapCandidate(
+            session_id="prop-skip-1",
+            proposed_action=ProposedAction.INCREMENT_COUNTER,
+            ticket_id="prop-skip-1",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        assert _state_queue_snapshot() == snap
+        assert sess.reap_proposed_at is None
+
+    def test_reap_proposed_dedup_skips_already_stamped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Session already stamped with reap_proposed_at → no duplicate event."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-dedup"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        first_stamp = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-dedup-1", worktree, started_at)
+        sess.reap_proposed_at = first_stamp  # pre-stamped
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-dedup-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-dedup-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        # No event emitted (already proposed)
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert reap_events == []
+        # Stamp NOT overwritten
+        assert sess.reap_proposed_at == first_stamp
+
+    def test_reap_proposed_in_roster_sets_in_roster_true(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """When surface_ref is in native_live, evidence.in_roster=True."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-roster"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-roster-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-roster-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-roster-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(
+            state,
+            [candidate],
+            native_live={"fake-short-id"},  # matches sess.surface_ref
+            now=now,
+        )
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["evidence"]["in_roster"] is True
+
+    def test_reap_proposed_not_in_roster_sets_in_roster_false(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """When surface_ref not in native_live, evidence.in_roster=False."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-norost"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-norost-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-norost-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-norost-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["evidence"]["in_roster"] is False
+
+    def test_reap_proposed_empty_candidates_no_writes(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Empty candidates list → no events, no state writes."""
+        from cw.reconcile import _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-empty"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-empty-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        snap = _state_queue_snapshot()
+
+        _emit_reap_proposed(state, [], native_live=set(), now=now)
+
+        assert _state_queue_snapshot() == snap

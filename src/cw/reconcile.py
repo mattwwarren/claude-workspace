@@ -1822,6 +1822,84 @@ def _act_on_phantom_candidates(
     )
 
 
+_REAP_PROPOSED_ACTIONS: frozenset[ProposedAction] = frozenset(
+    {
+        ProposedAction.REVERT_TASK,
+        ProposedAction.CRASH_COMPLETE,
+        ProposedAction.PARK_BLOCKED_ON_USER,
+    }
+)
+
+
+def _emit_reap_proposed(
+    state: CwState,
+    candidates: list[ReapCandidate],
+    *,
+    native_live: set[str],
+    now: datetime | None = None,
+) -> None:
+    """Emit SESSION_REAP_PROPOSED for reap-shaped candidates before act phase.
+
+    Called from _reconcile_locked after each _detect_* and before the
+    corresponding _act_on_*. Satisfies ADR-0006 invariant 3 (propose before act).
+
+    Only emits for REVERT_TASK, CRASH_COMPLETE, PARK_BLOCKED_ON_USER candidates.
+    Dedup: sessions with reap_proposed_at already set are skipped.
+
+    save_state is safe under sessions_lock — it is a raw file write, not a
+    reentrant lock acquisition. See existing _act_on_stalled_candidates,
+    _act_on_idle_candidates.
+    """
+    _now = now or datetime.now(UTC)
+    session_by_id = {s.id: s for s in state.sessions}
+    any_stamped = False
+
+    for candidate in candidates:
+        if candidate.proposed_action not in _REAP_PROPOSED_ACTIONS:
+            continue
+        session = session_by_id.get(candidate.session_id)
+        if session is None or session.reap_proposed_at is not None:
+            continue
+
+        # Compute in_roster
+        in_roster = (
+            session.surface_ref is not None and session.surface_ref in native_live
+        )
+
+        # Compute transcript_age_seconds (best-effort, nullable)
+        transcript_age_seconds: float | None = None
+        transcript_path = _locate_session_transcript(session)
+        if transcript_path is not None and transcript_path.exists():
+            with contextlib.suppress(OSError):
+                mtime = transcript_path.stat().st_mtime
+                transcript_age_seconds = _now.timestamp() - mtime
+
+        payload = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "proposed_action": candidate.proposed_action.value,
+            "reason": candidate.reap_reason.value if candidate.reap_reason else None,
+            "evidence": {
+                "elapsed_seconds": candidate.elapsed_seconds,
+                "in_roster": in_roster,
+                "transcript_age_seconds": transcript_age_seconds,
+            },
+        }
+        # Stamp before record_event: dedup guard fires on retry if write fails.
+        session.reap_proposed_at = _now
+        any_stamped = True
+        record_event(
+            OrchestratorEventType.SESSION_REAP_PROPOSED,
+            payload,
+            correlation_id=candidate.ticket_id or candidate.session_id,
+        )
+
+    if any_stamped:
+        save_state(state)
+
+
 def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -1844,8 +1922,16 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     # Load dev queue once here; pass to both sweeps to avoid a duplicate
     # filesystem read within the same reconcile tick. See GitHub issue #326.
     shared_task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-    stalled_reverted = revert_stalled_headless_sessions(
-        state, now=now, config=orchestrator_config, task_by_ticket=shared_task_by_ticket
+    stalled_candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=orchestrator_config,
+        task_by_ticket=shared_task_by_ticket,
+    )
+    # native_live not yet known — stalled sweep is pre-daemon-query.
+    _emit_reap_proposed(state, stalled_candidates, native_live=set(), now=now)
+    stalled_reverted = _act_on_stalled_candidates(
+        state, stalled_candidates, now=now, config=orchestrator_config
     )
 
     try:
@@ -1876,14 +1962,17 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     pre_watchdog_timed_out_ids = {
         s.id for s in state.sessions if s.status == SessionStatus.TIMED_OUT
     }
-    idle_result = flag_silently_idle_daemon_sessions(
+    idle_candidates = _detect_idle_candidates(
         state,
         now=now,
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
     )
-    silently_idle_ticket_ids, salvage_git_candidates = idle_result
+    _emit_reap_proposed(state, idle_candidates, native_live=native_live, now=now)
+    silently_idle_ticket_ids, salvage_git_candidates = _act_on_idle_candidates(
+        state, idle_candidates, now=now, config=orchestrator_config
+    )
     # Check whether any session newly transitioned to TIMED_OUT has a usage-limit
     # transcript. The _detect_usage_limit I/O cost is minimal (OS-cached files).
     watchdog_usage_limited = any(
@@ -1915,6 +2004,7 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
 
     phantom_set = set(drift.phantom_session_ids)
     phantom_candidates = _detect_phantom_candidates(state, phantom_set)
+    _emit_reap_proposed(state, phantom_candidates, native_live=native_live, now=now)
     (
         reverted,
         phantom_names,

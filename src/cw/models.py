@@ -73,7 +73,8 @@ class ReapReason(StrEnum):
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
 # v6: added Session.idle_observation_count (GitHub #545).
 # v7: added Session.reap_reason (GitHub #380).
-CW_STATE_SCHEMA_VERSION = 7
+# v8: added Session.reap_proposed_at (GitHub #555).
+CW_STATE_SCHEMA_VERSION = 8
 DEV_QUEUE_SCHEMA_VERSION = 2
 
 
@@ -150,6 +151,7 @@ class OrchestratorEventType(StrEnum):
     DISPATCH_TICK = "dispatch.tick"
     SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
+    SESSION_REAP_PROPOSED = "session.reap_proposed"
 
 
 class DispatchSkipReason(StrEnum):
@@ -392,6 +394,11 @@ class Session(BaseModel):
     # CompletionReason — see ReapReason and GitHub #380. None for sessions
     # not reaped by reconcile (e.g. user-backgrounded or /session-done'd).
     reap_reason: ReapReason | None = None
+    # Stamped in-place (under sessions_lock, NOT via mutate_state — self-deadlock
+    # risk per ADR-0006 invariant 2) when SESSION_REAP_PROPOSED is emitted for
+    # this session. Dedup guard: _emit_reap_proposed skips sessions already
+    # stamped. See GitHub #555.
+    reap_proposed_at: datetime | None = None
     parent_session_id: str | None = None
     worker_session_ids: list[str] = Field(default_factory=list)
     # Sentinel-block summary parsed from a headless /auto-dev worker's stdout
