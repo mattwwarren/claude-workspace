@@ -184,6 +184,12 @@ def mutate_state(fn: Callable[[CwState], None]) -> CwState:
     Code running inside a ``with sessions_lock():`` block (e.g. anything
     called from ``reconcile._reconcile_locked``) must mutate the loaded
     state and ``save_state`` directly instead.
+
+    Invariant: every ``save_state`` call outside ``config.py`` is either
+    inside a ``with sessions_lock():`` block **or** in a helper whose
+    docstring states the caller must hold the lock (the reconcile pattern).
+    Sites excluded from this helper have a ``# Why not mutate_state:``
+    comment explaining the disqualifying condition.
     """
     with sessions_lock():
         state = load_state()

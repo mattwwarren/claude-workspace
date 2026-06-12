@@ -1233,6 +1233,8 @@ def signal_stop() -> None:
         # Recovery, not silent wedge.
         return
 
+    # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
+    # and daemon.stop() network call inside the lock window (criteria 1 and 2).
     with sessions_lock():
         state = load_state()
         session = next((s for s in state.sessions if s.id == cw_session_id), None)
@@ -2344,6 +2346,8 @@ def _spawn_close_impl(
     skipped — the multiplexer adapter has been removed. Separated from
     the Click command so tests can inject the daemon client directly.
     """
+    # Why not mutate_state: daemon.stop() network call inside the lock window
+    # (criterion 1: no subprocess/network in lock).
     with sessions_lock():
         state = load_state()
         sess = state.find_by_name_or_id(session_id)
@@ -2479,6 +2483,8 @@ def _spawn_complete_impl(
     Separated from the Click command so tests can inject the daemon client
     directly.
     """
+    # Why not mutate_state: dev_queue_lock nested inside the sessions_lock
+    # window (criterion 2: no dual-lock).
     with sessions_lock():
         state = load_state()
         sess = state.find_by_name_or_id(session_id)

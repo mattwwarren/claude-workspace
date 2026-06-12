@@ -254,6 +254,8 @@ def retire_merged_prs(
     if not events:
         return []
 
+    # Why not mutate_state: _invoke_review_monitor_complete (subprocess) runs
+    # inside the lock window (criterion 1: no subprocess in lock).
     with sessions_lock():
         state = load_state()
         dispatch_record = load_dispatch_record()
