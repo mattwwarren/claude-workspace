@@ -801,6 +801,46 @@ class TestMigrateCwState:
         assert session["cost_usd"] == 1.5
         assert session["cost_breakdown"] == {"claude-sonnet-4-6": 1.5}
 
+    def test_v8_to_v9_fills_session_lane_default(self) -> None:
+        """migrate_cw_state fills lane=None on v8 sessions that lack the key."""
+        raw = {
+            "schema_version": 8,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["lane"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v9_session_lane_preserved_idempotently(self) -> None:
+        """Existing non-None lane survives a migration pass."""
+        raw = {
+            "schema_version": 9,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": "my-lane",
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["lane"] == "my-lane"
+
     # -----------------------------------------------------------------------
     # Phase F: cmux surface_ref migration tests (schema v5)
     # -----------------------------------------------------------------------

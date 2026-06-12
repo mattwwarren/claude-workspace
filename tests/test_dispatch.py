@@ -287,6 +287,28 @@ class TestDispatchTickSpawnsSession:
         assert worker.parent_session_id is None
         assert worker.worker_session_ids == []
 
+    def test_dispatch_stamps_task_lane_on_session(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """dispatch_tick passes task.lane to spawn_create_impl, stamping Session.lane."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-LANE",
+            client="test-client",
+            lane="my-lane",
+        )
+        add_ticket(task)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        state = load_state()
+        assert len(state.sessions) == 1
+        assert state.sessions[0].lane == "my-lane"
+
 
 # ---------------------------------------------------------------------------
 # TestPerClientCapRespected
