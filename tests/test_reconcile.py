@@ -11215,3 +11215,476 @@ class TestReapProposedPayloadLane:
         ]
         assert len(reap_events) == 1
         assert reap_events[0].payload["lane"] == DEFAULT_LANE
+
+
+# ---------------------------------------------------------------------------
+# GitHub #578 — ROUTE_EMITTED_SENTINEL: reconcile honors emitted-but-unrouted
+# sentinels without waiting for signal_stop
+# ---------------------------------------------------------------------------
+
+
+class TestRouteEmittedSentinel:
+    """flag_silently_idle_daemon_sessions routes a transcript sentinel before
+    the idle watchdog budget fires (GitHub #578)."""
+
+    def test_detect_sentinel_present_routes_before_watchdog(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel present + last_result None + elapsed >= 300 s
+        → ROUTE_EMITTED_SENTINEL, task COMPLETED, session COMPLETED."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-detect"
+        # 305 s elapsed — past the 300-s check but well under 900-s watchdog.
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+        assert (now - started_at).total_seconds() >= 300
+        assert (now - started_at).total_seconds() < IDLE_WATCHDOG_SECONDS
+
+        sess = _mk_headless_daemon_session("578-detect", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-1", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-detect",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-detect",
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-detect")
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.completed_reason == CompletionReason.NORMAL
+        assert reloaded.last_result is not None
+        assert reloaded.last_result["status"] == "shipped"
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-detect")
+        assert task.status == QueueItemStatus.COMPLETED
+
+        mock_daemon.stop.assert_called_once_with("fake-short-id")
+
+    def test_detect_elapsed_under_threshold_no_candidate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """elapsed < sentinel_unrouted_check_seconds → no ROUTE_EMITTED_SENTINEL
+        candidate, sentinel left in transcript for next tick."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-under"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 4, 0, tzinfo=UTC)  # 240 s < 300 s threshold
+        assert (now - started_at).total_seconds() < 300
+
+        sess = _mk_headless_daemon_session("578-under", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-2", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-under",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-under",
+                    )
+                ]
+            )
+        )
+
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"fake-short-id"},
+            config=_auto_config(),
+        )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-under")
+        # Session must NOT be completed — too early for the sentinel check.
+        assert reloaded.status == SessionStatus.ACTIVE
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-under")
+        assert task.status == QueueItemStatus.RUNNING
+
+    def test_detect_last_result_set_skips_double_route(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """session.last_result already set → ROUTE_EMITTED_SENTINEL skipped
+        (signal_stop already ran; prevents double-routing)."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-dbl"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-dbl", worktree, started_at)
+        # Simulate: signal_stop already ran and stored last_result.
+        sess.last_result = {"status": "shipped"}
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-3", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-dbl",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-dbl",
+                    )
+                ]
+            )
+        )
+
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"fake-short-id"},
+            config=_auto_config(),
+        )
+
+        assert blocked == []
+        # Session stays ACTIVE — watchdog budget not yet exhausted, no route.
+        reloaded = next(s for s in load_state().sessions if s.id == "578-dbl")
+        assert reloaded.status == SessionStatus.ACTIVE
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-dbl")
+        assert task.status == QueueItemStatus.RUNNING
+
+    def test_detect_live_session_with_sentinel_routes_not_crash_complete(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Live-roster session + sentinel → ROUTE_EMITTED_SENTINEL, NOT a crash path.
+        Session ends COMPLETED/NORMAL (not TIMED_OUT)."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-live"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-live", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-4", _no_op_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-live",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-live",
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-live")
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.completed_reason == CompletionReason.NORMAL
+        assert reloaded.last_result is not None
+        assert reloaded.last_result["status"] == "no_op"
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-live")
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_act_blocked_retry_eligible_routes_to_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel status=blocked + retry_eligible=True → task reverts to PENDING."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-retry"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-retry", worktree, started_at)
+        sess.last_result = None
+
+        blocked_retry_payload: dict[str, Any] = {
+            "schema_version": 4,
+            "ticket_id": "578-retry",
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+            "scope": {
+                "tier": "small",
+                "files": 0,
+                "lines_estimate": 0,
+                "lines_actual": None,
+                "forbidden_touched": False,
+            },
+            "plan_source": "generated",
+            "branch": None,
+            "worktree_path": None,
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "LOW",
+                "any_incomplete_risk": True,
+                "shortcuts": [],
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": {
+                "stage": "stage2_impl",
+                "reason": "impl_failed",
+                "retry_eligible": True,
+                "details": "agent timed out",
+                "next_actions": ["redispatch_ticket"],
+            },
+            "next_actions": ["redispatch_ticket"],
+        }
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-5", blocked_retry_payload
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-retry",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-retry",
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-retry")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_act_signal_only_does_not_gate_route_emitted_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal_only policy does NOT block ROUTE_EMITTED_SENTINEL — routing an
+        emitted sentinel is constructive, not a destructive reap."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-sigonly"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-sigonly", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-6", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-sigonly",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-sigonly",
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+            state = load_state()
+            # signal_only policy — normally gates reaps.
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-sigonly")
+        # ROUTE_EMITTED_SENTINEL is exempt from signal_only → session COMPLETED.
+        assert reloaded.status == SessionStatus.COMPLETED
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-sigonly")
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_act_session_completed_event_emitted(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ROUTE_EMITTED_SENTINEL emits a SESSION_COMPLETED event."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-event"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-event", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-7", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-event",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-event",
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+            state = load_state()
+            flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        events = read_events(
+            consumer="test-578-event",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["session_id"] == "578-event"
+        assert payload["status"] == "shipped"
+        assert payload["salvaged"] is True
+        assert payload["crashed"] is False
+
+    def test_review_pending_approval_sentinel_routes_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: review_pending_approval-shaped sentinel emitted without
+        signal_stop routes task to COMPLETED (PAUSED_FOR_USER_INPUT path),
+        not stuck as RUNNING indefinitely."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-rpa"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        ticket_id = "578-rpa"
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        sess.last_result = None
+        payload = _make_terminal_payload("review_pending_approval", ticket_id)
+        _write_salvage_transcript(home, worktree, "claude-578-uuid-8", payload)
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=ticket_id,
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.last_result is not None
+        assert reloaded.last_result["status"] == "review_pending_approval"
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        # review_pending_approval is in SALVAGE_TERMINAL_STATUSES (not retried).
+        assert task.status == QueueItemStatus.COMPLETED
