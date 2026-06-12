@@ -1454,6 +1454,187 @@ class ReapCandidate:
     worktree_path: Path | None = None
 
 
+
+def _detect_phantom_candidates(
+    state: CwState,
+    phantom_set: set[str],
+    *,
+    now: datetime,
+) -> list[ReapCandidate]:
+    """Pure classification phase for phantom sessions.
+
+    Returns a list of ReapCandidate objects. Makes zero writes.
+    The worktree_dirty check for DAEMON sessions is performed here
+    so the act phase does not need to repeat it. See GitHub #552, ADR-0006.
+    """
+    candidates: list[ReapCandidate] = []
+    for session in state.sessions:
+        if session.id not in phantom_set:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        # Try sentinel salvage before declaring crashed (DAEMON only).
+        salvage = (
+            _salvage_terminal_result(session)
+            if session.origin is SessionOrigin.DAEMON
+            else None
+        )
+        if salvage is not None:
+            result, claude_session_id = salvage
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.SALVAGE_COMPLETION,
+                    ticket_id=ticket_id,
+                    salvage_result=result,
+                    salvage_csid=claude_session_id,
+                    client=session.client,
+                    worktree_path=session.worktree_path,
+                )
+            )
+            continue
+        # Dirty-check for DAEMON sessions only; USER sessions have no worktree.
+        worktree_dirty = (
+            _worktree_dirty_by_path(session.client, session.worktree_path)
+            if session.origin is SessionOrigin.DAEMON
+            else False
+        )
+        candidates.append(
+            ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.CRASH_COMPLETE,
+                ticket_id=ticket_id,
+                worktree_dirty=worktree_dirty,
+                client=session.client,
+                worktree_path=session.worktree_path,
+            )
+        )
+    return candidates
+
+
+def _act_on_phantom_candidates(
+    state: CwState,
+    candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+) -> tuple[list[str], list[str], bool, list[str], dict[str, AutoDevResult]]:
+    """Act phase for phantom sessions: apply all mutations.
+
+    Returns (ticket_ids_to_revert, phantom_names, usage_limited,
+             salvaged_ticket_ids, salvaged_result_by_ticket).
+    ticket_ids_to_revert contains only PENDING-routed tickets (not dirty/blocked).
+    """
+    if not candidates:
+        return [], [], False, [], {}
+
+    session_by_id = {s.id: s for s in state.sessions}
+
+    crash_candidates = [c for c in candidates if c.proposed_action == ProposedAction.CRASH_COMPLETE]
+    salvage_candidates = [c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION]
+
+    phantom_names: list[str] = []
+    # ticket_ids to revert (only PENDING-routed, excludes dirty/BLOCKED_ON_USER)
+    ticket_ids_to_revert: list[str] = []
+    salvaged_ticket_ids: list[str] = []
+    salvaged_result_by_ticket: dict[str, AutoDevResult] = {}
+    pending_events: list[dict[str, object]] = []
+
+    for candidate in salvage_candidates:
+        session = session_by_id[candidate.session_id]
+        assert candidate.salvage_result is not None
+        assert candidate.salvage_csid is not None
+        _apply_salvaged_completion(session, candidate.salvage_result, candidate.salvage_csid, now=now)
+        phantom_names.append(session.name)
+        if candidate.ticket_id:
+            salvaged_ticket_ids.append(candidate.ticket_id)
+            salvaged_result_by_ticket[candidate.ticket_id] = candidate.salvage_result
+        salvaged_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "crashed": False,
+            "salvaged": True,
+            "status": candidate.salvage_result.status,
+        }
+        if candidate.ticket_id:
+            salvaged_payload["ticket_id"] = candidate.ticket_id
+        pending_events.append(salvaged_payload)
+
+    for candidate in crash_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.CRASHED
+        session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        phantom_names.append(session.name)
+        crash_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "crashed": True,
+        }
+        if candidate.ticket_id:
+            crash_payload["ticket_id"] = candidate.ticket_id
+        pending_events.append(crash_payload)
+
+    save_state(state)
+
+    for payload in pending_events:
+        record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    # Emit SESSION_PHANTOM_REVERTED for DAEMON-origin CRASH_COMPLETE candidates.
+    dirty_ticket_ids: set[str] = set()
+    for candidate in crash_candidates:
+        if candidate.ticket_id and session_by_id[candidate.session_id].origin is SessionOrigin.DAEMON:
+            wt_path_str: str | None = str(candidate.worktree_path) if candidate.worktree_path else None
+            if candidate.worktree_dirty:
+                dirty_ticket_ids.add(candidate.ticket_id)
+            queue_status = "blocked_on_user" if candidate.worktree_dirty else "pending"
+            record_event(
+                OrchestratorEventType.SESSION_PHANTOM_REVERTED,
+                {
+                    "session_id": candidate.session_id,
+                    "ticket_id": candidate.ticket_id,
+                    "client": candidate.client,
+                    "worktree_dirty": candidate.worktree_dirty,
+                    "worktree_path": wt_path_str,
+                    "queue_status": queue_status,
+                },
+                correlation_id=candidate.ticket_id,
+            )
+
+    # Queue mutations.
+    daemon_ticket_ids_to_revert = [
+        c.ticket_id
+        for c in crash_candidates
+        if c.ticket_id and session_by_id[c.session_id].origin is SessionOrigin.DAEMON
+    ]
+    revert_set = set(daemon_ticket_ids_to_revert)
+    salvaged_set = set(salvaged_ticket_ids)
+    if revert_set or salvaged_set:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            changed = False
+            for task in store.tasks:
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                if task.ticket_id in revert_set:
+                    if task.ticket_id in dirty_ticket_ids:
+                        task.status = QueueItemStatus.BLOCKED_ON_USER
+                    else:
+                        task.status = QueueItemStatus.PENDING
+                        ticket_ids_to_revert.append(task.ticket_id)
+                    task.session_id = None
+                    changed = True
+                elif task.ticket_id in salvaged_set:
+                    salvaged_result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(salvaged_result)
+                    changed = True
+            if changed:
+                save_dev_queue(store)
+
+    return ticket_ids_to_revert, phantom_names, False, salvaged_ticket_ids, salvaged_result_by_ticket
+
+
 def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -1546,127 +1727,14 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         ), salvage_git_candidates
 
     phantom_set = set(drift.phantom_session_ids)
-    ticket_ids_to_revert: list[str] = []
-    salvaged_ticket_ids: list[str] = []
-    salvaged_result_by_ticket: dict[str, AutoDevResult] = {}
-    pending_events: list[dict[str, object]] = []
-    phantom_names: list[str] = []
-    # Accumulate data for session.phantom_reverted events (DAEMON-origin only).
-    # Emitted after save_state but before dev_queue_lock — see operator resolution
-    # in issue #459 for lock-ordering rationale.
-    # (session_id, ticket_id, client, worktree_path)
-    phantom_reverted_data: list[tuple[str, str, str, Path | None]] = []
-    for session in state.sessions:
-        if session.id not in phantom_set:
-            continue
-        ticket_id = ticket_id_for_session(session.name)
-        # Recover a terminal-success sentinel before declaring the phantom
-        # crashed, so already-shipped work is not re-dispatched (#372).
-        salvage = (
-            _salvage_terminal_result(session)
-            if session.origin is SessionOrigin.DAEMON
-            else None
-        )
-        if salvage is not None:
-            result, claude_session_id = salvage
-            _apply_salvaged_completion(session, result, claude_session_id, now=now)
-            phantom_names.append(session.name)
-            if ticket_id:
-                salvaged_ticket_ids.append(ticket_id)
-                salvaged_result_by_ticket[ticket_id] = result
-            salvaged_payload: dict[str, object] = {
-                "session_id": session.id,
-                "session_name": session.name,
-                "client": session.client,
-                "crashed": False,
-                "salvaged": True,
-                "status": result.status,
-            }
-            if ticket_id:
-                salvaged_payload["ticket_id"] = ticket_id
-            pending_events.append(salvaged_payload)
-            continue
-        session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.CRASHED
-        session.completed_at = now
-        session.reap_reason = ReapReason.PHANTOM_SURFACE
-        phantom_names.append(session.name)
-        if ticket_id and session.origin is SessionOrigin.DAEMON:
-            ticket_ids_to_revert.append(ticket_id)
-            phantom_reverted_data.append(
-                (session.id, ticket_id, session.client, session.worktree_path)
-            )
-        payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "crashed": True,
-        }
-        if ticket_id:
-            payload["ticket_id"] = ticket_id
-        pending_events.append(payload)
-
-    save_state(state)
-    for payload in pending_events:
-        record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
-
-    # Why: dirty-check runs under sessions_lock before the queue mutation, but
-    # the orphaned claude --bg process may still be alive and could write to the
-    # worktree between this check and the BLOCKED_ON_USER routing below (TOCTOU).
-    # The accepted tradeoff is block > clobber — narrow the window, accept the race.
-    dirty_ticket_ids: set[str] = set()
-    for sess_id, rev_ticket_id, rev_client, rev_wt_path in phantom_reverted_data:
-        wt_dirty = _worktree_dirty_by_path(rev_client, rev_wt_path)
-        wt_path_str: str | None = str(rev_wt_path) if rev_wt_path else None
-        if wt_dirty:
-            dirty_ticket_ids.add(rev_ticket_id)
-        queue_status = "blocked_on_user" if wt_dirty else "pending"
-        record_event(
-            OrchestratorEventType.SESSION_PHANTOM_REVERTED,
-            {
-                "session_id": sess_id,
-                "ticket_id": rev_ticket_id,
-                "client": rev_client,
-                "worktree_dirty": wt_dirty,
-                "worktree_path": wt_path_str,
-                "queue_status": queue_status,
-            },
-            correlation_id=rev_ticket_id,
-        )
-
-    reverted: list[str] = []
-    if ticket_ids_to_revert or salvaged_ticket_ids:
-        revert_set = set(ticket_ids_to_revert)
-        salvaged_set = set(salvaged_ticket_ids)
-        with dev_queue_lock():
-            store = load_dev_queue()
-            changed = False
-            for task in store.tasks:
-                if task.status != QueueItemStatus.RUNNING:
-                    continue
-                if task.ticket_id in revert_set:
-                    if task.ticket_id in dirty_ticket_ids:
-                        # Dirty worktree: park for operator inspection rather than
-                        # re-dispatching — clobbering in-flight work is data loss.
-                        task.status = QueueItemStatus.BLOCKED_ON_USER
-                    else:
-                        task.status = QueueItemStatus.PENDING
-                        reverted.append(task.ticket_id)
-                    # Drop the stamp from the prior (now-crashed) session so
-                    # the next dispatch_tick can re-stamp with the freshly
-                    # spawned session_id without a window where the task
-                    # carries a stale id. See GitHub issue #97.
-                    task.session_id = None
-                    changed = True
-                elif task.ticket_id in salvaged_set:
-                    # Terminal-success salvage: retire the task instead of
-                    # reverting, so shipped/no_op work is not re-dispatched (#372).
-                    # Paused statuses route to BLOCKED_ON_USER instead (#471).
-                    salvaged_result = salvaged_result_by_ticket[task.ticket_id]
-                    task.status = _queue_status_for_salvaged(salvaged_result)
-                    changed = True
-            if changed:
-                save_dev_queue(store)
+    phantom_candidates = _detect_phantom_candidates(state, phantom_set, now=now)
+    (
+        reverted,
+        phantom_names,
+        _watchdog_usage_limited_phantom,
+        _salvaged_phantom_ticket_ids,
+        _salvaged_phantom_results,
+    ) = _act_on_phantom_candidates(state, phantom_candidates, now=now)
 
     # Sweep for TIMED_OUT and DAEMON-COMPLETED sessions whose owning TicketTask
     # was not yet reverted (e.g. signal_stop crashed after setting status but

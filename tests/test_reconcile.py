@@ -9059,8 +9059,9 @@ def test_detect_phantom_candidates_salvage_on_terminal_sentinel(
     worktree = tmp_path / "wt-phantom-salv"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    # surface_ref must match the prefix used by _write_salvage_transcript
     sess = _mk_phantom_daemon_session(
-        "phantom-salv-1", started_at, worktree_path=worktree
+        "phantom-salv-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
     )
     payload = _shipped_salvage_payload()
     payload["ticket_id"] = "phantom-salv-1"
