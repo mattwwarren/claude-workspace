@@ -163,9 +163,12 @@ def _tickets_table(
         tickets,
         key=lambda t: (-t.priority, t.created_at),
     ):
-        ticket_id_display = markup_escape(ticket.ticket_id)
-        if ticket.lane != DEFAULT_LANE:
-            ticket_id_display = markup_escape(f"{ticket.ticket_id} [{ticket.lane}]")
+        raw = (
+            ticket.ticket_id
+            if ticket.lane == DEFAULT_LANE
+            else f"{ticket.ticket_id} [{ticket.lane}]"
+        )
+        ticket_id_display = markup_escape(raw)
         row = [ticket_id_display, str(ticket.priority)]
         if level is DetailLevel.VERBOSE:
             row.append(ticket.scope_hint or "—")
