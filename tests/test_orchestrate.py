@@ -628,7 +628,7 @@ class TestOrchestratorStatus:
     def test_monitored_pr_ci_status_and_mergeable_none_when_absent(
         self, tmp_orchestrate_dirs: Path
     ) -> None:
-        """When ci_status/mergeable absent from monitor file, fields are None (backward compat)."""
+        """When ci_status/mergeable absent from monitor file, fields are None."""
         review_dir = tmp_orchestrate_dirs / "review-monitor"
         _write_monitor_file(review_dir, "owner/repo", 42)  # no new kwargs
         snapshot = orchestrator_status()
@@ -654,7 +654,8 @@ class TestOrchestratorStatus:
     ) -> None:
         """The snapshot round-trips through JSON cleanly."""
         review_dir = tmp_orchestrate_dirs / "review-monitor"
-        _write_monitor_file(review_dir, "owner/repo", 42)  # ci_status/mergeable absent → None
+        # ci_status/mergeable absent → None (backward compat)
+        _write_monitor_file(review_dir, "owner/repo", 42)
         save_state(CwState(sessions=[_make_session("s1", workspace)]))
         snapshot = orchestrator_status()
         as_json = snapshot.model_dump_json()
@@ -666,7 +667,8 @@ class TestOrchestratorStatus:
         assert "monitored_prs" in parsed
         assert len(parsed["monitored_prs"]) == 1
         pr_json = parsed["monitored_prs"][0]
-        assert pr_json["ci_status"] is None  # null guard: must serialize to null, not be excluded
+        # null guard: must serialize to null, not be excluded
+        assert pr_json["ci_status"] is None
         assert pr_json["mergeable"] is None
 
 

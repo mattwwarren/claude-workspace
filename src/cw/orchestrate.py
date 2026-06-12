@@ -334,7 +334,8 @@ class MonitoredPR(BaseModel):
     role: str
     status: str
     unresolved_threads: int
-    ci_status: str | None = None  # GH check rollup: pending, success, failure, error, action_required, expected, stale
+    # GH check rollup: pending, success, failure, error, action_required, stale
+    ci_status: str | None = None
     mergeable: bool | None = None
 
 
