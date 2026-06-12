@@ -16,6 +16,17 @@ class SessionPurpose(StrEnum):
     IMPL = "impl"
     IDEA = "idea"
     DEBT = "debt"
+    ORCHESTRATE = "orchestrate"
+
+
+# Purposes a worker session can be dispatched/created with. ORCHESTRATE is
+# excluded: an ORCHESTRATE session is created only via `cw orchestrate start`
+# (#595 / Phase 4b), never selected as a worker --purpose.
+WORKER_PURPOSES: tuple[SessionPurpose, ...] = (
+    SessionPurpose.IMPL,
+    SessionPurpose.IDEA,
+    SessionPurpose.DEBT,
+)
 
 
 class SessionStatus(StrEnum):
@@ -75,7 +86,8 @@ class ReapReason(StrEnum):
 # v6: added Session.idle_observation_count (GitHub #545).
 # v7: added Session.reap_reason (GitHub #380).
 # v8: added Session.reap_proposed_at (GitHub #555).
-CW_STATE_SCHEMA_VERSION = 8
+# v9: added Session.lane (GitHub #594).
+CW_STATE_SCHEMA_VERSION = 9
 # v3: added TicketTask.lane (GitHub #557).
 DEV_QUEUE_SCHEMA_VERSION = 3
 DEFAULT_LANE: str = "default"
@@ -503,6 +515,11 @@ class Session(BaseModel):
     # this session. Dedup guard: _emit_reap_proposed skips sessions already
     # stamped. See GitHub #555.
     reap_proposed_at: datetime | None = None
+    # Dispatch lane this session was spawned into. Stamped by spawn_create_impl
+    # when called from the dispatch loop (GitHub #594). None for sessions
+    # spawned outside the queue (interactive, plan, cli). Stored for
+    # observability; occupancy counting remains task-join based (ADR-0006).
+    lane: str | None = None
     parent_session_id: str | None = None
     worker_session_ids: list[str] = Field(default_factory=list)
     # Sentinel-block summary parsed from a headless /auto-dev worker's stdout
