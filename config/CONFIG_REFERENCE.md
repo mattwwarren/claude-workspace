@@ -190,6 +190,21 @@ headless_timeout_by_tier:
 # IDLE_WATCHDOG_SECONDS (900s). See GitHub issues #326, #340.
 idle_watchdog_by_tier:
   large: 1800   # 30 min — large-tier sessions may stall on slow builds
+
+# Reap policy: controls whether the reconciler destroys a stalled session
+# or only signals for human intervention (ADR-0006 invariant 4).
+#
+# signal_only (default): when a session is detected as stalled/phantom,
+#   the owning queue task is routed to BLOCKED_ON_USER. Session status,
+#   worktree, and daemon surface are left intact for operator review.
+#   Re-detection on subsequent ticks is an idempotent no-op.
+#
+# auto: pre-#554 self-healing — stop the daemon surface, revert the queue
+#   task to PENDING for retry, and remove the worktree.
+#
+# MIGRATION: existing deployments wanting self-healing must set:
+#   reap_policy: auto
+reap_policy: signal_only
 ```
 
 Override a single ticket's budget at enqueue time:
