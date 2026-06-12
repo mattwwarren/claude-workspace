@@ -27,6 +27,8 @@ _WORKTREE_NAME_CAP = 64
 _HASH_BASE_SEGMENTS = (".cw", "wt")
 # Git porcelain v1 format: "XY path" — 2-char status prefix + 1 space = 3 chars.
 _GIT_PORCELAIN_PATH_OFFSET = 3
+# XY field value for untracked files in porcelain v1.
+_GIT_PORCELAIN_UNTRACKED = "??"
 # 8 hex chars = 32 bits. For a single-user tool with a handful of
 # clients the collision probability is negligible; raising this value
 # pushes the hashed base closer to _WORKTREE_NAME_CAP and reduces
@@ -602,7 +604,9 @@ def fast_forward_main(
         # Why: dispatch auto-ff may run against a workspace with untracked runtime
         # artifacts (.claude/scheduled_tasks.lock etc.); git pull --ff-only is
         # safe with untracked files because ff-only never rewrites the working tree.
-        status_lines = [line for line in status_lines if line[:2] != "??"]
+        status_lines = [
+            line for line in status_lines if line[:2] != _GIT_PORCELAIN_UNTRACKED
+        ]
     if status_lines:
         msg = (
             f"Refusing to fast-forward {client.name}: working tree is dirty "

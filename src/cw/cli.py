@@ -1686,11 +1686,9 @@ def dev_queue_status(client: str | None) -> None:
     help="Suppress per-tick operator output (for cron/scripted use).",
 )
 @click.option(
-    "--no-auto-ff",
+    "--auto-ff/--no-auto-ff",
     "auto_ff",
-    is_flag=True,
     default=True,
-    flag_value=False,
     help="Disable automatic fast-forward of local main (legacy block-only behavior).",
 )
 @handle_errors

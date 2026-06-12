@@ -313,8 +313,12 @@ def dispatch_tick(
                         behind_count,
                     )
                     stale = False
-                except (WorktreeError, MissingWorkspaceError):
-                    pass
+                except (WorktreeError, MissingWorkspaceError) as exc:
+                    _log.warning(
+                        "auto-ff: fast-forward failed for %s: %s",
+                        client.name,
+                        exc,
+                    )
                 # Why: no git-level lock — concurrent dispatch loops are safe;
                 # git pull --ff-only is idempotent when already current.
 

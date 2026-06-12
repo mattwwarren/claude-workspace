@@ -4895,6 +4895,62 @@ class TestDevQueueRunQuiet:
             f"Expected callable emit but got: {captured_emit[0]!r}"
         )
 
+    def test_auto_ff_on_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bare invocation passes auto_ff=True to run_dispatch_loop."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        captured_auto_ff: list[bool] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+            auto_ff: bool = True,
+        ) -> None:
+            captured_auto_ff.append(auto_ff)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "run", "--once"])
+        assert result.exit_code == 0, result.output
+        assert captured_auto_ff == [True], (
+            f"Expected auto_ff=True by default but got: {captured_auto_ff!r}"
+        )
+
+    def test_no_auto_ff_flag_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--no-auto-ff passes auto_ff=False to run_dispatch_loop."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        captured_auto_ff: list[bool] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+            auto_ff: bool = True,
+        ) -> None:
+            captured_auto_ff.append(auto_ff)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "run", "--once", "--no-auto-ff"])
+        assert result.exit_code == 0, result.output
+        assert captured_auto_ff == [False], (
+            f"Expected auto_ff=False with --no-auto-ff but got: {captured_auto_ff!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: _format_status_human
