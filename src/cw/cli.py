@@ -54,7 +54,7 @@ from cw.dev_queue import (
     wait_for_terminal,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store, run_dispatch_loop
-from cw.doctor import format_report, format_report_json, run_doctor
+from cw.doctor import _reap_session_by_selector, format_report, format_report_json, run_doctor
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
@@ -345,8 +345,9 @@ def config() -> None:
     default=False,
     help="Output report as JSON.",
 )
+@click.argument("session", required=False, default=None)
 @handle_errors
-def doctor(reap: bool, as_json: bool) -> None:
+def doctor(reap: bool, session: str | None, as_json: bool) -> None:
     """Run environment preflight checks and print a health report.
 
     Reports daemon health, session count, and connectivity status.
@@ -377,6 +378,12 @@ def doctor(reap: bool, as_json: bool) -> None:
     roster, marking phantom sessions COMPLETED and reverting their tickets
     to PENDING.
     """
+    if reap and session:
+        ok = _reap_session_by_selector(session)
+        if not ok:
+            click.echo(f"No session found matching {session!r}", err=True)
+            raise click.exceptions.Exit(1)
+        return
     report = run_doctor(reap=reap)
     if as_json:
         click.echo(format_report_json(report))
