@@ -671,9 +671,7 @@ class TestLaneConfig:
 
 
 class TestClientConfigEffectiveLanes:
-    def test_effective_lanes_empty_synthesizes_default(
-        self, tmp_path: object
-    ) -> None:
+    def test_effective_lanes_empty_synthesizes_default(self, tmp_path: object) -> None:
         """ClientConfig with no lanes returns synthesized default lane."""
         config = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         lanes = config.effective_lanes
