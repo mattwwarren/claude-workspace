@@ -745,11 +745,6 @@ def run_dispatch_loop(
     """
     config = load_orchestrator_config()
 
-    if max_parallel is not None:
-        clients = load_clients()
-        overridden: dict[str, int] = dict.fromkeys(clients, max_parallel)
-        config = config.model_copy(update={"per_client_max_parallel": overridden})
-
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
     warned_stale: set[tuple[str, str]] = set()

@@ -2757,9 +2757,9 @@ class TestConfigReloadedEachTick:
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
 
-        # With once=True: pre-loop startup load + 1 in-loop reload = call_count >= 2
+        # With once=True: 1 startup load + 1 in-loop reload = exactly 2.
         # (Before fix: call_count == 1 — in-loop reload is missing → FAILS pre-fix)
-        assert call_count >= 2
+        assert call_count == 2
 
     def test_config_reload_takes_effect(
         self,
