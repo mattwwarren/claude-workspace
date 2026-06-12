@@ -26,6 +26,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapPolicy,
     ReapReason,
     Session,
     SessionOrigin,
@@ -263,6 +264,7 @@ def test_reconcile_marks_phantom_completed_crashed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """reconcile flips phantom sessions to COMPLETED/CRASHED and persists."""
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
     state = CwState(sessions=[_mk_session("s1", "missing-ref")])
     save_state(state)
 
@@ -289,6 +291,7 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When a DAEMON session for a ticket is phantom, revert its task."""
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
     sess = _mk_session("sess-daemon", "dead-ref")
     sess.origin = SessionOrigin.DAEMON
     sess.name = "client-a/auto-dev/TKT-1"
@@ -351,6 +354,7 @@ def test_reconcile_clears_session_id_on_revert(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
     reconcile()
 
     queue = load_dev_queue()
@@ -857,9 +861,7 @@ def test_revert_stalled_headless_sessions_transitions_past_budget(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    reverted = revert_stalled_headless_sessions(
-        state, now=now, config=OrchestratorConfig()
-    )
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert "stalled-1" in reverted
     assert sess.status == SessionStatus.TIMED_OUT
@@ -899,9 +901,7 @@ def test_revert_stalled_headless_sessions_leaves_under_budget_alone(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    reverted = revert_stalled_headless_sessions(
-        state, now=now, config=OrchestratorConfig()
-    )
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert reverted == []
     assert sess.status == SessionStatus.ACTIVE
@@ -921,9 +921,7 @@ def test_revert_stalled_headless_sessions_catches_idle_sessions(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    reverted = revert_stalled_headless_sessions(
-        state, now=now, config=OrchestratorConfig()
-    )
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert reverted == []  # no matching ticket task
     assert sess.status == SessionStatus.TIMED_OUT
@@ -959,9 +957,7 @@ def test_revert_stalled_headless_sessions_skips_non_daemon(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    reverted = revert_stalled_headless_sessions(
-        state, now=now, config=OrchestratorConfig()
-    )
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert reverted == []
     assert sess.status == SessionStatus.ACTIVE
@@ -995,9 +991,7 @@ def test_revert_stalled_headless_sessions_fail_open_missing_context(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    reverted = revert_stalled_headless_sessions(
-        state, now=now, config=OrchestratorConfig()
-    )
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert reverted == []
     assert sess.status == SessionStatus.ACTIVE
@@ -1018,9 +1012,7 @@ def test_revert_stalled_headless_sessions_skips_none_worktree_path(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    reverted = revert_stalled_headless_sessions(
-        state, now=now, config=OrchestratorConfig()
-    )
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert reverted == []
     assert sess.status == SessionStatus.ACTIVE
@@ -1046,7 +1038,7 @@ def test_revert_stalled_headless_sessions_stops_daemon_surface(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert short_id in daemon.stop_calls
 
@@ -1087,7 +1079,7 @@ def test_revert_stalled_cleans_up_worktree(
         ),
     )
 
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert removed == [("client-a", "auto-dev/clean-1", True)]
 
@@ -1117,7 +1109,7 @@ def test_revert_stalled_worktree_cleanup_is_best_effort(
     )
     monkeypatch.setattr("cw.reconcile.remove_worktree", boom)
 
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert sess.status == SessionStatus.TIMED_OUT
 
@@ -1147,7 +1139,7 @@ def test_revert_stalled_skips_cleanup_when_no_branch(
 
     monkeypatch.setattr("cw.reconcile.get_client", record_get_client)
 
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert calls == []
 
@@ -1198,7 +1190,7 @@ def test_revert_stalled_skips_removal_and_blocks_task_when_dirty(
     # Simulate dirty worktree (has unsaved work)
     monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
 
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     # Worktree must NOT have been removed
     assert removed == []
@@ -1247,7 +1239,7 @@ def test_revert_stalled_removes_when_clean(
     # Clean worktree
     monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
 
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     # Removal proceeds with force=True
     assert removed == [("client-a", "auto-dev/cleanX-1", True)]
@@ -1407,7 +1399,7 @@ def test_revert_stalled_salvages_shipped_sentinel(
     )
 
     reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=OrchestratorConfig()
+        state=load_state(), now=now, config=_auto_config()
     )
 
     # Not reverted for re-dispatch.
@@ -1462,7 +1454,7 @@ def test_revert_stalled_salvages_no_op_sentinel(
     )
 
     reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=OrchestratorConfig()
+        state=load_state(), now=now, config=_auto_config()
     )
 
     assert reverted == []
@@ -1518,7 +1510,7 @@ def test_revert_stalled_no_salvage_without_sentinel_times_out(
     )
 
     reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=OrchestratorConfig()
+        state=load_state(), now=now, config=_auto_config()
     )
 
     assert "salv-none" in reverted
@@ -1562,7 +1554,7 @@ def test_revert_stalled_ignores_stale_transcript(
     )
 
     reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=OrchestratorConfig()
+        state=load_state(), now=now, config=_auto_config()
     )
 
     # Stale transcript ignored → genuine timeout.
@@ -1661,6 +1653,7 @@ def test_reconcile_includes_stalled_reverts_in_report(
     # After revert_stalled_headless_sessions fires, session becomes TIMED_OUT,
     # so the outage guard won't trip. Monkeypatch to avoid subprocess.run.
     monkeypatch.setattr("cw.reconcile._claude_agents_json", list)
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
     with freezegun.freeze_time(now):
         report = reconcile()
 
@@ -1697,7 +1690,7 @@ def test_resolve_headless_budget_small_tier(
         started_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_result={"scope": {"tier": "small"}},
     )
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     budget = resolve_headless_budget(None, sess, config)
     assert budget == 1800
 
@@ -1724,7 +1717,7 @@ def test_resolve_headless_budget_large_tier(
         started_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_result={"scope": {"tier": "large"}},
     )
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     budget = resolve_headless_budget(None, sess, config)
     assert budget == 5400
 
@@ -1756,7 +1749,7 @@ def test_resolve_headless_budget_per_ticket_override(
         client="client-a",
         headless_timeout_override=7200,
     )
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     budget = resolve_headless_budget(task, sess, config)
     assert budget == 7200
 
@@ -1778,7 +1771,7 @@ def test_resolve_headless_budget_pre_stage1_fallback(
         started_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_result=None,
     )
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     budget = resolve_headless_budget(None, sess, config)
     assert budget == HEADLESS_TIMEOUT_SECONDS
 
@@ -1787,7 +1780,7 @@ def test_resolve_headless_budget_scope_hint_large_no_session(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2.5 (#314): scope_hint='large' + session=None → large-tier budget."""
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
     budget = resolve_headless_budget(task, None, config)
     assert budget == 5400
@@ -1798,7 +1791,7 @@ def test_resolve_headless_budget_scope_hint_small_no_session(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2.5 (#314): scope_hint='small' + session=None → small-tier budget."""
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="small")
     budget = resolve_headless_budget(task, None, config)
     assert budget == 1800
@@ -1808,7 +1801,7 @@ def test_resolve_headless_budget_no_scope_hint_no_session(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2.5 (#314): scope_hint=None + session=None → global timeout."""
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     task = TicketTask(ticket_id="GEN-314", client="client-a")
     budget = resolve_headless_budget(task, None, config)
     assert budget == HEADLESS_TIMEOUT_SECONDS
@@ -1818,7 +1811,7 @@ def test_resolve_headless_budget_override_beats_scope_hint(
     tmp_config_dir: Path,
 ) -> None:
     """Step 1 (override) beats step 2.5 (scope_hint): override=9999 > large=5400."""
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     task = TicketTask(
         ticket_id="GEN-314",
         client="client-a",
@@ -1833,7 +1826,7 @@ def test_resolve_headless_budget_last_result_beats_scope_hint(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2 (last_result tier) beats step 2.5 (scope_hint) when tier is present."""
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
     sess = Session(
         name="client-a/auto-dev/GEN-314",
@@ -1850,7 +1843,7 @@ def test_resolve_headless_budget_non_dict_last_result_falls_to_scope_hint(
     tmp_config_dir: Path,
 ) -> None:
     """Non-dict last_result → AttributeError caught → step 2.5 scope_hint fires."""
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
     sess = Session(
         name="client-a/auto-dev/GEN-314",
@@ -1876,7 +1869,7 @@ def test_revert_stalled_uses_per_session_budget(
 
     sess = _mk_headless_daemon_session("per-sess-small", worktree, started_at)
     sess.last_result = {"scope": {"tier": "small"}}
-    config = OrchestratorConfig(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
 
     # Verify resolve_headless_budget returns 1800 for this session
     budget = resolve_headless_budget(None, sess, config)
@@ -1972,7 +1965,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
         mock_notify.assert_called_once_with(sess.name, sess.client)
 
@@ -2047,7 +2040,7 @@ def test_flag_silently_idle_watchdog_does_not_stop_working_worker(
         patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
     ):
         result, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state, now=now, native_live={"live-ref"}, config=_auto_config()
         )
 
     mock_daemon.stop.assert_not_called()
@@ -2099,7 +2092,7 @@ def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     blocked, _salvage = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        state, now=now, native_live={"live-ref"}, config=_auto_config()
     )
 
     assert blocked == []
@@ -2136,7 +2129,7 @@ def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
     save_state(state)
 
     blocked, _salvage = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        state, now=now, native_live={"live-ref"}, config=_auto_config()
     )
 
     assert blocked == []
@@ -2169,7 +2162,7 @@ def test_flag_silently_idle_daemon_sessions_skips_session_with_terminal_sentinel
     save_state(state)
 
     blocked, _salvage = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        state, now=now, native_live={"live-ref"}, config=_auto_config()
     )
 
     assert blocked == []
@@ -2207,7 +2200,7 @@ def test_blocked_terminal_sentinel_suppresses_watchdog(
     save_state(state)
 
     blocked, _salvage = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        state, now=now, native_live={"live-ref"}, config=_auto_config()
     )
 
     assert blocked == []
@@ -2273,7 +2266,7 @@ def test_flag_silently_idle_daemon_sessions_skips_user_origin(
     save_state(state)
 
     blocked, _salvage = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        state, now=now, native_live={"live-ref"}, config=_auto_config()
     )
 
     assert blocked == []
@@ -2331,7 +2324,7 @@ def test_flag_silently_idle_salvages_shipped_sentinel(
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
+            state, now=now, native_live={"fake-short-id"}, config=_auto_config()
         )
 
     assert blocked == []
@@ -2389,7 +2382,7 @@ def test_flag_silently_idle_salvages_no_op_sentinel(
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
+            state, now=now, native_live={"fake-short-id"}, config=_auto_config()
         )
 
     assert blocked == []
@@ -2449,7 +2442,7 @@ def test_silently_idle_parked_session_salvaged_on_next_pass(
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"fake-short-id"}, config=OrchestratorConfig()
+            state, now=now, native_live={"fake-short-id"}, config=_auto_config()
         )
 
     assert blocked == []
@@ -2514,7 +2507,7 @@ def test_flag_silently_idle_no_salvage_without_sentinel_still_parks(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert "IDLE-NS" in blocked
@@ -2627,7 +2620,7 @@ def test_confirm_before_reap_first_observation_no_disposition(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(),  # default idle_confirm_observations=2
+            config=_auto_config(),  # default idle_confirm_observations=2
         )
         mock_notify.assert_not_called()
 
@@ -2692,7 +2685,7 @@ def test_confirm_before_reap_second_observation_fires(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(),  # idle_confirm_observations=2
+            config=_auto_config(),  # idle_confirm_observations=2
         )
         mock_notify.assert_called_once_with(sess.name, sess.client)
 
@@ -2762,7 +2755,7 @@ def test_confirm_before_reap_liveness_recovery_resets_counter(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(),
+            config=_auto_config(),
         )
 
     assert blocked == []
@@ -2778,7 +2771,7 @@ def test_confirm_before_reap_liveness_recovery_resets_counter(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(),  # threshold=2
+            config=_auto_config(),  # threshold=2
         )
 
     assert blocked2 == []  # still only at count 1, threshold not reached
@@ -2834,7 +2827,7 @@ def test_confirm_before_reap_sentinel_salvage_not_deferred(
             state=CwState(sessions=[sess]),
             now=now,
             native_live={"fake-short-id"},
-            config=OrchestratorConfig(),  # idle_confirm_observations=2
+            config=_auto_config(),  # idle_confirm_observations=2
         )
 
     # Sentinel salvage fires immediately — not deferred to observation 2.
@@ -2905,7 +2898,7 @@ def test_confirm_before_reap_git_salvage_deferred(
         state,
         now=now,
         native_live={"live-ref"},
-        config=OrchestratorConfig(),  # idle_confirm_observations=2
+        config=_auto_config(),  # idle_confirm_observations=2
     )
     assert salvage_git_1 == []
     assert sess.idle_observation_count == 1
@@ -2915,7 +2908,7 @@ def test_confirm_before_reap_git_salvage_deferred(
         state,
         now=now,
         native_live={"live-ref"},
-        config=OrchestratorConfig(),
+        config=_auto_config(),
     )
     assert len(salvage_git_2) == 1
     assert salvage_git_2[0][0] == "git-deferred"
@@ -2965,7 +2958,7 @@ def test_confirm_before_reap_park_deferred(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(),  # idle_confirm_observations=2
+            config=_auto_config(),  # idle_confirm_observations=2
         )
         mock_notify.assert_not_called()
 
@@ -3020,7 +3013,7 @@ def test_confirm_before_reap_attempts_unchanged(
     )
 
     # Run three observations — one counter-only, then threshold fires recover.
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     with patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()):
         # First observation: no disposition.
         flag_silently_idle_daemon_sessions(
@@ -3119,7 +3112,7 @@ def test_confirm_before_reap_single_observation_config(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
         mock_notify.assert_called_once()
 
@@ -3134,41 +3127,41 @@ def test_confirm_before_reap_single_observation_config(
 
 def test_resolve_idle_watchdog_budget_returns_global_default_with_no_task() -> None:
     """No task → global IDLE_WATCHDOG_SECONDS fallback."""
-    config = OrchestratorConfig()
+    config = _auto_config()
     assert resolve_idle_watchdog_budget(None, config) == IDLE_WATCHDOG_SECONDS
 
 
 def test_resolve_idle_watchdog_budget_no_scope_hint_returns_global_default() -> None:
     """Task with no scope_hint → global fallback."""
-    config = OrchestratorConfig()
+    config = _auto_config()
     task = TicketTask(ticket_id="T-1", client="c", scope_hint=None)
     assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
 
 
 def test_resolve_idle_watchdog_budget_respects_per_tier() -> None:
     """scope_hint='large' → idle_watchdog_by_tier['large'] returned."""
-    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    config = _auto_config(idle_watchdog_by_tier={"large": 600})
     task = TicketTask(ticket_id="T-1", client="c", scope_hint="large")
     assert resolve_idle_watchdog_budget(task, config) == 600
 
 
 def test_resolve_idle_watchdog_budget_global_config_override_no_task() -> None:
     """config.idle_watchdog_seconds overrides the hardcoded fallback (no task)."""
-    config = OrchestratorConfig(idle_watchdog_seconds=1800)
+    config = _auto_config(idle_watchdog_seconds=1800)
     assert resolve_idle_watchdog_budget(None, config) == 1800
 
 
 def test_resolve_idle_watchdog_budget_global_config_override_no_scope_hint() -> None:
     """A pre-Stage-1 task (no scope_hint) uses the global config override, not
     the hardcoded 900s — this is the fanout-cascade fix (workers reaped mid-work)."""
-    config = OrchestratorConfig(idle_watchdog_seconds=1800)
+    config = _auto_config(idle_watchdog_seconds=1800)
     task = TicketTask(ticket_id="T-1", client="c", scope_hint=None)
     assert resolve_idle_watchdog_budget(task, config) == 1800
 
 
 def test_resolve_idle_watchdog_budget_per_tier_beats_global_override() -> None:
     """A resolvable per-tier budget still wins over the global config default."""
-    config = OrchestratorConfig(
+    config = _auto_config(
         idle_watchdog_seconds=1800, idle_watchdog_by_tier={"large": 600}
     )
     task = TicketTask(ticket_id="T-1", client="c", scope_hint="large")
@@ -3177,7 +3170,7 @@ def test_resolve_idle_watchdog_budget_per_tier_beats_global_override() -> None:
 
 def test_resolve_idle_watchdog_budget_per_ticket_overrides_tier() -> None:
     """idle_watchdog_override beats per-tier dict."""
-    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    config = _auto_config(idle_watchdog_by_tier={"large": 600})
     task = TicketTask(
         ticket_id="T-1", client="c", scope_hint="large", idle_watchdog_override=900
     )
@@ -3220,7 +3213,7 @@ def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 1800})
+    config = _auto_config(idle_watchdog_by_tier={"large": 1800})
     blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=config
     )
@@ -3231,7 +3224,7 @@ def test_flag_silently_idle_daemon_sessions_respects_large_tier_override(
 
 def test_resolve_idle_watchdog_budget_unknown_tier_falls_back_to_global() -> None:
     """scope_hint not in idle_watchdog_by_tier → global IDLE_WATCHDOG_SECONDS."""
-    config = OrchestratorConfig(idle_watchdog_by_tier={"large": 600})
+    config = _auto_config(idle_watchdog_by_tier={"large": 600})
     task = TicketTask(ticket_id="T-1", client="c", scope_hint="unknown")
     assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
 
@@ -3272,7 +3265,7 @@ def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    config = OrchestratorConfig()
+    config = _auto_config()
     blocked, _salvage = flag_silently_idle_daemon_sessions(
         state, now=now, native_live={"live-ref"}, config=config
     )
@@ -3334,7 +3327,7 @@ def test_flag_silently_idle_skips_worker_with_recent_transcript(
     os.utime(str(transcript), (recent_ts, recent_ts))
 
     blocked, _salvage = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        state, now=now, native_live={"live-ref"}, config=_auto_config()
     )
 
     assert blocked == []
@@ -3380,7 +3373,7 @@ def test_flag_silently_idle_fires_when_project_dir_missing(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert "no-proj-1" in blocked
@@ -3429,7 +3422,7 @@ def test_flag_silently_idle_fires_when_session_id_file_missing(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert "missing-file-1" in blocked
@@ -3478,7 +3471,7 @@ def test_flag_silently_idle_fires_when_transcript_predates_session(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert "predates-1" in blocked
@@ -3528,7 +3521,7 @@ def test_flag_silently_idle_fires_on_stale_transcript(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert "stale-tx-1" in blocked
@@ -3577,7 +3570,7 @@ def test_flag_silently_idle_fires_when_no_transcript_in_project_dir(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert "no-tx-1" in blocked
@@ -3610,7 +3603,7 @@ def test_flag_silently_idle_skips_with_known_session_id_and_recent_transcript(
     os.utime(str(transcript), (recent_ts, recent_ts))
 
     blocked, _salvage = flag_silently_idle_daemon_sessions(
-        state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+        state, now=now, native_live={"live-ref"}, config=_auto_config()
     )
 
     assert blocked == []
@@ -3847,7 +3840,7 @@ def test_flag_silently_idle_skips_worker_awaiting_subagent(
         patch("cw.reconcile.fire_push_notification") as mock_notify,
     ):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
-            state, now=now, native_live={"live-ref"}, config=OrchestratorConfig()
+            state, now=now, native_live={"live-ref"}, config=_auto_config()
         )
         mock_notify.assert_not_called()
 
@@ -3865,13 +3858,13 @@ def test_flag_silently_idle_skips_worker_awaiting_subagent(
 def test_resolve_idle_retry_cap_default_with_no_task() -> None:
     from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, resolve_idle_retry_cap
 
-    assert resolve_idle_retry_cap(None, OrchestratorConfig()) == DEFAULT_IDLE_RETRY_CAP
+    assert resolve_idle_retry_cap(None, _auto_config()) == DEFAULT_IDLE_RETRY_CAP
 
 
 def test_resolve_idle_retry_cap_respects_per_tier() -> None:
     from cw.reconcile import resolve_idle_retry_cap
 
-    cfg = OrchestratorConfig(idle_retry_cap_by_tier={"large": 4})
+    cfg = _auto_config(idle_retry_cap_by_tier={"large": 4})
     task = TicketTask(ticket_id="T", client="c", scope_hint="large")
     assert resolve_idle_retry_cap(task, cfg) == 4
 
@@ -3879,7 +3872,7 @@ def test_resolve_idle_retry_cap_respects_per_tier() -> None:
 def test_resolve_idle_retry_cap_unknown_tier_falls_back() -> None:
     from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, resolve_idle_retry_cap
 
-    cfg = OrchestratorConfig(idle_retry_cap_by_tier={"large": 4})
+    cfg = _auto_config(idle_retry_cap_by_tier={"large": 4})
     task = TicketTask(ticket_id="T", client="c", scope_hint="small")
     assert resolve_idle_retry_cap(task, cfg) == DEFAULT_IDLE_RETRY_CAP
 
@@ -3935,7 +3928,7 @@ def test_flag_silently_idle_auto_recovers_under_cap(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
         mock_daemon.stop.assert_called_once_with("live-ref")
         mock_notify.assert_not_called()
@@ -4011,7 +4004,7 @@ def test_flag_silently_idle_recover_cleans_up_worktree(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert removed == [("client-a", "auto-dev/HANG-WT", True)]
@@ -4070,7 +4063,7 @@ def test_flag_silently_idle_recover_skips_cleanup_when_no_branch(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     assert calls == []
@@ -4166,7 +4159,7 @@ def test_flag_silently_idle_usage_limit_emits_distinct_cause(
             state,
             now=now,
             native_live={"ul-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     events = read_events(
@@ -4230,7 +4223,7 @@ def test_flag_silently_idle_no_usage_limit_emits_idle_stall_cause(
             state,
             now=now,
             native_live={"nostall-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     events = read_events(
@@ -4382,7 +4375,7 @@ def test_flag_silently_idle_parks_when_cap_exhausted(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
         mock_daemon.stop.assert_not_called()
         mock_notify.assert_called_once_with(sess.name, sess.client)
@@ -4549,7 +4542,7 @@ def test_flag_silently_idle_recover_skips_non_running_task(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
         # Surface still stopped (recover path, attempts=1 < cap=2)
         mock_daemon.stop.assert_called_once_with("live-ref")
@@ -4642,7 +4635,7 @@ def test_resolve_idle_watchdog_honors_zero(
     The `or` operator treats 0 as falsy and falls back to the constant.
     The fix uses an explicit None check so 0 passes through (#432).
     """
-    config = OrchestratorConfig(idle_watchdog_seconds=0)
+    config = _auto_config(idle_watchdog_seconds=0)
     budget = resolve_idle_watchdog_budget(task=None, config=config)
     assert budget == 0, (
         f"idle_watchdog_seconds=0 should be honoured as 0, got {budget} "
@@ -4912,7 +4905,7 @@ def test_salvage_all_terminal_statuses_from_stalled(
     )
 
     reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=OrchestratorConfig()
+        state=load_state(), now=now, config=_auto_config()
     )
 
     assert ticket_id not in reverted, (
@@ -4972,7 +4965,7 @@ def test_salvage_paused_statuses_from_stalled_route_to_blocked_on_user(
     )
 
     reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=OrchestratorConfig()
+        state=load_state(), now=now, config=_auto_config()
     )
 
     assert ticket_id not in reverted, (
@@ -5034,7 +5027,7 @@ def test_revert_stalled_skips_parked_silently_idle_session(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     reverted = revert_stalled_headless_sessions(
-        state=state, now=now, config=OrchestratorConfig()
+        state=state, now=now, config=_auto_config()
     )
 
     assert reverted == [], "Parked (silently_idle) session must NOT be reverted"
@@ -5674,6 +5667,7 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
 
     reconcile()
 
@@ -5815,6 +5809,7 @@ def test_phantom_clean_worktree_routes_to_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
 
     report = reconcile()
 
@@ -5960,6 +5955,7 @@ def test_phantom_reverted_event_carries_queue_status_pending(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
     reconcile()
 
     events = read_events(
@@ -6188,7 +6184,7 @@ def test_salvage_skipped_emitted_for_park_marker(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state=state, now=now, config=_auto_config())
 
     events = read_events(
         consumer="test-salvage-skipped",
@@ -6235,7 +6231,7 @@ def test_salvage_skipped_not_emitted_for_terminal_sentinel(
         lambda *_args, **_kwargs: (fake_result, "fake-claude-id"),
     )
 
-    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state=state, now=now, config=_auto_config())
 
     events = read_events(
         consumer="test-no-salvage-skip",
@@ -6290,7 +6286,7 @@ def test_salvage_skipped_emitted_with_null_ticket_id(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    revert_stalled_headless_sessions(state=state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state=state, now=now, config=_auto_config())
 
     events = read_events(
         consumer="test-salvage-skip-null-tid",
@@ -7138,7 +7134,7 @@ class TestSalvageCommittedNoPrSessions:
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
         # Session ended up in salvage_git, not park
@@ -7195,7 +7191,7 @@ class TestSalvageCommittedNoPrSessions:
         )
 
         reverted = revert_stalled_headless_sessions(
-            state, now=now, config=OrchestratorConfig()
+            state, now=now, config=_auto_config()
         )
 
         # Session was skipped — not reverted to PENDING
@@ -7946,6 +7942,7 @@ def test_reap_reason_phantom_surface(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
 
     reconcile()
 
@@ -7969,7 +7966,7 @@ def test_reap_reason_wall_clock_budget(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     reloaded = load_state()
     s = next(s for s in reloaded.sessions if s.id == "wc-budget-1")
@@ -8022,7 +8019,7 @@ def test_reap_reason_idle_stall(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     reloaded = load_state()
@@ -8077,7 +8074,7 @@ def test_reap_reason_usage_limit_cutoff(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     reloaded = load_state()
@@ -8129,7 +8126,7 @@ def test_reap_reason_retry_cap_parked(
             state,
             now=now,
             native_live={"live-ref"},
-            config=OrchestratorConfig(idle_confirm_observations=1),
+            config=_auto_config(idle_confirm_observations=1),
         )
 
     reloaded = load_state()
@@ -8522,7 +8519,7 @@ def test_detect_stalled_candidates_under_budget_returns_empty(
     candidates = _detect_stalled_candidates(
         state,
         now=now,
-        config=OrchestratorConfig(),
+        config=_auto_config(),
         task_by_ticket={},
     )
 
@@ -8556,7 +8553,7 @@ def test_detect_stalled_candidates_revert_task_candidate(
     candidates = _detect_stalled_candidates(
         state,
         now=now,
-        config=OrchestratorConfig(),
+        config=_auto_config(),
         task_by_ticket={"revert-detect-1": task},
     )
 
@@ -8590,7 +8587,7 @@ def test_detect_stalled_candidates_skip_parked_candidate(
     candidates = _detect_stalled_candidates(
         state,
         now=now,
-        config=OrchestratorConfig(),
+        config=_auto_config(),
         task_by_ticket={},
     )
 
@@ -8627,7 +8624,7 @@ def test_detect_stalled_candidates_salvage_completion_candidate(
     candidates = _detect_stalled_candidates(
         state,
         now=now,
-        config=OrchestratorConfig(),
+        config=_auto_config(),
         task_by_ticket={},
     )
 
@@ -8659,7 +8656,7 @@ def test_detect_stalled_candidates_skips_user_origin(
     candidates = _detect_stalled_candidates(
         state,
         now=now,
-        config=OrchestratorConfig(),
+        config=_auto_config(),
         task_by_ticket={},
     )
 
@@ -8713,7 +8710,7 @@ def test_detect_idle_candidates_under_budget_returns_empty(
         state,
         now=now,
         native_live={"live-ref"},
-        config=OrchestratorConfig(),
+        config=_auto_config(),
         task_by_ticket={},
     )
 
@@ -8732,7 +8729,7 @@ def test_detect_idle_candidates_increment_counter_only(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     sess = _mk_live_idle_daemon_session("idle-inc-1", "live-ref", started_at)
     state = CwState(sessions=[sess])
     save_state(state)
@@ -8763,7 +8760,7 @@ def test_detect_idle_candidates_counter_not_written_by_detect(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     sess = _mk_live_idle_daemon_session("idle-nowrit-1", "live-ref", started_at)
     state = CwState(sessions=[sess])
     save_state(state)
@@ -8793,7 +8790,7 @@ def test_detect_idle_candidates_threshold_reached_park(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     sess = _mk_live_idle_daemon_session(
         "idle-park-1", "live-ref", started_at, idle_observation_count=1
     )
@@ -8831,7 +8828,7 @@ def test_detect_idle_candidates_threshold_reached_recover(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     sess = _mk_live_idle_daemon_session(
         "idle-recover-1", "live-ref", started_at, idle_observation_count=1
     )
@@ -8871,7 +8868,7 @@ def test_detect_idle_candidates_recover_counter_when_liveness_restored(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     sess = _mk_live_idle_daemon_session(
         "idle-recov-cnt-1", "live-ref", started_at, idle_observation_count=1
     )
@@ -8911,7 +8908,7 @@ def test_detect_idle_candidates_salvage_git(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     wt_path = tmp_path / "wt-salvage-git"
     wt_path.mkdir(parents=True)
     sess = _mk_live_idle_daemon_session(
@@ -8964,7 +8961,7 @@ def test_detect_idle_candidates_worktree_dirty_flag(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
-    config = OrchestratorConfig(idle_confirm_observations=2)
+    config = _auto_config(idle_confirm_observations=2)
     sess = _mk_live_idle_daemon_session(
         "idle-dirty-1",
         "live-ref",
@@ -9196,7 +9193,9 @@ def test_act_on_stalled_revert_task_updates_state_and_queue(
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
 
-    reverted = _act_on_stalled_candidates(state, [candidate], now=now)
+    reverted = _act_on_stalled_candidates(
+        state, [candidate], now=now, config=_auto_config()
+    )
 
     assert "act-revert-1" in reverted
     assert sess.status == SessionStatus.TIMED_OUT
@@ -9405,7 +9404,9 @@ def test_act_on_phantom_crash_routes_pending(
         worktree_path=None,
     )
 
-    result = _act_on_phantom_candidates(state, [candidate], now=now)
+    result = _act_on_phantom_candidates(
+        state, [candidate], now=now, config=_auto_config()
+    )
     _, _, _, _, _ = result
 
     store = load_dev_queue()
@@ -9594,7 +9595,7 @@ def test_act_on_idle_revert_task_routes_pending_emits_timed_out(
         usage_limit_detected=False,
     )
 
-    _act_on_idle_candidates(state, [candidate], now=now)
+    _act_on_idle_candidates(state, [candidate], now=now, config=_auto_config())
 
     assert sess.status == SessionStatus.TIMED_OUT
     assert sess.reap_reason == ReapReason.IDLE_STALL
@@ -9643,7 +9644,7 @@ def test_act_on_idle_revert_task_usage_limit_detected_sets_cause(
         usage_limit_detected=True,
     )
 
-    _act_on_idle_candidates(state, [candidate], now=now)
+    _act_on_idle_candidates(state, [candidate], now=now, config=_auto_config())
 
     assert sess.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
 
@@ -9735,7 +9736,7 @@ def test_detect_stalled_needs_salvage_reason_skip_parked(
     candidates = _detect_stalled_candidates(
         state,
         now=now,
-        config=OrchestratorConfig(),
+        config=_auto_config(),
         task_by_ticket={},
     )
 
@@ -9783,3 +9784,499 @@ def test_act_on_idle_salvage_git_persists_observation_counter(
     reloaded = load_state()
     s = next(s for s in reloaded.sessions if s.id == "idle-salv-git-ctr-1")
     assert s.idle_observation_count == 3
+
+
+# ---------------------------------------------------------------------------
+# _auto_config helper + ReapPolicy signal_only gate tests (#554)
+# ---------------------------------------------------------------------------
+
+
+def _auto_config(**kwargs: object) -> OrchestratorConfig:
+    """Return OrchestratorConfig with reap_policy=AUTO for auto-revert tests."""
+    return OrchestratorConfig(reap_policy=ReapPolicy.AUTO, **kwargs)  # type: ignore[arg-type]
+
+
+class TestActOnStalledCandidatesSignalOnly:
+    """Under signal_only policy, REVERT_TASK stalled candidates → BLOCKED_ON_USER."""
+
+    def test_signal_only_routes_revert_task_to_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal_only: REVERT_TASK → BLOCKED_ON_USER; no stop, no worktree-remove."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-so-stalled"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        removed: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile.remove_worktree",
+            lambda _c, branch, **_kw: removed.append(branch),
+        )
+
+        sess = _mk_headless_daemon_session("so-stalled-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-stalled-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-stalled-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-stalled-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="so-stalled-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        # signal_only is the default — explicit for clarity
+        reverted = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # Should return early: no reverts
+        assert reverted == []
+        # Task routes to BLOCKED_ON_USER (not PENDING)
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-stalled-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        # Daemon stop NOT called
+        assert daemon.stop_calls == []
+        # Worktree NOT removed
+        assert removed == []
+
+    def test_signal_only_idempotent(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Second call with already-BLOCKED_ON_USER task → no additional save."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-so-idem"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        sess = _mk_headless_daemon_session("so-idem-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        # Already BLOCKED_ON_USER — not RUNNING, so _apply_queue_mutations skips it
+        task = TicketTask(
+            ticket_id="so-idem-1",
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id="so-idem-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-idem-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="so-idem-1",
+            elapsed_seconds=3700.0,
+        )
+
+        # Call twice — second call is a no-op (task not RUNNING)
+        cfg = OrchestratorConfig()
+        _act_on_stalled_candidates(state, [candidate], now=now, config=cfg)
+        _act_on_stalled_candidates(state, [candidate], now=now, config=cfg)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-idem-1")
+        # Still BLOCKED_ON_USER — second call didn't double-write
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_auto_policy_still_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTO policy: REVERT_TASK still routes to PENDING (regression guard)."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-auto-stalled"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_headless_daemon_session("auto-stalled-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="auto-stalled-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="auto-stalled-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="auto-stalled-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="auto-stalled-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        reverted = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert "auto-stalled-1" in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "auto-stalled-1")
+        assert t.status == QueueItemStatus.PENDING
+
+
+class TestActOnIdleCandidatesSignalOnly:
+    """Under signal_only policy, REVERT_TASK idle candidates → BLOCKED_ON_USER."""
+
+    def test_signal_only_routes_idle_revert_to_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal_only: idle REVERT_TASK → BLOCKED_ON_USER; daemon stop NOT called."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_live_idle_daemon_session(
+            "so-idle-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-idle-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-idle-1",
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-idle-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="so-idle-1",
+            elapsed_seconds=1000.0,
+            new_observation_count=2,
+        )
+
+        # signal_only is default
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert blocked == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-idle-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        # session_id preserved (not cleared) — operator review traceability
+        assert t.session_id == "so-idle-1"
+        # Daemon stop NOT called
+        assert daemon.stop_calls == []
+
+    def test_signal_only_park_candidates_pass_through(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PARK_BLOCKED_ON_USER is not gated — still processes under signal_only."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        monkeypatch.setattr("cw.reconcile.fire_push_notification", lambda *_a: None)
+
+        sess = _mk_live_idle_daemon_session(
+            "so-idle-park-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-idle-park-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-idle-park-1",
+            attempts=99,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-idle-park-1",
+            proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+            ticket_id="so-idle-park-1",
+            new_observation_count=2,
+        )
+
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # PARK_BLOCKED_ON_USER passes through; task is BLOCKED_ON_USER
+        assert "so-idle-park-1" in blocked
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-idle-park-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_auto_policy_idle_still_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTO policy: idle REVERT_TASK still routes to PENDING."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_live_idle_daemon_session(
+            "auto-idle-1", "live-ref", started_at, idle_observation_count=2
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="auto-idle-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="auto-idle-1",
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="auto-idle-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="auto-idle-1",
+            elapsed_seconds=1000.0,
+            new_observation_count=2,
+        )
+
+        blocked, _salvage = _act_on_idle_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert blocked == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "auto-idle-1")
+        assert t.status == QueueItemStatus.PENDING
+
+
+class TestActOnPhantomCandidatesSignalOnly:
+    """Under signal_only, clean CRASH_COMPLETE phantoms → BLOCKED_ON_USER."""
+
+    def test_signal_only_routes_clean_crash_to_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal_only: clean CRASH_COMPLETE → BLOCKED_ON_USER, not PENDING."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("so-phantom-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/so-phantom-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="so-phantom-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="so-phantom-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="so-phantom-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="so-phantom-1",
+            worktree_dirty=False,
+            client="client-a",
+        )
+
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # Return list contains only PENDING-routed; BLOCKED_ON_USER excluded
+        assert "so-phantom-1" not in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "so-phantom-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_signal_only_dirty_worktree_still_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dirty-worktree CRASH_COMPLETE: always BLOCKED_ON_USER (both policies)."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("dirty-phantom-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/dirty-phantom-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="dirty-phantom-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="dirty-phantom-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="dirty-phantom-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="dirty-phantom-1",
+            worktree_dirty=True,
+            client="client-a",
+        )
+
+        # Both signal_only and auto produce BLOCKED_ON_USER for dirty-worktree
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert "dirty-phantom-1" not in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "dirty-phantom-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_auto_policy_phantom_reverts_to_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTO policy: clean CRASH_COMPLETE → PENDING (regression guard)."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("auto-phantom-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/auto-phantom-1"
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="auto-phantom-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="auto-phantom-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="auto-phantom-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="auto-phantom-1",
+            worktree_dirty=False,
+            client="client-a",
+        )
+
+        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        assert "auto-phantom-1" in reverted
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "auto-phantom-1")
+        assert t.status == QueueItemStatus.PENDING

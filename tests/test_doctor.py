@@ -134,6 +134,12 @@ def test_run_doctor_reap_flag_reconciles_and_reports(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    from cw.models import OrchestratorConfig, ReapPolicy
+
+    monkeypatch.setattr(
+        "cw.reconcile.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
 
     report = run_doctor(reap=True)
     reap_checks = [c for c in report.checks if c.name == "reconciliation"]

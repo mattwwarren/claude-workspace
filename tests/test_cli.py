@@ -3286,6 +3286,12 @@ class TestShowStatus:
             ]
         )
         save_state(state)
+        from cw.models import OrchestratorConfig, ReapPolicy
+
+        monkeypatch.setattr(
+            "cw.reconcile.load_orchestrator_config",
+            lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+        )
 
         _display_status()
 
@@ -4007,6 +4013,12 @@ def test_display_status_reconciles_phantom_active_sessions(
     monkeypatch.setattr(
         "cw.reconcile._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    from cw.models import OrchestratorConfig, ReapPolicy
+
+    monkeypatch.setattr(
+        "cw.reconcile.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
     runner = CliRunner()

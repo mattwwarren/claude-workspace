@@ -66,6 +66,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapPolicy,
     ReapReason,
     SessionOrigin,
     SessionStatus,
@@ -841,20 +842,75 @@ def _detect_stalled_candidates(
     return candidates
 
 
+def _apply_queue_mutations(
+    mutations: dict[str, QueueItemStatus],
+    clear_session_id: set[str],
+) -> list[str]:
+    """Apply ticket-status mutations to the dev queue under dev_queue_lock.
+
+    *mutations* maps ticket_id → target QueueItemStatus for RUNNING tasks.
+    *clear_session_id* is the subset of ticket_ids whose session_id should be
+    set to None (only PENDING-routed tasks; BLOCKED_ON_USER tasks keep their
+    session_id for operator traceability).
+
+    Returns the list of ticket_ids that were mutated.  Skips tasks that are
+    not RUNNING (natural idempotency — a second call is a no-op).
+    """
+    if not mutations:
+        return []
+    mutated: list[str] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        changed = False
+        for task in store.tasks:
+            if task.status != QueueItemStatus.RUNNING:
+                continue
+            if task.ticket_id not in mutations:
+                continue
+            task.status = mutations[task.ticket_id]
+            if task.ticket_id in clear_session_id:
+                task.session_id = None
+            mutated.append(task.ticket_id)
+            changed = True
+        if changed:
+            save_dev_queue(store)
+    return mutated
+
+
 def _act_on_stalled_candidates(
     state: CwState,
     candidates: list[ReapCandidate],
     *,
     now: datetime,
+    config: OrchestratorConfig | None = None,
 ) -> list[str]:
     """Act phase for stalled headless sessions: apply all mutations.
 
     Consumes ReapCandidate objects from _detect_stalled_candidates.
     Mirrors the side-effect logic in revert_stalled_headless_sessions.
     Returns the list of ticket IDs reverted to PENDING.
+
+    Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
+    routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
+    candidates (SALVAGE_*, SKIP_PARKED) are unaffected and pass through.
     """
     if not candidates:
         return []
+
+    effective_config = config if config is not None else OrchestratorConfig()
+    if effective_config.reap_policy is ReapPolicy.SIGNAL_ONLY:
+        signal_mutations = {
+            c.ticket_id: QueueItemStatus.BLOCKED_ON_USER
+            for c in candidates
+            if c.ticket_id and c.proposed_action == ProposedAction.REVERT_TASK
+        }
+        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+        # Fall through: non-REVERT candidates (SALVAGE_*, SKIP_PARKED) still processed.
+        candidates = [
+            c for c in candidates if c.proposed_action != ProposedAction.REVERT_TASK
+        ]
+        if not candidates:
+            return []
 
     # Separate by action for batch processing.
     skip_candidates = [
@@ -1002,7 +1058,7 @@ def revert_stalled_headless_sessions(
     candidates = _detect_stalled_candidates(
         state, now=now, config=config, task_by_ticket=task_by_ticket
     )
-    return _act_on_stalled_candidates(state, candidates, now=now)
+    return _act_on_stalled_candidates(state, candidates, now=now, config=config)
 
 
 def _has_terminal_sentinel(session: Session) -> bool:
@@ -1189,15 +1245,36 @@ def _act_on_idle_candidates(
     candidates: list[ReapCandidate],
     *,
     now: datetime,
+    config: OrchestratorConfig | None = None,
 ) -> tuple[list[str], list[_SalvageCandidate]]:
     """Act phase for silently idle sessions: apply all mutations.
 
     Consumes ReapCandidate objects from _detect_idle_candidates.
     Returns (blocked_ticket_ids, salvage_git_candidates) matching
     flag_silently_idle_daemon_sessions's return type.
+
+    Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
+    routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
+    candidates (SALVAGE_*, INCREMENT_COUNTER, RECOVER_COUNTER,
+    PARK_BLOCKED_ON_USER) are unaffected and pass through.
     """
     if not candidates:
         return [], []
+
+    effective_config = config if config is not None else OrchestratorConfig()
+    if effective_config.reap_policy is ReapPolicy.SIGNAL_ONLY:
+        signal_mutations = {
+            c.ticket_id: QueueItemStatus.BLOCKED_ON_USER
+            for c in candidates
+            if c.ticket_id and c.proposed_action == ProposedAction.REVERT_TASK
+        }
+        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+        # Fall through to process non-REVERT candidates (counters, park, salvage).
+        candidates = [
+            c for c in candidates if c.proposed_action != ProposedAction.REVERT_TASK
+        ]
+        if not candidates:
+            return [], []
 
     session_by_id = {s.id: s for s in state.sessions}
 
@@ -1419,7 +1496,7 @@ def flag_silently_idle_daemon_sessions(
         config=config,
         task_by_ticket=task_by_ticket,
     )
-    return _act_on_idle_candidates(state, candidates, now=now)
+    return _act_on_idle_candidates(state, candidates, now=now, config=config)
 
 
 def reconcile() -> ReconcileReport:
@@ -1573,15 +1650,47 @@ def _act_on_phantom_candidates(
     candidates: list[ReapCandidate],
     *,
     now: datetime,
+    config: OrchestratorConfig | None = None,
 ) -> tuple[list[str], list[str], bool, list[str], dict[str, AutoDevResult]]:
     """Act phase for phantom sessions: apply all mutations.
 
     Returns (ticket_ids_to_revert, phantom_names, usage_limited,
              salvaged_ticket_ids, salvaged_result_by_ticket).
     ticket_ids_to_revert contains only PENDING-routed tickets (not dirty/blocked).
+
+    Under ``ReapPolicy.SIGNAL_ONLY`` (default), CRASH_COMPLETE candidates
+    (non-dirty only) are routed to BLOCKED_ON_USER instead of triggering
+    stop/remove.  Dirty-worktree CRASH_COMPLETE already routes to
+    BLOCKED_ON_USER in both policies — the gate only affects clean phantoms.
+    SALVAGE_COMPLETION candidates pass through unaffected.
     """
     if not candidates:
         return [], [], False, [], {}
+
+    effective_config = config if config is not None else OrchestratorConfig()
+    if effective_config.reap_policy is ReapPolicy.SIGNAL_ONLY:
+        # Signal-only for CRASH_COMPLETE candidates where worktree is NOT dirty.
+        # Dirty phantoms already route to BLOCKED_ON_USER in both policies, so
+        # exclude them here to avoid double-processing.
+        signal_mutations = {
+            c.ticket_id: QueueItemStatus.BLOCKED_ON_USER
+            for c in candidates
+            if (
+                c.ticket_id
+                and c.proposed_action == ProposedAction.CRASH_COMPLETE
+                and not c.worktree_dirty
+            )
+        }
+        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+        # Keep only SALVAGE_COMPLETION and dirty-CRASH_COMPLETE candidates.
+        candidates = [
+            c
+            for c in candidates
+            if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
+            or (c.proposed_action == ProposedAction.CRASH_COMPLETE and c.worktree_dirty)
+        ]
+        if not candidates:
+            return [], [], False, [], {}
 
     session_by_id = {s.id: s for s in state.sessions}
 
@@ -1656,7 +1765,11 @@ def _act_on_phantom_candidates(
             )
             if candidate.worktree_dirty:
                 dirty_ticket_ids.add(candidate.ticket_id)
-            queue_status = "blocked_on_user" if candidate.worktree_dirty else "pending"
+            queue_status = (
+                QueueItemStatus.BLOCKED_ON_USER
+                if candidate.worktree_dirty
+                else QueueItemStatus.PENDING
+            )
             record_event(
                 OrchestratorEventType.SESSION_PHANTOM_REVERTED,
                 {
@@ -1808,7 +1921,9 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         _watchdog_usage_limited_phantom,
         _salvaged_phantom_ticket_ids,
         _salvaged_phantom_results,
-    ) = _act_on_phantom_candidates(state, phantom_candidates, now=now)
+    ) = _act_on_phantom_candidates(
+        state, phantom_candidates, now=now, config=orchestrator_config
+    )
 
     # Sweep for TIMED_OUT and DAEMON-COMPLETED sessions whose owning TicketTask
     # was not yet reverted (e.g. signal_stop crashed after setting status but
