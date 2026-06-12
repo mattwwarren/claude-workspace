@@ -3152,7 +3152,7 @@ class TestCheckCwVersion:
 
 
 class TestReapSessionBySelector:
-    """_reap_session_by_selector reaps a single session by id or name prefix."""
+    """_reap_session_by_selector reaps a single session by exact id or exact name."""
 
     def test_reap_session_by_id_active(
         self,
@@ -3319,3 +3319,95 @@ class TestReapSessionBySelector:
         updated = next(s for s in state.sessions if s.id == "done-sess")
         # Status unchanged
         assert updated.status == SessionStatus.COMPLETED
+
+    def test_reap_session_signal_only_policy_still_reaps(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Targeted reap works under signal_only policy (AC2)."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CompletionReason,
+            CwState,
+            DevQueueStore,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        # No need to stub load_orchestrator_config — _reap_session_by_selector
+        # bypasses reap_policy entirely (that's the AC2 invariant being tested).
+
+        sess = Session(
+            id="sig-sess",
+            name="client-a/auto-dev/sig-ticket",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        result = _reap_session_by_selector("sig-sess")
+
+        assert result is True
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "sig-sess")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.USER
+
+    def test_reap_session_backgrounded_gets_reaped(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """BACKGROUNDED session is treated as live and gets reaped."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CompletionReason,
+            CwState,
+            DevQueueStore,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        sess = Session(
+            id="bg-sess",
+            name="client-a/auto-dev/bg-ticket",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.BACKGROUNDED,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        result = _reap_session_by_selector("bg-sess")
+
+        assert result is True
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "bg-sess")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.USER

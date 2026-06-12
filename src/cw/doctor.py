@@ -692,7 +692,9 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
 
 
 def _reap_session_by_selector(selector: str) -> bool:
-    """Reap a single session by short id or name prefix, regardless of reap_policy.
+    """Reap a single session by exact short id or exact session name.
+
+    Bypasses ``reap_policy`` — targeted reap is always authorized by the operator.
 
     Called directly from the CLI ``doctor --reap <SESSION>`` targeted path.
     Does NOT go through ``run_doctor`` to avoid changing its return type.
@@ -709,7 +711,11 @@ def _reap_session_by_selector(selector: str) -> bool:
         )
         if target is None:
             return False
-        if target.status not in (SessionStatus.ACTIVE, SessionStatus.IDLE):
+        if target.status not in (
+            SessionStatus.ACTIVE,
+            SessionStatus.IDLE,
+            SessionStatus.BACKGROUNDED,
+        ):
             # Already terminal — idempotent.
             return True
         now = datetime.now(UTC)

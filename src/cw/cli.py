@@ -389,6 +389,8 @@ def doctor(reap: bool, session: str | None, as_json: bool) -> None:
             click.echo(f"No session found matching {session!r}", err=True)
             raise click.exceptions.Exit(1)
         return
+    if session and not reap:
+        click.echo("SESSION argument has no effect without --reap", err=True)
     report = run_doctor(reap=reap)
     if as_json:
         click.echo(format_report_json(report))
@@ -1905,8 +1907,9 @@ def dev_queue_wait(
     Exit codes:
       0   shipped / no_op (or COMPLETED queue status)
       1   scope_exceeded / forbidden_area / failed / FAILED / CANCELLED
-      2   blocked / *_pending_* family / BLOCKED_ON_USER
-      3   ATTENTION — transcript stale past idle budget, worker not in roster
+      2   blocked / *_pending_* family / BLOCKED_ON_USER (no reap proposal)
+      3   ATTENTION — transcript stale past idle budget, worker not in roster;
+          or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set)
       124 hard timeout ceiling (--timeout) with no terminal or attention signal
     """
     config = load_orchestrator_config()
@@ -1954,6 +1957,15 @@ def dev_queue_wait(
             if task.status == QueueItemStatus.COMPLETED:
                 return
             if task.status == QueueItemStatus.BLOCKED_ON_USER:
+                # BLOCKED_ON_USER from a reap proposal → ATTENTION (#542 fix).
+                if task.session_id is not None:
+                    _state = load_state()
+                    _session = next(
+                        (s for s in _state.sessions if s.id == task.session_id),
+                        None,
+                    )
+                    if _session is not None and _session.reap_proposed_at is not None:
+                        raise click.exceptions.Exit(_WAIT_EXIT_ATTENTION)
                 raise click.exceptions.Exit(_WAIT_EXIT_BLOCKED)
             raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
 

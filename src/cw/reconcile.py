@@ -1887,13 +1887,14 @@ def _emit_reap_proposed(
                 "transcript_age_seconds": transcript_age_seconds,
             },
         }
+        # Stamp before record_event: dedup guard fires on retry if write fails.
+        session.reap_proposed_at = _now
+        any_stamped = True
         record_event(
             OrchestratorEventType.SESSION_REAP_PROPOSED,
             payload,
             correlation_id=candidate.ticket_id or candidate.session_id,
         )
-        session.reap_proposed_at = _now
-        any_stamped = True
 
     if any_stamped:
         save_state(state)
