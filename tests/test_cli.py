@@ -37,6 +37,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
     TaskSpec,
+    TicketTask,
 )
 
 if TYPE_CHECKING:
@@ -6548,4 +6549,432 @@ class TestDoctorTargetedReap:
         result = runner.invoke(main, ["doctor", "some-session-id"])
 
         assert "SESSION argument has no effect without --reap" in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestLaneCli — cw lane ls / add / rm / pause / resume
+# ---------------------------------------------------------------------------
+
+
+def _write_clients_yaml_with_lanes(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    client_name: str,
+    lanes: list[str],
+) -> None:
+    """Write clients.yaml with named lanes for a client."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    lane_yaml = "".join(
+        f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
+    )
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n"
+        f"  {client_name}:\n"
+        f"    workspace_path: {ws}\n"
+        f"    lanes:\n"
+        f"{lane_yaml}"
+    )
+
+
+def _write_clients_yaml_no_lanes(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    client_name: str,
+) -> None:
+    """Write clients.yaml without explicit lanes (uses default)."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n"
+        f"  {client_name}:\n"
+        f"    workspace_path: {ws}\n"
+    )
+
+
+class TestLaneLs:
+    def test_lane_ls_lists_declared_lanes(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "ls", "acme"])
+        assert result.exit_code == 0, result.output
+        assert "default" in result.output
+        assert "urgent" in result.output
+
+    def test_lane_ls_json_output(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "ls", "acme", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        names = [item["name"] for item in data]
+        assert "default" in names
+        assert "urgent" in names
+
+
+class TestLaneAdd:
+    def test_lane_add_writes_clients_yaml(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "add", "acme", "fast"])
+        assert result.exit_code == 0, result.output
+        assert "fast" in result.output
+
+        from cw.config import load_clients
+
+        client = load_clients()["acme"]
+        lane_names = [ln.name for ln in client.effective_lanes]
+        assert "fast" in lane_names
+
+    def test_lane_add_emits_lane_created_event(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "add", "acme", "fast"])
+        assert result.exit_code == 0, result.output
+
+        events = read_events()
+        lane_events = [e for e in events if e.type == OrchestratorEventType.LANE_CREATED]
+        assert len(lane_events) == 1
+        assert lane_events[0].payload["lane"] == "fast"
+        assert lane_events[0].payload["client"] == "acme"
+
+    def test_lane_add_duplicate_hard_fails(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(tmp_config_dir, tmp_path, "acme", ["default"])
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "add", "acme", "default"])
+        assert result.exit_code != 0
+        assert "already" in result.output.lower() or "exists" in result.output.lower()
+
+
+class TestLaneRm:
+    def test_lane_rm_removes_from_clients_yaml(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "rm", "acme", "fast"])
+        assert result.exit_code == 0, result.output
+
+        from cw.config import load_clients
+
+        client = load_clients()["acme"]
+        lane_names = [ln.name for ln in client.effective_lanes]
+        assert "fast" not in lane_names
+
+    def test_lane_rm_with_active_tasks_hard_fails(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        )
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="ACM-1",
+            client="acme",
+            status=QueueItemStatus.PENDING,
+            lane="urgent",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "rm", "acme", "urgent"])
+        assert result.exit_code != 0
+
+
+class TestLanePauseResume:
+    def test_lane_pause_writes_override_and_emits_event(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+        )
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "pause", "acme", "slow"])
+        assert result.exit_code == 0, result.output
+
+        events = read_events()
+        paused_events = [
+            e for e in events if e.type == OrchestratorEventType.LANE_PAUSED
+        ]
+        assert len(paused_events) == 1
+        assert paused_events[0].payload["client"] == "acme"
+        assert paused_events[0].payload["lane"] == "slow"
+
+    def test_lane_resume_writes_override_and_emits_event(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+        )
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        runner = CliRunner()
+        runner.invoke(main, ["lane", "pause", "acme", "slow"])
+        result = runner.invoke(main, ["lane", "resume", "acme", "slow"])
+        assert result.exit_code == 0, result.output
+
+        events = read_events()
+        resumed_events = [
+            e for e in events if e.type == OrchestratorEventType.LANE_RESUMED
+        ]
+        assert len(resumed_events) == 1
+        assert resumed_events[0].payload["client"] == "acme"
+        assert resumed_events[0].payload["lane"] == "slow"
+
+
+# ---------------------------------------------------------------------------
+# TestConfigGroup — cw config / cw config show / cw config concurrency
+# ---------------------------------------------------------------------------
+
+
+class TestConfigGroup:
+    def test_config_bare_shows_config(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw config (bare) calls show_config (backward compat)."""
+        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        runner = CliRunner()
+        with patch("cw.cli.show_config") as mock_cfg:
+            result = runner.invoke(main, ["config"])
+            assert result.exit_code == 0, result.output
+            mock_cfg.assert_called_once()
+
+    def test_config_show_subcommand(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw config show calls show_config."""
+        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        runner = CliRunner()
+        with patch("cw.cli.show_config") as mock_cfg:
+            result = runner.invoke(main, ["config", "show"])
+            assert result.exit_code == 0, result.output
+            mock_cfg.assert_called_once()
+
+    def test_config_concurrency_get(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw config concurrency get exits 0 and shows concurrency layers."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["config", "concurrency", "get"])
+        assert result.exit_code == 0, result.output
+        # Should show declared/override/effective layers
+        out = result.output.lower()
+        assert "declared" in out or "effective" in out or "ceiling" in out
+
+    def test_config_concurrency_get_json(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw config concurrency get --json emits valid JSON."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["config", "concurrency", "get", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "declared" in data or "effective" in data
+
+    def test_config_concurrency_set_max_parallel_clients(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """cw config concurrency set max_parallel_clients=4 writes override store."""
+        from cw.config import concurrency_override_file, load_effective_config
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["config", "concurrency", "set", "max_parallel_clients=4"]
+        )
+        assert result.exit_code == 0, result.output
+
+        effective = load_effective_config()
+        assert effective.max_parallel_clients == 4
+
+    def test_config_concurrency_clear_all(self, tmp_config_dir: Path) -> None:
+        """cw config concurrency clear removes all overrides."""
+        from cw.config import concurrency_override_file, load_effective_config
+
+        # Set a value first
+        runner = CliRunner()
+        runner.invoke(
+            main, ["config", "concurrency", "set", "max_parallel_clients=3"]
+        )
+        # Clear all
+        result = runner.invoke(main, ["config", "concurrency", "clear"])
+        assert result.exit_code == 0, result.output
+
+        effective = load_effective_config()
+        assert effective.max_parallel_clients is None
+
+    def test_config_concurrency_clear_single_key(self, tmp_config_dir: Path) -> None:
+        """cw config concurrency clear max_parallel_clients removes that key only."""
+        from cw.config import load_effective_config
+
+        runner = CliRunner()
+        runner.invoke(
+            main, ["config", "concurrency", "set", "max_parallel_clients=3"]
+        )
+        result = runner.invoke(
+            main, ["config", "concurrency", "clear", "max_parallel_clients"]
+        )
+        assert result.exit_code == 0, result.output
+
+        effective = load_effective_config()
+        assert effective.max_parallel_clients is None
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueAddLane — cw dev-queue add --lane
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueAddLane:
+    def test_dev_queue_add_default_lane(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--lane default (implicit) routes to default lane."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default"]
+        )
+        from cw.dev_queue import load_dev_queue
+        from cw.models import DEFAULT_LANE
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "add", "ACM-1", "-c", "acme"])
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "ACM-1")
+        assert task.lane == DEFAULT_LANE
+
+    def test_dev_queue_add_explicit_lane(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--lane fast routes to the fast lane."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        )
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "ACM-2", "-c", "acme", "--lane", "fast"]
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "ACM-2")
+        assert task.lane == "fast"
+
+    def test_dev_queue_add_undeclared_lane_hard_fails(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--lane undeclared exits non-zero with helpful message."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default"]
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "ACM-3", "-c", "acme", "--lane", "undeclared"]
+        )
+        assert result.exit_code != 0
+        assert "undeclared" in result.output or "Lane" in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueMove — cw dev-queue move
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueMove:
+    def test_dev_queue_move_pending_ticket(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw dev-queue move moves PENDING ticket and emits TICKET_MOVED event."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        )
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.events import read_events
+        from cw.models import DevQueueStore, OrchestratorEventType, QueueItemStatus
+
+        task = TicketTask(
+            ticket_id="ACM-10",
+            client="acme",
+            status=QueueItemStatus.PENDING,
+            lane="default",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "move", "ACM-10", "-c", "acme", "--to", "fast"],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "ACM-10")
+        assert moved.lane == "fast"
+
+        events = read_events()
+        moved_events = [e for e in events if e.type == OrchestratorEventType.TICKET_MOVED]
+        assert len(moved_events) == 1
+        ev = moved_events[0]
+        assert ev.payload["ticket_id"] == "ACM-10"
+        assert ev.payload["from_lane"] == "default"
+        assert ev.payload["to_lane"] == "fast"
+
+    def test_dev_queue_move_running_task_hard_fails(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw dev-queue move on RUNNING task exits non-zero."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        )
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        task = TicketTask(
+            ticket_id="ACM-11",
+            client="acme",
+            status=QueueItemStatus.RUNNING,
+            lane="default",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "move", "ACM-11", "-c", "acme", "--to", "fast"],
+        )
+        assert result.exit_code != 0
         assert result.exit_code == 0

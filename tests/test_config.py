@@ -1087,3 +1087,90 @@ class TestMutateState:
 
         assert isinstance(result, CwState)
         assert any(sess.id == "ms-return-1" for sess in result.sessions)
+
+
+# ---------------------------------------------------------------------------
+# TestLoadEffectiveConfig
+# ---------------------------------------------------------------------------
+
+
+class TestLoadEffectiveConfig:
+    """Tests for load_effective_config() and ConcurrencyOverrides."""
+
+    def test_declared_only_no_override_file(self, tmp_config_dir: Path) -> None:
+        """No override file → effective config equals declared config."""
+        from cw.config import load_effective_config, load_orchestrator_config
+
+        declared = load_orchestrator_config()
+        effective = load_effective_config()
+        assert effective.default_ceiling == declared.default_ceiling
+        assert effective.max_parallel_clients == declared.max_parallel_clients
+
+    def test_override_wins_max_parallel_clients(self, tmp_config_dir: Path) -> None:
+        """Override file with max_parallel_clients=5 wins over declared None."""
+        from cw.config import (
+            concurrency_override_file,
+            concurrency_override_lock,
+            load_effective_config,
+        )
+        from cw.models import ConcurrencyOverrides
+
+        overrides = ConcurrencyOverrides(max_parallel_clients=5)
+        with concurrency_override_lock():
+            concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+            concurrency_override_file().write_text(overrides.model_dump_json())
+
+        effective = load_effective_config()
+        assert effective.max_parallel_clients == 5
+
+    def test_override_wins_per_client_ceiling(self, tmp_config_dir: Path) -> None:
+        """Override file with client ceiling overrides declared value."""
+        from cw.config import (
+            concurrency_override_file,
+            concurrency_override_lock,
+            load_effective_config,
+        )
+        from cw.models import ClientConcurrencyOverride, ConcurrencyOverrides
+
+        overrides = ConcurrencyOverrides(
+            clients={"acme": ClientConcurrencyOverride(ceiling=7)}
+        )
+        with concurrency_override_lock():
+            concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+            concurrency_override_file().write_text(overrides.model_dump_json())
+
+        effective = load_effective_config()
+        assert effective.per_client_ceiling.get("acme") == 7
+
+    def test_no_override_file_returns_pure_declared(self, tmp_config_dir: Path) -> None:
+        """Absent override file: returns declared config unchanged."""
+        from cw.config import concurrency_override_file, load_effective_config
+
+        assert not concurrency_override_file().exists()
+        effective = load_effective_config()
+        assert effective.max_parallel_clients is None  # default declared value
+
+    def test_concurrency_override_lock_creates_and_releases(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """concurrency_override_lock() creates lock file and releases on exit."""
+        from cw.config import concurrency_override_lock, concurrency_override_lock_file
+
+        lock_path = concurrency_override_lock_file()
+        with concurrency_override_lock():
+            assert lock_path.exists()
+        # Lock released — file still exists but lock is no longer held
+
+    def test_concurrency_overrides_null_keys_accepted(self) -> None:
+        """ConcurrencyOverrides accepts None values on all keys."""
+        from cw.models import ConcurrencyOverrides
+
+        o = ConcurrencyOverrides(max_parallel_clients=None)
+        assert o.max_parallel_clients is None
+
+    def test_concurrency_overrides_int_coercion(self) -> None:
+        """ConcurrencyOverrides accepts integer values."""
+        from cw.models import ConcurrencyOverrides
+
+        o = ConcurrencyOverrides(max_parallel_clients=3)
+        assert o.max_parallel_clients == 3
