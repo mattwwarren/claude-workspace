@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import importlib.resources
 import json
 import logging
 import subprocess
@@ -348,6 +349,17 @@ def done(session_name: str | None, cleanup: bool, force: bool) -> None:
     Optionally removes the associated worktree with --cleanup.
     """
     done_session(session_name, cleanup=cleanup, force=force)
+
+
+@main.command(name="guide")
+def guide() -> None:
+    """Print the cw operator guide (how to drive a sprint with cw)."""
+    text = (
+        importlib.resources.files("cw")
+        .joinpath("data/GUIDE.md")
+        .read_text(encoding="utf-8")
+    )
+    click.echo(text)
 
 
 @main.group("config", invoke_without_command=True, help="Show or manage configuration.")
@@ -2441,7 +2453,7 @@ def dev_queue_refresh_all() -> None:
 
 @main.group()
 def orchestrate() -> None:
-    """Orchestrator pipeline: status snapshot and PR retirement."""
+    """Orchestrator pipeline: status snapshot and PR retirement. Driving a sprint? See `cw guide`."""
 
 
 def _should_show_lane_breakdown(lanes: dict[str, dict[str, int]]) -> bool:
