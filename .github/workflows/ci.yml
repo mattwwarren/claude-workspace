@@ -76,3 +76,22 @@ jobs:
           name: coverage-xml
           path: coverage.xml
           if-no-files-found: error
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
+      - name: Build wheel
+        run: uv build --wheel --out-dir dist
+
+      - name: Install wheel into clean env
+        run: uv tool install --no-cache dist/*.whl
+
+      - name: Smoke test - version
+        run: cw --version
+
+      - name: Smoke test - guide data file
+        run: cw guide | grep -q "orchestrating a sprint"
