@@ -1538,7 +1538,7 @@ class TestDispatchTickFreshnessGate:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 3),
+            lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
 
         daemon = FakeNativeDaemonClient()
@@ -1573,7 +1573,7 @@ class TestDispatchTickFreshnessGate:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 1),
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
 
         daemon = FakeNativeDaemonClient()
@@ -1622,7 +1622,10 @@ class TestDispatchTickFreshnessGate:
         add_ticket(TicketTask(ticket_id="CW-20", client="test-client"))
         add_ticket(TicketTask(ticket_id="CW-21", client="fresh-client"))
 
-        def _freshness_check(client: ClientConfig) -> tuple[bool, str, str, int]:
+        def _freshness_check(
+            client: ClientConfig,
+            warned_fetch_fail: set[str] | None = None,
+        ) -> tuple[bool, str, str, int]:
             if client.name == "test-client":
                 return (True, "aaa", "bbb", 2)
             return (False, "abc", "abc", 0)
@@ -1660,7 +1663,7 @@ class TestDispatchTickFreshnessGate:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (False, "abc", "abc", 0),
+            lambda _client, **_kw: (False, "abc", "abc", 0),
         )
 
         daemon = FakeNativeDaemonClient()
@@ -1688,7 +1691,10 @@ class TestDispatchTickFreshnessGate:
 
         call_count = 0
 
-        def _counting(_client: ClientConfig) -> tuple[bool, str, str, int]:
+        def _counting(
+            _client: ClientConfig,
+            warned_fetch_fail: set[str] | None = None,
+        ) -> tuple[bool, str, str, int]:
             nonlocal call_count
             call_count += 1
             return (False, "abc", "abc", 0)
@@ -1759,7 +1765,10 @@ class TestDispatchTickFreshnessGate:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-50", client="test-client"))
 
-        def _boom(_client: ClientConfig) -> tuple[bool, str, str, int]:
+        def _boom(
+            _client: ClientConfig,
+            warned_fetch_fail: set[str] | None = None,
+        ) -> tuple[bool, str, str, int]:
             msg = "network unreachable"
             raise RuntimeError(msg)
 
@@ -2290,7 +2299,7 @@ class TestRunDispatchLoopVerbose:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 3),
+            lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -2316,7 +2325,7 @@ class TestRunDispatchLoopVerbose:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 1),
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -2342,7 +2351,7 @@ class TestRunDispatchLoopVerbose:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 2),
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -2388,7 +2397,7 @@ class TestRunDispatchLoopVerbose:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (False, "abc", "abc", 0),
+            lambda _client, **_kw: (False, "abc", "abc", 0),
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -2417,7 +2426,7 @@ class TestRunDispatchLoopVerbose:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (False, "abc", "abc", 0),
+            lambda _client, **_kw: (False, "abc", "abc", 0),
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -2445,7 +2454,7 @@ class TestRunDispatchLoopVerbose:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 1),
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -2559,7 +2568,7 @@ class TestDispatchTickEvents:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 3),
+            lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
 
         daemon = FakeNativeDaemonClient()
@@ -2918,11 +2927,11 @@ class TestFreshnessGateAutoFF:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "abc12345" * 5, "def67890" * 5, 3),
+            lambda _client, **_kw: (True, "abc12345" * 5, "def67890" * 5, 3),
         )
         monkeypatch.setattr(
             "cw.dispatch.check_main_ff_safety",
-            lambda _client: "behind",
+            lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
             "cw.dispatch.fast_forward_main",
@@ -2956,11 +2965,11 @@ class TestFreshnessGateAutoFF:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 1),
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
             "cw.dispatch.check_main_ff_safety",
-            lambda _client: "ahead",
+            lambda _client, **_kw: "ahead",
         )
 
         daemon = FakeNativeDaemonClient()
@@ -2988,11 +2997,11 @@ class TestFreshnessGateAutoFF:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 2),
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
             "cw.dispatch.check_main_ff_safety",
-            lambda _client: "diverged",
+            lambda _client, **_kw: "diverged",
         )
 
         daemon = FakeNativeDaemonClient()
@@ -3019,11 +3028,11 @@ class TestFreshnessGateAutoFF:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 1),
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
             "cw.dispatch.check_main_ff_safety",
-            lambda _client: "detached",
+            lambda _client, **_kw: "detached",
         )
 
         daemon = FakeNativeDaemonClient()
@@ -3053,11 +3062,11 @@ class TestFreshnessGateAutoFF:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 2),
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
             "cw.dispatch.check_main_ff_safety",
-            lambda _client: "behind",
+            lambda _client, **_kw: "behind",
         )
 
         def _boom(_client: object, **_kwargs: object) -> tuple[str, str]:
@@ -3091,7 +3100,7 @@ class TestFreshnessGateAutoFF:
 
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda _client: (True, "aaa", "bbb", 3),
+            lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         # check_main_ff_safety must NOT be called; if it is called that's a bug
         check_called = [False]
@@ -3258,7 +3267,7 @@ class TestTier1ClientSelection:
         # client-a3 is stale (skipped by the freshness gate); client-b3 fresh.
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
-            lambda client: (client.name == "client-a3", "aaa", "bbb", 1),
+            lambda client, **_kw: (client.name == "client-a3", "aaa", "bbb", 1),
         )
 
         config = OrchestratorConfig(max_parallel_clients=1, default_ceiling=1)
