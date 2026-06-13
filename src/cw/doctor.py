@@ -35,7 +35,7 @@ from cw.config import (
     state_file,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
@@ -691,7 +691,14 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
     return results
 
 
-def _reap_session_by_selector(selector: str) -> bool:
+def _reap_session_by_selector(
+    selector: str,
+    *,
+    authority: str = "operator",
+    lane: str | None = None,
+    proposed_action: str | None = None,
+    correlation_id: str | None = None,
+) -> bool:
     """Reap a single session by exact short id or exact session name.
 
     Bypasses ``reap_policy`` — targeted reap is always authorized by the operator.
@@ -743,6 +750,28 @@ def _reap_session_by_selector(selector: str) -> bool:
                     task.session_id = None
                     save_dev_queue(store)
                     break
+
+    # Emit audit event after all locks released. record_event uses _inbox_lock
+    # (separate file lock — no deadlock risk). Covers both automated 4c consumer
+    # and manual cw doctor --reap so propose→authorize→act is fully traceable.
+    record_event(
+        OrchestratorEventType.SESSION_REAP_AUTHORIZED,
+        payload={
+            "session_id": target.id,
+            "session_name": target.name,
+            "client": target.client,
+            "ticket_id": ticket_id,
+            "lane": lane,
+            "authority": authority,
+            "proposed_action": proposed_action,
+            "mutations": [
+                "session_status_completed",
+                "daemon_stopped",
+                "task_reverted_to_pending",
+            ],
+        },
+        correlation_id=correlation_id,
+    )
     return True
 
 

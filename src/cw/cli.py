@@ -2854,7 +2854,13 @@ def _drain_reap_proposals(client: str, lane: str) -> int:
             # window. Never invoke this from inside a held lock (cf. #387/#563).
             # Why: under reap_policy=auto, sessions are already terminal when this
             # consumer reads the event; the status guard above makes it a no-op.
-            _reap_session_by_selector(session_id)
+            _reap_session_by_selector(
+                session_id,
+                authority="orchestrate-run",
+                lane=lane,
+                proposed_action=proposed_action,
+                correlation_id=event.id,
+            )
             logger.info(
                 "orchestrate run: authorized reap for session %s (action=%s)",
                 session_id,

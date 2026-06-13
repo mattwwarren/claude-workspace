@@ -1792,7 +1792,7 @@ def test_orchestrate_run_drain_authorizes_revert_task(
 
     reap_calls: list[str] = []
 
-    def fake_reap(selector: str) -> bool:
+    def fake_reap(selector: str, **kwargs: object) -> bool:
         reap_calls.append(selector)
         return True
 
@@ -1821,7 +1821,7 @@ def test_orchestrate_run_drain_authorizes_crash_complete(
 
     reap_calls: list[str] = []
 
-    def fake_reap(selector: str) -> bool:
+    def fake_reap(selector: str, **kwargs: object) -> bool:
         reap_calls.append(selector)
         return True
 
@@ -1852,7 +1852,7 @@ def test_orchestrate_run_drain_logs_and_leaves_park_blocked(
 
     reap_calls: list[str] = []
 
-    def fake_reap(selector: str) -> bool:
+    def fake_reap(selector: str, **kwargs: object) -> bool:
         reap_calls.append(selector)
         return True
 
@@ -1880,7 +1880,7 @@ def test_orchestrate_run_drain_idempotent_replay(
 
     reap_calls: list[str] = []
 
-    def fake_reap(selector: str) -> bool:
+    def fake_reap(selector: str, **kwargs: object) -> bool:
         reap_calls.append(selector)
         return True
 
@@ -1915,7 +1915,7 @@ def test_orchestrate_run_drain_backgrounded_proceeds_to_reap_check(
 
     reap_calls: list[str] = []
 
-    def fake_reap(selector: str) -> bool:
+    def fake_reap(selector: str, **kwargs: object) -> bool:
         reap_calls.append(selector)
         return False  # inner guard would reject BACKGROUNDED
 
@@ -1946,7 +1946,7 @@ def test_orchestrate_run_lane_isolation_adversarial(
 
     reap_calls: list[str] = []
 
-    def fake_reap(selector: str) -> bool:
+    def fake_reap(selector: str, **kwargs: object) -> bool:
         reap_calls.append(selector)
         return True
 
