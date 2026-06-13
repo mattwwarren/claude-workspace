@@ -59,6 +59,30 @@ class TestCli:
         assert result.exit_code == 0
         assert __version__ in result.output
 
+    def test_resolve_version_from_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cw
+
+        def _fake(name: str) -> str:
+            return "9.9.9"
+
+        monkeypatch.setattr(cw, "version", _fake)
+        assert cw._resolve_version() == "9.9.9"
+
+    def test_resolve_version_fallback_when_not_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from importlib.metadata import PackageNotFoundError
+
+        import cw
+
+        def _raise(name: str) -> str:
+            raise PackageNotFoundError(name)
+
+        monkeypatch.setattr(cw, "version", _raise)
+        assert cw._resolve_version() == "0.0.0+unknown"
+
     def test_help(self) -> None:
         runner = CliRunner()
         result = runner.invoke(main, ["--help"])
