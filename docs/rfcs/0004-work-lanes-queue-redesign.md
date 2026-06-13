@@ -2,12 +2,24 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — design |
+| Status | **Implemented** — Phases 1–4 shipped (see As-built) |
 | Owner | @mattwwarren |
-| Date | 2026-05-30 |
+| Date | 2026-05-30 (implemented through 2026-06-13) |
 | Supersedes | none (extends the dispatch model) |
-| Related | RFC 0002 (orchestrator on Agent SDK), ADR 0004 (stage events), `docs/events.md` |
+| Related | RFC 0002 (orchestrator on Agent SDK), ADR 0004 (stage events), ADR 0006 (reaping authority), `docs/events.md` |
 | Branch | `claude/queue-system-redesign-7vG0t` |
+
+## As-built
+
+This RFC is fully implemented. The design below is the system as shipped, not a proposal:
+
+- **Phases 1–3** — lane schema, two-tier scheduler, `cw lane` CLI + `--lane` routing +
+  `dev-queue move`, lane-aware status, per-lane `reap_policy` (#557/#558/#559/#560/#561,
+  released in v1.1.0).
+- **Phase 4** — first-class ORCHESTRATE sessions: `Session.lane` + schema v9 (#594),
+  `cw orchestrate start --lane` binding (#595), `cw orchestrate run --lane` cw-side reap-authority
+  consumption loop (#596). See ADR-0006 for the reaping-authority decision this phase completes.
+- Operator how-to: `cw guide`. Reaping-authority rationale: [ADR-0006](../adr/0006-reaping-is-gated-by-an-authority.md).
 
 ## Summary
 
