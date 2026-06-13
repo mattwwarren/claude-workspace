@@ -1902,6 +1902,41 @@ def test_orchestrate_run_drain_idempotent_replay(
     assert reap_calls == []  # No reap — already terminal
 
 
+def test_orchestrate_run_drain_backgrounded_proceeds_to_reap_check(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BACKGROUNDED sessions are not treated as terminal by the idempotency guard (R3).
+
+    A BACKGROUNDED session passes the outer guard and proceeds to
+    _reap_session_by_selector, which applies its own inner lock-guarded check.
+    """
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str) -> bool:
+        reap_calls.append(selector)
+        return False  # inner guard would reject BACKGROUNDED
+
+    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(
+        _mk_impl_session("s5", lane="default", status=SessionStatus.BACKGROUNDED)
+    )
+    save_state(state)
+
+    _emit_reap_event("s5", "default", ProposedAction.REVERT_TASK)
+    count = _drain_reap_proposals("client-a", "default")
+
+    assert count == 1
+    # BACKGROUNDED is in the live set — drain forwards to _reap_session_by_selector
+    assert reap_calls == ["s5"]
+
+
 def test_orchestrate_run_lane_isolation_adversarial(
     run_env: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1956,7 +1991,7 @@ def test_orchestrate_run_binding_gate_raises_without_binding(
     result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-x", "--once"])
     assert result.exit_code != 0
     combined = result.output + str(result.exception or "")
-    assert "No live ORCHESTRATE binding" in combined
+    assert "No ORCHESTRATE binding" in combined
 
 
 def test_orchestrate_run_once_flag_exits(
@@ -1968,9 +2003,8 @@ def test_orchestrate_run_once_flag_exits(
     from cw.config import load_state, save_state
 
     state = load_state()
-    state.sessions.append(
-        _mk_orchestrate_session("binding-1", lane="lane-x", status=SessionStatus.ACTIVE)
-    )
+    # Default status is COMPLETED — matches 4b's self-completing binding
+    state.sessions.append(_mk_orchestrate_session("binding-1", lane="lane-x"))
     save_state(state)
 
     drain_calls: list[tuple[str, str]] = []

@@ -2808,12 +2808,15 @@ def _drain_reap_proposals(client: str, lane: str) -> int:
         proposed_action = payload.get("proposed_action", "")
 
         # Idempotency guard: skip already-terminal sessions.
-        # Use {ACTIVE, IDLE} — mirrors reconcile._LIVE_STATUSES. BACKGROUNDED
-        # sessions are user-backgrounded; this consumer should not reap them.
+        # Use {ACTIVE, IDLE, BACKGROUNDED} per spec R3 — terminal statuses
+        # (COMPLETED, PENDING, etc.) trigger the skip; live sessions proceed.
+        # _reap_session_by_selector's own lock guard is the authoritative
+        # fence against double-reap (cf. #387/#563).
         session = next((s for s in state.sessions if s.id == session_id), None)
         if session is None or session.status not in {
             SessionStatus.ACTIVE,
             SessionStatus.IDLE,
+            SessionStatus.BACKGROUNDED,
         }:
             logger.info(
                 "orchestrate run: session %s already resolved, skipping", session_id
@@ -2891,7 +2894,7 @@ def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
         )
         raise LaneNotFoundError(msg)
 
-    _live = {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
+    # Any-status match: orchestrate start's binding self-completes to COMPLETED.
     state = load_state()
     binding = next(
         (
@@ -2900,13 +2903,12 @@ def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
             if s.client == client_cfg.name
             and s.purpose == SessionPurpose.ORCHESTRATE
             and s.lane == lane
-            and s.status in _live
         ),
         None,
     )
     if binding is None:
         msg = (
-            f"No live ORCHESTRATE binding for lane '{lane}'; "
+            f"No ORCHESTRATE binding for lane '{lane}'; "
             f"run `cw orchestrate start --lane {lane}` first."
         )
         raise CwError(msg)
