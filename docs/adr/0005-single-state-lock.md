@@ -1,6 +1,6 @@
 # All `sessions.json` mutations go through a single state lock
 
-**Status:** Proposed
+**Status:** Accepted — implemented (single state lock + `mutate_state`, #387/#563; released v1.1.0)
 **Driven by:** RFC 0004 (work lanes — adds concurrent state writers); reconcile.py:19-25 race note (pre-existing, previously deferred)
 
 ## Decision

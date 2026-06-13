@@ -7,6 +7,10 @@ contract the monitoring step reads, see
 `AUTO_DEV_RESULT` schema and event taxonomy, see
 [`docs/headless-contract.md`](headless-contract.md).
 
+> **This runbook is for cw developers** (the dispatch internals). For the operator-facing
+> how-to — driving a sprint with cw from any repo — run **`cw guide`** (a version-matched
+> guide bundled with the tool).
+
 ---
 
 ## 1. Pre-dispatch: fast-forward main
