@@ -5345,6 +5345,32 @@ class TestDevQueueStatusWithTick:
         assert "    lane fast:" in result.output
         assert "blocked=1" in result.output
 
+    def test_dev_queue_status_blocked_column_in_main_table(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """BLOCKED_ON_USER task appears in main table BLOCKED column. See #633."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-633",
+                client="approval-client",
+                priority=5,
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        assert "approval-client" in result.output
+        # The BLOCKED count for this client must be 1
+        for line in result.output.splitlines():
+            if "approval-client" in line:
+                assert "1" in line
+                break
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueWait (GitHub issue #474)

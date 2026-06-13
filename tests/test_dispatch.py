@@ -695,17 +695,28 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
 
+    @pytest.mark.parametrize(
+        "paused_status",
+        [
+            "premises_pending_verification",
+            "ambiguities_pending_resolution",
+            "plan_pending_approval",
+            "review_pending_approval",
+        ],
+    )
     def test_consume_paused_status_routes_to_blocked_on_user(
         self,
+        paused_status: str,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
         """SESSION_COMPLETED with paused last_result routes task to BLOCKED_ON_USER.
 
-        When a session ends with a paused sentinel
-        (premises_pending_verification or ambiguities_pending_resolution),
-        the task must become BLOCKED_ON_USER, not COMPLETED. See #489.
+        When a session ends with a paused sentinel (any status in
+        PAUSED_FOR_USER_INPUT_STATUSES), the task must become BLOCKED_ON_USER,
+        not COMPLETED. See #489 (original) and #633 (plan_pending_approval,
+        review_pending_approval).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -725,7 +736,7 @@ class TestConsumeCompletesTasks:
             status=SessionStatus.ACTIVE,
             workspace_path=sample_client_config.workspace_path,
             last_result={
-                "status": "premises_pending_verification",
+                "status": paused_status,
                 "schema_version": 4,
             },
         )
