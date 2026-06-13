@@ -3472,7 +3472,9 @@ class TestReapSessionBySelector:
             consumer="test-reap-audit-603",
             event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED],
         )
-        assert len(events) == 1, f"Expected 1 SESSION_REAP_AUTHORIZED event, got {events}"
+        assert len(events) == 1, (
+            f"Expected 1 SESSION_REAP_AUTHORIZED event, got {events}"
+        )
         payload = events[0].payload
         assert payload["session_id"] == "audit-sess"
         assert payload["session_name"] == "client-a/auto-dev/audit-ticket"
