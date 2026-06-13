@@ -17,6 +17,7 @@ from cw.dev_queue import add_ticket
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
+    DEFAULT_LANE,
     CompletionReason,
     CwState,
     OrchestratorEventType,
@@ -40,6 +41,7 @@ from cw.orchestrate import (
     retire_merged_prs,
     save_dispatch_record,
 )
+from cw.reconcile import ProposedAction
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -1689,3 +1691,332 @@ class TestOrchestrateStart:
         assert "session_id" in data
         assert data["lane"] == "impl"
         assert data["client"] == "test-client"
+
+
+# ---------------------------------------------------------------------------
+# cw orchestrate run — drain + authorize
+# ---------------------------------------------------------------------------
+
+
+def _mk_orchestrate_session(
+    sid: str,
+    lane: str,
+    client: str = "client-a",
+    status: SessionStatus = SessionStatus.COMPLETED,
+) -> Session:
+    """Create an ORCHESTRATE-purpose binding session for test setup."""
+    return Session(
+        id=sid,
+        name=f"{client}/orchestrate/{lane}",
+        client=client,
+        purpose=SessionPurpose.ORCHESTRATE,
+        status=status,
+        lane=lane,
+        workspace_path=Path("/tmp/ws"),
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+
+
+def _mk_impl_session(
+    sid: str,
+    lane: str = DEFAULT_LANE,
+    client: str = "client-a",
+    status: SessionStatus = SessionStatus.ACTIVE,
+) -> Session:
+    """Create an IMPL-purpose active session for reap candidate tests."""
+    return Session(
+        id=sid,
+        name=f"{client}/impl/{sid}",
+        client=client,
+        purpose=SessionPurpose.IMPL,
+        status=status,
+        lane=lane,
+        workspace_path=Path("/tmp/ws"),
+        surface_ref=f"surf-{sid}",
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
+
+
+def _emit_reap_event(
+    session_id: str,
+    lane: str,
+    proposed_action: ProposedAction,
+    client: str = "client-a",
+) -> None:
+    """Emit a SESSION_REAP_PROPOSED event for testing."""
+    record_event(
+        OrchestratorEventType.SESSION_REAP_PROPOSED,
+        {
+            "session_id": session_id,
+            "session_name": f"{client}/impl/{session_id}",
+            "client": client,
+            "ticket_id": None,
+            "lane": lane,
+            "proposed_action": proposed_action.value,
+            "reason": None,
+            "evidence": {},
+        },
+        correlation_id=session_id,
+    )
+
+
+@pytest.fixture
+def run_env(tmp_orchestrate_dirs: Path) -> Path:
+    """Set up a minimal client config with a lane for orchestrate run tests."""
+    from cw.config import clients_file
+
+    clients_path = clients_file()
+    clients_path.parent.mkdir(parents=True, exist_ok=True)
+    clients_path.write_text(
+        "clients:\n"
+        "  client-a:\n"
+        "    workspace_path: /tmp/ws\n"
+        "    lanes:\n"
+        "      - name: default\n"
+        "        reap_policy: signal_only\n"
+        "      - name: lane-x\n"
+        "        reap_policy: signal_only\n"
+        "      - name: lane-y\n"
+        "        reap_policy: signal_only\n"
+    )
+    return tmp_orchestrate_dirs
+
+
+def test_orchestrate_run_drain_authorizes_revert_task(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drain authorizes REVERT_TASK by calling _reap_session_by_selector."""
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str) -> bool:
+        reap_calls.append(selector)
+        return True
+
+    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+
+    # Seed state with an active IMPL session
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(_mk_impl_session("s1", lane="default"))
+    save_state(state)
+
+    _emit_reap_event("s1", "default", ProposedAction.REVERT_TASK)
+    count = _drain_reap_proposals("client-a", "default")
+
+    assert count == 1
+    assert reap_calls == ["s1"]
+
+
+def test_orchestrate_run_drain_authorizes_crash_complete(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drain authorizes CRASH_COMPLETE by calling _reap_session_by_selector."""
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str) -> bool:
+        reap_calls.append(selector)
+        return True
+
+    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(_mk_impl_session("s2", lane="default"))
+    save_state(state)
+
+    _emit_reap_event("s2", "default", ProposedAction.CRASH_COMPLETE)
+    count = _drain_reap_proposals("client-a", "default")
+
+    assert count == 1
+    assert reap_calls == ["s2"]
+
+
+def test_orchestrate_run_drain_logs_and_leaves_park_blocked(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drain does NOT reap for PARK_BLOCKED_ON_USER.
+
+    Leaves at BLOCKED_ON_USER routing for operator review.
+    """
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str) -> bool:
+        reap_calls.append(selector)
+        return True
+
+    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(_mk_impl_session("s3", lane="default"))
+    save_state(state)
+
+    _emit_reap_event("s3", "default", ProposedAction.PARK_BLOCKED_ON_USER)
+    count = _drain_reap_proposals("client-a", "default")
+
+    assert count == 1
+    assert reap_calls == []  # NOT reaped
+
+
+def test_orchestrate_run_drain_idempotent_replay(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drain is a no-op for already-terminal sessions (idempotent replay)."""
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str) -> bool:
+        reap_calls.append(selector)
+        return True
+
+    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+
+    from cw.config import load_state, save_state
+
+    # Session already COMPLETED
+    state = load_state()
+    state.sessions.append(
+        _mk_impl_session("s4", lane="default", status=SessionStatus.COMPLETED)
+    )
+    save_state(state)
+
+    _emit_reap_event("s4", "default", ProposedAction.REVERT_TASK)
+    count = _drain_reap_proposals("client-a", "default")
+
+    assert count == 1
+    assert reap_calls == []  # No reap — already terminal
+
+
+def test_orchestrate_run_drain_backgrounded_proceeds_to_reap_check(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BACKGROUNDED sessions are not treated as terminal by the idempotency guard (R3).
+
+    A BACKGROUNDED session passes the outer guard and proceeds to
+    _reap_session_by_selector, which applies its own inner lock-guarded check.
+    """
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str) -> bool:
+        reap_calls.append(selector)
+        return False  # inner guard would reject BACKGROUNDED
+
+    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(
+        _mk_impl_session("s5", lane="default", status=SessionStatus.BACKGROUNDED)
+    )
+    save_state(state)
+
+    _emit_reap_event("s5", "default", ProposedAction.REVERT_TASK)
+    count = _drain_reap_proposals("client-a", "default")
+
+    assert count == 1
+    # BACKGROUNDED is in the live set — drain forwards to _reap_session_by_selector
+    assert reap_calls == ["s5"]
+
+
+def test_orchestrate_run_lane_isolation_adversarial(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lane-X drain MUST NOT reap a lane-Y session (adversarial isolation test)."""
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str) -> bool:
+        reap_calls.append(selector)
+        return True
+
+    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(_mk_impl_session("lane-y-session", lane="lane-y"))
+    save_state(state)
+
+    # Emit event for lane-Y
+    _emit_reap_event("lane-y-session", "lane-y", ProposedAction.REVERT_TASK)
+
+    # Drain lane-X — must not touch lane-Y session
+    count = _drain_reap_proposals("client-a", "lane-x")
+
+    # lane-X consumer does not count lane-Y events as processed
+    assert count == 0
+    state_after = load_state()
+    lane_y_session = next(s for s in state_after.sessions if s.id == "lane-y-session")
+    assert lane_y_session.status == SessionStatus.ACTIVE  # Unchanged
+
+
+def test_orchestrate_run_lane_validation_raises(
+    run_env: Path,
+) -> None:
+    """--lane with unknown lane raises LaneNotFoundError."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["orchestrate", "run", "--lane", "nonexistent-lane", "--once"]
+    )
+    assert result.exit_code != 0
+    assert "nonexistent-lane" in (result.output + str(result.exception or ""))
+
+
+def test_orchestrate_run_binding_gate_raises_without_binding(
+    run_env: Path,
+) -> None:
+    """cw orchestrate run errors if no ORCHESTRATE binding exists for lane."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-x", "--once"])
+    assert result.exit_code != 0
+    combined = result.output + str(result.exception or "")
+    assert "No ORCHESTRATE binding" in combined
+
+
+def test_orchestrate_run_once_flag_exits(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--once flag: drains once and exits (does not poll)."""
+    # Seed a binding so the binding gate passes
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    # Default status is COMPLETED — matches 4b's self-completing binding
+    state.sessions.append(_mk_orchestrate_session("binding-1", lane="lane-x"))
+    save_state(state)
+
+    drain_calls: list[tuple[str, str]] = []
+
+    def counting_drain(client: str, lane: str) -> int:
+        drain_calls.append((client, lane))
+        return 0
+
+    monkeypatch.setattr("cw.cli._drain_reap_proposals", counting_drain)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-x", "--once"])
+
+    assert result.exit_code == 0
+    assert len(drain_calls) == 1  # Exactly one drain, then exit

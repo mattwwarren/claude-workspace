@@ -90,6 +90,7 @@ from cw.models import (
     ReapPolicy,
     ReapReason,
     SessionOrigin,
+    SessionPurpose,
     SessionStatus,
     TicketTask,
 )
@@ -288,6 +289,8 @@ def compute_drift(
         if session.surface_ref in native_live:
             continue
         if session.started_at > cutoff:
+            continue
+        if session.purpose is SessionPurpose.ORCHESTRATE:
             continue
         phantoms.append(session.id)
     return ReconcileReport(phantom_session_ids=phantoms)

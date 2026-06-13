@@ -122,6 +122,7 @@ from cw.queue import (
     remove_item,
 )
 from cw.reconcile import (
+    ProposedAction,
     _apply_sentinel_to_task,
     _csid_from_transcript,
     _locate_session_transcript,
@@ -147,6 +148,8 @@ from cw.worktree import fast_forward_main
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
@@ -2758,6 +2761,165 @@ def orchestrate_start(lane: str, client_name: str | None, as_json: bool) -> None
         )
     else:
         click.echo(f"Spawned orchestrate session for lane '{lane}': {session_id}")
+
+
+_POLL_INTERVAL_SECONDS: float = 5.0
+
+
+def _consumer_name(client: str, lane: str) -> str:
+    """Return the event cursor consumer name for an orchestrate run consumer.
+
+    Sanitizes path separators so events._cursor_path does not create nested
+    directories under cursors/ when client or lane names contain slashes.
+    """
+    sanitized_client = client.replace("/", "-")
+    sanitized_lane = lane.replace("/", "-")
+    return f"orchestrate-{sanitized_client}-{sanitized_lane}"
+
+
+def _drain_reap_proposals(client: str, lane: str) -> int:
+    """Drain one pass of SESSION_REAP_PROPOSED events for the given lane.
+
+    Authorizes REVERT_TASK and CRASH_COMPLETE by calling
+    _reap_session_by_selector. Logs-and-leaves PARK_BLOCKED_ON_USER (already
+    routed to operator review by reconcile).
+
+    Returns the count of events processed (consumed from cursor).
+    """
+    consumer = _consumer_name(client, lane)
+    events = read_events(
+        consumer=consumer,
+        event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED],
+    )
+    # Load state once for the entire drain pass; sequential consumer, no
+    # lock needed here — _reap_session_by_selector acquires sessions_lock()
+    # itself when it mutates (cf. #387/#563 non-reentrancy constraint).
+    state = load_state()
+    processed = 0
+    for event in events:
+        payload = event.payload
+        if payload.get("lane") != lane:
+            # Advance cursor past events for other lanes so they are not
+            # replayed on every drain, but do not count them as processed
+            # by this consumer (lane isolation: each lane owns its events).
+            advance_cursor(consumer, event.id)
+            continue
+        session_id = payload.get("session_id", "")
+        proposed_action = payload.get("proposed_action", "")
+
+        # Idempotency guard: skip already-terminal sessions.
+        # Use {ACTIVE, IDLE, BACKGROUNDED} per spec R3 — terminal statuses
+        # (COMPLETED, PENDING, etc.) trigger the skip; live sessions proceed.
+        # _reap_session_by_selector's own lock guard is the authoritative
+        # fence against double-reap (cf. #387/#563).
+        session = next((s for s in state.sessions if s.id == session_id), None)
+        if session is None or session.status not in {
+            SessionStatus.ACTIVE,
+            SessionStatus.IDLE,
+            SessionStatus.BACKGROUNDED,
+        }:
+            logger.info(
+                "orchestrate run: session %s already resolved, skipping", session_id
+            )
+            advance_cursor(consumer, event.id)
+            processed += 1
+            continue
+
+        if proposed_action in {
+            ProposedAction.REVERT_TASK.value,
+            ProposedAction.CRASH_COMPLETE.value,
+        }:
+            # Why: _reap_session_by_selector acquires sessions_lock() itself and
+            # is NOT reentrant. Safe here because orchestrate run is a standalone
+            # command, NOT inside reconcile's held sessions_lock/_reconcile_locked
+            # window. Never invoke this from inside a held lock (cf. #387/#563).
+            # Why: under reap_policy=auto, sessions are already terminal when this
+            # consumer reads the event; the status guard above makes it a no-op.
+            _reap_session_by_selector(session_id)
+            logger.info(
+                "orchestrate run: authorized reap for session %s (action=%s)",
+                session_id,
+                proposed_action,
+            )
+        else:
+            # PARK_BLOCKED_ON_USER or unknown action: leave at BLOCKED_ON_USER
+            # routing for the operator. Salvage deferred to follow-on ticket.
+            logger.info(
+                "orchestrate run: action %s for session %s deferred"
+                " (not authorize-eligible)",
+                proposed_action,
+                session_id,
+            )
+
+        advance_cursor(consumer, event.id)
+        processed += 1
+    return processed
+
+
+@orchestrate.command(name="run")
+@click.option(
+    "--lane",
+    "lane",
+    required=True,
+    help="Lane name to consume SESSION_REAP_PROPOSED events for.",
+)
+@click.option(
+    "--client",
+    "client_name",
+    default=None,
+    help="Client name (defaults to first configured client).",
+)
+@click.option(
+    "--once",
+    "once",
+    is_flag=True,
+    help="Drain available events once and exit (default: poll loop).",
+)
+@handle_errors
+def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
+    """Consume SESSION_REAP_PROPOSED events for a lane and authorize reaps.
+
+    Requires an ORCHESTRATE binding for the lane (created by
+    ``cw orchestrate start --lane <lane>``). Authorizes clear-cut phantom
+    reaps via the same path as ``cw doctor --reap``; defers salvage to a
+    follow-on ticket.
+    """
+    client_cfg = _resolve_client(client_name)
+    declared = [ln.name for ln in client_cfg.effective_lanes]
+    if lane not in declared:
+        msg = (
+            f"Lane '{lane}' is not declared for client '{client_cfg.name}'. "
+            f"Declared lanes: {', '.join(declared)}. "
+            f"Run: cw lane add {client_cfg.name} {lane}"
+        )
+        raise LaneNotFoundError(msg)
+
+    # Any-status match: orchestrate start's binding self-completes to COMPLETED.
+    state = load_state()
+    binding = next(
+        (
+            s
+            for s in state.sessions
+            if s.client == client_cfg.name
+            and s.purpose == SessionPurpose.ORCHESTRATE
+            and s.lane == lane
+        ),
+        None,
+    )
+    if binding is None:
+        msg = (
+            f"No ORCHESTRATE binding for lane '{lane}'; "
+            f"run `cw orchestrate start --lane {lane}` first."
+        )
+        raise CwError(msg)
+
+    if once:
+        _drain_reap_proposals(client_cfg.name, lane)
+        return
+
+    while True:
+        _drain_reap_proposals(client_cfg.name, lane)
+        time.sleep(_POLL_INTERVAL_SECONDS)
 
 
 # --- Spawn command group ---

@@ -67,12 +67,13 @@ def _mk_session(
     surface_ref: str | None,
     status: SessionStatus = SessionStatus.ACTIVE,
     started_at: datetime | None = None,
+    purpose: SessionPurpose = SessionPurpose.IMPL,
 ) -> Session:
     return Session(
         id=sid,
         name=f"client-a/{sid}",
         client="client-a",
-        purpose=SessionPurpose.IMPL,
+        purpose=purpose,
         status=status,
         workspace_path=ClientConfig(
             name="client-a", workspace_path=Path("/tmp/ws")
@@ -258,6 +259,33 @@ def test_compute_drift_empty_live_set_from_both_backends_is_reconciled() -> None
     )
     report = compute_drift(state, set())
     assert set(report.phantom_session_ids) == {"s1", "s2"}
+
+
+def test_compute_drift_skips_orchestrate_purpose_session() -> None:
+    """ORCHESTRATE sessions are excluded from phantom detection (R5 guard).
+
+    ORCHESTRATE binding sessions have no live worker process by design,
+    so they must never be classified as phantoms.
+    """
+    state = CwState(
+        sessions=[
+            _mk_session("orch1", "missing-ref", purpose=SessionPurpose.ORCHESTRATE),
+        ]
+    )
+    report = compute_drift(state, set())
+    assert report.phantom_session_ids == []
+
+
+def test_compute_drift_still_flags_impl_phantom_with_orchestrate_present() -> None:
+    """ORCHESTRATE guard does not suppress IMPL phantom detection."""
+    state = CwState(
+        sessions=[
+            _mk_session("orch1", "missing-ref", purpose=SessionPurpose.ORCHESTRATE),
+            _mk_session("impl1", "also-missing"),
+        ]
+    )
+    report = compute_drift(state, set())
+    assert report.phantom_session_ids == ["impl1"]
 
 
 def test_reconcile_marks_phantom_completed_crashed(
