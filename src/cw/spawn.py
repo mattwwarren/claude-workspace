@@ -14,6 +14,7 @@ from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus, TicketTask
 from cw.native_daemon import get_native_daemon_client
+from cw.reconcile import _csid_from_transcript
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -308,6 +309,10 @@ def spawn_create_impl(
         extra_args=final_extra or None,
         permission_mode=permission_mode,
     )
+
+    csid = _csid_from_transcript(sess)
+    if csid is not None:
+        sess.claude_session_id = csid
 
     with sessions_lock():
         state = load_state()

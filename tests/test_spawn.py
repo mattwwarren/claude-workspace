@@ -2032,7 +2032,9 @@ class TestSpawnCreateImplCsidBackfill:
         import cw.spawn as spawn_mod
         from cw.spawn import spawn_create_impl
 
-        monkeypatch.setattr(spawn_mod, "_csid_from_transcript", lambda sess: "abc12345def67890")
+        monkeypatch.setattr(
+            spawn_mod, "_csid_from_transcript", lambda _: "abc12345def67890"
+        )
 
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
@@ -2062,7 +2064,7 @@ class TestSpawnCreateImplCsidBackfill:
         import cw.spawn as spawn_mod
         from cw.spawn import spawn_create_impl
 
-        monkeypatch.setattr(spawn_mod, "_csid_from_transcript", lambda sess: None)
+        monkeypatch.setattr(spawn_mod, "_csid_from_transcript", lambda _: None)
 
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
