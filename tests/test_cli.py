@@ -5365,10 +5365,14 @@ class TestDevQueueStatusWithTick:
         assert result.exit_code == 0, result.output
         assert "BLOCKED" in result.output
         assert "approval-client" in result.output
-        # The BLOCKED count for this client must be 1
+        # BLOCKED column (7-wide, right-aligned) must show 1; all others must be 0.
         for line in result.output.splitlines():
             if "approval-client" in line:
-                assert "1" in line
+                parts = line.split()
+                # parts: [client, pending, running, blocked, completed, cancelled, ...]
+                assert parts[3] == "1", f"BLOCKED count wrong: {line!r}"
+                assert parts[1] == "0", f"PENDING should be 0: {line!r}"
+                assert parts[4] == "0", f"COMPLETED should be 0: {line!r}"
                 break
 
 
