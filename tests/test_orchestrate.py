@@ -2020,3 +2020,53 @@ def test_orchestrate_run_once_flag_exits(
 
     assert result.exit_code == 0
     assert len(drain_calls) == 1  # Exactly one drain, then exit
+
+
+def test_orchestrate_run_keyboard_interrupt(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """poll loop: KeyboardInterrupt exits with code 130 and stop message."""
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(_mk_orchestrate_session("binding-1", lane="lane-x"))
+    save_state(state)
+
+    def raising_drain(client: str, lane: str) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("cw.cli._drain_reap_proposals", raising_drain)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-x"])
+
+    assert result.exit_code == 130
+    assert "orchestrate run: stopped." in result.output
+
+
+def test_orchestrate_run_keyboard_interrupt_during_sleep(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """poll loop: KeyboardInterrupt during sleep also exits with code 130."""
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(_mk_orchestrate_session("binding-2", lane="lane-y"))
+    save_state(state)
+
+    def noop_drain(client: str, lane: str) -> int:
+        return 0
+
+    def raising_sleep(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("cw.cli._drain_reap_proposals", noop_drain)
+    monkeypatch.setattr("cw.cli.time.sleep", raising_sleep)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-y"])
+
+    assert result.exit_code == 130
+    assert "orchestrate run: stopped." in result.output

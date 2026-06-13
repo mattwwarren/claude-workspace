@@ -2942,9 +2942,13 @@ def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
         _drain_reap_proposals(client_cfg.name, lane)
         return
 
-    while True:
-        _drain_reap_proposals(client_cfg.name, lane)
-        time.sleep(_POLL_INTERVAL_SECONDS)
+    try:
+        while True:
+            _drain_reap_proposals(client_cfg.name, lane)
+            time.sleep(_POLL_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        click.echo("orchestrate run: stopped.", err=True)
+        raise click.exceptions.Exit(130) from None
 
 
 # --- Spawn command group ---
