@@ -37,6 +37,11 @@ Dispatch/reconcile reliability and packaging-gate hardening (Sprint 0 follow-ons
 - **Graceful `Ctrl-C` on `cw orchestrate run`** (#604): the poll loop now exits
   130 with a one-line "stopped" message instead of a raw `KeyboardInterrupt`
   traceback; cursor state stays clean (idempotent replay, no cursor flush).
+- **Version single-sourced from package metadata**: `cw.__version__` is now
+  derived via `importlib.metadata` instead of a hardcoded literal, so
+  `cw --version` / `cw doctor` can never diverge from `pyproject.toml` again.
+  (The first `v1.1.1` tag's release build correctly failed its version-match
+  guard because the literal was missed — this removes that failure class.)
 
 ### Docs
 
