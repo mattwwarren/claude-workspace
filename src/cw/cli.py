@@ -2453,7 +2453,10 @@ def dev_queue_refresh_all() -> None:
 
 @main.group()
 def orchestrate() -> None:
-    """Orchestrator pipeline: status snapshot and PR retirement. Driving a sprint? See `cw guide`."""
+    """Orchestrator pipeline: status snapshot and PR retirement.
+
+    Driving a sprint? See `cw guide`.
+    """
 
 
 def _should_show_lane_breakdown(lanes: dict[str, dict[str, int]]) -> bool:
