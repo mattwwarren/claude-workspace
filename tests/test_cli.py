@@ -7059,3 +7059,17 @@ class TestDevQueueMove:
             ["dev-queue", "move", "ACM-11", "-c", "acme", "--to", "fast"],
         )
         assert result.exit_code != 0
+
+
+def test_guide_exits_zero() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["guide"])
+    assert result.exit_code == 0
+
+
+def test_guide_output_contains_markers() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["guide"])
+    assert "orchestrating a sprint" in result.output
+    assert "Sprint recipe" in result.output
+    assert result.output.strip()
