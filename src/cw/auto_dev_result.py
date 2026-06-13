@@ -83,8 +83,11 @@ _V4_STATUSES: frozenset[str] = frozenset(
     {"ambiguities_pending_resolution", "premises_pending_verification"}
 )
 # Public alias for consumers that need to check whether a status indicates the
-# session is paused waiting for human input (issue #129).
-PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES
+# session is paused waiting for human input (issue #129). Includes the v4
+# ambiguity/premises statuses plus the approval-pending states (#633).
+PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES | frozenset(
+    {"plan_pending_approval", "review_pending_approval"}
+)
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. A phantom or stalled session that emitted one of these
