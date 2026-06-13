@@ -1955,7 +1955,8 @@ def test_orchestrate_run_binding_gate_raises_without_binding(
     runner = CliRunner()
     result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-x", "--once"])
     assert result.exit_code != 0
-    assert "No ORCHESTRATE binding" in (result.output + str(result.exception or ""))
+    combined = result.output + str(result.exception or "")
+    assert "No live ORCHESTRATE binding" in combined
 
 
 def test_orchestrate_run_once_flag_exits(
@@ -1967,7 +1968,9 @@ def test_orchestrate_run_once_flag_exits(
     from cw.config import load_state, save_state
 
     state = load_state()
-    state.sessions.append(_mk_orchestrate_session("binding-1", lane="lane-x"))
+    state.sessions.append(
+        _mk_orchestrate_session("binding-1", lane="lane-x", status=SessionStatus.ACTIVE)
+    )
     save_state(state)
 
     drain_calls: list[tuple[str, str]] = []

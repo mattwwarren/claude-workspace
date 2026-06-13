@@ -5,7 +5,6 @@ from __future__ import annotations
 import functools
 import json
 import logging
-import os
 import subprocess
 import sys
 import time
@@ -2764,7 +2763,7 @@ def orchestrate_start(lane: str, client_name: str | None, as_json: bool) -> None
         click.echo(f"Spawned orchestrate session for lane '{lane}': {session_id}")
 
 
-_POLL_INTERVAL_SECONDS = 5
+_POLL_INTERVAL_SECONDS: float = 5.0
 
 
 def _consumer_name(client: str, lane: str) -> str:
@@ -2773,8 +2772,8 @@ def _consumer_name(client: str, lane: str) -> str:
     Sanitizes path separators so events._cursor_path does not create nested
     directories under cursors/ when client or lane names contain slashes.
     """
-    sanitized_client = client.replace("/", "-").replace(os.sep, "-")
-    sanitized_lane = lane.replace("/", "-").replace(os.sep, "-")
+    sanitized_client = client.replace("/", "-")
+    sanitized_lane = lane.replace("/", "-")
     return f"orchestrate-{sanitized_client}-{sanitized_lane}"
 
 
@@ -2792,6 +2791,10 @@ def _drain_reap_proposals(client: str, lane: str) -> int:
         consumer=consumer,
         event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED],
     )
+    # Load state once for the entire drain pass; sequential consumer, no
+    # lock needed here — _reap_session_by_selector acquires sessions_lock()
+    # itself when it mutates (cf. #387/#563 non-reentrancy constraint).
+    state = load_state()
     processed = 0
     for event in events:
         payload = event.payload
@@ -2805,12 +2808,12 @@ def _drain_reap_proposals(client: str, lane: str) -> int:
         proposed_action = payload.get("proposed_action", "")
 
         # Idempotency guard: skip already-terminal sessions.
-        state = load_state()
+        # Use {ACTIVE, IDLE} — mirrors reconcile._LIVE_STATUSES. BACKGROUNDED
+        # sessions are user-backgrounded; this consumer should not reap them.
         session = next((s for s in state.sessions if s.id == session_id), None)
         if session is None or session.status not in {
             SessionStatus.ACTIVE,
             SessionStatus.IDLE,
-            SessionStatus.BACKGROUNDED,
         }:
             logger.info(
                 "orchestrate run: session %s already resolved, skipping", session_id
@@ -2888,6 +2891,7 @@ def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
         )
         raise LaneNotFoundError(msg)
 
+    _live = {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
     state = load_state()
     binding = next(
         (
@@ -2896,12 +2900,13 @@ def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
             if s.client == client_cfg.name
             and s.purpose == SessionPurpose.ORCHESTRATE
             and s.lane == lane
+            and s.status in _live
         ),
         None,
     )
     if binding is None:
         msg = (
-            f"No ORCHESTRATE binding for lane '{lane}'; "
+            f"No live ORCHESTRATE binding for lane '{lane}'; "
             f"run `cw orchestrate start --lane {lane}` first."
         )
         raise CwError(msg)
