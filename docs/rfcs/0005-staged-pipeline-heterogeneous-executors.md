@@ -54,7 +54,7 @@ walks the stage pipeline *within* that lane. Lanes do **not** become stages
 |---|---|---|
 | D1 | Stage as a new orthogonal axis | **Yes.** `TicketTask.stage`; lane semantics unchanged. Stage parameterizes *which executor/prompt/model* spawns — nothing else. |
 | D2 | How stages advance | **Re-enter the normal `PENDING→RUNNING` cycle.** Advancing = mark the stage's session done → set `stage = next`, `status = PENDING` → next `dispatch_tick` re-claims and spawns the next stage. The existing Tier-2 per-lane `max_parallel` allocator is the concurrency guardrail *for free*; it never needs to know about stages. Cost: one tick of latency per handoff. |
-| D3 | Where stage content lives | **Three legs.** Durable trace → ticket comments (enterprise audit trail). Disposable detail → gitignored `.cw/` in the worktree. Contract → `cw schema`. cw owns *position* only; stages own *content*. |
+| D3 | Where stage content lives | **Three legs.** Durable trace → ticket comments via the **active tracker** (`tracking.primary.system`), never a hardcoded forge — reuses `/auto-dev`'s Tracker Resolution dispatch (`github-issues`/`linear`/`notion`/`local`). Disposable detail → gitignored `.cw/` in the worktree. Contract → `cw schema`. cw owns *position* only; stages own *content*. |
 | D4 | Executor model | **Pluggable `StageExecutor` seam** from day one. `ClaudeNativeExecutor` (wraps existing `spawn_create_impl` + `native_daemon`) is the only one shipped early; foreign backends (codex, GLM) are later phases against the same seam — required because `native_daemon` hardcodes `claude --bg`, so a non-Claude executor cannot be a flag. |
 | D5 | Worktree per ticket | **One worktree per ticket, shared across all its stages.** Created at stage 1, removed at FINALIZE. Bounds disk (the real OOM axis); stage sessions are short-lived so live-RAM ≈ tickets-in-flight, unchanged from today. |
 | D6 | PR lifecycle | REVIEW opens a **draft** PR + posts the review trace. FINALIZE scrubs ephemeral files, folds stray plan docs into real docs, marks the PR **ready-for-review**, and assigns reviewers. Splits "AI done self-reviewing" from "ready for humans." |
@@ -171,8 +171,18 @@ existing marker (`<!-- auto-dev-preflight-resolutions -->` →
 - `review` → findings, **deferred work/decisions**, draft-PR link.
 - `finalize` → final disposition, PR ready, reviewers assigned.
 
-Agents already read `gh issue view --comments`; the next stage consumes these
-natively, including non-Claude executors via plain `gh`.
+Stages read and post comments through the **active tracker**, never a
+hardcoded forge. The tracker is resolved from `tracking.primary.system` in
+`.claude/project-config.yaml` exactly as `/auto-dev`'s existing "Tracker
+Resolution" dispatch table does (`github-issues` → `gh issue view/comment`,
+`linear` → MCP `list_comments`/create-comment, `notion`/`local` → their
+equivalents). cw's Python stays tracker-blind — it owns `ticket_id` as an
+opaque string (`models.py:TicketTask`); all tracker I/O is the executor/skill
+layer's job. The `<!-- cw-stage:<name> -->` markers are **plain-string
+sentinels matched on read, not rendered HTML**, so they work uniformly across
+GitHub, Linear, and Notion comments. The next stage consumes prior comments
+natively, including non-Claude executors via whatever CLI/MCP the active
+tracker exposes.
 
 ### Leg 2 — Ephemeral worktree files (disposable detail)
 
@@ -265,7 +275,8 @@ stage shape (consume ticket+code → emit a durable ticket artifact the next
 stage reads), but run in the operator's context, polluting it per ticket.
 
 Under this RFC it becomes the **HARDEN stage**: a delegated stage session whose
-executor runs the sweep and posts the `<!-- cw-stage:harden -->` comment. This
+executor runs the sweep and posts the `<!-- cw-stage:harden -->` comment via the
+active tracker (the resolutions comment is just leg-1 content). This
 removes the orchestrator-context cost and makes harden a uniform pipeline phase
 rather than a manual pre-step. (Answers the originating question: harden is
 **neither an agent nor a lane — it is a stage**, executed by an agent.)
@@ -308,6 +319,12 @@ rather than a manual pre-step. (Answers the originating question: harden is
   constraint recorded above).
 - Lane/branch integration changes — RFC 0004 D4 stands; workers still PR into
   the client default branch.
+- Reconciling the **pre-existing `project-config.yaml` divergence** — `/setup`
+  writes flat `tracking.system` while the deployed config + `/auto-dev` read
+  nested `tracking.primary.system` (and `queue-issues` reads the flat form).
+  This RFC uses the canonical `tracking.primary.system` and does not depend on
+  the flat path, but the divergence predates this work and should be fixed
+  separately (a natural companion to the `cw schema` / `setup` surface).
 
 ## Testing
 
