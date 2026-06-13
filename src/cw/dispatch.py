@@ -182,6 +182,7 @@ def dispatch_tick(
     native_daemon: NativeDaemonClient | None = None,
     emit: Callable[[str], None] | None = None,
     warned_stale: set[tuple[str, str]] | None = None,
+    warned_fetch_fail: set[str] | None = None,
     usage_limited_until: datetime | None = None,
     auto_ff: bool = True,
 ) -> DispatchTickResult:
@@ -207,6 +208,10 @@ def dispatch_tick(
             have already received a "main behind origin" warning during
             this dispatcher run.  Prevents repeated spam across ticks.
             Caller owns the set; mutated in-place.
+        warned_fetch_fail: Mutable set of client names that have already
+            received a fetch-failure WARNING during this dispatcher run.
+            Suppresses repeated WARNINGs for persistently unreachable
+            remotes.  Caller owns the set; mutated in-place.
         usage_limited_until: When set and in the future, all clients are
             skipped with ``skip_reason=USAGE_LIMITED`` and the function
             returns immediately. The back-off window is set by the
@@ -305,7 +310,9 @@ def dispatch_tick(
         # On any error, log and proceed so a transient network issue never
         # blocks the whole loop.
         try:
-            stale, local_sha, origin_sha, behind_count = is_main_behind_origin(client)
+            stale, local_sha, origin_sha, behind_count = is_main_behind_origin(
+                client, warned_fetch_fail=warned_fetch_fail
+            )
         except Exception:  # noqa: BLE001
             # Defense-in-depth: _fetch_default_branch now handles
             # FileNotFoundError/PermissionError internally; this catches
@@ -922,6 +929,8 @@ def run_dispatch_loop(
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
     warned_stale: set[tuple[str, str]] = set()
+    # Track fetch-fail-warn deduplication for persistently unreachable remotes.
+    warned_fetch_fail: set[str] = set()
     # Back-off window: set when a UsageLimitError is detected during a tick.
     # Subsequent ticks skip all spawns until this window elapses.
     usage_limited_until: datetime | None = None
@@ -944,6 +953,7 @@ def run_dispatch_loop(
             native_daemon=resolved_native_daemon,
             emit=emit,
             warned_stale=warned_stale,
+            warned_fetch_fail=warned_fetch_fail,
             usage_limited_until=usage_limited_until,
             auto_ff=auto_ff,
         )
