@@ -1989,6 +1989,10 @@ def dev_queue_status(client: str | None) -> None:
     if tick_data:
         click.echo("")
         click.echo("Last dispatch tick per client:")
+        click.echo(
+            "  (snapshot from the most recent dispatch tick"
+            " — not live queue state; see the table above)"
+        )
         for client_name in clients_seen:
             if client_name in tick_data:
                 tick = tick_data[client_name]
