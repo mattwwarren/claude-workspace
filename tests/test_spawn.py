@@ -2016,3 +2016,69 @@ def test_spawn_create_impl_default_purpose(
 
     context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
     assert context["purpose"] == "impl"
+
+
+class TestSpawnCreateImplCsidBackfill:
+    """Tests for claude_session_id backfill at spawn-return (issue #635)."""
+
+    def test_csid_backfill_when_transcript_present(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """spawn_create_impl backfills claude_session_id when transcript is found."""
+        import cw.spawn as spawn_mod
+        from cw.spawn import spawn_create_impl
+
+        monkeypatch.setattr(
+            spawn_mod, "_csid_from_transcript", lambda _: "abc12345def67890"
+        )
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-csid-present")
+
+        session_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Fix #635",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        state = load_state()
+        sess = state.find_by_name_or_id(session_id)
+        assert sess is not None
+        assert sess.claude_session_id == "abc12345def67890"
+
+    def test_csid_backfill_when_transcript_absent(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """spawn_create_impl leaves claude_session_id None when transcript is absent."""
+        import cw.spawn as spawn_mod
+        from cw.spawn import spawn_create_impl
+
+        monkeypatch.setattr(spawn_mod, "_csid_from_transcript", lambda _: None)
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-csid-absent")
+
+        session_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Fix #635",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        state = load_state()
+        sess = state.find_by_name_or_id(session_id)
+        assert sess is not None
+        assert sess.claude_session_id is None
