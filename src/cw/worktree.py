@@ -409,7 +409,12 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
     return _has_unpushed_commits(client, branch, wt_path)
 
 
-def _fetch_default_branch(client_name: str, default_branch: str, git_dir: Path) -> bool:
+def _fetch_default_branch(
+    client_name: str,
+    default_branch: str,
+    git_dir: Path,
+    warned_fetch_fail: set[str] | None = None,
+) -> bool:
     """Fetch origin/<default_branch>. Returns True on success, False on failure."""
     if not git_dir.exists():
         _log.warning(
@@ -431,12 +436,17 @@ def _fetch_default_branch(client_name: str, default_branch: str, git_dir: Path) 
         )
         return False
     if result.returncode != 0:
-        _log.warning(
-            "freshness_check_skip: fetch failed for %s (rc=%d): %s",
-            client_name,
-            result.returncode,
-            result.stderr.strip(),
-        )
+        if warned_fetch_fail is None or client_name not in warned_fetch_fail:
+            stderr = result.stderr.strip()
+            first_line = stderr.splitlines()[0] if stderr else ""
+            _log.warning(
+                "freshness_check_skip: fetch failed for %s (rc=%d): %s",
+                client_name,
+                result.returncode,
+                first_line,
+            )
+            if warned_fetch_fail is not None:
+                warned_fetch_fail.add(client_name)
         return False
     return True
 
@@ -483,10 +493,18 @@ def _get_behind_count(
 
 def is_main_behind_origin(
     client: ClientConfig,
+    warned_fetch_fail: set[str] | None = None,
 ) -> tuple[bool, str, str, int]:
     """Check whether the client's local default branch is behind origin.
 
     Fetches ``origin/<default_branch>`` then compares local and remote SHAs.
+
+    Args:
+        client: Client configuration.
+        warned_fetch_fail: Caller-owned set of client names that have already
+            received a fetch-failure WARNING in this run. Suppresses repeated
+            WARNINGs for the same client across ticks. Pass ``None`` (default)
+            to always log (correct for one-shot callers).
 
     Returns:
         A 4-tuple ``(is_stale, local_sha, origin_sha, behind_count)`` where
@@ -497,7 +515,9 @@ def is_main_behind_origin(
     git_dir = _git_dir(client)
     default_branch = client.default_branch
 
-    if not _fetch_default_branch(client.name, default_branch, git_dir):
+    if not _fetch_default_branch(
+        client.name, default_branch, git_dir, warned_fetch_fail=warned_fetch_fail
+    ):
         return (False, "", "", 0)
 
     counts = _get_behind_count(client.name, default_branch, git_dir)
