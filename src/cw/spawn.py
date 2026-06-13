@@ -237,6 +237,7 @@ def spawn_create_impl(
     task: TicketTask | None = None,
     wall_clock_budget_seconds: int | None = None,
     lane: str | None = None,
+    purpose: SessionPurpose = SessionPurpose.IMPL,
 ) -> str:
     """Create a daemon-spawned session via the native Claude background daemon.
 
@@ -269,7 +270,7 @@ def spawn_create_impl(
     sess = Session(
         name=f"{client.name}/{session_label}",
         client=client.name,
-        purpose=SessionPurpose.IMPL,
+        purpose=purpose,
         origin=SessionOrigin.DAEMON,
         workspace_path=client.workspace_path,
         worktree_path=worktree,
@@ -285,7 +286,7 @@ def spawn_create_impl(
         session_id=sess.id,
         session_name=sess.name,
         client=client.name,
-        purpose=SessionPurpose.IMPL.value,
+        purpose=purpose.value,
         ticket_id=ticket_id,
         origin=SessionOrigin.DAEMON,
         headless=headless,
