@@ -6,6 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-06-13
+
+Dispatch/reconcile reliability and packaging-gate hardening (Sprint 0 follow-ons to RFC 0004 Phase 4).
+
+### Added
+
+- **CI `package-smoke` job** (#611): builds the wheel (`uv build`), installs it
+  into a clean env (`uv tool install --no-cache`), and smoke-tests the installed
+  `cw` — including `cw guide` to assert the `GUIDE.md` data file is packaged.
+  Closes the gap where a packaging break (e.g. #609) passed CI and only failed
+  at `uv tool install`.
+- **`SESSION_REAP_AUTHORIZED` audit event** (#603): `_reap_session_by_selector`
+  now emits `session.reap_authorized` after the destructive reap, recording
+  authority (`operator` vs `orchestrate-run`), lane, and the proposed action —
+  closing the auditability gap under the automated 4c consumer (ADR-0006).
+
+### Changed
+
+- **`cw dev-queue status` footer** (#598): the "Last dispatch tick per client"
+  block is now labelled as a historical snapshot, not live state; added a
+  "Reading the status output" section to the dispatch runbook.
+
+### Fixed
+
+- **Worktree fetch-fail log spam** (#597): an unreachable client `origin` no
+  longer floods every dispatch tick with a multi-line git `fatal:` block —
+  stderr is collapsed to one line and de-duplicated per client per run
+  (caller-owned warn set, mirroring `warned_stale`).
+- **Graceful `Ctrl-C` on `cw orchestrate run`** (#604): the poll loop now exits
+  130 with a one-line "stopped" message instead of a raw `KeyboardInterrupt`
+  traceback; cursor state stays clean (idempotent replay, no cursor flush).
+
+### Docs
+
+- **RFC 0005 — staged pipeline & heterogeneous executors** (#629): the
+  pipeline-axis design (stage as a first-class concept; `StageExecutor` seam).
+  v1.1.x ships only the forward-compat seams; the engine lands in v1.2.0.
+
 ## [1.1.0] — 2026-06-12
 
 Lane-aware dispatch, gated reaping, and state-integrity hardening.
