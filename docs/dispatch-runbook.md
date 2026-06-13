@@ -94,6 +94,25 @@ next.
 
 ---
 
+### Reading the status output
+
+`cw dev-queue status` prints two distinct sections:
+
+- **Top table** — live queue state. Each row reflects the current task record
+  (PENDING / RUNNING / COMPLETED / FAILED columns) at the moment the command
+  runs. This is the authoritative view of what is in the queue right now.
+
+- **"Last dispatch tick per client:" footer** — a historical snapshot from the
+  most recent `DISPATCH_TICK` event stored in the event history. It can be
+  stale, especially after idle periods or when no dispatch has run since the
+  last queue mutation.
+  - `running=N/M` reflects that tick's grant math — how many workers were
+    granted vs. the cap at dispatch time — **not** the current live session
+    count.
+  - For current live session count, use the top table or `cw status`.
+
+---
+
 ## 4. Monitor
 
 Use `cw dev-queue wait` — the sentinel-aware monitor (#535):
