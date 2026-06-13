@@ -3411,3 +3411,133 @@ class TestReapSessionBySelector:
         updated = next(s for s in state.sessions if s.id == "bg-sess")
         assert updated.status == SessionStatus.COMPLETED
         assert updated.completed_reason == CompletionReason.USER
+
+    def test_reap_session_emits_authorized_event(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reaped active session emits SESSION_REAP_AUTHORIZED on the event bus."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.events import read_events
+        from cw.models import (
+            CompletionReason,
+            CwState,
+            DevQueueStore,
+            OrchestratorEventType,
+            QueueItemStatus,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+            TicketTask,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        sess = Session(
+            id="audit-sess",
+            name="client-a/auto-dev/audit-ticket",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id="audit-ticket",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="audit-sess",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = _reap_session_by_selector(
+            "audit-sess",
+            authority="orchestrate-run",
+            lane="impl",
+            proposed_action="revert_task",
+            correlation_id="corr-abc",
+        )
+
+        assert result is True
+        events = read_events(
+            consumer="test-reap-audit-603",
+            event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED],
+        )
+        assert len(events) == 1, f"Expected 1 SESSION_REAP_AUTHORIZED event, got {events}"
+        payload = events[0].payload
+        assert payload["session_id"] == "audit-sess"
+        assert payload["session_name"] == "client-a/auto-dev/audit-ticket"
+        assert payload["client"] == "client-a"
+        assert payload["ticket_id"] == "audit-ticket"
+        assert payload["authority"] == "orchestrate-run"
+        assert payload["lane"] == "impl"
+        assert payload["proposed_action"] == "revert_task"
+        assert "session_status_completed" in payload["mutations"]
+        assert events[0].correlation_id == "corr-abc"
+        # Task must be reverted to PENDING
+        queue = load_dev_queue()
+        reverted = next(t for t in queue.tasks if t.ticket_id == "audit-ticket")
+        assert reverted.status == QueueItemStatus.PENDING
+        # Session must be COMPLETED
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "audit-sess")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.USER
+
+    def test_reap_session_already_terminal_emits_no_event(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Already-terminal session returns True but emits no audit event."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.events import read_events
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            OrchestratorEventType,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        sess = Session(
+            id="term-sess",
+            name="client-a/auto-dev/term-ticket",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.COMPLETED,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        result = _reap_session_by_selector("term-sess")
+
+        assert result is True
+        events = read_events(
+            consumer="test-reap-terminal-603",
+            event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED],
+        )
+        assert len(events) == 0, (
+            f"Expected no SESSION_REAP_AUTHORIZED for terminal session, got {events}"
+        )

@@ -566,6 +566,11 @@ def test_orchestrator_event_type_includes_needs_sync() -> None:
     assert OrchestratorEventType.TICKET_NEEDS_SYNC.value == "ticket.needs_sync"
 
 
+def test_orchestrator_event_type_includes_reap_authorized() -> None:
+    """SESSION_REAP_AUTHORIZED event type has correct string value."""
+    assert OrchestratorEventType.SESSION_REAP_AUTHORIZED.value == "session.reap_authorized"
+
+
 class TestQueueItemStatusBlockedOnUser:
     def test_blocked_on_user_value(self) -> None:
         assert QueueItemStatus.BLOCKED_ON_USER.value == "blocked_on_user"
