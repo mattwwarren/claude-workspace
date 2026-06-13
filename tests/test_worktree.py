@@ -1515,6 +1515,86 @@ class TestFetchDefaultBranch:
         result = _fetch_default_branch("test-client", "main", missing)
         assert result is False
 
+    def test_multiline_stderr_collapses_to_single_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """rc=128 with multi-line git stderr: WARNING contains no newline."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client", workspace_path=ws, default_branch="main"
+        )
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 128
+            result.stdout = ""
+            result.stderr = (
+                "fatal: 'origin' does not appear to be a git repository\n"
+                "\n"
+                "fatal: Could not read from remote repository.\n"
+                "\n"
+                "Please make sure you have the correct access rights\n"
+                "and the repository exists.\n"
+            )
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            is_main_behind_origin(client)
+
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert warning_messages, "Expected at least one WARNING"
+        for msg in warning_messages:
+            assert "\n" not in msg, f"WARNING contains newline: {msg!r}"
+
+    def test_warned_fetch_fail_deduplicates_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Second call for same client with warned_fetch_fail set does not log."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        client = ClientConfig(
+            name="test-client", workspace_path=ws, default_branch="main"
+        )
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 128
+            result.stdout = ""
+            result.stderr = "fatal: 'origin' does not appear to be a git repository"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        warned_fetch_fail: set[str] = set()
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            is_main_behind_origin(client, warned_fetch_fail=warned_fetch_fail)
+            first_count = sum(
+                1
+                for r in caplog.records
+                if r.levelno == logging.WARNING and "freshness_check_skip" in r.message
+            )
+            caplog.clear()
+            is_main_behind_origin(client, warned_fetch_fail=warned_fetch_fail)
+            second_count = sum(
+                1
+                for r in caplog.records
+                if r.levelno == logging.WARNING and "freshness_check_skip" in r.message
+            )
+
+        assert first_count == 1, "Expected WARNING on first call"
+        assert second_count == 0, "Expected no WARNING on second call (deduped)"
+
 
 class TestFetchFeatureBranch:
     """Regression tests for fetch_feature_branch.
