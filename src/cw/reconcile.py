@@ -1238,6 +1238,8 @@ def _act_on_stalled_candidates(
 
     for candidate in gh_blocked_revert_candidates:
         session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -1994,7 +1996,7 @@ def reconcile() -> ReconcileReport:
     _gh_blocked_tids: list[str] = []
     _gh_available = True
     for _session in pre_state.sessions:
-        if _session.status not in {SessionStatus.ACTIVE, SessionStatus.IDLE}:
+        if _session.status not in _LIVE_STATUSES:
             continue
         if _session.origin is not SessionOrigin.DAEMON:
             continue
@@ -2312,6 +2314,8 @@ def _act_on_phantom_candidates(
         pending_events.append(salvaged_payload)
 
     # Merged-complete: PR already shipped; mark COMPLETED + NORMAL, not CRASHED.
+    # Still appended to phantom_names — these sessions ARE phantom (absent from
+    # daemon roster), and callers need their names for queue cleanup below.
     for candidate in merged_crash_candidates:
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED
@@ -2337,8 +2341,8 @@ def _act_on_phantom_candidates(
             crash_payload["ticket_id"] = candidate.ticket_id
         pending_events.append(crash_payload)
 
-    # GH-blocked phantoms: can't verify PR; mark CRASHED so they leave
-    # _LIVE_STATUSES and are not re-detected as phantom candidates.
+    # GH-blocked phantoms: can't verify PR; mark COMPLETED+CRASHED so they
+    # leave _LIVE_STATUSES (via status=COMPLETED) and aren't re-detected.
     for candidate in gh_blocked_crash_candidates:
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED
