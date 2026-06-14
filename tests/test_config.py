@@ -841,6 +841,48 @@ class TestMigrateCwState:
         session = migrated["sessions"][0]
         assert session["lane"] == "my-lane"
 
+    def test_v9_to_v10_fills_session_stage_default(self) -> None:
+        """migrate_cw_state fills stage=None on v9 sessions that lack the key."""
+        raw = {
+            "schema_version": 9,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["stage"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v10_session_stage_preserved_idempotently(self) -> None:
+        """Existing non-None stage survives a migration pass."""
+        raw = {
+            "schema_version": 10,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": "impl",
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["stage"] == "impl"
+
     # -----------------------------------------------------------------------
     # Phase F: cmux surface_ref migration tests (schema v5)
     # -----------------------------------------------------------------------

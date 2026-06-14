@@ -32,11 +32,13 @@ from cw.dev_queue import (
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
+    DEFAULT_STAGE,
     DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
     OrchestratorConfig,
     QueueItemStatus,
+    Stage,
     TicketTask,
 )
 
@@ -1174,6 +1176,65 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["lane"] == "custom-lane"
+
+    def test_v3_to_v4_fills_task_stage_default(self) -> None:
+        """migrate_dev_queue fills stage=DEFAULT_STAGE on tasks missing the key."""
+        raw: dict[str, object] = {
+            "schema_version": 3,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-20",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                    "lane": DEFAULT_LANE,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_v3_to_v4_fills_task_stage_base_ref_default(self) -> None:
+        """migrate_dev_queue fills stage_base_ref=None on tasks missing the key."""
+        raw: dict[str, object] = {
+            "schema_version": 3,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-21",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                    "lane": DEFAULT_LANE,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["stage_base_ref"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_v4_task_stage_preserved_idempotently(self) -> None:
+        """Existing stage values survive a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 4,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-22",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                    "lane": DEFAULT_LANE,
+                    "stage": Stage.IMPL.value,
+                    "stage_base_ref": "abc1234",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["stage"] == Stage.IMPL.value
+        assert migrated["tasks"][0]["stage_base_ref"] == "abc1234"
 
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""
