@@ -1350,6 +1350,8 @@ Spawn a **general-purpose** agent scoped to the implementation worktree. The age
 
 **Worktree mechanic:** `/prep-pr` operates in `cwd`. The impl worktree is not the main session's cwd. The safer path is to spawn with `isolation: "worktree"` and have the agent re-checkout the feature branch from origin (same push-then-recheckout pattern as Stage 3b fix loop) before invoking `/prep-pr`.
 
+**Permission mode (known limitation, #636 — deferred):** In headless/daemon context the worker runs under `claude --bg --permission-mode auto` (cw default, `native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` permission classifier fires on `gh pr create` inside the worktree-isolated subagent; with no TTY to approve, the call blocks and `/prep-pr` aborts. The global allowlist `Bash(gh pr:*)` does NOT suppress the classifier here. The *effective* fix is to spawn the worker with a non-`auto` `permission_mode` (cw side, requires the bypassPermissions disclaimer accepted once interactively) — **deferred** to RFC 0005's FINALIZE/REVIEW stages, which own PR creation and must carry this requirement (see #622/#621). Setting `bypassPermissions` on *this subagent spawn alone* is NOT currently effective — the worker's own `auto` mode is the source. Until the stage fix lands, a classifier block surfaces as a BLOCK (below) for manual ship.
+
 **Agent prompt must include:**
 - Branch name, fork point SHA (from Checkpoint 2), and ticket ID
 - Instruction to re-checkout the branch from origin AND refresh with main:
