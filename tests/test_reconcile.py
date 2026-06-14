@@ -11851,6 +11851,7 @@ class TestWorldStateCheckBeforeRevert:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "stalled-ghblock-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert sess.status == SessionStatus.TIMED_OUT
 
         events = read_events(
             consumer="test-stalled-ghblock-1",
@@ -11972,6 +11973,7 @@ class TestWorldStateCheckBeforeRevert:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "idle-ghblock-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert sess.status == SessionStatus.TIMED_OUT
 
         events = read_events(
             consumer="test-idle-ghblock-1",
@@ -12101,6 +12103,7 @@ class TestWorldStateCheckBeforeRevert:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "phantom-ghblock-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert sess.status == SessionStatus.COMPLETED
 
         events = read_events(
             consumer="test-phantom-ghblock-1",

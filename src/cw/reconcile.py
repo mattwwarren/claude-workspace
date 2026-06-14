@@ -1137,6 +1137,15 @@ def _act_on_stalled_candidates(
         session.completed_reason = CompletionReason.NORMAL
         session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
 
+    # GH-blocked: can't verify PR status; terminate session so it is not
+    # re-detected as a stalled candidate on subsequent ticks.
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
+
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.TIMED_OUT
@@ -1206,6 +1215,8 @@ def _act_on_stalled_candidates(
             get_native_daemon_client().stop(session.surface_ref)
         _cleanup_timed_out_worktree(session, candidate.ticket_id)
 
+    # Why: no _cleanup_timed_out_worktree for merged — the PR shipped, so the
+    # worktree content is already in main; pruning it is not our responsibility.
     for candidate in merged_revert_candidates:
         session = session_by_id[candidate.session_id]
         if session.surface_ref is not None:
@@ -1219,7 +1230,7 @@ def _act_on_stalled_candidates(
                 "ticket_id": candidate.ticket_id,
                 "claude_session_id": session.claude_session_id,
                 "crashed": False,
-                "salvaged": True,
+                "salvaged": False,
                 "reason": _PHANTOM_REAP_MERGED_REASON,
             },
             correlation_id=candidate.ticket_id,
@@ -1293,6 +1304,8 @@ def revert_stalled_headless_sessions(
     because save_state is idempotent over identical content.
 
     Returns the list of ticket IDs whose TicketTask was reverted to PENDING.
+    Tickets whose PR is already merged complete instead of reverting (#637).
+    Tickets whose gh availability check fails go to BLOCKED_ON_USER (#637).
     See GitHub issue #185, #265.
     """
     if task_by_ticket is None:
@@ -1678,6 +1691,18 @@ def _act_on_idle_candidates(
             else ReapReason.IDLE_STALL
         )
 
+    # GH-blocked: can't verify PR status; terminate so it is not re-detected.
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = (
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if candidate.usage_limit_detected
+            else ReapReason.IDLE_STALL
+        )
+
     # Recover (revert to PENDING for re-dispatch).
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -1802,6 +1827,8 @@ def _act_on_idle_candidates(
         )
         fire_push_notification(session.name, session.client)
 
+    # Why: no _cleanup_timed_out_worktree for merged — PR shipped, worktree
+    # content is already in main; pruning it is not our responsibility.
     for candidate in merged_revert_candidates:
         session = session_by_id[candidate.session_id]
         if session.surface_ref is not None:
@@ -1815,7 +1842,7 @@ def _act_on_idle_candidates(
                 "ticket_id": candidate.ticket_id,
                 "claude_session_id": session.claude_session_id,
                 "crashed": False,
-                "salvaged": True,
+                "salvaged": False,
                 "reason": _PHANTOM_REAP_MERGED_REASON,
             },
             correlation_id=candidate.ticket_id,
@@ -1823,6 +1850,8 @@ def _act_on_idle_candidates(
 
     for candidate in gh_blocked_revert_candidates:
         session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -1981,7 +2010,10 @@ def reconcile() -> ReconcileReport:
             _gh_blocked_tids.append(_ticket_id)
             continue
         if _merged is None:
-            # Transient error — skip, allow normal revert path.
+            # merged=None is a transient per-ticket error (e.g. network blip on
+            # a single PR lookup); fall through to normal revert so the session
+            # is not silently stuck.  A structural gh outage sets _gh_avail=False
+            # (above), which routes ALL subsequent tickets to gh_blocked_tids.
             continue
         if _merged:
             _merged_tids.append(_ticket_id)
@@ -2305,6 +2337,16 @@ def _act_on_phantom_candidates(
             crash_payload["ticket_id"] = candidate.ticket_id
         pending_events.append(crash_payload)
 
+    # GH-blocked phantoms: can't verify PR; mark CRASHED so they leave
+    # _LIVE_STATUSES and are not re-detected as phantom candidates.
+    for candidate in gh_blocked_crash_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.CRASHED
+        session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        phantom_names.append(session.name)
+
     save_state(state)
 
     for payload in pending_events:
@@ -2320,7 +2362,7 @@ def _act_on_phantom_candidates(
             "session_name": session.name,
             "client": session.client,
             "crashed": False,
-            "salvaged": True,
+            "salvaged": False,
             "reason": _PHANTOM_REAP_MERGED_REASON,
         }
         if candidate.ticket_id:
