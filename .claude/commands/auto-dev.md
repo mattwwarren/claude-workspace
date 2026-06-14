@@ -132,7 +132,7 @@ Everything else runs to completion or exits with a structured error.
 
 ### Gate-Collapse Table
 
-All 41 rows define the deterministic headless action for every interactive gate in the pipeline:
+All 46 rows define the deterministic headless action for every interactive gate in the pipeline:
 
 > **Maintenance:** the `expected 2` and `hard-cap at 5` cycle values appear in 6 locations across this file. See the maintenance note in Step 3b.5 for the full sync list before editing the cycle-related rows here.
 
@@ -166,13 +166,13 @@ All 41 rows define the deterministic headless action for every interactive gate 
 | S2.5 files outside plan | Append `"impl_scope_growth: <files>"` to `friction_highlights`; continue (routes through existing scope-growth handling) |
 | S2 / S3b agent timeout (Mitigation 4) | EXIT `blocked` with `blocker.reason: "agent_block"`, `blocker.details: "agent timed out after <N>m"` |
 | S2 / S3b single-commit on non-trivial change | Append `"impl_no_incremental_commits"` to `friction_highlights`; continue (advisory only) |
-| S3 review (any scope) | Always run reviewers |
-| S3 MUST_FIX (any scope) | Run fix loop; expected 2 cycles, hard-cap at 5 |
+| S3 review (any scope) | Always run reviewers, then adjudicate every finding into FIX NOW / REJECT / DEFER (Checkpoint 3a) |
+| S3 action list non-empty (post-adjudication) | Run fix loop on the action list (accepted MUST_FIX + SHOULD_FIX); expected 2 cycles, hard-cap at 5 |
 | S3b fix gate fails (test/mypy/diff mismatch / no new commits) | Count as cycle failure; re-spawn within 5-cycle cap; append `"fix_loop_gate_failed_cycle_<N>"` |
 | S3 fix-loop, Small + sparse fix (Step 3b.5 criteria all hold) | Skip re-review → S4. Append `"rereview_skipped_sparse"` to `friction_highlights` |
-| S3 review clean / SHOULD_FIX, small | AUTO-CONTINUE → S4 |
-| S3 review clean / SHOULD_FIX, large | EXIT `review_pending_approval` (post-fix-loop diff, branch pushed, no PR) |
-| S3 MUST_FIX persists after 5 cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` |
+| S3 action list empty (every finding fixed / rejected / deferred), small | AUTO-CONTINUE → S4. Rejections recorded in PR body + `friction_highlights`; deferrals queued for merge-time ticketing (Step H3) |
+| S3 large scope, action list resolved (clean, or fix loop complete) | EXIT `review_pending_approval` (post-fix-loop diff, branch pushed, no PR); adjudication applies within the human review |
+| S3 action list non-empty after 5 fix cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` |
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
 | Tool call denied by auto-mode classifier (any stage) | EXIT `blocked` with `blocker.reason: "tool_denied"`, `retry_eligible: true`, `next_actions: ["redispatch_ticket"]` (see Tool-Use Denial Exit section) |
@@ -516,6 +516,33 @@ Options:
 - **Skip** → Proceed to Stage 1 for the next ticket.
 
 **Note:** This sweep is intentionally lightweight — just API calls. The heavier fix work happens only when issues are found. The goal is to catch and clear PR debt early so it doesn't pile up.
+
+### Step H3: Harvest deferred review findings from merged PRs
+
+The pipeline records deferred review findings in the PR body (Step 4d) but cannot file them at merge time — the session is gone, especially under `auto_merge: false`. This step is the merge-triggered filing: it runs as part of the per-ticket sweep and scans **recently-merged** pipeline PRs for an un-harvested `DEFERRED-REVIEW-FINDINGS` block. Label-gated and idempotent — re-running is safe.
+
+1. **Find candidates** — merged pipeline PRs lacking the harvested label:
+   ```bash
+   gh pr list --author @me --state merged --search '-label:review-debt-harvested' \
+     --json number,headRefName,body
+   ```
+   Filter to the pipeline's branch-prefix pattern (same as Step H1). No time window — the label gates idempotency, so an unbounded scan is correct (correctness over speed). If the merged-PR list grows large, a `merged:>=<date>` 7-day bound is acceptable.
+
+2. **Extract** the `DEFERRED-REVIEW-FINDINGS` block from each candidate's body (the content between the `<!-- DEFERRED-REVIEW-FINDINGS` and `DEFERRED-REVIEW-FINDINGS -->` sentinels). No block → nothing to file; apply the harvested label (step 5) anyway so the PR is skipped next sweep.
+
+3. **Resolve the tracker** for the merged PR's repo from its `.claude/project-config.yaml` (per **Tracker Resolution**). Deferred tickets land in the **code's own repo** — `linear` or `github-issues` as that repo configures, not a central backlog.
+
+4. **For each finding — dedup, then file:**
+   - **Dedup:** search the tracker's open issues for the same summary/file before filing (prior-art culture — do not create duplicates). `gh issue list --search "<summary> in:title"` for `github-issues`; the `search_issues` op for `linear`. A plausible match → skip filing, log `deferred finding already tracked: <summary>`.
+   - **File** the ticket against that repo with a `review-debt` label: title = the finding summary, body = file + rationale + a backlink to the source PR.
+
+5. **Mark harvested:** apply the `review-debt-harvested` label so the next sweep skips the PR:
+   ```bash
+   gh pr edit <number> --add-label review-debt-harvested
+   ```
+   This is the idempotency gate — filing and labeling both happen, but a re-run that finds the label already present is a no-op.
+
+**Headless:** fully autonomous — no AskUserQuestion. Dedup-match is fuzzy (summary-string); acceptable for v1, refine if duplicates appear. If the `review-debt` / `review-debt-harvested` labels don't exist in the repo, create them once (`gh label create`).
 
 ### Quick Feedback Checks (stage boundaries)
 
@@ -1109,9 +1136,32 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 
 Consolidate review results: deduplicate, sort by severity, group by file.
 
-**Small scope + (NO_ISSUES or SHOULD_FIX only) → AUTO-ACCEPT.** Log:
-- Review outcome: "Review clean" or "N SHOULD_FIX items noted — auto-accepted per small scope"
-- List SHOULD_FIX items for transparency
+### Checkpoint 3a: Adjudicate every finding
+
+Consolidation produces a list; adjudication assigns each finding a disposition. The coordinating session — never a subagent or executor — sorts **every** finding (MUST_FIX *and* SHOULD_FIX) into exactly one of three buckets:
+
+1. **FIX NOW → the action list.** All surviving MUST_FIX plus any SHOULD_FIX the session accepts into scope. Principle: *if it stays in the review, it's worth fixing.* The filtering happens here, at scoping — not by silently ignoring the returned list.
+2. **REJECT (review-the-review).** The session disagrees: the finding is wrong, or the code is a deliberate choice / documented tradeoff. **Record the rationale** (see "Recording adjudication" below). No fix, no ticket.
+3. **DEFER.** Valid but out of scope for this ticket ("handle when scale demands"). **Record now, file as a ticket on merge** (PR Hygiene Sweep Step H3). Skip the ticket only when the item is already a bucket-2 documented tradeoff.
+
+**Invariant:** every finding ends *fixed*, *rejected-with-reason*, or *ticketed*. A reviewer finding that simply vanishes is a process failure.
+
+The **action list** (bucket 1) — not "MUST_FIX only" — is what drives Step 3b. An accepted SHOULD_FIX is fixed; a rejected or deferred SHOULD_FIX leaves the action list, recorded. If every finding lands in REJECT/DEFER the action list is empty and the pipeline continues (rejections recorded, deferrals queued for merge).
+
+**Adjudication is judgment** → it stays on the coordinating session. A stateless executor must never decide whether a finding is correct — that is exactly how the "we did X for a reason" pushback gets lost. An executor may only *mechanically apply* an action-list fix the session has already decided ("change X to Y in file Z").
+
+**Recording adjudication:**
+- **Rejections (bucket 2):** add each REJECTED finding + one-line rationale to a `## Review adjudication` section appended to the PR body (Step 4d), and append the same to `friction_highlights`. For a rejection rooted in non-obvious design intent, add an inline `# Why:` comment at the code site (per the global review-culture rule).
+- **Deferrals (bucket 3):** record each in the machine-readable `DEFERRED-REVIEW-FINDINGS` block written to the PR body (Step 4d), and append a one-line note to `friction_highlights`. Step H3 harvests the block on merge.
+
+**Headless:** adjudication is autonomous — **no AskUserQuestion.** The session adjudicates deterministically, records rationale for every REJECT/DEFER, writes the PR-body blocks, and proceeds. Interactive mode MAY surface the adjudication for confirmation but defaults to the same dispositions.
+
+**Small scope + NO_ISSUES → AUTO-ACCEPT.** Log "Review clean" and proceed to S4.
+
+**Small scope + SHOULD_FIX only (no MUST_FIX) → adjudicate per Checkpoint 3a, then:**
+- Action list non-empty (accepted SHOULD_FIX) → run Step 3b on it.
+- All SHOULD_FIX land in REJECT/DEFER → action list empty → AUTO-CONTINUE to S4 (rejections recorded, deferrals queued).
+- Log the disposition: "N SHOULD_FIX adjudicated — <a> fixed, <b> rejected, <c> deferred".
 
 **Small scope + MUST_FIX → AskUserQuestion:**
 - Present MUST_FIX findings (with file, line, description, suggested fix)
@@ -1123,15 +1173,17 @@ Consolidate review results: deduplicate, sort by severity, group by file.
 - If MUST_FIX: "Fix these issues and re-review, or abort?"
 - If clean or SHOULD_FIX only: "Review complete. Proceed to PR creation?"
 
-**Headless:** Always run reviewers. MUST_FIX → run fix loop (expected 2 cycles, hard-cap at 5; cycles 3+ or scope growth append to `friction_highlights` and set `health.fix_loop_escalated: true`). Clean/SHOULD_FIX + small → emit `stage.entered` (`s3_review_complete`) then AUTO-CONTINUE to S4:
+**Headless:** Always run reviewers, then adjudicate every finding per Checkpoint 3a (autonomous — no AskUserQuestion; record rationale for every REJECT/DEFER). Non-empty action list → run fix loop (expected 2 cycles, hard-cap at 5; cycles 3+ or scope growth append to `friction_highlights` and set `health.fix_loop_escalated: true`). Empty action list (every finding fixed / rejected / deferred) + small → emit `stage.entered` (`s3_review_complete`) then AUTO-CONTINUE to S4:
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s3_review_complete\",\"prev_stage\":\"s3_review_started\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
 ```
-Clean/SHOULD_FIX + large → EXIT `review_pending_approval`. MUST_FIX persists after 5 cycles → EXIT `blocked` with `blocker.reason: "review_blocked"`.
+Large scope (any result) → EXIT `review_pending_approval` (adjudication recorded in the structured output applies within the human review). Action list non-empty after 5 fix cycles → EXIT `blocked` with `blocker.reason: "review_blocked"`.
 
-### Step 3b: Fix Loop (when MUST_FIX needs fixing)
+### Step 3b: Fix Loop (when the action list is non-empty)
+
+The fix loop operates on the **action list** from Checkpoint 3a (accepted MUST_FIX + any accepted SHOULD_FIX), not on "MUST_FIX only." "MUST_FIX" below means "action-list item" — rejected and deferred findings never reach here.
 
 **Important**: you cannot attach a new subagent to the original implementation worktree. Subagents spawned without `isolation: "worktree"` inherit the main session's sandbox, which typically does not include other worktrees. `isolation: "worktree"` always creates a *new* worktree, not an attachment to an existing one. The correct pattern is **push-then-recheckout**.
 
@@ -1159,7 +1211,7 @@ Prerequisite: the implementation branch must already be on origin. Step 2's Impl
    ```
    If merge conflicts occur → BLOCK with file list. Do not force.
 
-3. Agent fixes MUST_FIX issues, re-runs quality gates, creates a NEW commit on top (do NOT amend) **with the trailer `Auto-Dev-Fix-Cycle: <N>`** (where `<N>` is the current cycle number, 1-5; pass via `git commit --trailer "Auto-Dev-Fix-Cycle: <N>"`), and pushes to origin using the explicit-refspec form (`git push origin HEAD:refs/heads/<branch-name>`) — defensive form, robust against any local branch rename even after the `git checkout -b <branch-name> origin/<branch-name>` in step 2 above. After pushing, verify with `git rev-parse origin/<branch-name>` matching `git rev-parse HEAD`.
+3. Agent fixes the action-list items, re-runs quality gates, creates a NEW commit on top (do NOT amend) **with the trailer `Auto-Dev-Fix-Cycle: <N>`** (where `<N>` is the current cycle number, 1-5; pass via `git commit --trailer "Auto-Dev-Fix-Cycle: <N>"`), and pushes to origin using the explicit-refspec form (`git push origin HEAD:refs/heads/<branch-name>`) — defensive form, robust against any local branch rename even after the `git checkout -b <branch-name> origin/<branch-name>` in step 2 above. After pushing, verify with `git rev-parse origin/<branch-name>` matching `git rev-parse HEAD`.
 
 The `Auto-Dev-Fix-Cycle` trailer is the durable cross-session signal for fix-loop progress. The resume detector reads the max `<N>` across fix-cycle trailers on commits newer than `Auto-Dev-Stage: impl-complete` to determine current cycle. On resume into `s3_fix_loop, substage="cycle_N"`, the pipeline resumes at cycle `N+1` (next iteration), not from cycle 1 — preserving the cycle budget across session deaths.
 
@@ -1197,7 +1249,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 
    **Skip re-review when ALL of the following hold (Small scope only):**
    - Scope tier was **Small** at Stage 1c, AND no scope growth was flagged in the fix-loop friction report (still Small)
-   - Initial review produced ≤2 MUST_FIX items
+   - Action list had ≤2 items
    - Fix-loop diff is small relative to the original implementation diff — judgment call, no hard line ceiling. A 2-line touch on a 50-line PR is sparse; a rewrite of half the implementation is not. Proportionality is what matters.
    - Fix did not touch files outside the original Stage 1 plan's file list
    - No SHOULD_FIX items adjacent to the MUST_FIX areas were left unaddressed in a way that warrants a second look
@@ -1522,25 +1574,45 @@ After `/prep-pr` returns with a PR number:
    3. Hold — leave PR open, do NOT enable auto-merge, exit ticket
    ```
    - **Capture now** → spawn a `general-purpose` agent (`isolation: "worktree"`, `run_in_background: true`) with the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns. Max 2 capture attempts before falling through to the "Hold" branch.
-   - **Ship anyway** → continue to step 2 (auto-merge enable). Append `"ui_evidence_missing_user_override"` to `friction_highlights`.
-   - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR exists but waits on the human to attach evidence and run `gh pr merge --auto --squash` manually. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]` in the structured output (interactive runs don't emit structured output, but a summary line at end-of-pipeline should mention it).
+   - **Ship anyway** → continue to step 3 (auto-merge enable). Append `"ui_evidence_missing_user_override"` to `friction_highlights`.
+   - **Hold** → skip step 3 entirely (do NOT enable auto-merge). The PR exists but waits on the human to attach evidence and run `gh pr merge --auto --squash` manually. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]` in the structured output (interactive runs don't emit structured output, but a summary line at end-of-pipeline should mention it).
 
-   *Headless:* never block on this — append `"ui_evidence_missing"` to `friction_highlights`, set `pr.auto_merge: false`, set `next_actions: ["attach_ui_evidence_and_enable_automerge"]`, skip step 2, continue to step 3. Status remains `shipped` because the PR exists; the human sees the missing-evidence signal in the structured output and decides whether to attach evidence and merge or close.
+   *Headless:* never block on this — append `"ui_evidence_missing"` to `friction_highlights`, set `pr.auto_merge: false`, set `next_actions: ["attach_ui_evidence_and_enable_automerge"]`, skip step 3, continue to step 4. Status remains `shipped` because the PR exists; the human sees the missing-evidence signal in the structured output and decides whether to attach evidence and merge or close.
 
-   **If the gate is clean** (no UI files in diff, OR UI files plus media markers in body): proceed to step 2.
+   **If the gate is clean** (no UI files in diff, OR UI files plus media markers in body): proceed to step 3.
 
    **Why fact-gated rather than trusting the ship-it agent:** the same way Mitigation 1 treats `git diff --stat` as filesystem truth, this gate treats the PR body grep as truth. The `/ship-it` agent may report "screenshots attached" with HIGH confidence and still have skipped the step — only the body content is binding.
 
-2. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. GitHub allows enabling auto-merge on a draft PR — the merge won't trigger until the PR is marked ready (which `/review-monitor` does when the parent in the stack merges) AND CI passes. Enable unconditionally here, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless — in those cases this step is skipped and `pr.auto_merge` is set to `false`.
-3. **Post to Linear:** Comment on the issue with PR link (skip for free-text tickets). For drafts, note in the comment: "Created as draft — stacked behind PR #<parent>; will auto-promote to ready when parent merges."
-4. **Store pipeline state:** Record PR number, branch, ticket ID for the merge gate check in Step 4a of the next ticket
-5. **Headless only — emit `stage.entered` (`s4_pr_created`) then proceed to Stage 5:**
+2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** The session owns the Checkpoint 3a outcomes; write them to the PR body now. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing the deferrals must be merge-triggered — Step H3 of the next sweep harvests this block. Read the current body (`gh pr view <pr-number> --json body --jq .body`), append the two artifacts below, and re-write via `gh pr edit <pr-number> --body-file -`:
+
+   - **Rejections (bucket 2)** → a human-readable `## Review adjudication` section, one line per REJECTED finding + rationale.
+   - **Deferrals (bucket 3)** → a machine-readable block the sweep parses verbatim:
+
+   ```
+   ## Review adjudication
+
+   Rejected (intentional / documented tradeoff):
+   - eval/runner.py — "drop retry wrapper" — deliberate: caller already retries at the queue layer
+
+   <!-- DEFERRED-REVIEW-FINDINGS
+   - severity: SHOULD_FIX
+     summary: "extract shared retry helper"
+     file: eval/runner.py
+     rationale: "out of scope; revisit when a 3rd caller appears"
+   DEFERRED-REVIEW-FINDINGS -->
+   ```
+
+   One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the whole section when every finding was fixed (no rejections, no deferrals). For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK), there is no body to write — rejections/deferrals stay in `friction_highlights` and surface to the human in the structured output instead.
+3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. GitHub allows enabling auto-merge on a draft PR — the merge won't trigger until the PR is marked ready (which `/review-monitor` does when the parent in the stack merges) AND CI passes. Enable unconditionally here, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless — in those cases this step is skipped and `pr.auto_merge` is set to `false`.
+4. **Post to Linear:** Comment on the issue with PR link (skip for free-text tickets). For drafts, note in the comment: "Created as draft — stacked behind PR #<parent>; will auto-promote to ready when parent merges."
+5. **Store pipeline state:** Record PR number, branch, ticket ID for the merge gate check in Step 4a of the next ticket
+6. **Headless only — emit `stage.entered` (`s4_pr_created`) then proceed to Stage 5:**
    ```bash
    cw event record stage.entered \
      --correlation-id "$TICKET" \
      --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s4_pr_created\",\"prev_stage\":\"s3_review_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
    ```
-6. **Proceed to Stage 5** (CI Wait)
+7. **Proceed to Stage 5** (CI Wait)
 
 Note: monitor registration happens inside `/prep-pr` Step 9 — do NOT re-register here.
 
