@@ -80,6 +80,16 @@ class ReapReason(StrEnum):
     SALVAGE_PARKED = "salvage_parked"
 
 
+class Stage(StrEnum):
+    """RFC 0005 pipeline stage. Dormant in A1 — no dispatch wiring yet."""
+
+    HARDEN = "harden"
+    PLAN = "plan"
+    IMPL = "impl"
+    REVIEW = "review"
+    FINALIZE = "finalize"
+
+
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
@@ -87,10 +97,13 @@ class ReapReason(StrEnum):
 # v7: added Session.reap_reason (GitHub #380).
 # v8: added Session.reap_proposed_at (GitHub #555).
 # v9: added Session.lane (GitHub #594).
-CW_STATE_SCHEMA_VERSION = 9
+# v10: added Session.stage (GitHub #612).
+CW_STATE_SCHEMA_VERSION = 10
 # v3: added TicketTask.lane (GitHub #557).
-DEV_QUEUE_SCHEMA_VERSION = 3
+# v4: added TicketTask.stage + stage_base_ref (GitHub #612).
+DEV_QUEUE_SCHEMA_VERSION = 4
 DEFAULT_LANE: str = "default"
+DEFAULT_STAGE: Stage = Stage.PLAN
 
 
 class TaskSpec(BaseModel):
@@ -269,6 +282,9 @@ class TicketTask(BaseModel):
     # Lane this ticket is assigned to. Defaults to DEFAULT_LANE; set by
     # orchestrate/dispatch in Phase 2 (#558).
     lane: str = DEFAULT_LANE
+    # RFC 0005 A1 — dormant; no dispatch wiring yet (GitHub #612).
+    stage: Stage = DEFAULT_STAGE
+    stage_base_ref: str | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -312,6 +328,22 @@ class ReapPolicy(StrEnum):
     AUTO = "auto"
 
 
+class StageExecutorConfig(BaseModel):
+    """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""
+
+    backend: str = "claude-native"
+    model: str | None = None
+
+
+class StagePipelineConfig(BaseModel):
+    """Per-client (or per-lane) pipeline configuration (RFC 0005 A1, dormant)."""
+
+    stages: list[Stage] = Field(
+        default_factory=lambda: [Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+    )
+    executors: dict[Stage, StageExecutorConfig] = Field(default_factory=dict)
+
+
 class LaneConfig(BaseModel):
     """Configuration for a named dispatch lane.
 
@@ -325,6 +357,7 @@ class LaneConfig(BaseModel):
     paused: bool = False
     description: str = ""
     reap_policy: ReapPolicy | None = None
+    pipeline: StagePipelineConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -537,6 +570,9 @@ class Session(BaseModel):
     # Per-model cost breakdown for this session. Populated via the SDK
     # orchestrator path (post-#116). None when not available.
     cost_breakdown: dict[str, float] | None = None
+    # RFC 0005 A1 — dormant; tracks which pipeline stage spawned this session.
+    # None for sessions not spawned by the staged pipeline (GitHub #612).
+    stage: Stage | None = None
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
@@ -578,6 +614,8 @@ class ClientConfig(BaseModel):
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)
+    # RFC 0005 A1 — dormant pipeline config; no dispatch wiring yet (#612).
+    pipeline: StagePipelineConfig = Field(default_factory=StagePipelineConfig)
 
     @property
     def effective_lanes(self) -> list[LaneConfig]:
