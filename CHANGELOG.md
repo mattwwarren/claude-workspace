@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-06-14
+
+Dispatch-reliability cluster — worker liveness, re-dispatch safety, and
+disposition visibility (the 1.1.x reliability backlog; all share the
+on-demand-reconcile staleness root captured in ADR-0007).
+
+### Fixed
+
+- **`claude_session_id` backfilled at spawn-return** (#635): `spawn_create_impl`
+  now attempts `_csid_from_transcript` before `save_state`, so a live worker's
+  session id is populated immediately instead of staying null until the next
+  operator-triggered `reconcile()` (hours later). Makes liveness detection
+  (csid→transcript→silence) actually work for fresh workers.
+- **Shipped tickets are no longer re-dispatched** (#637): before reverting a
+  RUNNING task to PENDING, reconcile consults world state — if the ticket's PR
+  is merged, the task is marked completed instead of reverted+re-dispatched. The
+  PR-merge pre-pass runs outside `sessions_lock` and the guard covers all three
+  revert sites (`_act_on_phantom_candidates`, `_act_on_stalled_candidates`,
+  `_act_on_idle_candidates`). Closes the data-safety hazard that re-ran an
+  already-merged ticket under `reap_policy: auto`.
+- **Approval-pending sessions are surfaced, not hidden** (#633):
+  `plan_pending_approval` / `review_pending_approval` now map to
+  `BLOCKED_ON_USER` (were silently recorded as `completed` with null
+  disposition); `cw dev-queue status` gains a `BLOCKED` column.
+
+### Docs
+
+- **ADR-0007 — reconcile cadence and ownership** (#639): on-demand vs
+  background-ticker vs daemon-primary-runner; recommends an opt-in periodic
+  ticker (Option B2) with a cron fallback, daemon promotion deferred.
+- **#636 known limitation** documented in `auto-dev.md` Step 4c: headless
+  `gh pr create` is blocked by the `auto` permission classifier inside the
+  worktree-isolated `/prep-pr` subagent; the effective fix (non-`auto` worker
+  `permission_mode`) is deferred to the RFC 0005 FINALIZE/REVIEW stages
+  (#621/#622), which carry the requirement.
+
 ## [1.1.1] — 2026-06-13
 
 Dispatch/reconcile reliability and packaging-gate hardening (Sprint 0 follow-ons to RFC 0004 Phase 4).
