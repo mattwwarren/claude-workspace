@@ -9225,7 +9225,7 @@ def test_act_on_stalled_revert_task_updates_state_and_queue(
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
 
-    reverted = _act_on_stalled_candidates(
+    reverted, _ = _act_on_stalled_candidates(
         state, [candidate], now=now, config=_auto_config()
     )
 
@@ -9439,7 +9439,7 @@ def test_act_on_phantom_crash_routes_pending(
     result = _act_on_phantom_candidates(
         state, [candidate], now=now, config=_auto_config()
     )
-    _, _, _, _, _ = result
+    _, _, _, _, _, _ = result
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "phantom-act-1")
@@ -9729,7 +9729,9 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
         worktree_path=None,
     )
 
-    _, _, _, salvaged_ids, _ = _act_on_phantom_candidates(state, [candidate], now=now)
+    _, _, _, salvaged_ids, _, _ = _act_on_phantom_candidates(
+        state, [candidate], now=now
+    )
 
     assert sess.status == SessionStatus.COMPLETED
     assert "phantom-salv-act-1" in salvaged_ids
@@ -9876,7 +9878,7 @@ class TestActOnStalledCandidatesSignalOnly:
         )
 
         # signal_only is the default — explicit for clarity
-        reverted = _act_on_stalled_candidates(
+        reverted, _ = _act_on_stalled_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -9989,7 +9991,7 @@ class TestActOnStalledCandidatesSignalOnly:
             reap_reason=ReapReason.WALL_CLOCK_BUDGET,
         )
 
-        reverted = _act_on_stalled_candidates(
+        reverted, _ = _act_on_stalled_candidates(
             state, [candidate], now=now, config=_auto_config()
         )
 
@@ -10048,7 +10050,7 @@ class TestActOnIdleCandidatesSignalOnly:
         )
 
         # signal_only is default
-        blocked, _salvage = _act_on_idle_candidates(
+        blocked, _, _salvage = _act_on_idle_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -10096,7 +10098,7 @@ class TestActOnIdleCandidatesSignalOnly:
             new_observation_count=2,
         )
 
-        blocked, _salvage = _act_on_idle_candidates(
+        blocked, _, _salvage = _act_on_idle_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -10151,7 +10153,7 @@ class TestActOnIdleCandidatesSignalOnly:
             new_observation_count=2,
         )
 
-        blocked, _salvage = _act_on_idle_candidates(
+        blocked, _, _salvage = _act_on_idle_candidates(
             state, [candidate], now=now, config=_auto_config()
         )
 
@@ -10204,7 +10206,7 @@ class TestActOnPhantomCandidatesSignalOnly:
             client="client-a",
         )
 
-        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -10255,7 +10257,7 @@ class TestActOnPhantomCandidatesSignalOnly:
         )
 
         # Both signal_only and auto produce BLOCKED_ON_USER for dirty-worktree
-        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -10304,7 +10306,7 @@ class TestActOnPhantomCandidatesSignalOnly:
             client="client-a",
         )
 
-        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
             state, [candidate], now=now, config=_auto_config()
         )
 
@@ -10757,7 +10759,7 @@ class TestActOnStalledCandidatesPerLane:
         )
 
         # Global is SIGNAL_ONLY but lane is AUTO → should ACT (reverts to PENDING)
-        reverted = _act_on_stalled_candidates(
+        reverted, _ = _act_on_stalled_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -10814,7 +10816,7 @@ class TestActOnStalledCandidatesPerLane:
         )
 
         # Global is AUTO but lane is SIGNAL_ONLY → routes to BLOCKED_ON_USER
-        reverted = _act_on_stalled_candidates(
+        reverted, _ = _act_on_stalled_candidates(
             state, [candidate], now=now, config=_auto_config()
         )
 
@@ -10885,7 +10887,7 @@ class TestActOnIdleCandidatesPerLane:
             client="client-a",
         )
 
-        blocked, _salvage = _act_on_idle_candidates(
+        blocked, _, _salvage = _act_on_idle_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -10944,7 +10946,7 @@ class TestActOnIdleCandidatesPerLane:
             client="client-a",
         )
 
-        blocked, _salvage = _act_on_idle_candidates(
+        blocked, _, _salvage = _act_on_idle_candidates(
             state, [candidate], now=now, config=_auto_config()
         )
 
@@ -11005,7 +11007,7 @@ class TestActOnPhantomCandidatesPerLane:
             lane="fast",
         )
 
-        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
             state, [candidate], now=now, config=OrchestratorConfig()
         )
 
@@ -11062,7 +11064,7 @@ class TestActOnPhantomCandidatesPerLane:
             lane="slow",
         )
 
-        reverted, _names, _usage, _salvaged, _results = _act_on_phantom_candidates(
+        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
             state, [candidate], now=now, config=_auto_config()
         )
 
@@ -11155,7 +11157,7 @@ class TestMixedLanePolicySingleTick:
         )
 
         # Global is SIGNAL_ONLY; lane A is AUTO, lane B is SIGNAL_ONLY
-        reverted = _act_on_stalled_candidates(
+        reverted, _ = _act_on_stalled_candidates(
             state,
             [candidate_a, candidate_b],
             now=now,
@@ -11717,3 +11719,491 @@ class TestRouteEmittedSentinel:
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         # review_pending_approval is in PAUSED_FOR_USER_INPUT_STATUSES (#633).
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# GitHub #637 — world-state check before revert (merged-PR guard)
+# ---------------------------------------------------------------------------
+
+
+class TestWorldStateCheckBeforeRevert:
+    """_act_on_stalled/idle/phantom skip revert when PR is already merged."""
+
+    # --- stalled ---
+
+    def test_stalled_merged_ticket_completes_not_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """merged_ticket_ids → COMPLETED session + COMPLETED queue, not TIMED_OUT."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-stalled-merged"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_headless_daemon_session("stalled-merged-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="stalled-merged-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="stalled-merged-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="stalled-merged-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="stalled-merged-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        reverted, merged = _act_on_stalled_candidates(
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+            merged_ticket_ids=frozenset({"stalled-merged-1"}),
+        )
+
+        assert reverted == []
+        assert "stalled-merged-1" in merged
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.completed_reason == CompletionReason.NORMAL
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "stalled-merged-1")
+        assert t.status == QueueItemStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-stalled-merged-1",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        assert events[0].payload.get("crashed") is False
+
+    def test_stalled_gh_blocked_routes_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """gh_blocked_ticket_ids → BLOCKED_ON_USER queue task, NEEDS_ATTENTION."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-stalled-ghblock"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_headless_daemon_session("stalled-ghblock-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="stalled-ghblock-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="stalled-ghblock-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="stalled-ghblock-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="stalled-ghblock-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        reverted, merged = _act_on_stalled_candidates(
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+            gh_blocked_ticket_ids=frozenset({"stalled-ghblock-1"}),
+        )
+
+        assert reverted == []
+        assert merged == []
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "stalled-ghblock-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert sess.status == SessionStatus.TIMED_OUT
+
+        events = read_events(
+            consumer="test-stalled-ghblock-1",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+
+    # --- idle ---
+
+    def test_idle_merged_ticket_completes_not_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """merged_ticket_ids → COMPLETED session + COMPLETED queue, not TIMED_OUT."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        worktree = tmp_path / "wt-idle-merged"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_headless_daemon_session("idle-merged-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="idle-merged-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="idle-merged-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="idle-merged-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="idle-merged-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.IDLE_STALL,
+        )
+
+        blocked, merged, _salvage = _act_on_idle_candidates(
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+            merged_ticket_ids=frozenset({"idle-merged-1"}),
+        )
+
+        assert blocked == []
+        assert "idle-merged-1" in merged
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.completed_reason == CompletionReason.NORMAL
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "idle-merged-1")
+        assert t.status == QueueItemStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-idle-merged-1",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        assert events[0].payload.get("crashed") is False
+
+    def test_idle_gh_blocked_routes_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """gh_blocked_ticket_ids → BLOCKED_ON_USER queue task, NEEDS_ATTENTION."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+
+        worktree = tmp_path / "wt-idle-ghblock"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+
+        sess = _mk_headless_daemon_session("idle-ghblock-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="idle-ghblock-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="idle-ghblock-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="idle-ghblock-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="idle-ghblock-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.IDLE_STALL,
+        )
+
+        blocked, merged, _salvage = _act_on_idle_candidates(
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+            gh_blocked_ticket_ids=frozenset({"idle-ghblock-1"}),
+        )
+
+        assert blocked == []
+        assert merged == []
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "idle-ghblock-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert sess.status == SessionStatus.TIMED_OUT
+
+        events = read_events(
+            consumer="test-idle-ghblock-1",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+
+    # --- phantom ---
+
+    def test_phantom_merged_ticket_completes_not_crashes(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """merged_ticket_ids → COMPLETED+NORMAL phantom, not COMPLETED+CRASHED."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        sess = _mk_phantom_daemon_session("phantom-merged-1", started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="phantom-merged-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="phantom-merged-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="phantom-merged-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="phantom-merged-1",
+            worktree_dirty=False,
+            client="client-a",
+        )
+
+        reverted, _names, _limited, _salvaged, _results, merged = (
+            _act_on_phantom_candidates(
+                state,
+                [candidate],
+                now=now,
+                config=_auto_config(),
+                merged_ticket_ids=frozenset({"phantom-merged-1"}),
+            )
+        )
+
+        assert reverted == []
+        assert "phantom-merged-1" in merged
+        assert sess.status == SessionStatus.COMPLETED
+        assert sess.completed_reason == CompletionReason.NORMAL
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "phantom-merged-1")
+        assert t.status == QueueItemStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-phantom-merged-1",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        completed = [e for e in events if not e.payload.get("crashed")]
+        assert len(completed) == 1
+
+    def test_phantom_gh_blocked_routes_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """gh_blocked_ticket_ids → phantom skipped, BLOCKED_ON_USER."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        sess = _mk_phantom_daemon_session("phantom-ghblock-1", started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="phantom-ghblock-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="phantom-ghblock-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidate = ReapCandidate(
+            session_id="phantom-ghblock-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="phantom-ghblock-1",
+            worktree_dirty=False,
+            client="client-a",
+        )
+
+        reverted, _names, _limited, _salvaged, _results, merged = (
+            _act_on_phantom_candidates(
+                state,
+                [candidate],
+                now=now,
+                config=_auto_config(),
+                gh_blocked_ticket_ids=frozenset({"phantom-ghblock-1"}),
+            )
+        )
+
+        assert reverted == []
+        assert merged == []
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "phantom-ghblock-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert sess.status == SessionStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-phantom-ghblock-1",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+
+    # --- reconcile() pre-pass ---
+
+    def test_reconcile_prepass_merged_pr_populates_completed_ticket_ids(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile() pre-pass: merged PR → completed_ticket_ids, task COMPLETED."""
+        worktree = tmp_path / "wt-reconcile-merged"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("reconcile-merged-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="reconcile-merged-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="reconcile-merged-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket",
+            lambda _tid: (True, True),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._claude_agents_json",
+            list,
+        )
+        monkeypatch.setattr("cw.reconcile.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.salvage_committed_no_pr_sessions", lambda _c: []
+        )
+
+        with freezegun.freeze_time(now):
+            report = reconcile()
+
+        assert "reconcile-merged-1" in report.completed_ticket_ids
+        assert "reconcile-merged-1" not in report.reverted_ticket_ids
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "reconcile-merged-1")
+        assert t.status == QueueItemStatus.COMPLETED
+
+    def test_reconcile_prepass_gh_unavailable_blocks_not_reverts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile() pre-pass: gh unavailable → task BLOCKED_ON_USER, not PENDING."""
+        worktree = tmp_path / "wt-reconcile-ghblock"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("reconcile-ghblock-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id="reconcile-ghblock-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="reconcile-ghblock-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.pr_is_merged_for_ticket",
+            lambda _tid: (None, False),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._claude_agents_json",
+            list,
+        )
+        monkeypatch.setattr("cw.reconcile.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.salvage_committed_no_pr_sessions", lambda _c: []
+        )
+
+        with freezegun.freeze_time(now):
+            report = reconcile()
+
+        assert "reconcile-ghblock-1" not in report.reverted_ticket_ids
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "reconcile-ghblock-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER

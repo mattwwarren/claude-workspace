@@ -163,6 +163,15 @@ _TIMED_OUT_MERGED_REASON = "timed_out_merged"
 # worktree has unsaved work and the task is routed to BLOCKED_ON_USER instead
 # of being retried automatically (GitHub issue #421).
 _DIRTY_WORKTREE_REASON = "dirty_worktree"
+# Reason tag written to SESSION_COMPLETED events when a phantom/stalled/idle
+# session's PR was found MERGED before its task was reverted to PENDING.
+# Prevents re-dispatch of already-shipped tickets (GitHub issue #637).
+_PHANTOM_REAP_MERGED_REASON = "phantom_reap_merged"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when the gh
+# availability or PR-merged check returns an inconclusive result and the
+# task is routed to BLOCKED_ON_USER rather than being reverted to PENDING
+# (fail-closed on ambiguous world state; GitHub issue #637).
+_GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -1013,12 +1022,17 @@ def _act_on_stalled_candidates(
     *,
     now: datetime,
     config: OrchestratorConfig | None = None,
-) -> list[str]:
+    merged_ticket_ids: frozenset[str] = frozenset(),
+    gh_blocked_ticket_ids: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str]]:
     """Act phase for stalled headless sessions: apply all mutations.
 
     Consumes ReapCandidate objects from _detect_stalled_candidates.
     Mirrors the side-effect logic in revert_stalled_headless_sessions.
-    Returns the list of ticket IDs reverted to PENDING.
+    Returns (reverted_ticket_ids, merged_completed_ticket_ids).
+    reverted_ticket_ids contains ticket IDs reverted to PENDING.
+    merged_completed_ticket_ids contains ticket IDs completed because their
+    PR was already merged (from merged_ticket_ids pre-pass; GitHub #637).
 
     Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
     routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
@@ -1027,15 +1041,22 @@ def _act_on_stalled_candidates(
     resolved individually via resolve_reap_policy (GitHub #560).
     """
     if not candidates:
-        return []
+        return [], []
 
     effective_config = config if config is not None else OrchestratorConfig()
     clients = load_effective_clients()
     # Route each REVERT_TASK candidate individually based on its lane's policy.
+    # Merged-PR / gh-blocked check (GitHub #637) runs BEFORE policy routing so
+    # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
     signal_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
     for c in candidates:
         if c.proposed_action == ProposedAction.REVERT_TASK:
+            if c.ticket_id and (
+                c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
+            ):
+                auto_candidates.append(c)
+                continue
             policy = resolve_reap_policy(c, clients, effective_config)
             if policy is ReapPolicy.SIGNAL_ONLY:
                 if c.ticket_id:
@@ -1048,7 +1069,7 @@ def _act_on_stalled_candidates(
         _apply_queue_mutations(signal_mutations, clear_session_id=set())
     candidates = auto_candidates
     if not candidates:
-        return []
+        return [], []
 
     # Separate by action for batch processing.
     skip_candidates = [
@@ -1057,8 +1078,28 @@ def _act_on_stalled_candidates(
     salvage_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
     ]
-    revert_candidates = [
+    all_revert_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK
+    ]
+
+    # Split REVERT_TASK candidates by world-state check results (GitHub #637).
+    # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
+    # reconcile() that runs BEFORE sessions_lock, so no gh subprocess executes
+    # here. Candidates with no ticket_id fall through to the normal revert path.
+    merged_revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c.ticket_id and c.ticket_id in merged_ticket_ids
+    ]
+    gh_blocked_revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c.ticket_id and c.ticket_id in gh_blocked_ticket_ids
+    ]
+    revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c not in merged_revert_candidates and c not in gh_blocked_revert_candidates
     ]
 
     # SKIP_PARKED: emit event only, no state/queue change.
@@ -1074,10 +1115,10 @@ def _act_on_stalled_candidates(
             correlation_id=candidate.ticket_id,
         )
 
-    if not salvage_candidates and not revert_candidates:
-        return []
+    if not salvage_candidates and not all_revert_candidates:
+        return [], []
 
-    # Apply state mutations for salvage and revert.
+    # Apply state mutations for salvage, merged-complete, and revert.
     session_by_id = {s.id: s for s in state.sessions}
 
     for candidate in salvage_candidates:
@@ -1087,6 +1128,23 @@ def _act_on_stalled_candidates(
         _apply_salvaged_completion(
             session, candidate.salvage_result, candidate.salvage_csid, now=now
         )
+
+    # Merged-complete: PR already shipped; mark session COMPLETED, not TIMED_OUT.
+    for candidate in merged_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
+
+    # GH-blocked: can't verify PR status; terminate session so it is not
+    # re-detected as a stalled candidate on subsequent ticks.
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
 
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -1098,6 +1156,8 @@ def _act_on_stalled_candidates(
     save_state(state)
 
     timed_out_ticket_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
+    merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
+    gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
     salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
     salvaged_result_by_ticket = {
         c.ticket_id: c.salvage_result
@@ -1105,7 +1165,13 @@ def _act_on_stalled_candidates(
         if c.ticket_id and c.salvage_result
     }
     reverted: list[str] = []
-    if timed_out_ticket_ids or salvaged_ticket_ids_set:
+    merged_completed: list[str] = []
+    if (
+        timed_out_ticket_ids
+        or merged_tids
+        or gh_blocked_tids
+        or salvaged_ticket_ids_set
+    ):
         with dev_queue_lock():
             store = load_dev_queue()
             changed = False
@@ -1116,6 +1182,15 @@ def _act_on_stalled_candidates(
                     task.status = QueueItemStatus.PENDING
                     task.session_id = None
                     reverted.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in merged_tids:
+                    task.status = QueueItemStatus.COMPLETED
+                    task.session_id = None
+                    merged_completed.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in gh_blocked_tids:
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    task.session_id = None
                     changed = True
                 elif task.ticket_id in salvaged_ticket_ids_set:
                     result = salvaged_result_by_ticket[task.ticket_id]
@@ -1140,6 +1215,48 @@ def _act_on_stalled_candidates(
             get_native_daemon_client().stop(session.surface_ref)
         _cleanup_timed_out_worktree(session, candidate.ticket_id)
 
+    # Why: no _cleanup_timed_out_worktree for merged — the PR shipped, so the
+    # worktree content is already in main; pruning it is not our responsibility.
+    for candidate in merged_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "crashed": False,
+                "salvaged": False,
+                "reason": _PHANTOM_REAP_MERGED_REASON,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _GH_CHECK_BLOCKED_REASON,
+                "breadcrumbs": str(session.worktree_path)
+                if session.worktree_path
+                else "",
+                "crashed": False,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
         if candidate.salvage_result is None:
@@ -1158,7 +1275,7 @@ def _act_on_stalled_candidates(
         if session.surface_ref is not None:
             get_native_daemon_client().stop(session.surface_ref)
 
-    return reverted
+    return reverted, merged_completed
 
 
 def revert_stalled_headless_sessions(
@@ -1189,6 +1306,8 @@ def revert_stalled_headless_sessions(
     because save_state is idempotent over identical content.
 
     Returns the list of ticket IDs whose TicketTask was reverted to PENDING.
+    Tickets whose PR is already merged complete instead of reverting (#637).
+    Tickets whose gh availability check fails go to BLOCKED_ON_USER (#637).
     See GitHub issue #185, #265.
     """
     if task_by_ticket is None:
@@ -1196,7 +1315,13 @@ def revert_stalled_headless_sessions(
     candidates = _detect_stalled_candidates(
         state, now=now, config=config, task_by_ticket=task_by_ticket
     )
-    return _act_on_stalled_candidates(state, candidates, now=now, config=config)
+    # Discard merged_completed_ids — this public wrapper's callers expect list[str]
+    # (reverted ticket IDs only). merged completions are surfaced through the
+    # ReconcileReport.completed_ticket_ids path inside _reconcile_locked (GitHub #637).
+    reverted, _merged_completed = _act_on_stalled_candidates(
+        state, candidates, now=now, config=config
+    )
+    return reverted
 
 
 def _has_terminal_sentinel(session: Session) -> bool:
@@ -1421,12 +1546,15 @@ def _act_on_idle_candidates(
     *,
     now: datetime,
     config: OrchestratorConfig | None = None,
-) -> tuple[list[str], list[_SalvageCandidate]]:
+    merged_ticket_ids: frozenset[str] = frozenset(),
+    gh_blocked_ticket_ids: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str], list[_SalvageCandidate]]:
     """Act phase for silently idle sessions: apply all mutations.
 
     Consumes ReapCandidate objects from _detect_idle_candidates.
-    Returns (blocked_ticket_ids, salvage_git_candidates) matching
-    flag_silently_idle_daemon_sessions's return type.
+    Returns (blocked_ticket_ids, merged_completed_ticket_ids, salvage_git_candidates).
+    merged_completed_ticket_ids contains ticket IDs completed because their
+    PR was already merged (from merged_ticket_ids pre-pass; GitHub #637).
 
     Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
     routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
@@ -1436,15 +1564,22 @@ def _act_on_idle_candidates(
     resolved individually via resolve_reap_policy (GitHub #560).
     """
     if not candidates:
-        return [], []
+        return [], [], []
 
     effective_config = config if config is not None else OrchestratorConfig()
     clients = load_effective_clients()
     # Route each REVERT_TASK candidate individually based on its lane's policy.
+    # Merged-PR / gh-blocked check (GitHub #637) runs BEFORE policy routing so
+    # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
     signal_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
     for c in candidates:
         if c.proposed_action == ProposedAction.REVERT_TASK:
+            if c.ticket_id and (
+                c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
+            ):
+                auto_candidates.append(c)
+                continue
             policy = resolve_reap_policy(c, clients, effective_config)
             if policy is ReapPolicy.SIGNAL_ONLY:
                 if c.ticket_id:
@@ -1457,7 +1592,7 @@ def _act_on_idle_candidates(
         _apply_queue_mutations(signal_mutations, clear_session_id=set())
     candidates = auto_candidates
     if not candidates:
-        return [], []
+        return [], [], []
 
     session_by_id = {s.id: s for s in state.sessions}
 
@@ -1476,8 +1611,28 @@ def _act_on_idle_candidates(
     salvage_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
     ]
-    revert_candidates = [
+    all_revert_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK
+    ]
+
+    # Split REVERT_TASK candidates by world-state check results (GitHub #637).
+    # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
+    # reconcile() that runs BEFORE sessions_lock, so no gh subprocess executes
+    # here. Candidates with no ticket_id fall through to the normal revert path.
+    merged_revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c.ticket_id and c.ticket_id in merged_ticket_ids
+    ]
+    gh_blocked_revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c.ticket_id and c.ticket_id in gh_blocked_ticket_ids
+    ]
+    revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c not in merged_revert_candidates and c not in gh_blocked_revert_candidates
     ]
     park_candidates = [
         c
@@ -1526,6 +1681,30 @@ def _act_on_idle_candidates(
             session, candidate.salvage_result, candidate.salvage_csid, now=now
         )
 
+    # Merged-complete: PR already shipped; mark session COMPLETED, not TIMED_OUT.
+    for candidate in merged_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.reap_reason = (
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if candidate.usage_limit_detected
+            else ReapReason.IDLE_STALL
+        )
+
+    # GH-blocked: can't verify PR status; terminate so it is not re-detected.
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = (
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if candidate.usage_limit_detected
+            else ReapReason.IDLE_STALL
+        )
+
     # Recover (revert to PENDING for re-dispatch).
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -1547,6 +1726,8 @@ def _act_on_idle_candidates(
     has_dispositions = bool(
         salvage_candidates
         or revert_candidates
+        or merged_revert_candidates
+        or gh_blocked_revert_candidates
         or park_candidates
         or salvage_git_candidates_list
         or routed_sentinel_candidates
@@ -1556,9 +1737,11 @@ def _act_on_idle_candidates(
         save_state(state)
 
     if not has_dispositions:
-        return [], []
+        return [], [], []
 
     recovered_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
+    merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
+    gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
     parked_ids = {c.ticket_id for c in park_candidates if c.ticket_id}
     salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
     salvaged_result_by_ticket = {
@@ -1567,7 +1750,14 @@ def _act_on_idle_candidates(
         if c.ticket_id and c.salvage_result
     }
     blocked: list[str] = []
-    if recovered_ids or parked_ids or salvaged_ticket_ids_set:
+    merged_completed: list[str] = []
+    if (
+        recovered_ids
+        or merged_tids
+        or gh_blocked_tids
+        or parked_ids
+        or salvaged_ticket_ids_set
+    ):
         with dev_queue_lock():
             store = load_dev_queue()
             changed = False
@@ -1576,6 +1766,15 @@ def _act_on_idle_candidates(
                     continue
                 if task.ticket_id in recovered_ids:
                     task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    changed = True
+                elif task.ticket_id in merged_tids:
+                    task.status = QueueItemStatus.COMPLETED
+                    task.session_id = None
+                    merged_completed.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in gh_blocked_tids:
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
                     task.session_id = None
                     changed = True
                 elif task.ticket_id in parked_ids:
@@ -1630,6 +1829,48 @@ def _act_on_idle_candidates(
         )
         fire_push_notification(session.name, session.client)
 
+    # Why: no _cleanup_timed_out_worktree for merged — PR shipped, worktree
+    # content is already in main; pruning it is not our responsibility.
+    for candidate in merged_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "crashed": False,
+                "salvaged": False,
+                "reason": _PHANTOM_REAP_MERGED_REASON,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _GH_CHECK_BLOCKED_REASON,
+                "breadcrumbs": str(session.worktree_path)
+                if session.worktree_path
+                else "",
+                "crashed": False,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
         if candidate.salvage_result is None:
@@ -1678,7 +1919,7 @@ def _act_on_idle_candidates(
         if c.branch is not None and c.worktree_path_str is not None
     ]
 
-    return blocked, salvage_git
+    return blocked, merged_completed, salvage_git
 
 
 def flag_silently_idle_daemon_sessions(
@@ -1720,7 +1961,10 @@ def flag_silently_idle_daemon_sessions(
         config=config,
         task_by_ticket=task_by_ticket,
     )
-    return _act_on_idle_candidates(state, candidates, now=now, config=config)
+    blocked, _merged_completed, salvage_git = _act_on_idle_candidates(
+        state, candidates, now=now, config=config
+    )
+    return blocked, salvage_git
 
 
 def reconcile() -> ReconcileReport:
@@ -1744,8 +1988,45 @@ def reconcile() -> ReconcileReport:
     only be recovered by explicit operator action. This is an acceptable
     tradeoff for a file-based, single-user tool.
     """
+    # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
+    # acquiring sessions_lock. gh subprocess must NOT run under the lock
+    # (liveness requirement, #485). Mirrors complete_timed_out_merged_tasks().
+    pre_state = load_state()
+    _merged_tids: list[str] = []
+    _gh_blocked_tids: list[str] = []
+    _gh_available = True
+    for _session in pre_state.sessions:
+        if _session.status not in _LIVE_STATUSES:
+            continue
+        if _session.origin is not SessionOrigin.DAEMON:
+            continue
+        _ticket_id = ticket_id_for_session(_session.name)
+        if _ticket_id is None:
+            continue
+        if not _gh_available:
+            _gh_blocked_tids.append(_ticket_id)
+            continue
+        _merged, _gh_avail = pr_is_merged_for_ticket(_ticket_id)
+        if not _gh_avail:
+            _gh_available = False
+            _gh_blocked_tids.append(_ticket_id)
+            continue
+        if _merged is None:
+            # merged=None is a transient per-ticket error (e.g. network blip on
+            # a single PR lookup); fall through to normal revert so the session
+            # is not silently stuck.  A structural gh outage sets _gh_avail=False
+            # (above), which routes ALL subsequent tickets to gh_blocked_tids.
+            continue
+        if _merged:
+            _merged_tids.append(_ticket_id)
+    merged_ticket_ids = frozenset(_merged_tids)
+    gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
+
     with sessions_lock():
-        locked_report, salvage_git_candidates = _reconcile_locked()
+        locked_report, salvage_git_candidates = _reconcile_locked(
+            merged_ticket_ids=merged_ticket_ids,
+            gh_blocked_ticket_ids=gh_blocked_ticket_ids,
+        )
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
@@ -1921,12 +2202,16 @@ def _act_on_phantom_candidates(
     *,
     now: datetime,
     config: OrchestratorConfig | None = None,
-) -> tuple[list[str], list[str], bool, list[str], dict[str, AutoDevResult]]:
+    merged_ticket_ids: frozenset[str] = frozenset(),
+    gh_blocked_ticket_ids: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str], bool, list[str], dict[str, AutoDevResult], list[str]]:
     """Act phase for phantom sessions: apply all mutations.
 
     Returns (ticket_ids_to_revert, phantom_names, usage_limited,
-             salvaged_ticket_ids, salvaged_result_by_ticket).
+             salvaged_ticket_ids, salvaged_result_by_ticket, merged_completed_ids).
     ticket_ids_to_revert contains only PENDING-routed tickets (not dirty/blocked).
+    merged_completed_ids contains ticket IDs completed because their PR was already
+    merged (from merged_ticket_ids pre-pass; GitHub #637).
 
     Under ``ReapPolicy.SIGNAL_ONLY`` (default), CRASH_COMPLETE candidates
     (non-dirty only) are routed to BLOCKED_ON_USER instead of triggering
@@ -1937,16 +2222,23 @@ def _act_on_phantom_candidates(
     is resolved individually via resolve_reap_policy (GitHub #560).
     """
     if not candidates:
-        return [], [], False, [], {}
+        return [], [], False, [], {}, []
 
     effective_config = config if config is not None else OrchestratorConfig()
     clients = load_effective_clients()
     # Route each clean CRASH_COMPLETE candidate individually based on its lane's policy.
+    # Merged-PR / gh-blocked check (GitHub #637) runs BEFORE policy routing so
+    # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
     # Dirty phantoms always go to BLOCKED_ON_USER regardless of policy.
     signal_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
     for c in candidates:
         if c.proposed_action == ProposedAction.CRASH_COMPLETE and not c.worktree_dirty:
+            if c.ticket_id and (
+                c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
+            ):
+                auto_candidates.append(c)
+                continue
             policy = resolve_reap_policy(c, clients, effective_config)
             if policy is ReapPolicy.SIGNAL_ONLY:
                 if c.ticket_id:
@@ -1959,20 +2251,41 @@ def _act_on_phantom_candidates(
         _apply_queue_mutations(signal_mutations, clear_session_id=set())
     candidates = auto_candidates
     if not candidates:
-        return [], [], False, [], {}
+        return [], [], False, [], {}, []
 
     session_by_id = {s.id: s for s in state.sessions}
 
-    crash_candidates = [
+    all_crash_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.CRASH_COMPLETE
     ]
     salvage_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
     ]
 
+    # Split CRASH_COMPLETE candidates by world-state check results (GitHub #637).
+    # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
+    # reconcile() that runs BEFORE sessions_lock, so no gh subprocess executes
+    # here. Candidates with no ticket_id fall through to the normal crash path.
+    merged_crash_candidates = [
+        c
+        for c in all_crash_candidates
+        if c.ticket_id and c.ticket_id in merged_ticket_ids
+    ]
+    gh_blocked_crash_candidates = [
+        c
+        for c in all_crash_candidates
+        if c.ticket_id and c.ticket_id in gh_blocked_ticket_ids
+    ]
+    crash_candidates = [
+        c
+        for c in all_crash_candidates
+        if c not in merged_crash_candidates and c not in gh_blocked_crash_candidates
+    ]
+
     phantom_names: list[str] = []
     # ticket_ids to revert (only PENDING-routed, excludes dirty/BLOCKED_ON_USER)
     ticket_ids_to_revert: list[str] = []
+    merged_completed_ids: list[str] = []
     salvaged_ticket_ids: list[str] = []
     salvaged_result_by_ticket: dict[str, AutoDevResult] = {}
     pending_events: list[dict[str, object]] = []
@@ -2000,6 +2313,17 @@ def _act_on_phantom_candidates(
             salvaged_payload["ticket_id"] = candidate.ticket_id
         pending_events.append(salvaged_payload)
 
+    # Merged-complete: PR already shipped; mark COMPLETED + NORMAL, not CRASHED.
+    # Still appended to phantom_names — these sessions ARE phantom (absent from
+    # daemon roster), and callers need their names for queue cleanup below.
+    for candidate in merged_crash_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.NORMAL
+        session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        phantom_names.append(session.name)
+
     for candidate in crash_candidates:
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED
@@ -2017,10 +2341,61 @@ def _act_on_phantom_candidates(
             crash_payload["ticket_id"] = candidate.ticket_id
         pending_events.append(crash_payload)
 
+    # GH-blocked phantoms: can't verify PR; mark COMPLETED+CRASHED so they
+    # leave _LIVE_STATUSES (via status=COMPLETED) and aren't re-detected.
+    for candidate in gh_blocked_crash_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.CRASHED
+        session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        phantom_names.append(session.name)
+
     save_state(state)
 
     for payload in pending_events:
         record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    # SESSION_COMPLETED for merged phantoms (PR already shipped, not CRASHED).
+    for candidate in merged_crash_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            get_native_daemon_client().stop(session.surface_ref)
+        merged_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "crashed": False,
+            "salvaged": False,
+            "reason": _PHANTOM_REAP_MERGED_REASON,
+        }
+        if candidate.ticket_id:
+            merged_payload["ticket_id"] = candidate.ticket_id
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            merged_payload,
+            correlation_id=candidate.ticket_id,
+        )
+
+    # SESSION_NEEDS_ATTENTION for gh-blocked phantoms.
+    for candidate in gh_blocked_crash_candidates:
+        session = session_by_id[candidate.session_id]
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _GH_CHECK_BLOCKED_REASON,
+                "breadcrumbs": str(candidate.worktree_path)
+                if candidate.worktree_path
+                else "",
+                "crashed": False,
+            },
+            correlation_id=candidate.ticket_id,
+        )
 
     # Emit SESSION_PHANTOM_REVERTED for DAEMON-origin CRASH_COMPLETE candidates.
     dirty_ticket_ids: set[str] = set()
@@ -2059,8 +2434,12 @@ def _act_on_phantom_candidates(
         if c.ticket_id and session_by_id[c.session_id].origin is SessionOrigin.DAEMON
     ]
     revert_set = set(daemon_ticket_ids_to_revert)
+    merged_crash_tids = {c.ticket_id for c in merged_crash_candidates if c.ticket_id}
+    gh_blocked_crash_tids = {
+        c.ticket_id for c in gh_blocked_crash_candidates if c.ticket_id
+    }
     salvaged_set = set(salvaged_ticket_ids)
-    if revert_set or salvaged_set:
+    if revert_set or merged_crash_tids or gh_blocked_crash_tids or salvaged_set:
         with dev_queue_lock():
             store = load_dev_queue()
             changed = False
@@ -2073,6 +2452,15 @@ def _act_on_phantom_candidates(
                     else:
                         task.status = QueueItemStatus.PENDING
                         ticket_ids_to_revert.append(task.ticket_id)
+                    task.session_id = None
+                    changed = True
+                elif task.ticket_id in merged_crash_tids:
+                    task.status = QueueItemStatus.COMPLETED
+                    task.session_id = None
+                    merged_completed_ids.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in gh_blocked_crash_tids:
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
                     task.session_id = None
                     changed = True
                 elif task.ticket_id in salvaged_set:
@@ -2088,6 +2476,7 @@ def _act_on_phantom_candidates(
         False,
         salvaged_ticket_ids,
         salvaged_result_by_ticket,
+        merged_completed_ids,
     )
 
 
@@ -2170,12 +2559,19 @@ def _emit_reap_proposed(
         save_state(state)
 
 
-def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
+def _reconcile_locked(
+    *,
+    merged_ticket_ids: frozenset[str] = frozenset(),
+    gh_blocked_ticket_ids: frozenset[str] = frozenset(),
+) -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     """Body of reconcile(), called while sessions_lock is held.
 
     Separated so reconcile() holds exactly one lock acquisition and the
     helpers (revert_stalled_headless_sessions, flag_silently_idle_daemon_sessions)
     can save_state directly without re-acquiring the lock.
+
+    merged_ticket_ids / gh_blocked_ticket_ids come from a lockless pre-pass in
+    reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
 
     Returns a tuple of (ReconcileReport, salvage_git_candidates) where
     salvage_git_candidates is the list of git-state salvage candidates for
@@ -2200,8 +2596,13 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     )
     # native_live not yet known — stalled sweep is pre-daemon-query.
     _emit_reap_proposed(state, stalled_candidates, native_live=set(), now=now)
-    stalled_reverted = _act_on_stalled_candidates(
-        state, stalled_candidates, now=now, config=orchestrator_config
+    stalled_reverted, merged_from_stalled = _act_on_stalled_candidates(
+        state,
+        stalled_candidates,
+        now=now,
+        config=orchestrator_config,
+        merged_ticket_ids=merged_ticket_ids,
+        gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
 
     try:
@@ -2224,7 +2625,10 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         surface_to_full = {}
         daemon_errored = True
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
-        return ReconcileReport(reverted_ticket_ids=stalled_reverted), []
+        return ReconcileReport(
+            reverted_ticket_ids=stalled_reverted,
+            completed_ticket_ids=merged_from_stalled,
+        ), []
     _backfill_claude_session_ids(state, surface_to_full)
 
     # Snapshot sessions that are already TIMED_OUT before the watchdog sweep,
@@ -2240,8 +2644,15 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         task_by_ticket=shared_task_by_ticket,
     )
     _emit_reap_proposed(state, idle_candidates, native_live=native_live, now=now)
-    silently_idle_ticket_ids, salvage_git_candidates = _act_on_idle_candidates(
-        state, idle_candidates, now=now, config=orchestrator_config
+    silently_idle_ticket_ids, merged_from_idle, salvage_git_candidates = (
+        _act_on_idle_candidates(
+            state,
+            idle_candidates,
+            now=now,
+            config=orchestrator_config,
+            merged_ticket_ids=merged_ticket_ids,
+            gh_blocked_ticket_ids=gh_blocked_ticket_ids,
+        )
     )
     # Check whether any session newly transitioned to TIMED_OUT has a usage-limit
     # transcript. The _detect_usage_limit I/O cost is minimal (OS-cached files).
@@ -2269,6 +2680,9 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         )
         return ReconcileReport(
             reverted_ticket_ids=all_reverted,
+            completed_ticket_ids=list(
+                dict.fromkeys(merged_from_stalled + merged_from_idle)
+            ),
             usage_limited=watchdog_usage_limited,
         ), salvage_git_candidates
 
@@ -2283,8 +2697,14 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         _watchdog_usage_limited_phantom,
         _salvaged_phantom_ticket_ids,
         _salvaged_phantom_results,
+        merged_from_phantom,
     ) = _act_on_phantom_candidates(
-        state, phantom_candidates, now=now, config=orchestrator_config
+        state,
+        phantom_candidates,
+        now=now,
+        config=orchestrator_config,
+        merged_ticket_ids=merged_ticket_ids,
+        gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
 
     # Sweep for TIMED_OUT and DAEMON-COMPLETED sessions whose owning TicketTask
@@ -2307,11 +2727,15 @@ def _reconcile_locked() -> tuple[ReconcileReport, list[_SalvageCandidate]]:
         )
     )
 
+    all_merged_completed = list(
+        dict.fromkeys(merged_from_stalled + merged_from_idle + merged_from_phantom)
+    )
     return (
         ReconcileReport(
             phantom_session_ids=drift.phantom_session_ids,
             phantom_session_names=phantom_names,
             reverted_ticket_ids=all_reverted,
+            completed_ticket_ids=all_merged_completed,
             usage_limited=watchdog_usage_limited,
         ),
         salvage_git_candidates,
