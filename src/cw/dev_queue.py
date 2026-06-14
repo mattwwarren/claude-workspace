@@ -21,6 +21,7 @@ from cw.config import (
 from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError
 from cw.models import (
     DEFAULT_LANE,
+    DEFAULT_STAGE,
     DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
@@ -122,6 +123,18 @@ def _fill_lane_default(task_raw: dict[str, Any]) -> None:
         task_raw["lane"] = DEFAULT_LANE
 
 
+def _fill_task_stage_default(task_raw: dict[str, Any]) -> None:
+    """Fill stage introduced in dev-queue schema v4 (GitHub #612). Idempotent."""
+    if "stage" not in task_raw:
+        task_raw["stage"] = DEFAULT_STAGE.value
+
+
+def _fill_task_stage_base_ref_default(task_raw: dict[str, Any]) -> None:
+    """Fill stage_base_ref from dev-queue schema v4 (GitHub #612). Idempotent."""
+    if "stage_base_ref" not in task_raw:
+        task_raw["stage_base_ref"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -130,6 +143,8 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
             if isinstance(task_raw, dict):
                 _fill_task_cost_default(task_raw)
                 _fill_lane_default(task_raw)
+                _fill_task_stage_default(task_raw)
+                _fill_task_stage_base_ref_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 

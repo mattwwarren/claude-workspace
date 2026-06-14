@@ -343,6 +343,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _fill_last_result_default(session_raw)
             _fill_cost_fields_default(session_raw)
             _fill_session_lane_default(session_raw)
+            _fill_session_stage_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -421,6 +422,12 @@ def _fill_session_lane_default(session_raw: dict[str, Any]) -> None:
     """Fill Session.lane introduced in schema v9 (GitHub #594). Idempotent."""
     if "lane" not in session_raw:
         session_raw["lane"] = None
+
+
+def _fill_session_stage_default(session_raw: dict[str, Any]) -> None:
+    """Fill Session.stage introduced in schema v10 (GitHub #612). Idempotent."""
+    if "stage" not in session_raw:
+        session_raw["stage"] = None
 
 
 def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
