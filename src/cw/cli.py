@@ -75,6 +75,7 @@ from cw.exceptions import (
     MissingWorkspaceError,
     WorktreeError,
 )
+from cw.executor import ClaudeNativeExecutor
 from cw.models import (
     DEFAULT_LANE,
     WORKER_PURPOSES,
@@ -89,6 +90,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TaskSpec,
     TicketTask,
 )
@@ -3504,6 +3506,26 @@ def schema_show(name: str, fmt: str) -> None:
         click.echo(format_json(model_cls))
     else:
         click.echo(format_tldr(model_cls))
+
+
+@schema.command(name="stage-output")
+@click.argument("stage")
+def schema_stage_output(stage: str) -> None:
+    """Show the sentinel JSON schema for STAGE.
+
+    STAGE must be one of: harden, plan, impl, review, finalize.
+    # Why: bridge — every stage returns the AutoDevResult contract until
+    # per-stage models land (RFC 0005, post-A3)
+    """
+    try:
+        stage_enum = Stage(stage)
+    except ValueError as exc:
+        valid = ", ".join(s.value for s in Stage)
+        msg = f"Unknown stage {stage!r}. Valid stages: {valid}"
+        raise click.UsageError(msg) from exc
+    executor = ClaudeNativeExecutor()
+    schema_dict = executor.stage_sentinel_schema(stage_enum)
+    click.echo(json.dumps(schema_dict, indent=2))
 
 
 # --- Result command group ---
