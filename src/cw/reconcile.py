@@ -163,6 +163,15 @@ _TIMED_OUT_MERGED_REASON = "timed_out_merged"
 # worktree has unsaved work and the task is routed to BLOCKED_ON_USER instead
 # of being retried automatically (GitHub issue #421).
 _DIRTY_WORKTREE_REASON = "dirty_worktree"
+# Reason tag written to SESSION_COMPLETED events when a phantom/stalled/idle
+# session's PR was found MERGED before its task was reverted to PENDING.
+# Prevents re-dispatch of already-shipped tickets (GitHub issue #637).
+_PHANTOM_REAP_MERGED_REASON = "phantom_reap_merged"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when the gh
+# availability or PR-merged check returns an inconclusive result and the
+# task is routed to BLOCKED_ON_USER rather than being reverted to PENDING
+# (fail-closed on ambiguous world state; GitHub issue #637).
+_GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
