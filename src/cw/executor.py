@@ -12,6 +12,7 @@ from cw.models import (
     StageExecutorConfig,
     TicketTask,
 )
+from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.spawn import spawn_create_impl
 
 if TYPE_CHECKING:
@@ -66,7 +67,7 @@ class ClaudeNativeExecutor:
             client=effective_client,
             worktree=worktree,
             prompt=f"auto-dev stage {stage.value} for ticket {task.ticket_id}",
-            label=f"auto-dev/{task.ticket_id}/{stage.value}",
+            label=f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}/{stage.value}",
             ticket_id=task.ticket_id,
             lane=task.lane,
             headless=True,

@@ -18,6 +18,7 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.native_daemon import FakeNativeDaemonClient
@@ -34,14 +35,10 @@ def _make_client(tmp_path: Path, *, worker_model: str | None = None) -> ClientCo
 def test_spawn_no_model(
     tmp_config_dir: Path,
     mock_native_daemon: FakeNativeDaemonClient,
-    make_git_repo: object,
+    make_git_repo: Callable[[str], Path],
 ) -> None:
     """worker_model=None, no stage executor config → no --model in spawn_extra_args."""
-    from collections.abc import Callable
-    from pathlib import Path as _Path
-
-    assert isinstance(make_git_repo, Callable)
-    worktree: _Path = make_git_repo("wt-no-model")  # type: ignore[operator]
+    worktree = make_git_repo("wt-no-model")
     client = _make_client(worktree, worker_model=None)
     task = TicketTask(ticket_id="T-1", client="test")
     executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
@@ -56,14 +53,10 @@ def test_spawn_no_model(
 def test_spawn_client_worker_model(
     tmp_config_dir: Path,
     mock_native_daemon: FakeNativeDaemonClient,
-    make_git_repo: object,
+    make_git_repo: Callable[[str], Path],
 ) -> None:
     """client.worker_model='sonnet', no stage config → ['--model', 'sonnet'] in args."""
-    from collections.abc import Callable
-    from pathlib import Path as _Path
-
-    assert isinstance(make_git_repo, Callable)
-    worktree: _Path = make_git_repo("wt-client-model")  # type: ignore[operator]
+    worktree = make_git_repo("wt-client-model")
     client = _make_client(worktree, worker_model="sonnet")
     task = TicketTask(ticket_id="T-1", client="test")
     executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
@@ -79,17 +72,13 @@ def test_spawn_client_worker_model(
 def test_spawn_stage_model_wins(
     tmp_config_dir: Path,
     mock_native_daemon: FakeNativeDaemonClient,
-    make_git_repo: object,
+    make_git_repo: Callable[[str], Path],
 ) -> None:
     """stage_config.model='haiku' wins over client.worker_model='sonnet'.
 
     Exactly one --model flag in spawn_extra_args.
     """
-    from collections.abc import Callable
-    from pathlib import Path as _Path
-
-    assert isinstance(make_git_repo, Callable)
-    worktree: _Path = make_git_repo("wt-stage-model")  # type: ignore[operator]
+    worktree = make_git_repo("wt-stage-model")
     client = ClientConfig(
         name="test",
         workspace_path=worktree,
