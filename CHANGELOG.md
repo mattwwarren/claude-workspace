@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-06-14
+
+RFC 0005 forward-compat seams (milestone #7). Additive, dormant data-model and
+executor scaffolding so a later staged-pipeline engine (v1.2.0) can be wired in
+without another schema migration. No dispatch behavior change.
+
+### Added
+
+- **Stage data-model + schema bump** (#612): `Stage` enum, `StageExecutorConfig`,
+  `StagePipelineConfig` (with a `LaneConfig.pipeline` lane override and
+  `ClientConfig.pipeline`), and dormant `TicketTask.stage`/`stage_base_ref` +
+  `Session.stage` fields. Bumps `CW_STATE_SCHEMA_VERSION` 9→10 and
+  `DEV_QUEUE_SCHEMA_VERSION` 3→4 with store-level migrations that default the new
+  fields on load (verified against real on-disk v9/v3 state).
+- **`StageExecutor` seam** (#613): a `@runtime_checkable` Protocol plus
+  `ClaudeNativeExecutor` wrapping `spawn_create_impl` + the native daemon
+  (forwards `--model`). Unwired — not yet called by dispatch.
+- **`cw schema stage-output <stage>`** (#614): exposes the per-stage sentinel JSON
+  schema (the validation contract foreign executors will consume).
+- **`.cw/` worktree exclude** (#615): worktree creation idempotently registers
+  `.cw/` in `$GIT_COMMON_DIR/info/exclude`, never touching the consumer's
+  committed `.gitignore`.
+
 ## [1.1.2] — 2026-06-14
 
 Dispatch-reliability cluster — worker liveness, re-dispatch safety, and
