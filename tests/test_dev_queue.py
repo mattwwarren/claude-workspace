@@ -1241,9 +1241,14 @@ class TestConsumeCompletedSessionsWrapper:
         from cw.dev_queue import consume_completed_sessions
 
         called: list[int] = []
+
+        def _consume_side_effect() -> int:
+            called.append(1)
+            return 3
+
         monkeypatch.setattr(
             "cw.dispatch.consume_completed_sessions",
-            lambda: called.append(1) or 3,
+            _consume_side_effect,
         )
         result = consume_completed_sessions()
         assert result == 3

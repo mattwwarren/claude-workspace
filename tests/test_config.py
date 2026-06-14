@@ -1034,25 +1034,25 @@ class TestOrchestratorConfigReapPolicy:
     def test_explicit_auto(self) -> None:
         from cw.models import OrchestratorConfig, ReapPolicy
 
-        config = OrchestratorConfig(reap_policy="auto")
+        config = OrchestratorConfig.model_validate({"reap_policy": "auto"})
         assert config.reap_policy == ReapPolicy.AUTO
 
     def test_unknown_string_coerces_to_signal_only(self) -> None:
         from cw.models import OrchestratorConfig, ReapPolicy
 
-        config = OrchestratorConfig(reap_policy="bogus")
+        config = OrchestratorConfig.model_validate({"reap_policy": "bogus"})
         assert config.reap_policy == ReapPolicy.SIGNAL_ONLY
 
     def test_non_string_coerces_to_signal_only(self) -> None:
         from cw.models import OrchestratorConfig, ReapPolicy
 
-        config = OrchestratorConfig(reap_policy=True)
+        config = OrchestratorConfig.model_validate({"reap_policy": True})
         assert config.reap_policy == ReapPolicy.SIGNAL_ONLY
 
     def test_numeric_coerces_to_signal_only(self) -> None:
         from cw.models import OrchestratorConfig, ReapPolicy
 
-        config = OrchestratorConfig(reap_policy=42)
+        config = OrchestratorConfig.model_validate({"reap_policy": 42})
         assert config.reap_policy == ReapPolicy.SIGNAL_ONLY
 
 
