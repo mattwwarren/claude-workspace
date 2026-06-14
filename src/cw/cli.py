@@ -1964,15 +1964,18 @@ def dev_queue_status(client: str | None) -> None:
         by_client[task.client].append(task)
 
     header = (
-        f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'COMPLETED':>9}"
-        f"  {'CANCELLED':>9}  TICKETS"
+        f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'BLOCKED':>7}"
+        f"  {'COMPLETED':>9}  {'CANCELLED':>9}  TICKETS"
     )
     click.echo(header)
-    click.echo("-" * 82)
+    click.echo("-" * 90)
     for client_name in clients_seen:
         client_tasks = by_client[client_name]
         pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
         running_tasks = [t for t in client_tasks if t.status == QueueItemStatus.RUNNING]
+        blocked_tasks = [
+            t for t in client_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER
+        ]
         completed_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.COMPLETED
         ]
@@ -1982,7 +1985,8 @@ def dev_queue_status(client: str | None) -> None:
         ticket_ids = ", ".join(t.ticket_id for t in client_tasks)
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
-            f"  {len(completed_tasks):>9}  {len(cancelled_tasks):>9}  {ticket_ids}"
+            f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
+            f"  {len(cancelled_tasks):>9}  {ticket_ids}"
         )
 
     tick_data = latest_tick_summary_by_client()

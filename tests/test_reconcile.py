@@ -4744,8 +4744,6 @@ def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
     [
         "scope_exceeded",
         "forbidden_area",
-        "plan_pending_approval",
-        "review_pending_approval",
         "merge_gate_blocked",
     ],
 )
@@ -4822,6 +4820,8 @@ def test_salvage_all_terminal_statuses_from_phantom(
     [
         "ambiguities_pending_resolution",
         "premises_pending_verification",
+        "plan_pending_approval",
+        "review_pending_approval",
     ],
 )
 def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
@@ -4893,8 +4893,6 @@ def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
     [
         "scope_exceeded",
         "forbidden_area",
-        "plan_pending_approval",
-        "review_pending_approval",
         "merge_gate_blocked",
     ],
 )
@@ -4956,6 +4954,8 @@ def test_salvage_all_terminal_statuses_from_stalled(
     [
         "ambiguities_pending_resolution",
         "premises_pending_verification",
+        "plan_pending_approval",
+        "review_pending_approval",
     ],
 )
 def test_salvage_paused_statuses_from_stalled_route_to_blocked_on_user(
@@ -11663,15 +11663,15 @@ class TestRouteEmittedSentinel:
         assert payload["salvaged"] is True
         assert payload["crashed"] is False
 
-    def test_review_pending_approval_sentinel_routes_completed(
+    def test_review_pending_approval_sentinel_routes_blocked_on_user(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression: review_pending_approval-shaped sentinel emitted without
-        signal_stop routes task to COMPLETED (PAUSED_FOR_USER_INPUT path),
-        not stuck as RUNNING indefinitely."""
+        signal_stop routes task to BLOCKED_ON_USER (PAUSED_FOR_USER_INPUT path),
+        not stuck as RUNNING indefinitely. See #633."""
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -11715,5 +11715,5 @@ class TestRouteEmittedSentinel:
         assert reloaded.last_result["status"] == "review_pending_approval"
 
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-        # review_pending_approval is in SALVAGE_TERMINAL_STATUSES (not retried).
-        assert task.status == QueueItemStatus.COMPLETED
+        # review_pending_approval is in PAUSED_FOR_USER_INPUT_STATUSES (#633).
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
