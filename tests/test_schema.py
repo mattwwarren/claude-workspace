@@ -85,3 +85,26 @@ class TestSchemaShow:
         result = runner.invoke(main, ["schema", "show", "unknown-schema"])
         assert result.exit_code != 0
         assert "unknown-schema" in result.output.lower()
+
+
+class TestSchemaStageOutput:
+    def test_valid_stage_returns_json_with_properties(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["schema", "stage-output", "impl"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert "properties" in parsed
+
+    def test_invalid_stage_errors_with_bad_value(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["schema", "stage-output", "bogus"])
+        assert result.exit_code != 0
+        assert "bogus" in result.output.lower()
+
+    def test_all_stages_return_identical_schema(self) -> None:
+        runner = CliRunner()
+        result_impl = runner.invoke(main, ["schema", "stage-output", "impl"])
+        result_plan = runner.invoke(main, ["schema", "stage-output", "plan"])
+        assert result_impl.exit_code == 0
+        assert result_plan.exit_code == 0
+        assert result_impl.output == result_plan.output
