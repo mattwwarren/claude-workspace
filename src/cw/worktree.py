@@ -34,6 +34,9 @@ _GIT_PORCELAIN_UNTRACKED = "??"
 # pushes the hashed base closer to _WORKTREE_NAME_CAP and reduces
 # headroom for the branch slug, so increase with care.
 _WORKSPACE_HASH_CHARS = 8
+# Pattern appended to $GIT_COMMON_DIR/info/exclude so ephemeral per-session
+# .cw/ artifacts are invisible to git status without touching .gitignore.
+_CW_EXCLUDE_PATTERN = ".cw/"
 
 
 def slugify_branch(branch: str) -> str:
@@ -193,6 +196,40 @@ def _has_commits_beyond_base(wt_path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def _register_cw_exclude(git_cwd: Path) -> None:
+    """Idempotently append .cw/ to $GIT_COMMON_DIR/info/exclude.
+
+    Uses git rev-parse --git-common-dir so the write targets the shared
+    object-store directory even when called from within a worktree. Never
+    touches the committed .gitignore. Logs a warning and returns on any
+    git or I/O failure rather than propagating — exclude registration is
+    advisory and must not abort worktree creation.
+    """
+    try:
+        result = _run_git("rev-parse", "--git-common-dir", cwd=git_cwd)
+        common_dir_str = result.stdout.strip()
+        if not common_dir_str:
+            _log.warning(
+                "_register_cw_exclude: empty --git-common-dir output in %s", git_cwd
+            )
+            return
+        common_dir = (
+            Path(common_dir_str)
+            if Path(common_dir_str).is_absolute()
+            else git_cwd / common_dir_str
+        )
+        exclude_path = common_dir / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude_path.read_text() if exclude_path.exists() else ""
+        if _CW_EXCLUDE_PATTERN in existing.splitlines():
+            return
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        with exclude_path.open("a") as fh:
+            fh.write(f"{separator}{_CW_EXCLUDE_PATTERN}\n")
+    except (WorktreeError, OSError) as exc:
+        _log.warning("_register_cw_exclude: failed for %s: %s", git_cwd, exc)
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -259,6 +296,7 @@ def create_worktree(
         args.insert(2, "--force")
 
     _run_git(*args, cwd=git_cwd)
+    _register_cw_exclude(git_cwd)
 
     # Initialize submodules if the repo uses them
     if (git_cwd / ".gitmodules").exists():

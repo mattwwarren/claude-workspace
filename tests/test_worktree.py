@@ -16,6 +16,7 @@ from cw.models import ClientConfig
 from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
+    _register_cw_exclude,
     check_main_ff_safety,
     check_not_main_checkout,
     create_worktree,
@@ -171,6 +172,111 @@ class TestWorktreePathFor:
         )
         result = worktree_path_for(client, "feat/x")
         assert result == override / "feat-x"
+
+
+class TestRegisterCwExclude:
+    """Tests for _register_cw_exclude — idempotent .cw/ exclude registration."""
+
+    def test_appends_cw_pattern_to_exclude(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """First call writes .cw/ to $GIT_COMMON_DIR/info/exclude."""
+        repo = make_git_repo("test-repo")
+        _register_cw_exclude(repo)
+        exclude = repo / ".git" / "info" / "exclude"
+        assert ".cw/" in exclude.read_text().splitlines()
+
+    def test_idempotent_second_call_does_not_duplicate(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Calling twice does not produce duplicate .cw/ lines."""
+        repo = make_git_repo("test-repo")
+        _register_cw_exclude(repo)
+        _register_cw_exclude(repo)
+        exclude = repo / ".git" / "info" / "exclude"
+        assert exclude.read_text().splitlines().count(".cw/") == 1
+
+    def test_pattern_already_present_is_left_unchanged(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Pre-existing .cw/ line is not duplicated."""
+        repo = make_git_repo("test-repo")
+        info_dir = repo / ".git" / "info"
+        info_dir.mkdir(exist_ok=True)
+        (info_dir / "exclude").write_text(".cw/\n")
+        _register_cw_exclude(repo)
+        assert (info_dir / "exclude").read_text().splitlines().count(".cw/") == 1
+
+    def test_creates_info_dir_when_missing(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """info/ directory and exclude file are created if absent."""
+        repo = make_git_repo("test-repo")
+        info_dir = repo / ".git" / "info"
+        import shutil
+
+        shutil.rmtree(info_dir, ignore_errors=True)
+        _register_cw_exclude(repo)
+        assert (info_dir / "exclude").exists()
+        assert ".cw/" in (info_dir / "exclude").read_text().splitlines()
+
+    def test_does_not_touch_gitignore(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The committed .gitignore is never modified."""
+        repo = make_git_repo("test-repo")
+        gitignore = repo / ".gitignore"
+        original = "*.pyc\n__pycache__/\n"
+        gitignore.write_text(original)
+        _register_cw_exclude(repo)
+        assert gitignore.read_text() == original
+
+    def test_git_failure_logs_warning_and_does_not_raise(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """WorktreeError from _run_git is swallowed with a WARNING."""
+        from cw.exceptions import WorktreeError
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            msg = "git not available"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            _register_cw_exclude(tmp_path)  # must not raise
+        assert any("_register_cw_exclude" in r.message for r in caplog.records)
+
+    def test_oserror_logs_warning_and_does_not_raise(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """OSError from file I/O is swallowed with a WARNING."""
+        repo = make_git_repo("test-repo")
+
+        original_run = __import__("cw.worktree", fromlist=["_run_git"])._run_git
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            if "rev-parse" in args and "--git-common-dir" in args:
+                return original_run(*args, cwd=cwd, check=check)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        info_dir = repo / ".git" / "info"
+        info_dir.mkdir(exist_ok=True)
+        exclude = info_dir / "exclude"
+        exclude.write_text("")
+        exclude.chmod(0o000)
+        try:
+            with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+                _register_cw_exclude(repo)  # must not raise
+        finally:
+            exclude.chmod(0o644)
+        assert any("_register_cw_exclude" in r.message for r in caplog.records)
 
 
 class TestCreateWorktree:
@@ -342,10 +448,11 @@ class TestCreateWorktree:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         result = create_worktree(client, "feat/new")
         assert result == tmp_path / "wt" / "feat-new"
-        # Should have called rev-parse then worktree add -b
-        add_call = git_calls[-1]
-        assert "worktree" in add_call
-        assert "-b" in add_call
+        # Should have called worktree add -b (not necessarily the last call
+        # since _register_cw_exclude runs after and adds a rev-parse call)
+        wt_add_calls = [c for c in git_calls if "worktree" in c and "add" in c]
+        assert len(wt_add_calls) == 1
+        assert "-b" in wt_add_calls[0]
 
     def test_uses_existing_branch(
         self,
@@ -371,8 +478,9 @@ class TestCreateWorktree:
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         create_worktree(client, "feat/existing")
-        add_call = git_calls[-1]
-        assert "-b" not in add_call
+        wt_add_calls = [c for c in git_calls if "worktree" in c and "add" in c]
+        assert len(wt_add_calls) == 1
+        assert "-b" not in wt_add_calls[0]
 
     def test_create_worktree_rejects_path_equal_to_main_checkout(
         self,
@@ -519,6 +627,76 @@ class TestCreateWorktree:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         with pytest.raises(StaleWorktreeError, match="unsaved work"):
             create_worktree(client, "feat/unpushed")
+
+    def test_registers_cw_exclude_on_new_worktree(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_register_cw_exclude is called once when a new worktree is created."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        exclude_calls: list[Path] = []
+
+        def mock_register(git_cwd: Path) -> None:
+            exclude_calls.append(git_cwd)
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            result = MagicMock(stderr="")
+            if "rev-parse" in args:
+                result.returncode = 128  # branch doesn't exist
+            else:
+                result.returncode = 0
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        monkeypatch.setattr("cw.worktree._register_cw_exclude", mock_register)
+        create_worktree(client, "feat/new")
+        assert len(exclude_calls) == 1
+
+    def test_does_not_register_exclude_on_idempotent_reuse(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_register_cw_exclude is NOT called when an existing worktree is reused."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "feat-clean-reuse"
+        wt_path.mkdir(parents=True)
+        exclude_calls: list[Path] = []
+
+        def mock_register(git_cwd: Path) -> None:
+            exclude_calls.append(git_cwd)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "branch" in args and "--show-current" in args:
+                result.stdout = "feat/clean-reuse\n"
+            elif "status" in args:
+                result.stdout = ""
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.stdout = "abc1234\n"
+            elif "log" in args:
+                result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        monkeypatch.setattr("cw.worktree._register_cw_exclude", mock_register)
+        create_worktree(client, "feat/clean-reuse")
+        assert len(exclude_calls) == 0
 
 
 class TestCheckNotMainCheckout:
