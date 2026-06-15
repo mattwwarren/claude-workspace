@@ -32,8 +32,6 @@ class StageExecutor(Protocol):
         task: TicketTask,
         worktree: Path,
         client: ClientConfig,
-        wall_clock_budget_seconds: int | None = None,
-        parent: str | None = None,
     ) -> str:
         """Spawn the stage session; return the cw session id."""
         ...
@@ -61,8 +59,6 @@ class ClaudeNativeExecutor:
         task: TicketTask,
         worktree: Path,
         client: ClientConfig,
-        wall_clock_budget_seconds: int | None = None,
-        parent: str | None = None,
     ) -> str:
         stage_config = client.pipeline.executors.get(stage, StageExecutorConfig())
         effective_model = stage_config.model or client.worker_model
@@ -70,17 +66,15 @@ class ClaudeNativeExecutor:
         return spawn_create_impl(
             client=effective_client,
             worktree=worktree,
-            prompt=f"/auto-dev-{stage.value} {task.ticket_id} --headless",
-            # Why: stage-agnostic so ticket_id_for_session resolves cleanly;
-            # sequential pipeline ensures only one stage per ticket at a time.
-            label=f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
+            prompt=f"auto-dev stage {stage.value} for ticket {task.ticket_id}",
+            label=f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}/{stage.value}",
             ticket_id=task.ticket_id,
             lane=task.lane,
             headless=True,
             purpose=SessionPurpose.IMPL,
             permission_mode=None,
-            parent=parent,
-            wall_clock_budget_seconds=wall_clock_budget_seconds,
+            parent=None,
+            wall_clock_budget_seconds=None,
             native_daemon=self._native_daemon,
         )
 
