@@ -13,11 +13,7 @@ import pydantic
 import yaml
 
 from cw.auto_dev_result import (
-    PURE_PAUSE_STATUSES,
-    SCOPE_GATED_APPROVAL_STATUSES,
-    SCOPE_TIER_SMALL,
-    STAGE_FAILURE_STATUSES,
-    STAGE_SUCCESS_STATUSES,
+    PAUSED_FOR_USER_INPUT_STATUSES,
     AutoDevResult,
     parse_stdout,
 )
@@ -43,7 +39,6 @@ from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
-    Stage,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
@@ -747,35 +742,9 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
         task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
 
 
-def _stage_advance(
-    task: TicketTask,
-    stages: list[Stage],
-) -> tuple[QueueItemStatus, Stage, str | None]:
-    """Return (new_status, new_stage, new_session_id) for a stage-success event.
-
-    When the task's current stage is the last in the pipeline, signals
-    COMPLETED (terminal). When the stage is not found in the pipeline at all,
-    signals BLOCKED_ON_USER with a warning so the operator can inspect.
-    Otherwise advances to the next stage and returns PENDING.
-    """
-    if task.stage not in stages:
-        _log.warning(
-            "dispatch: task %s stage %r not in pipeline stages %r — BLOCKED_ON_USER",
-            task.ticket_id,
-            task.stage,
-            stages,
-        )
-        return QueueItemStatus.BLOCKED_ON_USER, task.stage, task.session_id
-    if task.stage == stages[-1]:
-        return QueueItemStatus.COMPLETED, task.stage, task.session_id
-    idx = stages.index(task.stage)
-    return QueueItemStatus.PENDING, stages[idx + 1], None
-
-
 def _apply_events_to_store(
     store: DevQueueStore,
     events: list[OrchestratorEvent],
-    clients: dict[str, ClientConfig],
 ) -> int:
     """Apply SESSION_COMPLETED events to an already-loaded DevQueueStore.
 
@@ -835,53 +804,15 @@ def _apply_events_to_store(
                 (s for s in state.sessions if s.id == event_session_id),
                 None,
             )
-            sid = event_session_id if isinstance(event_session_id, str) else None
-
-            # Resolve stage pipeline for this task's client.
-            client_cfg = clients.get(task.client)
-            if client_cfg is None:
-                _log.warning(
-                    "dispatch: unknown client %r for task %s — routing BLOCKED_ON_USER",
-                    task.client,
-                    task.ticket_id,
-                )
+            if (
+                session is not None
+                and isinstance(session.last_result, dict)
+                and session.last_result.get("status") in PAUSED_FOR_USER_INPUT_STATUSES
+            ):
                 task.status = QueueItemStatus.BLOCKED_ON_USER
-                _accumulate_task_cost(task, sid)
-                completed += 1
-                break
-
-            stages = client_cfg.pipeline.stages
-            last_result: dict[str, object] | None = None
-            if session is not None and isinstance(session.last_result, dict):
-                last_result = session.last_result
-            status = last_result.get("status") if last_result is not None else None
-
-            # Rule 1: pure pause statuses (ambiguities, premises) → BLOCKED
-            if status in PURE_PAUSE_STATUSES:
-                task.status = QueueItemStatus.BLOCKED_ON_USER
-            # Rule 2: scope-gated approval → advance if small, else BLOCKED
-            elif status in SCOPE_GATED_APPROVAL_STATUSES:
-                scope = last_result.get("scope") if last_result is not None else None
-                tier = scope.get("tier") if isinstance(scope, dict) else None
-                if tier == SCOPE_TIER_SMALL:
-                    task.status, task.stage, task.session_id = _stage_advance(
-                        task, stages
-                    )
-                else:
-                    task.status = QueueItemStatus.BLOCKED_ON_USER
-            # Rule 3: shipped → stage success, advance
-            elif status in STAGE_SUCCESS_STATUSES:
-                task.status, task.stage, task.session_id = _stage_advance(task, stages)
-            # Rule 4: no_op → always terminal
-            elif status == "no_op":
-                task.status = QueueItemStatus.COMPLETED
-            # Rule 5: failure statuses → BLOCKED
-            elif status in STAGE_FAILURE_STATUSES:
-                task.status = QueueItemStatus.BLOCKED_ON_USER
-            # Rule 6: unparseable / None → BLOCKED
             else:
-                task.status = QueueItemStatus.BLOCKED_ON_USER
-
+                task.status = QueueItemStatus.COMPLETED
+            sid = event_session_id if isinstance(event_session_id, str) else None
             _accumulate_task_cost(task, sid)
             completed += 1
             break
@@ -912,12 +843,7 @@ def consume_completed_sessions() -> int:
 
     with dev_queue_lock():
         store = load_dev_queue()
-        # Why: load_clients() is correct here — lane-level overrides in
-        # concurrency_overrides.json only patch paused/max_parallel, not
-        # pipeline.stages, so load_effective_clients() would return the same
-        # pipeline config and is not needed for stage-advance resolution.
-        clients = load_clients()
-        completed = _apply_events_to_store(store, events, clients)
+        completed = _apply_events_to_store(store, events)
         # Advance cursor inside the dev-queue lock so the cursor never
         # moves past events whose queue mutations haven't been persisted yet.
         advance_cursor(_DISPATCH_CONSUMER, events[-1].id)

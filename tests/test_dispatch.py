@@ -425,27 +425,14 @@ class TestConsumeCompletesTasks:
             ticket_id="GEN-300",
             client="test-client",
             status=QueueItemStatus.RUNNING,
-            session_id="sess-300",
         )
         store = DevQueueStore(tasks=[task])
         save_dev_queue(store)
 
-        # Seed a session with no_op so Rule 4 routes to COMPLETED.
-        sess = Session(
-            id="sess-300",
-            name="test-client/auto-dev/GEN-300",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            workspace_path=sample_client_config.workspace_path,
-            last_result={"status": "no_op"},
-        )
-        save_state(CwState(sessions=[sess]))
-
         # Write a session.completed event referencing the ticket
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
-            {"ticket_id": "GEN-300", "session_id": "sess-300", "client": "test-client"},
+            {"ticket_id": "GEN-300", "client": "test-client"},
         )
 
         completed = consume_completed_sessions()
@@ -488,18 +475,6 @@ class TestConsumeCompletesTasks:
             status=QueueItemStatus.RUNNING,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
-
-        # Seed a session with no_op so the stage-advance rule routes to COMPLETED.
-        sess = Session(
-            id="abc123",
-            name="test-client/auto-dev/GEN-700",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            workspace_path=sample_client_config.workspace_path,
-            last_result={"status": "no_op"},
-        )
-        save_state(CwState(sessions=[sess]))
 
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
@@ -638,20 +613,6 @@ class TestConsumeCompletesTasks:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        # Seed a session with no_op so the stage-advance rule (Rule 4) still
-        # routes to COMPLETED — this test verifies session-id disambiguation,
-        # not stage-advance semantics.
-        sess = Session(
-            id="current-session",
-            name="test-client/auto-dev/GEN-MATCH",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            workspace_path=sample_client_config.workspace_path,
-            last_result={"status": "no_op"},
-        )
-        save_state(CwState(sessions=[sess]))
-
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
             {
@@ -681,19 +642,6 @@ class TestConsumeCompletesTasks:
             status=QueueItemStatus.RUNNING,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
-
-        # Seed a session with no_op so Rule 4 routes to COMPLETED — this test
-        # verifies ticket_id fallback matching, not stage-advance semantics.
-        sess = Session(
-            id="any-session",
-            name="test-client/auto-dev/GEN-LEGACY",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            workspace_path=sample_client_config.workspace_path,
-            last_result={"status": "no_op"},
-        )
-        save_state(CwState(sessions=[sess]))
 
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
@@ -730,19 +678,6 @@ class TestConsumeCompletesTasks:
             session_id="daemon-session",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
-
-        # Seed a session with no_op so Rule 4 routes to COMPLETED — the
-        # extended-event shape test verifies event parsing, not stage advance.
-        sess = Session(
-            id="daemon-session",
-            name="test-client/auto-dev/GEN-WRAP",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            workspace_path=sample_client_config.workspace_path,
-            last_result={"status": "no_op"},
-        )
-        save_state(CwState(sessions=[sess]))
 
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
@@ -824,13 +759,11 @@ class TestConsumeCompletesTasks:
     ) -> None:
         """SESSION_COMPLETED with a non-paused last_result routes task to COMPLETED.
 
-        Verifies the paused-status guard does not affect terminal outcomes.
-        Uses no_op (Rule 4: always COMPLETED) and shipped at the last pipeline
-        stage (Rule 3: advance-or-complete → COMPLETED). See #489.
+        Verifies the paused-status guard does not affect normal shipped/no_op
+        outcomes. See #489.
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
-        # no_op always routes to COMPLETED regardless of stage (Rule 4).
         task = TicketTask(
             ticket_id="GEN-489B",
             client="test-client",
@@ -846,7 +779,7 @@ class TestConsumeCompletesTasks:
             purpose=SessionPurpose.IMPL,
             status=SessionStatus.ACTIVE,
             workspace_path=sample_client_config.workspace_path,
-            last_result={"status": "no_op", "schema_version": 4},
+            last_result={"status": "shipped", "schema_version": 4},
         )
         save_state(CwState(sessions=[sess]))
 
@@ -859,18 +792,16 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
 
-    def test_consume_null_last_result_routes_to_blocked_on_user(
+    def test_consume_null_last_result_routes_to_completed(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """SESSION_COMPLETED with last_result=None routes task to BLOCKED_ON_USER.
+        """SESSION_COMPLETED with last_result=None routes task to COMPLETED.
 
-        Sessions that did not emit a sentinel have last_result=None; under
-        RFC 0005 B2 Rule 6, an unparseable/missing sentinel is conservative-safe
-        and routes to BLOCKED_ON_USER so a human can inspect. See #489 (original)
-        and #617 (B2 decision table).
+        Sessions that did not emit a sentinel (e.g. interactive) have
+        last_result=None; they must fall through to COMPLETED. See #489.
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
@@ -900,7 +831,7 @@ class TestConsumeCompletesTasks:
 
         completed = consume_completed_sessions()
         assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
 
     def test_consume_advances_cursor(
         self,
@@ -1314,14 +1245,7 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     assert queue.tasks[0].session_id == new_session_id
 
     # Step 4: a real completion event for the NEW session arrives and
-    # correctly completes the task. Seed last_result=no_op on the new
-    # session so the stage-advance rule (Rule 4) routes to COMPLETED.
-    new_state = load_state()
-    for s in new_state.sessions:
-        if s.id == new_session_id:
-            s.last_result = {"status": "no_op"}
-    save_state(new_state)
-
+    # correctly completes the task.
     record_event(
         OrchestratorEventType.SESSION_COMPLETED,
         {
