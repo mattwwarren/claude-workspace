@@ -40,7 +40,10 @@ if TYPE_CHECKING:
 # Module-level constant - ordered list of all pipeline stages for column headers.
 _STAGE_COLUMNS: list[Stage] = list(Stage)
 
-# Status display map: status -> short label
+_MIN_INTERVAL_SECONDS: int = 1
+_MAX_INTERVAL_SECONDS: int = 60
+
+# Status display map: status -> label
 _STATUS_LABEL: dict[QueueItemStatus, str] = {
     QueueItemStatus.PENDING: "pending",
     QueueItemStatus.RUNNING: "running",
@@ -238,7 +241,7 @@ def run_board(
     if loader_fn is None:
         loader_fn = _load_board_state
 
-    interval = max(1, min(60, interval))
+    interval = max(_MIN_INTERVAL_SECONDS, min(_MAX_INTERVAL_SECONDS, interval))
 
     def _build() -> RenderableType:
         return render_board(loader_fn(), client_filter=client_filter)
