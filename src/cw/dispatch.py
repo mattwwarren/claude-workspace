@@ -13,8 +13,9 @@ import pydantic
 import yaml
 
 from cw.auto_dev_result import (
-    PAUSED_FOR_USER_INPUT_STATUSES,
+    PURE_PAUSE_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
+    SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
     AutoDevResult,
@@ -855,17 +856,14 @@ def _apply_events_to_store(
                 last_result = session.last_result
             status = last_result.get("status") if last_result is not None else None
 
-            # Pure pause statuses — Rule 1 (not scope-gated)
-            _pure_pause = PAUSED_FOR_USER_INPUT_STATUSES - SCOPE_GATED_APPROVAL_STATUSES
-
             # Rule 1: pure pause statuses (ambiguities, premises) → BLOCKED
-            if status in _pure_pause:
+            if status in PURE_PAUSE_STATUSES:
                 task.status = QueueItemStatus.BLOCKED_ON_USER
             # Rule 2: scope-gated approval → advance if small, else BLOCKED
             elif status in SCOPE_GATED_APPROVAL_STATUSES:
                 scope = last_result.get("scope") if last_result is not None else None
                 tier = scope.get("tier") if isinstance(scope, dict) else None
-                if tier == "small":
+                if tier == SCOPE_TIER_SMALL:
                     task.status, task.stage, task.session_id = _stage_advance(
                         task, stages
                     )
@@ -914,6 +912,10 @@ def consume_completed_sessions() -> int:
 
     with dev_queue_lock():
         store = load_dev_queue()
+        # Why: load_clients() is correct here — lane-level overrides in
+        # concurrency_overrides.json only patch paused/max_parallel, not
+        # pipeline.stages, so load_effective_clients() would return the same
+        # pipeline config and is not needed for stage-advance resolution.
         clients = load_clients()
         completed = _apply_events_to_store(store, events, clients)
         # Advance cursor inside the dev-queue lock so the cursor never

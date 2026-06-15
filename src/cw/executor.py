@@ -71,6 +71,8 @@ class ClaudeNativeExecutor:
             client=effective_client,
             worktree=worktree,
             prompt=f"/auto-dev-{stage.value} {task.ticket_id} --headless",
+            # Why: stage-agnostic so ticket_id_for_session resolves cleanly;
+            # sequential pipeline ensures only one stage per ticket at a time.
             label=f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
             ticket_id=task.ticket_id,
             lane=task.lane,

@@ -3193,6 +3193,14 @@ def _spawn_complete_impl(
             # is the correct sentinel for human-initiated session retirement.
             # The authoritative status (e.g. "shipped") stays in the event
             # payload for observability; the machine reads last_result.
+            #
+            # Preserve any cost_usd from the real last_result before overwriting.
+            # _accumulate_task_cost reads session.last_result from disk (via
+            # load_state) so the save_state below must happen before the call.
+            # Without this guard, cost data in last_result is silently lost when
+            # session.cost_usd is also None.
+            if sess.cost_usd is None and isinstance(sess.last_result, dict):
+                sess.cost_usd = sess.last_result.get("cost_usd")
             sess.last_result = {"status": "no_op"}
             save_state(state)
 

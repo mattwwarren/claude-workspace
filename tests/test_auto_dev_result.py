@@ -10,7 +10,9 @@ from pydantic import ValidationError
 
 from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
+    PURE_PAUSE_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
+    SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
     AutoDevResult,
@@ -2585,3 +2587,15 @@ class TestStageConstants:
 
     def test_scope_gated_is_subset_of_paused(self) -> None:
         assert SCOPE_GATED_APPROVAL_STATUSES.issubset(PAUSED_FOR_USER_INPUT_STATUSES)
+
+    def test_pure_pause_statuses_disjoint_from_scope_gated(self) -> None:
+        assert PURE_PAUSE_STATUSES.isdisjoint(SCOPE_GATED_APPROVAL_STATUSES)
+
+    def test_pure_pause_union_scope_gated_equals_paused(self) -> None:
+        assert (
+            PURE_PAUSE_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
+            == PAUSED_FOR_USER_INPUT_STATUSES
+        )
+
+    def test_scope_tier_small(self) -> None:
+        assert SCOPE_TIER_SMALL == "small"
