@@ -91,7 +91,9 @@ SCOPE_GATED_APPROVAL_STATUSES: frozenset[str] = frozenset(
 # session is paused waiting for human input (issue #129). Includes the v4
 # ambiguity/premises statuses plus the approval-pending states (#633).
 # DRY: SCOPE_GATED_APPROVAL_STATUSES is composed in here (RFC 0005 B2).
-PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
+PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = (
+    _V4_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
+)
 STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped"})
 STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
     {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}

@@ -9,13 +9,13 @@ import pytest
 from pydantic import ValidationError
 
 from cw.auto_dev_result import (
-    AutoDevResult,
-    BlockedResult,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
+    AutoDevResult,
+    BlockedResult,
     extract_block,
     parse_stdout,
 )
@@ -2560,6 +2560,7 @@ class TestCase5BlockerRetryEligibleNoneWithDelay:
         with pytest.raises(ValidationError, match="retry_delay_seconds"):
             AutoDevResult.model_validate(p)
 
+
 # ---------------------------------------------------------------------------
 # TestB2StatusSets — RFC 0005 B2 frozensets and constants
 # ---------------------------------------------------------------------------
@@ -2569,27 +2570,31 @@ class TestB2StatusSets:
     """RFC 0005 B2 stage-advance status sets and constants."""
 
     def test_stage_success_statuses(self) -> None:
-        assert STAGE_SUCCESS_STATUSES == frozenset({"shipped"})
+        assert frozenset({"shipped"}) == STAGE_SUCCESS_STATUSES
 
     def test_stage_failure_statuses(self) -> None:
-        assert STAGE_FAILURE_STATUSES == frozenset(
-            {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
+        assert (
+            frozenset(
+                {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
+            )
+            == STAGE_FAILURE_STATUSES
         )
 
     def test_scope_gated_approval_statuses(self) -> None:
-        assert SCOPE_GATED_APPROVAL_STATUSES == frozenset(
-            {"plan_pending_approval", "review_pending_approval"}
+        assert (
+            frozenset({"plan_pending_approval", "review_pending_approval"})
+            == SCOPE_GATED_APPROVAL_STATUSES
         )
 
     def test_scope_tier_small(self) -> None:
         assert SCOPE_TIER_SMALL == "small"
 
     def test_paused_is_superset_of_scope_gated(self) -> None:
-        """DRY composition check: PAUSED_FOR_USER_INPUT_STATUSES includes scope-gated."""
+        """DRY composition: PAUSED_FOR_USER_INPUT_STATUSES includes scope-gated."""
         assert SCOPE_GATED_APPROVAL_STATUSES.issubset(PAUSED_FOR_USER_INPUT_STATUSES)
 
     def test_paused_composed_from_scope_gated(self) -> None:
-        """SCOPE_GATED_APPROVAL_STATUSES are not duplicated — they compose into PAUSED."""
+        """SCOPE_GATED_APPROVAL_STATUSES compose into PAUSED (no duplication)."""
         # Both plan_pending_approval and review_pending_approval must be in PAUSED
         assert "plan_pending_approval" in PAUSED_FOR_USER_INPUT_STATUSES
         assert "review_pending_approval" in PAUSED_FOR_USER_INPUT_STATUSES

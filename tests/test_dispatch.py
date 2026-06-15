@@ -198,7 +198,7 @@ class TestDispatchTickSpawnsSession:
 
         assert len(daemon.spawn_calls) == 1
         _cwd, prompt = daemon.spawn_calls[0]
-        assert prompt == "/auto-dev GEN-300 --headless"
+        assert prompt == "/auto-dev-plan GEN-300 --headless"
 
     def test_dispatch_tick_links_workers_to_parent(
         self,
@@ -435,11 +435,12 @@ class TestConsumeCompletesTasks:
             {"ticket_id": "GEN-300", "client": "test-client"},
         )
 
+        # B2: no session/last_result -> Rule 6 -> BLOCKED_ON_USER
         completed = consume_completed_sessions()
         assert completed == 1
 
         updated_store = load_dev_queue()
-        assert updated_store.tasks[0].status == QueueItemStatus.COMPLETED
+        assert updated_store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_consume_ignores_events_without_ticket_id(
         self,
@@ -485,9 +486,10 @@ class TestConsumeCompletesTasks:
             },
         )
 
+        # B2: no session in state -> Rule 6 -> BLOCKED_ON_USER
         completed = consume_completed_sessions()
         assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_consume_skips_crashed_events(
         self,
@@ -622,9 +624,10 @@ class TestConsumeCompletesTasks:
             },
         )
 
+        # B2: no session in state -> Rule 6 -> BLOCKED_ON_USER
         completed = consume_completed_sessions()
         assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_consume_falls_back_to_ticket_id_when_task_has_no_session_id(
         self,
@@ -652,9 +655,10 @@ class TestConsumeCompletesTasks:
             },
         )
 
+        # B2: no session in state -> Rule 6 -> BLOCKED_ON_USER
         completed = consume_completed_sessions()
         assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_consume_completes_extended_event_shape(
         self,
@@ -691,9 +695,10 @@ class TestConsumeCompletesTasks:
             },
         )
 
+        # B2: no session "daemon-session" in state -> Rule 6 -> BLOCKED_ON_USER
         completed = consume_completed_sessions()
         assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     @pytest.mark.parametrize(
         "paused_status",
@@ -788,9 +793,15 @@ class TestConsumeCompletesTasks:
             {"ticket_id": "GEN-489B", "session_id": "sess-489b"},
         )
 
+        # B2: shipped at PLAN stage -> _stage_advance -> IMPL (PENDING), not COMPLETED
+        # The test now validates that shipped at a non-terminal stage advances.
         completed = consume_completed_sessions()
         assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        from cw.models import Stage
+
+        assert task.stage == Stage.IMPL
 
     def test_consume_null_last_result_routes_to_completed(
         self,
@@ -829,9 +840,11 @@ class TestConsumeCompletesTasks:
             {"ticket_id": "GEN-489C", "session_id": "sess-489c"},
         )
 
+        # B2: last_result=None -> Rule 6 -> BLOCKED_ON_USER
+        # Sessions without sentinel must not silently complete in a staged pipeline.
         completed = consume_completed_sessions()
         assert completed == 1
-        assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_consume_advances_cursor(
         self,
@@ -1254,9 +1267,10 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
             "client": sample_client_config.name,
         },
     )
+    # B2: no session for new_session_id in state -> Rule 6 -> BLOCKED_ON_USER
     completed = consume_completed_sessions()
     assert completed == 1
-    assert load_dev_queue().tasks[0].status == QueueItemStatus.COMPLETED
+    assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
 
 # ---------------------------------------------------------------------------

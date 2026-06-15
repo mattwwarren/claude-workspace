@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
-from cw.config import load_state, save_state
+from cw.config import save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.dispatch import _apply_events_to_store, consume_completed_sessions
 from cw.events import record_event
@@ -134,7 +134,9 @@ def _apply_and_check(
     task = _running_task(ticket_id, client_name, session_id, stage=initial_stage)
     store = DevQueueStore(tasks=[task])
 
-    sess = _make_session(session_id, ticket_id, client_name, workspace_path, last_result)
+    sess = _make_session(
+        session_id, ticket_id, client_name, workspace_path, last_result
+    )
     save_state(CwState(sessions=[sess]))
 
     event = OrchestratorEvent(
@@ -173,7 +175,10 @@ class TestDecisionTable:
             session_id="sess-r1a",
             client_name=client_with_pipeline.name,
             workspace_path=client_with_pipeline.workspace_path,
-            last_result={"status": "ambiguities_pending_resolution", "schema_version": 4},
+            last_result={
+                "status": "ambiguities_pending_resolution",
+                "schema_version": 4,
+            },
             clients=clients,
         )
         assert status == QueueItemStatus.BLOCKED_ON_USER
@@ -193,7 +198,10 @@ class TestDecisionTable:
             session_id="sess-r1b",
             client_name=client_with_pipeline.name,
             workspace_path=client_with_pipeline.workspace_path,
-            last_result={"status": "premises_pending_verification", "schema_version": 4},
+            last_result={
+                "status": "premises_pending_verification",
+                "schema_version": 4,
+            },
             clients=clients,
         )
         assert status == QueueItemStatus.BLOCKED_ON_USER
@@ -234,7 +242,7 @@ class TestDecisionTable:
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
-        status, stage = _apply_and_check(
+        status, _stage = _apply_and_check(
             ticket_id="T-R2B",
             session_id="sess-r2b",
             client_name=client_with_pipeline.name,
@@ -490,7 +498,7 @@ class TestDecisionTable:
         tmp_stage_dirs: Path,
         client_with_pipeline: ClientConfig,
     ) -> None:
-        """Idempotency: same event processed twice is a no-op (task already transitioned)."""
+        """Idempotency: same event processed twice is a no-op (already transitioned)."""
         _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
         from cw.config import load_effective_clients
 
@@ -528,7 +536,7 @@ class TestDecisionTable:
         tmp_stage_dirs: Path,
         client_with_pipeline: ClientConfig,
     ) -> None:
-        """R1 guard: client not found in clients dict -> BLOCKED_ON_USER with warning."""
+        """R1 guard: client not found in clients dict -> BLOCKED_ON_USER."""
         # Use empty clients dict to simulate missing client
         clients: dict = {}
         task = _running_task("T-MC", client_with_pipeline.name, "sess-mc")
@@ -604,7 +612,9 @@ class TestDecisionTable:
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
-        task = _running_task("T-SID", client_with_pipeline.name, "sess-sid", stage=Stage.PLAN)
+        task = _running_task(
+            "T-SID", client_with_pipeline.name, "sess-sid", stage=Stage.PLAN
+        )
         assert task.session_id == "sess-sid"
         store = DevQueueStore(tasks=[task])
 
@@ -646,12 +656,11 @@ class TestFullStagedPipelineE2E:
         mock_native_daemon: FakeNativeDaemonClient,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """Full staged pipeline: PLAN->IMPL->REVIEW->FINALIZE->COMPLETED with per-stage prompts.
+        """Full staged pipeline: PLAN->IMPL->REVIEW->FINALIZE->COMPLETED.
 
         Guards against the regression where consumer-half-only B2 advanced a
         shipped task to PENDING (re-spawning the monolith on an already-merged ticket).
         """
-        from cw.config import load_effective_clients
         from cw.dispatch import dispatch_tick
         from cw.models import OrchestratorConfig
 
@@ -710,32 +719,36 @@ class TestFullStagedPipelineE2E:
                 config=config,
                 native_daemon=mock_native_daemon,
             )
-            assert result.spawned == 1, f"stage {stage}: expected 1 spawn, got {result.spawned}"
+            assert result.spawned == 1, (
+                f"stage {stage}: expected 1 spawn, got {result.spawned}"
+            )
 
             # Verify prompt for this stage
             assert len(mock_native_daemon.spawn_calls) == i + 1
             actual_prompt = mock_native_daemon.spawn_calls[i][1]
             assert actual_prompt == expected_prompts[i], (
-                f"stage {stage}: expected {expected_prompts[i]!r}, got {actual_prompt!r}"
+                f"stage {stage}: expected {expected_prompts[i]!r},"
+                f" got {actual_prompt!r}"
             )
 
             # Get the session_id that was assigned
             running_tasks = [
-                t
-                for t in load_dev_queue().tasks
-                if t.status == QueueItemStatus.RUNNING
+                t for t in load_dev_queue().tasks if t.status == QueueItemStatus.RUNNING
             ]
             assert len(running_tasks) == 1
             session_id = running_tasks[0].session_id
             assert session_id is not None
 
-            # Simulate shipped result
-            sess = _make_session(
-                session_id,
-                "E2E-1",
-                "e2e-client",
-                worktree,
-                {"status": "shipped", "schema_version": 4},
+            # Simulate shipped result -- mark session COMPLETED so worktree
+            # reuse guard does not block the next stage spawn.
+            sess = Session(
+                id=session_id,
+                name="e2e-client/auto-dev/E2E-1",
+                client="e2e-client",
+                purpose=SessionPurpose.IMPL,
+                status=SessionStatus.COMPLETED,
+                workspace_path=worktree,
+                last_result={"status": "shipped", "schema_version": 4},
             )
             save_state(CwState(sessions=[sess]))
 
@@ -754,17 +767,22 @@ class TestFullStagedPipelineE2E:
             if stage == Stage.FINALIZE:
                 # Last stage: should be COMPLETED
                 assert current_task.status == QueueItemStatus.COMPLETED, (
-                    f"After FINALIZE shipped: expected COMPLETED, got {current_task.status}"
+                    f"After FINALIZE shipped: expected COMPLETED,"
+                    f" got {current_task.status}"
                 )
             else:
                 # Intermediate stage: should advance to PENDING with next stage
                 assert current_task.status == QueueItemStatus.PENDING, (
-                    f"After {stage} shipped: expected PENDING, got {current_task.status}"
+                    f"After {stage} shipped: expected PENDING,"
+                    f" got {current_task.status}"
                 )
                 assert current_task.stage == stages[i + 1], (
-                    f"After {stage} shipped: expected stage {stages[i + 1]}, got {current_task.stage}"
+                    f"After {stage} shipped: expected stage {stages[i + 1]},"
+                    f" got {current_task.stage}"
                 )
-                assert current_task.session_id is None, "R6: session_id must be cleared on advance"
+                assert current_task.session_id is None, (
+                    "R6: session_id must be cleared on advance"
+                )
 
         # Assert exactly 4 spawns total (no extra re-spawns)
         assert len(mock_native_daemon.spawn_calls) == 4, (

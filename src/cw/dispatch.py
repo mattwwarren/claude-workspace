@@ -38,6 +38,7 @@ from cw.exceptions import (
     UsageLimitError,
     WorktreeError,
 )
+from cw.executor import ClaudeNativeExecutor
 from cw.models import (
     ClientConfig,
     DispatchSkipReason,
@@ -54,7 +55,6 @@ from cw.reconcile import (
     resolve_headless_budget,
     ticket_id_for_session,
 )
-from cw.executor import ClaudeNativeExecutor
 from cw.worktree import (
     check_main_ff_safety,
     check_not_main_checkout,
@@ -548,14 +548,18 @@ def dispatch_tick(
                     # implementation could still return the same path.
                     check_not_main_checkout(worktree_path, client)
 
-                    executor = ClaudeNativeExecutor(native_daemon=resolved_native_daemon)
+                    executor = ClaudeNativeExecutor(
+                        native_daemon=resolved_native_daemon
+                    )
                     session_id = executor.spawn(
                         stage=task.stage,
                         task=task,
                         worktree=worktree_path,
                         client=client,
                         parent=parent,
-                        wall_clock_budget_seconds=resolve_headless_budget(task, None, config),
+                        wall_clock_budget_seconds=resolve_headless_budget(
+                            task, None, config
+                        ),
                     )
 
                     # Stamp session_id on the queued task so the completion
@@ -574,13 +578,20 @@ def dispatch_tick(
                                 stored_task.session_id = session_id
                                 # R5: stamp stage_base_ref -- non-fatal on failure
                                 try:
-                                    stored_task.stage_base_ref = subprocess.check_output(
-                                        ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+                                    result = subprocess.check_output(
+                                        [
+                                            "git",
+                                            "-C",
+                                            str(worktree_path),
+                                            "rev-parse",
+                                            "HEAD",
+                                        ],
                                         text=True,
-                                    ).strip()
+                                    )
+                                    stored_task.stage_base_ref = result.strip()
                                 except subprocess.SubprocessError as exc:
                                     _log.warning(
-                                        "dispatch: stage_base_ref stamp failed for %s: %s",
+                                        "dispatch: stage_base_ref failed for %s: %s",
                                         task.ticket_id,
                                         exc,
                                     )
@@ -769,7 +780,7 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
     stages = pipeline.stages
     if task.stage not in stages:
         _log.warning(
-            "dispatch: advance: stage %r not in pipeline for task %r -- parking as BLOCKED",
+            "dispatch: advance: stage %r not in pipeline for task %r",
             task.stage,
             task.ticket_id,
         )
@@ -855,32 +866,35 @@ def _apply_events_to_store(
             status = last_result.get("status") if last_result is not None else None
 
             if status in SCOPE_GATED_APPROVAL_STATUSES:
-                # Rule 2: scope-gated approval -- small tier auto-advances; large blocks
-                tier = (
-                    last_result.get("scope", {}).get("tier")
-                    if isinstance(last_result.get("scope"), dict)
-                    else None
+                # Rule 2: scope-gated approval; small tier auto-advances, large blocks
+                # last_result is not None: status came from last_result.get("status")
+                scope_val = (
+                    last_result.get("scope") if last_result is not None else None
                 )
+                tier = scope_val.get("tier") if isinstance(scope_val, dict) else None
                 if tier == SCOPE_TIER_SMALL:
                     _stage_advance(task, clients)
                 else:
                     task.status = QueueItemStatus.BLOCKED_ON_USER
             elif status in PAUSED_FOR_USER_INPUT_STATUSES:
-                # Rule 1: pure pause (ambiguities_pending_resolution, premises_pending_verification)
+                # Rule 1: pure pause
+                # (ambiguities_pending_resolution, premises_pending_verification)
                 task.status = QueueItemStatus.BLOCKED_ON_USER
             elif status in STAGE_SUCCESS_STATUSES:
                 # Rule 3: shipped -- advance or complete
                 _stage_advance(task, clients)
             elif status == "no_op":
-                # Rule 4: pre-flight already satisfied -- terminal regardless of remaining stages
+                # Rule 4: pre-flight already satisfied -- terminal
+                # regardless of remaining stages
                 task.status = QueueItemStatus.COMPLETED
             elif status in STAGE_FAILURE_STATUSES:
                 # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
                 task.status = QueueItemStatus.BLOCKED_ON_USER
             else:
                 # Rule 6: None/not dict/missing status -- conservative fallback
-                # Why: unparseable sentinel must never silently advance/complete (B2 correctness requirement).
-                # Changes pre-B2 behavior which fell through to COMPLETED at dispatch.py:814.
+                # Why: unparseable sentinel must never silently advance/complete
+                # (B2 correctness requirement). Changes pre-B2 behavior which
+                # fell through to COMPLETED.
                 task.status = QueueItemStatus.BLOCKED_ON_USER
             sid = event_session_id if isinstance(event_session_id, str) else None
             _accumulate_task_cost(task, sid)
@@ -913,7 +927,8 @@ def consume_completed_sessions() -> int:
 
     with dev_queue_lock():
         store = load_dev_queue()
-        completed = _apply_events_to_store(store, events, clients=load_effective_clients())
+        clients = load_effective_clients()
+        completed = _apply_events_to_store(store, events, clients=clients)
         # Advance cursor inside the dev-queue lock so the cursor never
         # moves past events whose queue mutations haven't been persisted yet.
         advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
