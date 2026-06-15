@@ -32,6 +32,8 @@ class StageExecutor(Protocol):
         task: TicketTask,
         worktree: Path,
         client: ClientConfig,
+        wall_clock_budget_seconds: int | None = None,
+        parent: str | None = None,
     ) -> str:
         """Spawn the stage session; return the cw session id."""
         ...
@@ -59,6 +61,8 @@ class ClaudeNativeExecutor:
         task: TicketTask,
         worktree: Path,
         client: ClientConfig,
+        wall_clock_budget_seconds: int | None = None,
+        parent: str | None = None,
     ) -> str:
         stage_config = client.pipeline.executors.get(stage, StageExecutorConfig())
         effective_model = stage_config.model or client.worker_model
@@ -66,16 +70,17 @@ class ClaudeNativeExecutor:
         return spawn_create_impl(
             client=effective_client,
             worktree=worktree,
-            prompt=f"auto-dev stage {stage.value} for ticket {task.ticket_id}",
-            label=f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}/{stage.value}",
+            prompt=f"/auto-dev-{stage.value} {task.ticket_id} --headless",
+            label=f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
             ticket_id=task.ticket_id,
             lane=task.lane,
             headless=True,
             purpose=SessionPurpose.IMPL,
             permission_mode=None,
-            parent=None,
-            wall_clock_budget_seconds=None,
+            parent=parent,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
             native_daemon=self._native_daemon,
+            task=task,
         )
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
