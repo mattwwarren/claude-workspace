@@ -31,7 +31,7 @@ def main() -> int:
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()
-                print(f"FAIL {module} (PYTHONPATH={pythonpath}): {stderr}")
+                print(f"FAIL {module} (PYTHONPATH={pythonpath}): {stderr}", file=sys.stderr)
                 failed.append(module)
     if failed:
         print(f"\n{len(failed)} module(s) failed to import.", file=sys.stderr)
