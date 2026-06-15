@@ -47,6 +47,9 @@ jobs:
       - name: Type check
         run: uv run mypy --strict src/
 
+      - name: Smoke-import .claude scripts
+        run: uv run python .claude/scripts/check_imports.py
+
       # Catches drift between .pre-commit-config.yaml hook pins and the
       # dedicated lint/format/mypy steps above. Skips the local pytest
       # hook (CI runs the full suite separately with coverage). The
