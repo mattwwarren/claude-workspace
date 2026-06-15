@@ -7127,3 +7127,75 @@ def test_guide_output_contains_markers() -> None:
     assert "orchestrating a sprint" in result.output
     assert "Sprint recipe" in result.output
     assert result.output.strip()
+
+
+class TestBoardCommand:
+    def test_board_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["board", "--help"])
+        assert result.exit_code == 0
+        assert "--once" in result.output
+        assert "--interval" in result.output
+        assert "--client" in result.output
+
+    def test_board_once_frame_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cw board --once with empty state exits 0 and renders a frame."""
+        import cw.board as board_module
+        from cw.board import BoardState
+        from cw.models import CwState, DevQueueStore, OrchestratorConfig
+
+        fake_state = BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(),
+            clients={},
+            config=OrchestratorConfig(),
+            now=datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC),
+        )
+        monkeypatch.setattr(board_module, "_load_board_state", lambda: fake_state)
+        runner = CliRunner()
+        result = runner.invoke(main, ["board", "--once"])
+        assert result.exit_code == 0
+
+    def test_board_once_frame_with_ticket(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cw board --once with one ticket: MW-500 appears in output."""
+        import cw.board as board_module
+        from cw.board import BoardState
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            OrchestratorConfig,
+            QueueItemStatus,
+            Stage,
+            TicketTask,
+        )
+
+        task = TicketTask(
+            ticket_id="MW-500",
+            client="acme",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+        )
+        fake_state = BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(tasks=[task]),
+            clients={},
+            config=OrchestratorConfig(),
+            now=datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC),
+        )
+        monkeypatch.setattr(board_module, "_load_board_state", lambda: fake_state)
+        runner = CliRunner()
+        result = runner.invoke(main, ["board", "--once"])
+        assert result.exit_code == 0
+        assert "MW-500" in result.output
+
+    def test_board_invokes_run_board(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """board command delegates to run_board."""
+        import cw.cli as cli_module
+
+        called: list[dict[str, object]] = []
+        monkeypatch.setattr(cli_module, "run_board", lambda **kw: called.append(kw))
+        runner = CliRunner()
+        result = runner.invoke(main, ["board", "--once"])
+        assert result.exit_code == 0
+        assert called
+        assert called[0]["once"] is True

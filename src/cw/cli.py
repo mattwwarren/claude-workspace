@@ -30,6 +30,7 @@ from cw.auto_dev_result import (
     extract_block,
     parse_stdout,
 )
+from cw.board import run_board
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
@@ -3531,3 +3532,36 @@ def schema_stage_output(stage: str) -> None:
 # --- Result command group ---
 
 main.add_command(result_group)
+
+
+@main.command(name="board")
+@click.option(
+    "--once",
+    is_flag=True,
+    default=False,
+    help="Print one frame and exit (for non-TTY/CI).",
+)
+@click.option(
+    "--interval",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Seconds between data refreshes (1-60).",
+)
+@click.option(
+    "--client",
+    "client_filter",
+    default=None,
+    shell_complete=_complete_client,
+    help="Only render this client.",
+)
+@handle_errors
+def board(once: bool, interval: int, client_filter: str | None) -> None:
+    """Lane x stage pipeline cockpit (RFC 0005 D1).
+
+    Displays all dev-queue tickets grouped by client -> lane -> stage.
+    Reads state lock-free; does not reconcile or mutate.
+
+    Use --once for a static snapshot (CI-friendly).
+    """
+    run_board(once=once, interval=interval, client_filter=client_filter)
