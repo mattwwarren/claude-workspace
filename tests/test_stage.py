@@ -6,6 +6,7 @@ and an E2E acceptance test for the full staged pipeline.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,7 @@ from cw.models import (
     ClientConfig,
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
     QueueItemStatus,
@@ -150,6 +152,29 @@ def _apply_and_check(
 
     updated = store.tasks[0]
     return updated.status, updated.stage
+
+
+# ---------------------------------------------------------------------------
+# StagePipelineConfig model validation
+# ---------------------------------------------------------------------------
+
+
+class TestStagePipelineConfigValidation:
+    """Validator tests for StagePipelineConfig (RFC 0005 B2)."""
+
+    def test_duplicate_stages_rejected(self) -> None:
+        """Duplicate stages in pipeline config raise ValidationError."""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="unique"):
+            StagePipelineConfig(stages=[Stage.PLAN, Stage.PLAN, Stage.IMPL])
+
+    def test_unique_stages_accepted(self) -> None:
+        cfg = StagePipelineConfig(
+            stages=[Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        )
+        assert len(cfg.stages) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +665,117 @@ class TestDecisionTable:
         assert updated.status == QueueItemStatus.PENDING
         assert updated.stage == Stage.IMPL
         assert updated.session_id is None  # R6: cleared on advance
+
+    def test_stage_base_ref_cleared_on_advance(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+    ) -> None:
+        """stage_base_ref is cleared to None on stage advance (RFC idempotency)."""
+        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        from cw.config import load_effective_clients
+
+        clients = load_effective_clients()
+        task = _running_task(
+            "T-SBR", client_with_pipeline.name, "sess-sbr", stage=Stage.PLAN
+        )
+        task.stage_base_ref = "abc123def456"  # pre-stamped from prior spawn
+        store = DevQueueStore(tasks=[task])
+
+        sess = _make_session(
+            "sess-sbr",
+            "T-SBR",
+            client_with_pipeline.name,
+            client_with_pipeline.workspace_path,
+            {"status": "shipped", "schema_version": 4},
+        )
+        save_state(CwState(sessions=[sess]))
+
+        event = OrchestratorEvent(
+            id="evt-sbr",
+            type=OrchestratorEventType.SESSION_COMPLETED,
+            payload={"ticket_id": "T-SBR", "session_id": "sess-sbr"},
+        )
+
+        with dev_queue_lock():
+            _apply_events_to_store(store, [event], clients)
+
+        updated = store.tasks[0]
+        assert updated.status == QueueItemStatus.PENDING
+        assert updated.stage == Stage.IMPL
+        assert updated.stage_base_ref is None  # RFC: cleared so next spawn re-stamps
+
+
+# ---------------------------------------------------------------------------
+# stage_base_ref stamping error path
+# ---------------------------------------------------------------------------
+
+
+class TestStageBaseRefStamping:
+    """Tests for the stage_base_ref git-rev-parse block in dispatch_tick."""
+
+    def test_stage_base_ref_subprocess_error_is_nonfatal(
+        self,
+        tmp_stage_dirs: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """SubprocessError in git rev-parse: stage_base_ref stays None, spawn ok."""
+        import unittest.mock
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.dispatch import dispatch_tick
+        from cw.models import DevQueueStore, TicketTask
+
+        worktree = make_git_repo("wt-sbr-error")
+        client_cfg = ClientConfig(
+            name="sbr-client",
+            workspace_path=worktree,
+            default_branch="main",
+            worktree_base=tmp_stage_dirs / "worktrees",
+            pipeline=StagePipelineConfig(
+                stages=[Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+            ),
+        )
+
+        config_dir = tmp_stage_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n"
+            f"  {client_cfg.name}:\n"
+            f"    workspace_path: {client_cfg.workspace_path}\n"
+            f"    default_branch: {client_cfg.default_branch}\n"
+            f"    worktree_base: {client_cfg.worktree_base}\n"
+            f"    pipeline:\n"
+            f"      stages: [plan, impl, review, finalize]\n"
+        )
+
+        task = TicketTask(
+            ticket_id="T-SBR-ERR",
+            client=client_cfg.name,
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        cfg = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"sbr-client": 1},
+        )
+        with unittest.mock.patch(
+            "cw.dispatch.subprocess.check_output",
+            side_effect=subprocess.SubprocessError("git failure"),
+        ):
+            dispatch_tick(cfg, native_daemon=mock_native_daemon)
+
+        updated_store = load_dev_queue()
+        updated_task = next(
+            (t for t in updated_store.tasks if t.ticket_id == "T-SBR-ERR"), None
+        )
+        assert updated_task is not None
+        assert updated_task.status == QueueItemStatus.RUNNING
+        assert updated_task.stage_base_ref is None  # not stamped due to error
+        assert len(mock_native_daemon.spawn_calls) == 1  # spawn still succeeded
 
 
 # ---------------------------------------------------------------------------

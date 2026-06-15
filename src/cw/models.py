@@ -343,6 +343,13 @@ class StagePipelineConfig(BaseModel):
     )
     executors: dict[Stage, StageExecutorConfig] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _stages_unique(self) -> StagePipelineConfig:
+        if len(self.stages) != len(set(self.stages)):
+            msg = "pipeline stages must be unique"
+            raise ValueError(msg)
+        return self
+
 
 class LaneConfig(BaseModel):
     """Configuration for a named dispatch lane.

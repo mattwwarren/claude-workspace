@@ -98,7 +98,7 @@ STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped"})
 STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
     {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
 )
-SCOPE_TIER_SMALL: str = "small"
+SCOPE_TIER_SMALL: Literal["small"] = "small"
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. A phantom or stalled session that emitted one of these

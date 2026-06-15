@@ -144,7 +144,14 @@ def test_spawn_label_no_stage_suffix(
     mock_native_daemon: FakeNativeDaemonClient,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """label does NOT contain stage value (R7 worktree reuse invariant)."""
+    """label does NOT contain stage value (R7 worktree reuse invariant).
+
+    The label flows through spawn_create_impl → session.name as
+    ``{client}/{label}``. Assert it equals ``test/auto-dev/T-42`` (no stage
+    suffix) so all stages share one branch/worktree.
+    """
+    from cw.config import load_state
+
     worktree = make_git_repo("wt-label")
     client = _make_client(worktree)
     task = TicketTask(ticket_id="T-42", client="test")
@@ -152,17 +159,15 @@ def test_spawn_label_no_stage_suffix(
 
     executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
-    # Verify spawn was called; check label via spawn_bg call args not available
-    # directly — but we can verify the prompt has the correct stage-specific format
-    # and the stage is NOT in the label by checking the cw-context written file.
-    # The label is the branch name passed to spawn_create_impl; it comes through
-    # as part of the session name, not directly in spawn_calls. We verify indirectly:
-    # prompt should NOT contain impl suffix on ticket (label is ticket-only).
     assert len(mock_native_daemon.spawn_calls) == 1
-    # stage IS in prompt
-    assert "impl" in mock_native_daemon.spawn_calls[0][1]
-    # ticket is in prompt
-    assert "T-42" in mock_native_daemon.spawn_calls[0][1]
+    state = load_state()
+    session_names = [s.name for s in state.sessions]
+    assert any("auto-dev/T-42" in name for name in session_names), (
+        f"Expected session name containing 'auto-dev/T-42', got {session_names}"
+    )
+    assert not any("auto-dev/T-42/impl" in name for name in session_names), (
+        f"Session name must not contain stage suffix, got {session_names}"
+    )
 
 
 @pytest.mark.parametrize(

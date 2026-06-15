@@ -46,7 +46,6 @@ from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
-    StagePipelineConfig,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
@@ -578,7 +577,7 @@ def dispatch_tick(
                                 stored_task.session_id = session_id
                                 # R5: stamp stage_base_ref -- non-fatal on failure
                                 try:
-                                    result = subprocess.check_output(
+                                    head_sha = subprocess.check_output(
                                         [
                                             "git",
                                             "-C",
@@ -587,8 +586,9 @@ def dispatch_tick(
                                             "HEAD",
                                         ],
                                         text=True,
+                                        timeout=5,
                                     )
-                                    stored_task.stage_base_ref = result.strip()
+                                    stored_task.stage_base_ref = head_sha.strip()
                                 except subprocess.SubprocessError as exc:
                                     _log.warning(
                                         "dispatch: stage_base_ref failed for %s: %s",
@@ -766,7 +766,14 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
 
 
 def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
-    """Advance task to next pipeline stage, or mark COMPLETED at terminal stage."""
+    """Advance task to next pipeline stage, or mark COMPLETED at terminal stage.
+
+    Precondition: task.status must be RUNNING. Only called from the B2
+    decision table which guards on RUNNING before dispatching to this helper.
+    """
+    if task.status != QueueItemStatus.RUNNING:
+        msg = f"_stage_advance: expected RUNNING, got {task.status!r}"
+        raise AssertionError(msg)
     client_cfg = clients.get(task.client)
     if client_cfg is None:
         _log.warning(
@@ -776,7 +783,7 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
         )
         task.status = QueueItemStatus.BLOCKED_ON_USER
         return
-    pipeline = client_cfg.pipeline or StagePipelineConfig()
+    pipeline = client_cfg.pipeline
     stages = pipeline.stages
     if task.stage not in stages:
         _log.warning(
@@ -793,6 +800,7 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
         task.stage = stages[idx + 1]
         task.status = QueueItemStatus.PENDING
         task.session_id = None  # R6: clear session_id on advance
+        task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
 
 
 def _apply_events_to_store(
@@ -866,8 +874,8 @@ def _apply_events_to_store(
             status = last_result.get("status") if last_result is not None else None
 
             if status in SCOPE_GATED_APPROVAL_STATUSES:
-                # Rule 2: scope-gated approval; small tier auto-advances, large blocks
-                # last_result is not None: status came from last_result.get("status")
+                # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
+                # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
                 scope_val = (
                     last_result.get("scope") if last_result is not None else None
                 )
@@ -877,8 +885,8 @@ def _apply_events_to_store(
                 else:
                     task.status = QueueItemStatus.BLOCKED_ON_USER
             elif status in PAUSED_FOR_USER_INPUT_STATUSES:
-                # Rule 1: pure pause
-                # (ambiguities_pending_resolution, premises_pending_verification)
+                # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
+                # premises_pending_verification). Scope-gated statuses caught by Rule 1.
                 task.status = QueueItemStatus.BLOCKED_ON_USER
             elif status in STAGE_SUCCESS_STATUSES:
                 # Rule 3: shipped -- advance or complete
