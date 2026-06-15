@@ -1,12 +1,14 @@
-"""Live TUI board for cw dev-queue tickets — lane × stage cockpit (RFC 0005 D1)."""
+"""Live TUI board for cw dev-queue tickets - lane x stage cockpit (RFC 0005 D1)."""
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from rich.console import Console, Group
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -18,13 +20,16 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue
 from cw.models import (
+    DEFAULT_LANE,
     ClientConfig,
     CwState,
     DevQueueStore,
+    LaneConfig,
     OrchestratorConfig,
     QueueItemStatus,
     Stage,
     StageExecutorConfig,
+    TicketTask,
 )
 
 if TYPE_CHECKING:
@@ -32,10 +37,10 @@ if TYPE_CHECKING:
 
     from rich.console import RenderableType
 
-# Module-level constant — ordered list of all pipeline stages for column headers.
+# Module-level constant - ordered list of all pipeline stages for column headers.
 _STAGE_COLUMNS: list[Stage] = list(Stage)
 
-# Status display map: status → short label
+# Status display map: status -> short label
 _STATUS_LABEL: dict[QueueItemStatus, str] = {
     QueueItemStatus.PENDING: "pending",
     QueueItemStatus.RUNNING: "running",
@@ -80,7 +85,7 @@ def _derive_model_display(
     """Derive the model string to display for a task row.
 
     Precedence: executor.model > client.worker_model > "—".
-    Falls back to "—" when client_cfg is None (absent client guard — critical
+    Falls back to "—" when client_cfg is None (absent client guard - critical
     for Live safety when a task references a client not in the config).
     """
     if client_cfg is None:
@@ -100,11 +105,12 @@ def _build_lane_panel(
     lane_name: str,
     max_parallel: int,
     paused: bool,
-    tasks_in_lane: list,  # list[TicketTask]
+    tasks_in_lane: list[TicketTask],
     client_cfg: ClientConfig | None,
 ) -> Panel:
     """Build one Rich Panel for a single client/lane combination."""
-    # Why: mirrors dispatch._lane_stats_for_client without importing the private function.
+    # Why: mirrors dispatch._lane_stats_for_client without importing the
+    # private function.
     running = sum(
         1
         for t in tasks_in_lane
@@ -130,8 +136,10 @@ def _build_lane_panel(
             task.stage.value,
             status_label,
             model_display,
-            "—",  # Why: stage_entered_at lands in B2; render placeholder until then.
-            "—",  # Why: pr_url field does not exist on TicketTask (B2/REVIEW scope).
+            # Why: stage_entered_at lands in B2; render placeholder until then.
+            "—",
+            # Why: pr_url field does not exist on TicketTask (B2/REVIEW scope).
+            "—",
         )
 
     return Panel(table, title=title)
@@ -144,7 +152,7 @@ def render_board(
 ) -> RenderableType:
     """Render a full board frame as a Rich renderable.
 
-    Pure function — no I/O, no datetime.now() calls inside.
+    Pure function - no I/O, no datetime.now() calls inside.
     """
     panels: list[RenderableType] = []
 
@@ -163,9 +171,7 @@ def render_board(
         if client_cfg is not None:
             lanes = client_cfg.effective_lanes
         else:
-            # Unknown client: synthesise a single default lane so orphan tasks show up.
-            from cw.models import DEFAULT_LANE, LaneConfig
-
+            # Unknown client: synthesise a single default lane so orphan tasks show.
             lanes = [LaneConfig(name=DEFAULT_LANE)]
 
         client_tasks = [
@@ -217,14 +223,14 @@ def run_board(
     ticks: int | None = None,
     loader_fn: Callable[[], BoardState] | None = None,
 ) -> None:
-    """Run the board — either a Live loop or a one-shot snapshot.
+    """Run the board - either a Live loop or a one-shot snapshot.
 
     Args:
         once: Print one frame and exit (for non-TTY/CI).
-        interval: Seconds between data refreshes (clamped 1–60).
+        interval: Seconds between data refreshes (clamped 1-60).
         client_filter: Only render this client when set.
         console: Rich Console to use (created if None).
-        ticks: Test shim — render this many frames then return.
+        ticks: Test shim - render this many frames then return.
         loader_fn: Override the state loader (defaults to _load_board_state).
     """
     if console is None:
@@ -252,10 +258,6 @@ def run_board(
         return
 
     # Full Live loop for interactive use.
-    import time
-
-    from rich.live import Live
-
     try:
         with Live(
             _build(),

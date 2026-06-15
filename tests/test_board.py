@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 
-import pytest
 from rich.console import Console
 
 from cw.board import BoardState, render_board, run_board
@@ -99,7 +98,9 @@ class TestRenderBoardWithTickets:
     def test_model_derived_from_executor_config(self) -> None:
         from cw.models import ClientConfig
 
-        executor = StageExecutorConfig(backend="test-backend", model="claude-test-model")
+        executor = StageExecutorConfig(
+            backend="test-backend", model="claude-test-model"
+        )
         pipeline = StagePipelineConfig(executors={Stage.PLAN: executor})
         client_cfg = ClientConfig(
             name="acme",
@@ -162,17 +163,16 @@ class TestRenderBoardLaneHeader:
             workspace_path=Path("/tmp/acme"),
             lanes=[lane],
         )
-        tasks = []
-        for i in range(running_count):
-            tasks.append(
-                TicketTask(
-                    ticket_id=f"MW-{300 + i}",
-                    client="acme",
-                    status=QueueItemStatus.RUNNING,
-                    stage=Stage.IMPL,
-                    lane="default",
-                )
+        tasks = [
+            TicketTask(
+                ticket_id=f"MW-{300 + i}",
+                client="acme",
+                status=QueueItemStatus.RUNNING,
+                stage=Stage.IMPL,
+                lane="default",
             )
+            for i in range(running_count)
+        ]
         return BoardState(
             cw_state=CwState(),
             dev_queue=DevQueueStore(tasks=tasks),
@@ -244,6 +244,36 @@ class TestRenderBoardClientFilter:
         assert "MW-401" not in output
 
 
+class TestRenderBoardSynthesisedLaneSkip:
+    """Cover the synthesised-lane skip path (line 189 in board.py)."""
+
+    def test_unknown_client_with_no_tasks_renders_without_lane_panel(self) -> None:
+        """An unknown client (not in clients dict) with zero tasks produces no panel."""
+        # task_a belongs to "acme" (unknown client), task_b to lane "fast" not "default"
+        # The synthesised lane "default" for "acme" gets skipped since no tasks match.
+        task = TicketTask(
+            ticket_id="MW-900",
+            client="orphan",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+            lane="nonexistent-lane",  # won't match DEFAULT_LANE
+        )
+        state = BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(tasks=[task]),
+            clients={},
+            config=OrchestratorConfig(),
+            now=NOW,
+        )
+        # Should not raise; the synthesised default lane for "orphan" is skipped
+        # because no tasks have lane="default". The ticket in "nonexistent-lane"
+        # is also invisible (no matching lane panel). Board shows "No tickets".
+        output = _render(state)
+        assert isinstance(output, str)
+        # ticket won't appear since it's in a non-default lane with no config
+        assert "MW-900" not in output
+
+
 class TestRunBoard:
     def test_ticks_once_renders_without_live(self) -> None:
         """ticks=1 path renders one frame via console.print, no Live."""
@@ -259,4 +289,67 @@ class TestRunBoard:
         buf = StringIO()
         console = Console(file=buf, no_color=True, width=200)
         # Use ticks=1 to verify single-frame path doesn't raise
-        run_board(ticks=1, console=console, loader_fn=lambda: _empty_state())
+        run_board(ticks=1, console=console, loader_fn=_empty_state)
+
+    def test_multi_tick_renders_n_frames(self) -> None:
+        """ticks=N path calls loader N times and prints N frames."""
+        calls: list[int] = []
+
+        def counting_loader() -> BoardState:
+            calls.append(1)
+            return _empty_state()
+
+        buf = StringIO()
+        console = Console(file=buf, no_color=True, width=200)
+        run_board(ticks=3, console=console, loader_fn=counting_loader)
+        assert len(calls) == 3
+
+    def test_multi_tick_keyboard_interrupt_exits(self) -> None:
+        """KeyboardInterrupt during multi-tick loop exits cleanly."""
+        call_count = [0]
+
+        def raising_loader() -> BoardState:
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                raise KeyboardInterrupt
+            return _empty_state()
+
+        buf = StringIO()
+        console = Console(file=buf, no_color=True, width=200)
+        # ticks=5 but loader raises KI on 2nd call — should return cleanly
+        run_board(ticks=5, console=console, loader_fn=raising_loader)
+        assert call_count[0] == 2
+
+    def test_live_loop_keyboard_interrupt_exits(self) -> None:
+        """Live loop exits cleanly on KeyboardInterrupt (mocked Live)."""
+        from unittest.mock import MagicMock, patch
+
+        buf = StringIO()
+        console = Console(file=buf, no_color=True, width=200)
+
+        mock_live = MagicMock()
+        mock_live.__enter__ = MagicMock(return_value=mock_live)
+        mock_live.__exit__ = MagicMock(return_value=False)
+        # Raise KeyboardInterrupt on first update call
+        mock_live.update.side_effect = KeyboardInterrupt
+
+        with patch("cw.board.Live", return_value=mock_live):
+            # once=False, ticks=None -> full Live path
+            run_board(console=console, loader_fn=_empty_state)
+        # Should return without raising
+        assert True
+
+    def test_load_board_state_callable(self) -> None:
+        """_load_board_state is callable and accepts no args (integration smoke)."""
+        from unittest.mock import patch
+
+        from cw.board import _load_board_state
+
+        with (
+            patch("cw.board.load_state", return_value=CwState()),
+            patch("cw.board.load_dev_queue", return_value=DevQueueStore()),
+            patch("cw.board.load_effective_clients", return_value={}),
+            patch("cw.board.load_effective_config", return_value=OrchestratorConfig()),
+        ):
+            result = _load_board_state()
+        assert isinstance(result, BoardState)
