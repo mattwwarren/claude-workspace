@@ -82,12 +82,23 @@ _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
 _V4_STATUSES: frozenset[str] = frozenset(
     {"ambiguities_pending_resolution", "premises_pending_verification"}
 )
+# Named status sets for the B2 stage-advance decision table (RFC 0005 B2).
+# Placement: next to PAUSED_FOR_USER_INPUT_STATUSES per R9.
+SCOPE_GATED_APPROVAL_STATUSES: frozenset[str] = frozenset(
+    {"plan_pending_approval", "review_pending_approval"}
+)
 # Public alias for consumers that need to check whether a status indicates the
 # session is paused waiting for human input (issue #129). Includes the v4
 # ambiguity/premises statuses plus the approval-pending states (#633).
-PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES | frozenset(
-    {"plan_pending_approval", "review_pending_approval"}
+# DRY: SCOPE_GATED_APPROVAL_STATUSES is composed in here (RFC 0005 B2).
+PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = (
+    _V4_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
 )
+STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped"})
+STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
+    {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
+)
+SCOPE_TIER_SMALL: Literal["small"] = "small"
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. A phantom or stalled session that emitted one of these

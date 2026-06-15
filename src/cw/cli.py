@@ -40,6 +40,7 @@ from cw.config import (
     get_client,
     init_client,
     load_clients,
+    load_effective_clients,
     load_effective_config,
     load_orchestrator_config,
     load_state,
@@ -3187,7 +3188,7 @@ def _spawn_complete_impl(
             event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
             # Step 2: Apply to queue
-            _apply_events_to_store(store, [event])
+            _apply_events_to_store(store, [event], clients=load_effective_clients())
 
             # Step 3: Close session state
             sess.status = SessionStatus.COMPLETED
