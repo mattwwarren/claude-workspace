@@ -6,7 +6,7 @@
 | Owner | @mattwwarren |
 | Date | 2026-06-13 |
 | Supersedes | none (extends the dispatch model on a new axis) |
-| Related | RFC 0004 (work lanes — the *scheduling* axis), ADR 0003 (stop-hook completion signal), ADR 0004 (stage events on the bus), ADR 0006 (reaping authority), `docs/events.md` |
+| Related | RFC 0004 (work lanes — the *scheduling* axis), RFC 0006 (review system in cw — the *inbound* feedback loop; its REVIEW re-entries append to the stage ledger added below), ADR 0003 (stop-hook completion signal), ADR 0004 (stage events on the bus), ADR 0006 (reaping authority), `docs/events.md` |
 | Branch | TBD |
 
 ## Summary
@@ -83,13 +83,59 @@ observability — mirroring how `Session.lane` was added in schema v9
 ```python
 class TicketTask(BaseModel):
     ...
-    stage: Stage = Stage.PLAN          # current pipeline position
-    stage_base_ref: str | None = None  # commit each stage started from (idempotent re-run)
+    stage: Stage = Stage.PLAN              # current pipeline position
+    stage_base_ref: str | None = None      # commit each stage started from (idempotent re-run)
+    stage_history: list[StageVisit] = []   # the ledger (see below)
 ```
 
 `status` (PENDING/RUNNING/BLOCKED_ON_USER/…) continues to describe the *current
 stage*. A task is e.g. "RUNNING in stage IMPL". HARDEN is opt-in per pipeline
 config (see below); the default first stage is PLAN for parity with today.
+
+### Stage history (the ledger) — effort & position accounting
+
+*Added per the #678 design session: `stage` alone is point-in-time — it records
+**where** a ticket is, not **how much** each phase cost or how many times it
+looped. The operator requirement is both: "see how much planning, scoping,
+implementation, review a ticket needed, and where in that process it lies."*
+
+`stage` is the *current* position; an append-only `stage_history` ledger is the
+record of how the ticket got there:
+
+```python
+class StageVisit(BaseModel):
+    stage: Stage
+    entered_at: datetime
+    exited_at: datetime | None = None  # None = the open/current visit
+    outcome: str | None = None         # "advanced" | "blocked" | "reworked"
+    session_id: str | None = None      # links the visit to the worker → cost/audit
+```
+
+The ledger is maintained by the same advance loop that already moves `stage`
+(`consume_completed_sessions`): entering a stage appends an open `StageVisit`;
+advancing/blocking closes it (`exited_at`, `outcome`). `stage` stays as a cheap
+denormalized read (= the open visit's `stage`) so existing readers are
+untouched.
+
+What it answers, with no extra state:
+
+- **Where it lies** = the open visit (`exited_at is None`) — identical to
+  `task.stage`, the value `cw board` already columns on.
+- **How much each phase needed** = aggregate the ledger: *count of visits per
+  stage* = rework rounds (three REVIEW visits = three review loops), *Σ
+  (exited_at − entered_at) per stage* = time-in-phase, `session_id` links →
+  cost via the session records. "This ticket: 2 plan passes, 1 impl, 3 review
+  rounds, now in review."
+- **Inbound review feedback re-enters here.** A human review round that
+  triggers rework appends a fresh `StageVisit(stage=REVIEW, …)` to the *same*
+  ticket — see RFC 0006. The PR feedback loop *is* the observability; it is
+  **not** a separate PR-keyed work item (RFC 0006 rejects overloading
+  `ticket_id`).
+
+Idempotency: a re-run of a stage (reap recovery, retry) opens a new visit
+rather than mutating a closed one, so the rework count is honest. Release
+mapping: `stage_history` is an additive field with a safe default (`[]`),
+landing with the other 1.1.x forward-compat seams below.
 
 ### Pipeline configuration (per-client, lane-overridable)
 
@@ -253,6 +299,9 @@ position-state above (no new state):
   · FINALIZE`.
 - **Cells** place each in-flight ticket in its current stage column — id,
   age-in-stage, resolved model/backend, PR link once present; color by status.
+  Age-in-stage and a per-stage rework badge (e.g. `REVIEW ×3`) are read
+  straight off `stage_history` — the ledger is what turns the board from "where
+  is it" into "where is it, and how much has each phase cost so far."
 - **Per-lane header:** slot usage `running/max_parallel` (the throughput
   guardrail at a glance).
 - **Footer:** global live-session count vs ceiling (the OOM watch).
@@ -302,7 +351,7 @@ rather than a manual pre-step. (Answers the originating question: harden is
 
 - **1.1.x (patch — forward-compat seams, dormant/additive, no behavior
   change):** additive model fields with safe defaults (`TicketTask.stage`,
-  `stage_base_ref`, `StagePipelineConfig`, `Session.stage`) + the schema-version
+  `stage_base_ref`, `stage_history`, `StagePipelineConfig`, `Session.stage`) + the schema-version
   bump; the `StageExecutor` Protocol + `ClaudeNativeExecutor` (unwired); `.cw/`
   worktree exclude; `cw schema` (independently useful now). Defaults preserve
   the current single-session monolith exactly, so 1.2 lands the engine without

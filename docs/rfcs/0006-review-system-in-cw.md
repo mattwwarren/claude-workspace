@@ -144,8 +144,16 @@ the brain is in cw, the work it produces is ordinary dispatchable work:
 
 1. `cw review tick` polls deterministically (no model) and, for each PR that
    needs model work (a CI failure to auto-fix, a review thread needing a
-   judgment reply), **enqueues a `TicketTask`** with `ticket_id` = the PR ref,
-   routed to a dedicated **`review` lane**.
+   judgment reply), **routes it into the `review` lane** as a dispatchable work
+   item:
+   - **PR born from a cw ticket** → the ticket's existing `TicketTask`
+     **re-enters the REVIEW stage** (`stage = review`, `status = PENDING`,
+     `lane = review`), appending a fresh `StageVisit` to its ledger (RFC 0005).
+     No new work item; the rework is recorded on the originating ticket.
+   - **Orphan PR** (`cw review discover` found it; no originating ticket) → a
+     `TicketTask` carrying an explicit **`pr_ref` + `work_kind = pr`** (never a
+     PR ref crammed into `ticket_id`). It has no stage ledger — cw did not
+     drive its earlier phases — but still flows through the lane for capping.
 2. The existing `dispatch_tick` Tier-2 allocator spawns the
    delta-review/auto-fix worker **under `review_lane.max_parallel`**, inside
    the client ceiling and the global `max_parallel_clients` cap. Review work
@@ -169,13 +177,16 @@ impl (non-destructive preemption, RFC 0004 invariant 1) without ever killing an
 in-flight impl worker; `max_parallel: 1` caps concurrent review sessions
 regardless of free ceiling (invariant 4).
 
-**Design note — PR-as-work-item.** Review work reuses `TicketTask` with the PR
-ref as `ticket_id` rather than introducing a parallel review-queue. This is the
-DRY choice: it inherits the lane scheduler, the state lock, reap authority, and
-board rendering wholesale. The cost is that `ticket_id` now sometimes denotes a
-PR rather than an issue — acceptable because ADR-0008 already makes `ticket_id`
-an opaque, tracker-grammar string. See [Open questions](#open-questions) Q1 for
-whether review work wants a distinct queue field instead.
+**Design note — review feedback is a stage re-entry, not a PR-keyed item.**
+`ticket_id` is **not** overloaded to hold a PR ref. PR feedback on a
+ticket-born PR is modeled as the originating ticket re-entering its REVIEW
+stage (RFC 0005 stage ledger), because the operator requirement is per-ticket
+lifecycle accounting — "how much planning/impl/review did this ticket need, and
+where does it lie now." A PR-keyed orphan item would sever that rollup. Only
+truly orphan PRs (no cw ticket) get a work item, and they carry an explicit
+`pr_ref` + `work_kind = pr` — a typed discriminator, not a reused field. Both
+paths inherit the lane scheduler, state lock, reap authority, and board
+rendering wholesale.
 
 ## The schema contract (`cw schema`)
 
@@ -280,23 +291,26 @@ Project conventions (1:1 test↔module, `pytest`, `freezegun`, `CliRunner`,
   `except`/error paths — the 3,033-LOC script's error paths become covered
   surface for the first time.
 
+## Resolved decisions
+
+- **No `ticket_id` overload (was Q1).** Review feedback on a ticket-born PR is a
+  **REVIEW stage re-entry** on the originating `TicketTask`, appending to the
+  RFC-0005 stage ledger — this is what delivers the per-ticket effort/position
+  observability the operator wants. Orphan PRs (`cw review discover`, no
+  originating ticket) are the *only* PR-keyed work items and carry an explicit
+  `pr_ref` + `work_kind = pr`, never a PR ref in `ticket_id`. The overload is
+  rejected outright.
+- **Per-client `review` lane (was Q2).** Default `max_parallel: 1`, since
+  clients already own their lanes in `clients.yaml`. A shared cross-client lane
+  was rejected — it would couple unrelated repos' review concurrency.
+
 ## Open questions
 
-1. **PR-as-`TicketTask` vs a distinct field.** Reusing `ticket_id` for a PR ref
-   is DRY but overloads the field's meaning. Alternative: a `work_kind:
-   issue|pr` discriminator on `TicketTask`. (Proposed: overload for now;
-   add the discriminator only if a real ambiguity appears — e.g. a PR ref that
-   collides with an issue id.)
-2. **One `review` lane per client, or a shared system lane?** Per-client gives
-   independent budgets but multiplies lanes; a single cross-client `review`
-   lane is simpler but couples unrelated repos' review concurrency. (Proposed:
-   per-client, default `max_parallel: 1`, since clients already own their
-   lanes.)
-3. **Does `cw review tick` enqueue, or dispatch inline?** Enqueuing (Phase 4)
+1. **Does `cw review tick` enqueue, or dispatch inline?** Enqueuing (Phase 4)
    gets the lane budget but adds one tick of latency before a review worker
    spawns. Acceptable for an hourly cron; revisit if a low-latency
    reply-to-reviewer path is wanted.
-4. **`nudge-ok` rate limiting vs lane scheduling.** The script's nudge
+2. **`nudge-ok` rate limiting vs lane scheduling.** The script's nudge
    rate-limit and the lane's `max_parallel` are two different throttles. Confirm
    they compose (rate-limit gates *whether* to enqueue; lane gates *how many
    run at once*) rather than fighting.
