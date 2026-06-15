@@ -113,3 +113,122 @@ def test_isinstance_check(
 ) -> None:
     """isinstance(ClaudeNativeExecutor(), StageExecutor) is True."""
     assert isinstance(ClaudeNativeExecutor(), StageExecutor)
+
+
+def test_spawn_prompt_contains_stage_command(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """spawn emits /auto-dev-<stage> <ticket_id> --headless as the prompt."""
+    worktree = make_git_repo("wt-prompt")
+    client = _make_client(worktree)
+    task = TicketTask(ticket_id="T-1", client="test")
+    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+
+    executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
+
+    assert len(mock_native_daemon.spawn_calls) == 1
+    _cwd, prompt = mock_native_daemon.spawn_calls[0]
+    assert prompt == "/auto-dev-plan T-1 --headless"
+
+
+def test_spawn_label_strips_stage_suffix(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """spawn uses AUTO_DEV_LABEL_PREFIX + ticket_id only (no /stage.value suffix)."""
+
+    worktree = make_git_repo("wt-label")
+    client = _make_client(worktree)
+    task = TicketTask(ticket_id="T-2", client="test")
+    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+
+    executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    from cw.config import load_state
+
+    state = load_state()
+    assert len(state.sessions) == 1
+    sess = state.sessions[0]
+    # Label must not contain the stage suffix
+    assert "/impl" not in sess.name
+    assert "T-2" in sess.name
+
+
+def test_spawn_wall_clock_budget_forwarded(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """wall_clock_budget_seconds kwarg is accepted and spawn succeeds."""
+    worktree = make_git_repo("wt-budget")
+    client = _make_client(worktree)
+    task = TicketTask(ticket_id="T-3", client="test")
+    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+
+    executor.spawn(
+        stage=Stage.IMPL,
+        task=task,
+        worktree=worktree,
+        client=client,
+        wall_clock_budget_seconds=3600,
+    )
+
+    assert len(mock_native_daemon.spawn_calls) == 1
+
+
+def test_spawn_wall_clock_budget_none_default(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Default wall_clock_budget_seconds=None does not raise."""
+    worktree = make_git_repo("wt-budget-none")
+    client = _make_client(worktree)
+    task = TicketTask(ticket_id="T-4", client="test")
+    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+
+    executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    assert len(mock_native_daemon.spawn_calls) == 1
+
+
+def test_spawn_parent_forwarded(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """parent kwarg is accepted and spawn succeeds when parent session exists."""
+    from cw.config import load_state, save_state
+    from cw.models import Session, SessionPurpose, SessionStatus
+
+    worktree = make_git_repo("wt-parent")
+    client = _make_client(worktree)
+
+    # Seed a parent session so spawn_create_impl can validate the linkage.
+    parent_sess = Session(
+        id="parent-session-id",
+        name="test/orchestrator",
+        client="test",
+        purpose=SessionPurpose.IMPL,
+        status=SessionStatus.ACTIVE,
+        workspace_path=worktree,
+    )
+    state = load_state()
+    state.sessions.append(parent_sess)
+    save_state(state)
+
+    task = TicketTask(ticket_id="T-5", client="test")
+    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+
+    executor.spawn(
+        stage=Stage.PLAN,
+        task=task,
+        worktree=worktree,
+        client=client,
+        parent="parent-session-id",
+    )
+
+    assert len(mock_native_daemon.spawn_calls) == 1

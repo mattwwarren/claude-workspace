@@ -3186,8 +3186,29 @@ def _spawn_complete_impl(
             # Step 1: Record event (record_event uses _inbox_lock — no deadlock risk)
             event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
-            # Step 2: Apply to queue
-            _apply_events_to_store(store, [event])
+            # Step 2a: Stamp last_result as no_op before calling
+            # _apply_events_to_store. cw spawn complete is a user-directed
+            # terminal close — the stage-advance machine must route COMPLETED
+            # regardless of pipeline stage. Rule 4 (no_op → COMPLETED always)
+            # is the correct sentinel for human-initiated session retirement.
+            # The authoritative status (e.g. "shipped") stays in the event
+            # payload for observability; the machine reads last_result.
+            sess.last_result = {"status": "no_op"}
+            save_state(state)
+
+            # Step 2b: Apply to queue
+            # Build effective clients dict: start from real config and
+            # inject a synthetic ClientConfig for the session's client when
+            # it is absent (e.g. clients.yaml not yet written or client was
+            # removed). This ensures the stage-advance machine can always
+            # resolve a pipeline for manual-close tasks.
+            _eff_clients = load_clients()
+            if sess.client not in _eff_clients:
+                _eff_clients[sess.client] = ClientConfig(
+                    name=sess.client,
+                    workspace_path=sess.workspace_path,
+                )
+            _apply_events_to_store(store, [event], _eff_clients)
 
             # Step 3: Close session state
             sess.status = SessionStatus.COMPLETED

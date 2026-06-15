@@ -88,6 +88,13 @@ _V4_STATUSES: frozenset[str] = frozenset(
 PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = _V4_STATUSES | frozenset(
     {"plan_pending_approval", "review_pending_approval"}
 )
+STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped"})
+STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
+    {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
+)
+SCOPE_GATED_APPROVAL_STATUSES: frozenset[str] = frozenset(
+    {"plan_pending_approval", "review_pending_approval"}
+)
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. A phantom or stalled session that emitted one of these
