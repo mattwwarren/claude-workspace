@@ -103,25 +103,67 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
-### Checkpoint 3 (Review Approval)
+### Checkpoint 3a: Adjudicate every finding
 
 Consolidate review results: deduplicate, sort by severity, group by file.
 
-**Small scope + (NO_ISSUES or SHOULD_FIX only) → AUTO-ACCEPT.** Log:
-- Review outcome: "Review clean" or "N SHOULD_FIX items noted — auto-accepted per small scope"
-- List SHOULD_FIX items for transparency
+Adjudication assigns each finding a disposition. The coordinating session — never a subagent or executor — sorts **every** finding (MUST_FIX *and* SHOULD_FIX) into exactly one of three buckets:
 
-**Small scope + MUST_FIX → AskUserQuestion:**
+1. **FIX NOW → the action list.** All surviving MUST_FIX plus any SHOULD_FIX the session accepts into scope. Principle: *if it stays in the review, it's worth fixing.* The filtering happens here, at scoping — not by silently ignoring the returned list.
+2. **REJECT (review-the-review).** The session disagrees: the finding is wrong, or the code is a deliberate choice / documented tradeoff. **Record the rationale** (see "Recording adjudication" below). No fix, no ticket.
+3. **DEFER.** Valid but out of scope for this ticket ("handle when scale demands"). **Record now, file as a ticket on merge** (PR Hygiene Sweep Step H3). Skip the ticket only when the item is already a bucket-2 documented tradeoff.
+
+**Invariant:** every finding ends *fixed*, *rejected-with-reason*, or *ticketed*. A reviewer finding that simply vanishes is a process failure.
+
+The **action list** (bucket 1) — not "MUST_FIX only" — is what drives Step 3b. An accepted SHOULD_FIX is fixed; a rejected or deferred SHOULD_FIX leaves the action list, recorded. If every finding lands in REJECT/DEFER the action list is empty and the pipeline continues (rejections recorded, deferrals queued for merge).
+
+**Adjudication is judgment** → it stays on the coordinating session. A stateless executor must never decide whether a finding is correct — that is exactly how the "we did X for a reason" pushback gets lost. An executor may only *mechanically apply* an action-list fix the session has already decided ("change X to Y in file Z").
+
+**Recording adjudication:**
+- **Rejections (bucket 2):** record each REJECTED finding + one-line rationale; these are written to the PR body by Stage 4 (Step 4d). Append the same to `friction_highlights`. For a rejection rooted in non-obvious design intent, add an inline `# Why:` comment at the code site (per the global review-culture rule).
+- **Deferrals (bucket 3):** record each deferred finding now; Stage 4 (Step 4d) writes them into the machine-readable `DEFERRED-REVIEW-FINDINGS` block in the PR body for Step H3 to harvest. Append a one-line note to `friction_highlights`.
+
+**Stash adjudication outcomes for Stage 4.** Since PR creation happens in Stage 4 (FINALIZE), not here, write the adjudication outcomes to `.cw/deferred-findings.md` so Stage 4's Step 4d can consume them:
+
+```
+# Deferred Review Findings
+<!-- written by Stage 3 (auto-dev-review.md), consumed by Stage 4 Step 4d (auto-dev-finalize.md) -->
+
+## Review adjudication
+
+Rejected (intentional / documented tradeoff):
+- <file> — "<summary>" — <one-line rationale>
+
+<!-- DEFERRED-REVIEW-FINDINGS
+- severity: <MUST_FIX|SHOULD_FIX>
+  summary: "<finding summary>"
+  file: <file>
+  rationale: "<out-of-scope rationale>"
+DEFERRED-REVIEW-FINDINGS -->
+```
+
+Omit the `Rejected` section when there are no rejections. Omit the `DEFERRED-REVIEW-FINDINGS` block when there are no deferrals. Omit the file entirely when every finding was fixed (nothing to record). If `.cw/` does not exist, create it.
+
+**Headless:** adjudication is autonomous — **no AskUserQuestion.** The session adjudicates deterministically, records rationale for every REJECT/DEFER in `.cw/deferred-findings.md`, and proceeds. Interactive mode MAY surface the adjudication for confirmation but defaults to the same dispositions.
+
+**Small scope + NO_ISSUES → AUTO-ACCEPT.** Log "Review clean" and proceed to S4.
+
+**Small scope + SHOULD_FIX only (no MUST_FIX) → adjudicate per Checkpoint 3a, then:**
+- Action list non-empty (accepted SHOULD_FIX) → run Step 3b on it.
+- All SHOULD_FIX land in REJECT/DEFER → action list empty → AUTO-CONTINUE to S4 (rejections recorded, deferrals queued in `.cw/deferred-findings.md`).
+- Log the disposition: "N SHOULD_FIX adjudicated — <a> fixed, <b> rejected, <c> deferred".
+
+**Small scope + MUST_FIX → AskUserQuestion (interactive only):**
 - Present MUST_FIX findings (with file, line, description, suggested fix)
 - Present SHOULD_FIX findings if any
 - "MUST_FIX findings block shipping. Fix and re-review, skip fixes and ship anyway, skip ticket, or abort?"
 
-**Large scope (any result) → AskUserQuestion:**
+**Large scope (any result) → AskUserQuestion (interactive only):**
 - Present full consolidated review report
 - If MUST_FIX: "Fix these issues and re-review, or abort?"
 - If clean or SHOULD_FIX only: "Review complete. Proceed to PR creation?"
 
-**Headless:** Always run reviewers. MUST_FIX → run fix loop (expected 2 cycles, hard-cap at 5; cycles 3+ or scope growth append to `friction_highlights` and set `health.fix_loop_escalated: true`). Clean/SHOULD_FIX + small → emit `stage.entered` (`s3_review_complete`) then AUTO-CONTINUE to S4:
+**Headless:** Always run reviewers, then adjudicate every finding per Checkpoint 3a (autonomous — no AskUserQuestion; record rationale for every REJECT/DEFER in `.cw/deferred-findings.md`). Non-empty action list → run fix loop (expected 2 cycles, hard-cap at 5; cycles 3+ or scope growth append to `friction_highlights` and set `health.fix_loop_escalated: true`). Empty action list (every finding fixed / rejected / deferred) + small → emit `stage.entered` (`s3_review_complete`) then AUTO-CONTINUE to S4:
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
@@ -229,7 +271,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
    - **Interactive:** AskUserQuestion: "MUST_FIX issues persist after 5 fix cycles: [details]. Continue manually from worktree, skip ticket, or abort pipeline?"
    - **Headless:** EXIT `blocked` with `blocker.reason: "review_blocked"`. The `friction_highlights` field will contain the per-cycle escalation notes from cycles 3–5; the human reviewer sees them in the structured output.
 
-   > **Maintenance note:** the cap values (`expected 2`, `hard-cap at 5`) appear in 6 locations: this Step 3b.5 (multiple), the Checkpoint 3 Headless callout, the gate-collapse table rows for `S3 MUST_FIX`, `S3 MUST_FIX persists after 5 cycles`, and `S3 fix-loop cycle 3+`, and the `blocker.reason` table description for `review_blocked`. If you tune either value, update all locations atomically.
+   > **Maintenance note:** the cap values (`expected 2`, `hard-cap at 5`) appear in 6 locations: this Step 3b.5 (multiple), the Checkpoint 3a Headless callout, the gate-collapse table rows for `S3 action list non-empty`, `S3 action list non-empty after 5 fix cycles`, and `S3 fix-loop cycle 3+`, and the `blocker.reason` table description for `review_blocked`. If you tune either value, update all locations atomically.
 
 **Fallback — direct execution**: If the isolation fix agent also hits sandbox failures (Read/Write/Bash denied inside its own new worktree — this has been observed), the main session can apply the fix directly from its own worktree:
 

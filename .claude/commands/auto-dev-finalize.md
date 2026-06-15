@@ -292,16 +292,36 @@ After `/prep-pr` returns with a PR number:
 
    **Why fact-gated rather than trusting the ship-it agent:** the same way Mitigation 1 treats `git diff --stat` as filesystem truth, this gate treats the PR body grep as truth. The `/ship-it` agent may report "screenshots attached" with HIGH confidence and still have skipped the step — only the body content is binding.
 
-2. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. GitHub allows enabling auto-merge on a draft PR — the merge won't trigger until the PR is marked ready (which `/review-monitor` does when the parent in the stack merges) AND CI passes. Enable unconditionally here, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless — in those cases this step is skipped and `pr.auto_merge` is set to `false`.
-3. **Post to Linear:** Comment on the issue with PR link (skip for free-text tickets). For drafts, note in the comment: "Created as draft — stacked behind PR #<parent>; will auto-promote to ready when parent merges."
-4. **Store pipeline state:** Record PR number, branch, ticket ID for the merge gate check in Step 4a of the next ticket
-5. **Headless only — emit `stage.entered` (`s4_pr_created`) then proceed to Stage 5:**
+2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. Read that file now and write its content into the PR body. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing the deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body`), append the artifacts from `.cw/deferred-findings.md`, and re-write via `gh pr edit <pr-number> --body-file -`:
+
+   The format written to the PR body (taken verbatim from `.cw/deferred-findings.md`):
+
+   ```
+   ## Review adjudication
+
+   Rejected (intentional / documented tradeoff):
+   - eval/runner.py — "drop retry wrapper" — deliberate: caller already retries at the queue layer
+
+   <!-- DEFERRED-REVIEW-FINDINGS
+   - severity: SHOULD_FIX
+     summary: "extract shared retry helper"
+     file: eval/runner.py
+     rationale: "out of scope; revisit when a 3rd caller appears"
+   DEFERRED-REVIEW-FINDINGS -->
+   ```
+
+   One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the whole section when `.cw/deferred-findings.md` is absent or empty (every finding was fixed — no rejections, no deferrals). For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK), there is no body to write — rejections/deferrals stay in `friction_highlights` and surface to the human in the structured output instead.
+
+3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. GitHub allows enabling auto-merge on a draft PR — the merge won't trigger until the PR is marked ready (which `/review-monitor` does when the parent in the stack merges) AND CI passes. Enable unconditionally here, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless — in those cases this step is skipped and `pr.auto_merge` is set to `false`.
+4. **Post to Linear:** Comment on the issue with PR link (skip for free-text tickets). For drafts, note in the comment: "Created as draft — stacked behind PR #<parent>; will auto-promote to ready when parent merges."
+5. **Store pipeline state:** Record PR number, branch, ticket ID for the merge gate check in Step 4a of the next ticket
+6. **Headless only — emit `stage.entered` (`s4_pr_created`) then proceed to Stage 5:**
    ```bash
    cw event record stage.entered \
      --correlation-id "$TICKET" \
      --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s4_pr_created\",\"prev_stage\":\"s3_review_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
    ```
-6. **Proceed to Stage 5** (CI Wait)
+7. **Proceed to Stage 5** (CI Wait)
 
 Note: monitor registration happens inside `/prep-pr` Step 9 — do NOT re-register here.
 

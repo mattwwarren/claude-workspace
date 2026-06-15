@@ -88,7 +88,7 @@ Everything else runs to completion or exits with a structured error.
 
 **Out of scope in headless mode:**
 - Batch mode (multi-ticket selection) — stays interactive-only; `--headless` with batch filters is undefined behavior
-- PR Hygiene Sweep (Steps H1, H2) — stays interactive-only
+- PR Hygiene Sweep (Steps H1, H2, H3) — stays interactive-only
 - Stage 5b feedback fix agent — stays interactive-only
 
 ### Gate-Collapse Table
@@ -127,13 +127,13 @@ All 41 rows define the deterministic headless action for every interactive gate 
 | S2.5 files outside plan | Append `"impl_scope_growth: <files>"` to `friction_highlights`; continue (routes through existing scope-growth handling) |
 | S2 / S3b agent timeout (Mitigation 4) | EXIT `blocked` with `blocker.reason: "agent_block"`, `blocker.details: "agent timed out after <N>m"` |
 | S2 / S3b single-commit on non-trivial change | Append `"impl_no_incremental_commits"` to `friction_highlights`; continue (advisory only) |
-| S3 review (any scope) | Always run reviewers |
-| S3 MUST_FIX (any scope) | Run fix loop; expected 2 cycles, hard-cap at 5 |
+| S3 review (any scope) | Always run reviewers, then adjudicate every finding into FIX NOW / REJECT / DEFER (Checkpoint 3a) |
+| S3 action list non-empty (post-adjudication) | Run fix loop on the action list (accepted MUST_FIX + SHOULD_FIX); expected 2 cycles, hard-cap at 5 |
 | S3b fix gate fails (test/mypy/diff mismatch / no new commits) | Count as cycle failure; re-spawn within 5-cycle cap; append `"fix_loop_gate_failed_cycle_<N>"` |
 | S3 fix-loop, Small + sparse fix (Step 3b.5 criteria all hold) | Skip re-review → S4. Append `"rereview_skipped_sparse"` to `friction_highlights` |
-| S3 review clean / SHOULD_FIX, small | AUTO-CONTINUE → S4 |
-| S3 review clean / SHOULD_FIX, large | EXIT `review_pending_approval` (post-fix-loop diff, branch pushed, no PR) |
-| S3 MUST_FIX persists after 5 cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` |
+| S3 action list empty (every finding fixed / rejected / deferred), small | AUTO-CONTINUE → S4. Rejections recorded in PR body + `friction_highlights`; deferrals queued for merge-time ticketing (Step H3) |
+| S3 large scope, action list resolved (clean, or fix loop complete) | EXIT `review_pending_approval` (post-fix-loop diff, branch pushed, no PR); adjudication applies within the human review |
+| S3 action list non-empty after 5 fix cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` |
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
 | Tool call denied by auto-mode classifier (any stage) | EXIT `blocked` with `blocker.reason: "tool_denied"`, `retry_eligible: true`, `next_actions: ["redispatch_ticket"]` (see Tool-Use Denial Exit section) |
@@ -378,6 +378,33 @@ Options:
 
 **Note:** This sweep is intentionally lightweight — just API calls. The heavier fix work happens only when issues are found. The goal is to catch and clear PR debt early so it doesn't pile up.
 
+### Step H3: Harvest deferred review findings from merged PRs
+
+The pipeline records deferred review findings in the PR body (Stage 4 Step 4d) but cannot file them at merge time — the session is gone, especially under `auto_merge: false`. This step is the merge-triggered filing: it runs as part of the per-ticket sweep and scans **recently-merged** pipeline PRs for an un-harvested `DEFERRED-REVIEW-FINDINGS` block. Label-gated and idempotent — re-running is safe.
+
+1. **Find candidates** — merged pipeline PRs lacking the harvested label:
+   ```bash
+   gh pr list --author @me --state merged --search '-label:review-debt-harvested' \
+     --json number,headRefName,body
+   ```
+   Filter to the pipeline's branch-prefix pattern (same as Step H1). No time window — the label gates idempotency, so an unbounded scan is correct (correctness over speed). If the merged-PR list grows large, a `merged:>=<date>` 7-day bound is acceptable.
+
+2. **Extract** the `DEFERRED-REVIEW-FINDINGS` block from each candidate's body (the content between the `<!-- DEFERRED-REVIEW-FINDINGS` and `DEFERRED-REVIEW-FINDINGS -->` sentinels). No block → nothing to file; apply the harvested label (step 5) anyway so the PR is skipped next sweep.
+
+3. **Resolve the tracker** for the merged PR's repo from its `.claude/project-config.yaml` (per **Tracker Resolution**). Deferred tickets land in the **code's own repo** — `linear` or `github-issues` as that repo configures, not a central backlog.
+
+4. **For each finding — dedup, then file:**
+   - **Dedup:** search the tracker's open issues for the same summary/file before filing (prior-art culture — do not create duplicates). `gh issue list --search "<summary> in:title"` for `github-issues`; the `search_issues` op for `linear`. A plausible match → skip filing, log `deferred finding already tracked: <summary>`.
+   - **File** the ticket against that repo with a `review-debt` label: title = the finding summary, body = file + rationale + a backlink to the source PR.
+
+5. **Mark harvested:** apply the `review-debt-harvested` label so the next sweep skips the PR:
+   ```bash
+   gh pr edit <number> --add-label review-debt-harvested
+   ```
+   This is the idempotency gate — filing and labeling both happen, but a re-run that finds the label already present is a no-op.
+
+**Headless:** Step H3 is interactive-only (stays in the PR Hygiene Sweep, which runs in interactive mode only per the Headless Mode out-of-scope notes). Deferred findings are written to the PR body by Step 4d and harvested on the next interactive sweep.
+
 ### Quick Feedback Checks (stage boundaries)
 
 In addition to the full hygiene sweep before each ticket, run a **quick feedback check** at natural pause points within a ticket's lifecycle — specifically between non-code-writing phases where we're waiting on agent results anyway:
@@ -424,7 +451,7 @@ After Stage 2 completes, proceed to Stage 3.
 
 ## Stage 3: Review
 
-**Delegated to `auto-dev-review.md`.** Read and follow the instructions in `.claude/commands/auto-dev-review.md`. This stage spawns review agents, adjudicates findings per Checkpoint 3a, and runs the fix loop (Step 3b) for MUST_FIX items.
+**Delegated to `auto-dev-review.md`.** Read and follow the instructions in `.claude/commands/auto-dev-review.md`. This stage spawns review agents, adjudicates findings per Checkpoint 3a (in `auto-dev-review.md`), and runs the fix loop (Step 3b) for action-list items. Adjudication outcomes (rejections + deferrals) are stashed to `.cw/deferred-findings.md` for Stage 4 to consume in Step 4d.
 
 **Chaining note:** when following `auto-dev-review.md`'s instructions in this session, do NOT emit the `AUTO_DEV_RESULT` sentinel at the end of Stage 3. Continue to Stage 4. The sentinel is suppressed in the chained path.
 
