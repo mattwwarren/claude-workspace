@@ -1440,7 +1440,8 @@ class TestSpawnComplete:
         store = load_dev_queue()
         task = next((t for t in store.tasks if t.ticket_id == "GEN-42"), None)
         assert task is not None
-        assert task.status == QueueItemStatus.COMPLETED
+        # B2: no last_result on session -> Rule 6 -> BLOCKED_ON_USER
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_happy_path_event_recorded_with_correct_payload(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -1532,7 +1533,8 @@ class TestSpawnComplete:
         store = load_dev_queue()
         task = next((t for t in store.tasks if t.ticket_id == "OVERRIDE-1"), None)
         assert task is not None
-        assert task.status == QueueItemStatus.COMPLETED
+        # B2: no last_result on session -> Rule 6 -> BLOCKED_ON_USER
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_already_completed_session_raises_without_force(
         self, tmp_config_dir: Path, tmp_path: Path
