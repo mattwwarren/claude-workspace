@@ -7156,7 +7156,9 @@ class TestBoardCommand:
         result = runner.invoke(main, ["board", "--once"])
         assert result.exit_code == 0
 
-    def test_board_once_frame_with_ticket(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_board_once_frame_with_ticket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """cw board --once with one ticket: MW-500 appears in output."""
         import cw.board as board_module
         from cw.board import BoardState
