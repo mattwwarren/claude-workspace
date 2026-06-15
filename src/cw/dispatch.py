@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,10 @@ import yaml
 
 from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
+    SCOPE_GATED_APPROVAL_STATUSES,
+    SCOPE_TIER_SMALL,
+    STAGE_FAILURE_STATUSES,
+    STAGE_SUCCESS_STATUSES,
     AutoDevResult,
     parse_stdout,
 )
@@ -34,11 +39,13 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import (
+    ClientConfig,
     DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
+    StagePipelineConfig,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
@@ -47,7 +54,7 @@ from cw.reconcile import (
     resolve_headless_budget,
     ticket_id_for_session,
 )
-from cw.spawn import spawn_create_impl
+from cw.executor import ClaudeNativeExecutor
 from cw.worktree import (
     check_main_ff_safety,
     check_not_main_checkout,
@@ -541,21 +548,14 @@ def dispatch_tick(
                     # implementation could still return the same path.
                     check_not_main_checkout(worktree_path, client)
 
-                    label = branch
-                    session_id = spawn_create_impl(
-                        client=client,
-                        worktree=worktree_path,
-                        prompt=f"/auto-dev {task.ticket_id} --headless",
-                        label=label,
-                        native_daemon=resolved_native_daemon,
-                        parent=parent,
-                        ticket_id=task.ticket_id,
-                        headless=True,
+                    executor = ClaudeNativeExecutor(native_daemon=resolved_native_daemon)
+                    session_id = executor.spawn(
+                        stage=task.stage,
                         task=task,
-                        wall_clock_budget_seconds=resolve_headless_budget(
-                            task, None, config
-                        ),
-                        lane=task.lane,
+                        worktree=worktree_path,
+                        client=client,
+                        parent=parent,
+                        wall_clock_budget_seconds=resolve_headless_budget(task, None, config),
                     )
 
                     # Stamp session_id on the queued task so the completion
@@ -572,6 +572,18 @@ def dispatch_tick(
                                 and stored_task.status == QueueItemStatus.RUNNING
                             ):
                                 stored_task.session_id = session_id
+                                # R5: stamp stage_base_ref -- non-fatal on failure
+                                try:
+                                    stored_task.stage_base_ref = subprocess.check_output(
+                                        ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+                                        text=True,
+                                    ).strip()
+                                except subprocess.SubprocessError as exc:
+                                    _log.warning(
+                                        "dispatch: stage_base_ref stamp failed for %s: %s",
+                                        task.ticket_id,
+                                        exc,
+                                    )
                                 break
                         save_dev_queue(store)
 
@@ -599,7 +611,7 @@ def dispatch_tick(
                     available_client_slots -= 1
                 except UsageLimitError:
                     # Narrow catch for fleet-wide usage limits. Raised by
-                    # spawn_create_impl → NativeDaemonClient.spawn_bg when the
+                    # executor.spawn → NativeDaemonClient.spawn_bg when the
                     # claude output matches USAGE_LIMIT_RE. The task was claimed
                     # to RUNNING but no session_id was assigned (spawn failed);
                     # revert it explicitly to PENDING below, then break so no
@@ -742,9 +754,40 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
         task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
 
 
+def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
+    """Advance task to next pipeline stage, or mark COMPLETED at terminal stage."""
+    client_cfg = clients.get(task.client)
+    if client_cfg is None:
+        _log.warning(
+            "dispatch: advance: client %r not found for task %r -- parking as BLOCKED",
+            task.client,
+            task.ticket_id,
+        )
+        task.status = QueueItemStatus.BLOCKED_ON_USER
+        return
+    pipeline = client_cfg.pipeline or StagePipelineConfig()
+    stages = pipeline.stages
+    if task.stage not in stages:
+        _log.warning(
+            "dispatch: advance: stage %r not in pipeline for task %r -- parking as BLOCKED",
+            task.stage,
+            task.ticket_id,
+        )
+        task.status = QueueItemStatus.BLOCKED_ON_USER
+        return
+    if task.stage == stages[-1]:
+        task.status = QueueItemStatus.COMPLETED
+    else:
+        idx = stages.index(task.stage)
+        task.stage = stages[idx + 1]
+        task.status = QueueItemStatus.PENDING
+        task.session_id = None  # R6: clear session_id on advance
+
+
 def _apply_events_to_store(
     store: DevQueueStore,
     events: list[OrchestratorEvent],
+    clients: dict[str, ClientConfig],
 ) -> int:
     """Apply SESSION_COMPLETED events to an already-loaded DevQueueStore.
 
@@ -804,14 +847,41 @@ def _apply_events_to_store(
                 (s for s in state.sessions if s.id == event_session_id),
                 None,
             )
-            if (
-                session is not None
-                and isinstance(session.last_result, dict)
-                and session.last_result.get("status") in PAUSED_FOR_USER_INPUT_STATUSES
-            ):
+            last_result = (
+                session.last_result
+                if session is not None and isinstance(session.last_result, dict)
+                else None
+            )
+            status = last_result.get("status") if last_result is not None else None
+
+            if status in SCOPE_GATED_APPROVAL_STATUSES:
+                # Rule 2: scope-gated approval -- small tier auto-advances; large blocks
+                tier = (
+                    last_result.get("scope", {}).get("tier")
+                    if isinstance(last_result.get("scope"), dict)
+                    else None
+                )
+                if tier == SCOPE_TIER_SMALL:
+                    _stage_advance(task, clients)
+                else:
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+            elif status in PAUSED_FOR_USER_INPUT_STATUSES:
+                # Rule 1: pure pause (ambiguities_pending_resolution, premises_pending_verification)
+                task.status = QueueItemStatus.BLOCKED_ON_USER
+            elif status in STAGE_SUCCESS_STATUSES:
+                # Rule 3: shipped -- advance or complete
+                _stage_advance(task, clients)
+            elif status == "no_op":
+                # Rule 4: pre-flight already satisfied -- terminal regardless of remaining stages
+                task.status = QueueItemStatus.COMPLETED
+            elif status in STAGE_FAILURE_STATUSES:
+                # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
                 task.status = QueueItemStatus.BLOCKED_ON_USER
             else:
-                task.status = QueueItemStatus.COMPLETED
+                # Rule 6: None/not dict/missing status -- conservative fallback
+                # Why: unparseable sentinel must never silently advance/complete (B2 correctness requirement).
+                # Changes pre-B2 behavior which fell through to COMPLETED at dispatch.py:814.
+                task.status = QueueItemStatus.BLOCKED_ON_USER
             sid = event_session_id if isinstance(event_session_id, str) else None
             _accumulate_task_cost(task, sid)
             completed += 1
@@ -843,7 +913,7 @@ def consume_completed_sessions() -> int:
 
     with dev_queue_lock():
         store = load_dev_queue()
-        completed = _apply_events_to_store(store, events)
+        completed = _apply_events_to_store(store, events, clients=load_effective_clients())
         # Advance cursor inside the dev-queue lock so the cursor never
         # moves past events whose queue mutations haven't been persisted yet.
         advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
