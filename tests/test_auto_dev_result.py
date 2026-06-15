@@ -9,6 +9,12 @@ import pytest
 from pydantic import ValidationError
 
 from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
+    PURE_PAUSE_STATUSES,
+    SCOPE_GATED_APPROVAL_STATUSES,
+    SCOPE_TIER_SMALL,
+    STAGE_FAILURE_STATUSES,
+    STAGE_SUCCESS_STATUSES,
     AutoDevResult,
     BlockedResult,
     extract_block,
@@ -2554,3 +2560,42 @@ class TestCase5BlockerRetryEligibleNoneWithDelay:
         p["blocker"]["retry_delay_seconds"] = -1
         with pytest.raises(ValidationError, match="retry_delay_seconds"):
             AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# RFC 0005 B2 — frozenset constants
+# ---------------------------------------------------------------------------
+
+
+class TestStageConstants:
+    def test_stage_success_statuses(self) -> None:
+        assert frozenset({"shipped"}) == STAGE_SUCCESS_STATUSES
+
+    def test_stage_failure_statuses(self) -> None:
+        assert (
+            frozenset(
+                {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
+            )
+            == STAGE_FAILURE_STATUSES
+        )
+
+    def test_scope_gated_approval_statuses(self) -> None:
+        assert (
+            frozenset({"plan_pending_approval", "review_pending_approval"})
+            == SCOPE_GATED_APPROVAL_STATUSES
+        )
+
+    def test_scope_gated_is_subset_of_paused(self) -> None:
+        assert SCOPE_GATED_APPROVAL_STATUSES.issubset(PAUSED_FOR_USER_INPUT_STATUSES)
+
+    def test_pure_pause_statuses_disjoint_from_scope_gated(self) -> None:
+        assert PURE_PAUSE_STATUSES.isdisjoint(SCOPE_GATED_APPROVAL_STATUSES)
+
+    def test_pure_pause_union_scope_gated_equals_paused(self) -> None:
+        assert (
+            PURE_PAUSE_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
+            == PAUSED_FOR_USER_INPUT_STATUSES
+        )
+
+    def test_scope_tier_small(self) -> None:
+        assert SCOPE_TIER_SMALL == "small"
