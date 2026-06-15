@@ -87,8 +87,12 @@ fi
 TAIL=$(tail -n 40 "$LOG" 2>/dev/null | tail -c 1800)
 PAYLOAD=$(jq -n --argjson ec "$EC" --arg log "$LOG" --arg tail "$TAIL" \
   '{exit_code: $ec, log_path: $log, log_tail: $tail}')
-~/.claude/scripts/review_monitor.py enqueue-action \
+if ~/.claude/scripts/review_monitor.py enqueue-action \
   --type cron_failure \
-  --payload "$PAYLOAD" >> "$LOG" 2>&1 && touch "$ERR_MARKER" || true
+  --payload "$PAYLOAD" >> "$LOG" 2>&1; then
+  touch "$ERR_MARKER"
+else
+  log "enqueue-action failed (exit $?) — cron_failure not recorded"
+fi
 
 exit "$EC"
