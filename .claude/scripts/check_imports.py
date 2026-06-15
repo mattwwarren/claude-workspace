@@ -9,7 +9,13 @@ import sys
 GROUPS: list[tuple[str, list[str]]] = [
     (
         ".claude/scripts",
-        ["cw_queue_peek", "post_review", "prep_pr_finalize", "prep_pr_state", "review_monitor"],
+        [
+            "cw_queue_peek",
+            "post_review",
+            "prep_pr_finalize",
+            "prep_pr_state",
+            "review_monitor",
+        ],
     ),
     (".claude/skills/cw-fanout/scripts", ["wave_status"]),
     (".claude/skills/cw-followup/scripts", ["parse_sentinel", "render_decisions"]),
@@ -28,10 +34,12 @@ def main() -> int:
                 env=env,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()
-                print(f"FAIL {module} (PYTHONPATH={pythonpath}): {stderr}", file=sys.stderr)
+                msg = f"FAIL {module} (PYTHONPATH={pythonpath}): {stderr}"
+                print(msg, file=sys.stderr)
                 failed.append(module)
     if failed:
         print(f"\n{len(failed)} module(s) failed to import.", file=sys.stderr)
