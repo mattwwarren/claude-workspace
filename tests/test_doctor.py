@@ -1901,6 +1901,37 @@ class TestWedgeRepoAheadOfQueue:
             or "cw spawn-complete" in findings[0].recipe
         )
 
+    def test_load_clients_raising_degrades_to_no_findings(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        """A broken clients.yaml must not crash the wedge check (run_doctor)."""
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.exceptions import CwError
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-RC1")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+
+        def _raise() -> dict[str, object]:
+            msg = "clients.yaml unreadable"
+            raise CwError(msg)
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(_args: list[str], **_kw: object) -> _Proc:
+            # No remote configured → wedge check skips the task.
+            return _Proc(1, "")
+
+        monkeypatch.setattr("cw.doctor.load_clients", _raise)
+        monkeypatch.setattr("cw.doctor._sp.run", fake_run)
+        # The CwError from load_clients must be swallowed (degrade to no
+        # clients), not propagate out of the wedge check.
+        assert _check_wedge_repo_ahead(state, queue) == []
+
 
 class TestWedgeReapRecipes:
     """_reap_wedge_findings applies correct mutations per wedge class."""

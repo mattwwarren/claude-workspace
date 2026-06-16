@@ -461,7 +461,13 @@ def _check_wedge_repo_ahead(
     """
     findings: list[WedgeFinding] = []
     session_by_id = {s.id: s for s in state.sessions}
-    clients = load_clients()
+    # A broken clients.yaml must not crash the doctor run; degrade to no
+    # clients and fall back to the default feature-branch prefix below
+    # (mirrors the guard around load_clients in run_doctor).
+    try:
+        clients = load_clients()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        clients = {}
     for task in queue.tasks:
         if task.status != QueueItemStatus.RUNNING:
             continue
