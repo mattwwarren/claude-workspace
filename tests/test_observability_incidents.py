@@ -160,7 +160,7 @@ def test_incident_421_phantom_dirty_worktree(
     # Incident #421: worktree was dirty at the time of phantom revert.
     # Drive dirtiness through worktree_path (not session.branch).
     monkeypatch.setattr(
-        "cw.reconcile._shared._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICKET-421",
     )
     monkeypatch.setattr(
