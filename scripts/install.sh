@@ -6,7 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "Installing cw from $PROJECT_DIR..."
-uv tool install --from "$PROJECT_DIR" --force claude-workspace
+uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache claude-workspace
+
+echo ""
+echo "Syncing cw skills and commands to ~/.claude/..."
+"$SCRIPT_DIR/install-skills.sh"
 
 echo ""
 echo "Installed! Run 'cw --help' to get started."
