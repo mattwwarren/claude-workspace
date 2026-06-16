@@ -825,6 +825,52 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
         task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
 
 
+def apply_staged_decision(
+    task: TicketTask,
+    status: str | None,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> None:
+    """Apply the B2 staged advance decision to a RUNNING task.
+
+    The single advance authority shared by the consume path
+    (_apply_events_to_store) and reconcile's emitted-sentinel router
+    (_apply_sentinel_to_task), so staged dispatch advances regardless of which
+    path observes the completion first (#698). Precondition: task.status is
+    RUNNING. Mutates task in place.
+    """
+    if status in SCOPE_GATED_APPROVAL_STATUSES:
+        # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
+        # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
+        # Tier resolves from the sentinel's scope.tier, falling back to
+        # task.scope_hint when the sentinel omits it (#696).
+        tier = _resolve_scope_tier(last_result, task)
+        if tier == SCOPE_TIER_SMALL:
+            _stage_advance(task, clients)
+        else:
+            task.status = QueueItemStatus.BLOCKED_ON_USER
+    elif status in PAUSED_FOR_USER_INPUT_STATUSES:
+        # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
+        # premises_pending_verification). Scope-gated statuses caught by Rule 1.
+        task.status = QueueItemStatus.BLOCKED_ON_USER
+    elif status in STAGE_SUCCESS_STATUSES:
+        # Rule 3: shipped -- advance or complete
+        _stage_advance(task, clients)
+    elif status == "no_op":
+        # Rule 4: pre-flight already satisfied -- terminal
+        # regardless of remaining stages
+        task.status = QueueItemStatus.COMPLETED
+    elif status in STAGE_FAILURE_STATUSES:
+        # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
+        task.status = QueueItemStatus.BLOCKED_ON_USER
+    else:
+        # Rule 6: None/not dict/missing status -- conservative fallback
+        # Why: unparseable sentinel must never silently advance/complete
+        # (B2 correctness requirement). Changes pre-B2 behavior which
+        # fell through to COMPLETED.
+        task.status = QueueItemStatus.BLOCKED_ON_USER
+
+
 def _apply_events_to_store(
     store: DevQueueStore,
     events: list[OrchestratorEvent],
@@ -895,36 +941,7 @@ def _apply_events_to_store(
             )
             status = last_result.get("status") if last_result is not None else None
 
-            if status in SCOPE_GATED_APPROVAL_STATUSES:
-                # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
-                # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
-                # Tier resolves from the sentinel's scope.tier, falling back to
-                # task.scope_hint when the sentinel omits it (#696).
-                tier = _resolve_scope_tier(last_result, task)
-                if tier == SCOPE_TIER_SMALL:
-                    _stage_advance(task, clients)
-                else:
-                    task.status = QueueItemStatus.BLOCKED_ON_USER
-            elif status in PAUSED_FOR_USER_INPUT_STATUSES:
-                # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
-                # premises_pending_verification). Scope-gated statuses caught by Rule 1.
-                task.status = QueueItemStatus.BLOCKED_ON_USER
-            elif status in STAGE_SUCCESS_STATUSES:
-                # Rule 3: shipped -- advance or complete
-                _stage_advance(task, clients)
-            elif status == "no_op":
-                # Rule 4: pre-flight already satisfied -- terminal
-                # regardless of remaining stages
-                task.status = QueueItemStatus.COMPLETED
-            elif status in STAGE_FAILURE_STATUSES:
-                # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
-                task.status = QueueItemStatus.BLOCKED_ON_USER
-            else:
-                # Rule 6: None/not dict/missing status -- conservative fallback
-                # Why: unparseable sentinel must never silently advance/complete
-                # (B2 correctness requirement). Changes pre-B2 behavior which
-                # fell through to COMPLETED.
-                task.status = QueueItemStatus.BLOCKED_ON_USER
+            apply_staged_decision(task, status, last_result, clients)
             sid = event_session_id if isinstance(event_session_id, str) else None
             _accumulate_task_cost(task, sid)
             completed += 1

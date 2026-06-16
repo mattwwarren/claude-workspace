@@ -572,22 +572,17 @@ def _apply_sentinel_to_task(
             return
 
         if isinstance(sentinel, AutoDevResult):
-            if sentinel.status in PAUSED_FOR_USER_INPUT_STATUSES:
-                target.status = QueueItemStatus.BLOCKED_ON_USER
-            elif sentinel.status in _TERMINAL_NO_RETRY_STATUSES:
-                target.status = QueueItemStatus.COMPLETED
-            elif sentinel.status == "blocked":
-                retry = (
-                    sentinel.blocker is not None
-                    and sentinel.blocker.retry_eligible is True
-                )
-                if retry:
-                    target.status = QueueItemStatus.PENDING
-                    target.session_id = None
-                else:
-                    target.status = QueueItemStatus.COMPLETED
-            else:
-                target.status = QueueItemStatus.COMPLETED
+            # Delegate to the shared B2 staged advance decision so both the
+            # consume path (_apply_events_to_store) and the reconcile
+            # ROUTE_EMITTED_SENTINEL path use the same routing table (#698).
+            # Why function-level import: cw.dispatch imports reconcile at
+            # module level (see reconcile.py module docstring); a module-level
+            # import here would create a circular dependency.
+            from cw.dispatch import apply_staged_decision
+
+            clients = load_effective_clients()
+            last_result = sentinel.model_dump(mode="json")
+            apply_staged_decision(target, sentinel.status, last_result, clients)
         else:
             # BlockedResult: sentinel failed to parse or was malformed.
             if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
