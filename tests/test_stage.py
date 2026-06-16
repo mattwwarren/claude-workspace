@@ -452,6 +452,54 @@ class TestDecisionTable:
         )
         assert status == QueueItemStatus.COMPLETED
 
+    def test_rule3_stage_complete_advances_impl_to_review(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+    ) -> None:
+        """Rule 3: stage_complete at IMPL advances to REVIEW (RFC 0005 B2, #699).
+
+        IMPL does not create a PR — it emits stage_complete (not shipped) so
+        the schema validators don't require a non-null pr or wait_for_ci.
+        The B2 advance machine must still route stage_complete via _stage_advance.
+        """
+        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        from cw.config import load_effective_clients
+
+        clients = load_effective_clients()
+        status, stage = _apply_and_check(
+            ticket_id="T-R3C",
+            session_id="sess-r3c",
+            client_name=client_with_pipeline.name,
+            workspace_path=client_with_pipeline.workspace_path,
+            last_result={"status": "stage_complete", "schema_version": 4},
+            clients=clients,
+            initial_stage=Stage.IMPL,
+        )
+        assert status == QueueItemStatus.PENDING
+        assert stage == Stage.REVIEW
+
+    def test_rule3_stage_complete_at_terminal_stage_completed(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+    ) -> None:
+        """Rule 3: stage_complete at terminal stage (FINALIZE) -> COMPLETED."""
+        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        from cw.config import load_effective_clients
+
+        clients = load_effective_clients()
+        status, _ = _apply_and_check(
+            ticket_id="T-R3D",
+            session_id="sess-r3d",
+            client_name=client_with_pipeline.name,
+            workspace_path=client_with_pipeline.workspace_path,
+            last_result={"status": "stage_complete", "schema_version": 4},
+            clients=clients,
+            initial_stage=Stage.FINALIZE,
+        )
+        assert status == QueueItemStatus.COMPLETED
+
     def test_rule4_no_op_completed(
         self,
         tmp_stage_dirs: Path,
