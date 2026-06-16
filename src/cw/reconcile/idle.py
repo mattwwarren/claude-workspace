@@ -1,0 +1,643 @@
+"""Silently-idle DAEMON session detection and act phases for reconcile.
+
+A silently idle session stalled past the watchdog budget without emitting a
+terminal sentinel (e.g. the child self-backgrounded a subagent and exited
+before it returned). See GitHub #105, #121, #545, #552, ADR-0006.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from cw.config import save_state
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.events import record_event
+from cw.models import (
+    DEFAULT_LANE,
+    CompletionReason,
+    OrchestratorConfig,
+    OrchestratorEventType,
+    QueueItemStatus,
+    ReapPolicy,
+    ReapReason,
+    SessionOrigin,
+    SessionStatus,
+)
+from cw.reconcile import _deps, _shared
+from cw.reconcile._shared import (
+    _CAUSE_IDLE_STALL,
+    _CAUSE_USAGE_LIMIT,
+    _GH_CHECK_BLOCKED_REASON,
+    _LIVE_STATUSES,
+    _PHANTOM_REAP_MERGED_REASON,
+    _SILENTLY_IDLE_REASON,
+    ProposedAction,
+    ReapCandidate,
+    _apply_queue_mutations,
+    _apply_salvaged_completion,
+    _apply_sentinel_to_task,
+    _awaiting_subagent,
+    _cleanup_timed_out_worktree,
+    _detect_post_review_clean,
+    _has_terminal_sentinel,
+    _parse_any_sentinel_from_transcript,
+    _queue_status_for_salvaged,
+    _SalvageCandidate,
+    _transcript_recently_active,
+    resolve_idle_retry_cap,
+    resolve_idle_watchdog_budget,
+    resolve_reap_policy,
+    ticket_id_for_session,
+)
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from cw.models import CwState, TicketTask
+
+
+def _detect_idle_candidates(
+    state: CwState,
+    *,
+    now: datetime,
+    native_live: set[str],
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask],
+) -> list[ReapCandidate]:
+    """Pure classification phase for silently idle DAEMON sessions.
+
+    Returns a list of ReapCandidate objects. Makes zero writes to state,
+    queue, or event bus. The idle_observation_count increment is computed
+    but NOT written; it is carried in new_observation_count on the candidate.
+    See GitHub #552, ADR-0006.
+    """
+    candidates: list[ReapCandidate] = []
+    for session in state.sessions:
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if _has_terminal_sentinel(session):
+            continue
+        if session.surface_ref is None or session.surface_ref not in native_live:
+            continue
+        elapsed = (now - session.started_at).total_seconds()
+        ticket_id = ticket_id_for_session(session.name)
+        task = task_by_ticket.get(ticket_id) if ticket_id else None
+        budget = resolve_idle_watchdog_budget(task, config)
+        # ROUTE_EMITTED_SENTINEL: fires before the full idle-budget check.
+        # An emitted sentinel is positive evidence the worker completed; the
+        # 300 s threshold (sentinel_unrouted_check_seconds) is shorter than
+        # the watchdog budget to route the task before a reap fires.
+        # Guard: last_result is None means signal_stop never ran — prevents
+        # double-routing. Exempt from signal_only (constructive, not a reap).
+        # See GitHub #578.
+        unrouted_check = config.sentinel_unrouted_check_seconds
+        if session.last_result is None and elapsed >= unrouted_check:
+            routed = _parse_any_sentinel_from_transcript(session)
+            if routed is not None:
+                _routed_result, _csid = routed
+                candidates.append(
+                    ReapCandidate(
+                        session_id=session.id,
+                        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+                        ticket_id=ticket_id,
+                        routed_sentinel=_routed_result,
+                        salvage_csid=_csid,
+                        elapsed_seconds=elapsed,
+                        lane=task.lane if task else DEFAULT_LANE,
+                        client=session.client,
+                    )
+                )
+                continue
+        if elapsed < budget:
+            continue
+        # Liveness check: if active, check for recovery of observation counter.
+        if _transcript_recently_active(session, now) or _awaiting_subagent(
+            session, now
+        ):
+            if session.idle_observation_count > 0:
+                candidates.append(
+                    ReapCandidate(
+                        session_id=session.id,
+                        proposed_action=ProposedAction.RECOVER_COUNTER,
+                        ticket_id=ticket_id,
+                        new_observation_count=0,
+                        lane=task.lane if task else DEFAULT_LANE,
+                        client=session.client,
+                    )
+                )
+            continue
+        # Sentinel salvage: evidence-based completion, not deferred by counter.
+        salvage = _shared.salvage_terminal_result(session)
+        if salvage is not None:
+            result, claude_session_id = salvage
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.SALVAGE_COMPLETION,
+                    ticket_id=ticket_id,
+                    salvage_result=result,
+                    salvage_csid=claude_session_id,
+                    elapsed_seconds=elapsed,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
+                )
+            )
+            continue
+        # Confirm-before-reap: accumulate consecutive failed observations.
+        new_count = session.idle_observation_count + 1
+        if new_count < config.idle_confirm_observations:
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.INCREMENT_COUNTER,
+                    ticket_id=ticket_id,
+                    new_observation_count=new_count,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
+                )
+            )
+            continue
+        # Threshold reached: classify final disposition.
+        # Git-state salvage path.
+        if session.worktree_path is not None:
+            branch = _deps.checked_out_branch(session.worktree_path)
+            if branch is not None:
+                post_review_clean = _detect_post_review_clean(session)
+                worktree_dirty = _shared.worktree_dirty_by_path(
+                    session.client, session.worktree_path
+                )
+                candidates.append(
+                    ReapCandidate(
+                        session_id=session.id,
+                        proposed_action=ProposedAction.SALVAGE_GIT,
+                        ticket_id=ticket_id,
+                        branch=branch,
+                        worktree_path_str=str(session.worktree_path),
+                        post_review_clean=post_review_clean,
+                        worktree_dirty=worktree_dirty,
+                        new_observation_count=new_count,
+                        lane=task.lane if task else DEFAULT_LANE,
+                        client=session.client,
+                    )
+                )
+                continue
+        cap = resolve_idle_retry_cap(task, config)
+        worktree_dirty = _shared.worktree_dirty_by_path(
+            session.client, session.worktree_path
+        )
+        if task is not None and task.attempts < cap:
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.REVERT_TASK,
+                    ticket_id=ticket_id,
+                    elapsed_seconds=elapsed,
+                    worktree_dirty=worktree_dirty,
+                    new_observation_count=new_count,
+                    usage_limit_detected=_shared.detect_usage_limit(session),
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
+                )
+            )
+        else:
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+                    ticket_id=ticket_id,
+                    worktree_dirty=worktree_dirty,
+                    new_observation_count=new_count,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
+                )
+            )
+    return candidates
+
+
+def _act_on_idle_candidates(
+    state: CwState,
+    candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+    config: OrchestratorConfig | None = None,
+    merged_ticket_ids: frozenset[str] = frozenset(),
+    gh_blocked_ticket_ids: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str], list[_SalvageCandidate]]:
+    """Act phase for silently idle sessions: apply all mutations.
+
+    Consumes ReapCandidate objects from _detect_idle_candidates.
+    Returns (blocked_ticket_ids, merged_completed_ticket_ids, salvage_git_candidates).
+    merged_completed_ticket_ids contains ticket IDs completed because their
+    PR was already merged (from merged_ticket_ids pre-pass; GitHub #637).
+
+    Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
+    routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
+    candidates (SALVAGE_*, INCREMENT_COUNTER, RECOVER_COUNTER,
+    PARK_BLOCKED_ON_USER) are unaffected and pass through.
+    Per-lane resolution: each REVERT_TASK candidate's effective policy is
+    resolved individually via resolve_reap_policy (GitHub #560).
+    """
+    if not candidates:
+        return [], [], []
+
+    effective_config = config if config is not None else OrchestratorConfig()
+    clients = _deps.load_effective_clients()
+    # Route each REVERT_TASK candidate individually based on its lane's policy.
+    # Merged-PR / gh-blocked check (GitHub #637) runs BEFORE policy routing so
+    # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
+    signal_mutations: dict[str, QueueItemStatus] = {}
+    auto_candidates: list[ReapCandidate] = []
+    for c in candidates:
+        if c.proposed_action == ProposedAction.REVERT_TASK:
+            if c.ticket_id and (
+                c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
+            ):
+                auto_candidates.append(c)
+                continue
+            policy = resolve_reap_policy(c, clients, effective_config)
+            if policy is ReapPolicy.SIGNAL_ONLY:
+                if c.ticket_id:
+                    signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+            else:
+                auto_candidates.append(c)
+        else:
+            auto_candidates.append(c)
+    if signal_mutations:
+        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+    candidates = auto_candidates
+    if not candidates:
+        return [], [], []
+
+    session_by_id = {s.id: s for s in state.sessions}
+
+    counter_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action
+        in (
+            ProposedAction.INCREMENT_COUNTER,
+            ProposedAction.RECOVER_COUNTER,
+            # SALVAGE_GIT reaches the threshold — persist new_observation_count so
+            # a process restart between ticks does not replay the observation as fresh.
+            ProposedAction.SALVAGE_GIT,
+        )
+    ]
+    salvage_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
+    ]
+    all_revert_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK
+    ]
+
+    # Split REVERT_TASK candidates by world-state check results (GitHub #637).
+    # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
+    # reconcile() that runs BEFORE sessions_lock, so no gh subprocess executes
+    # here. Candidates with no ticket_id fall through to the normal revert path.
+    merged_revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c.ticket_id and c.ticket_id in merged_ticket_ids
+    ]
+    gh_blocked_revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c.ticket_id and c.ticket_id in gh_blocked_ticket_ids
+    ]
+    revert_candidates = [
+        c
+        for c in all_revert_candidates
+        if c not in merged_revert_candidates and c not in gh_blocked_revert_candidates
+    ]
+    park_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    ]
+    salvage_git_candidates_list = [
+        c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_GIT
+    ]
+    routed_sentinel_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    ]
+
+    # ROUTE_EMITTED_SENTINEL queue routing: _apply_sentinel_to_task acquires its
+    # own dev_queue_lock so it runs BEFORE the shared lock block below.  Session
+    # state is mutated here; save_state picks it up in the combined flush below.
+    for candidate in routed_sentinel_candidates:
+        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
+            continue
+        if candidate.ticket_id:
+            _apply_sentinel_to_task(
+                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
+            )
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
+        session.claude_session_id = candidate.salvage_csid
+
+    # Counter-only updates: just update the counter and possibly save_state.
+    counters_changed = False
+    for candidate in counter_candidates:
+        session = session_by_id[candidate.session_id]
+        session.idle_observation_count = candidate.new_observation_count
+        counters_changed = True
+
+    # Salvage completions.
+    for candidate in salvage_candidates:
+        session = session_by_id[candidate.session_id]
+        if candidate.salvage_result is None or candidate.salvage_csid is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
+        _apply_salvaged_completion(
+            session, candidate.salvage_result, candidate.salvage_csid, now=now
+        )
+
+    # Merged-complete: PR already shipped; mark session COMPLETED, not TIMED_OUT.
+    for candidate in merged_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.reap_reason = (
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if candidate.usage_limit_detected
+            else ReapReason.IDLE_STALL
+        )
+
+    # GH-blocked: can't verify PR status; terminate so it is not re-detected.
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = (
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if candidate.usage_limit_detected
+            else ReapReason.IDLE_STALL
+        )
+
+    # Recover (revert to PENDING for re-dispatch).
+    for candidate in revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = (
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if candidate.usage_limit_detected
+            else ReapReason.IDLE_STALL
+        )
+
+    # Park: flag-only (preserves #348 — no daemon stop, session stays ACTIVE).
+    for candidate in park_candidates:
+        session = session_by_id[candidate.session_id]
+        session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+        session.reap_reason = ReapReason.RETRY_CAP_PARKED
+
+    has_dispositions = bool(
+        salvage_candidates
+        or revert_candidates
+        or merged_revert_candidates
+        or gh_blocked_revert_candidates
+        or park_candidates
+        or salvage_git_candidates_list
+        or routed_sentinel_candidates
+    )
+
+    if counters_changed or has_dispositions:
+        save_state(state)
+
+    if not has_dispositions:
+        return [], [], []
+
+    recovered_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
+    merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
+    gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
+    parked_ids = {c.ticket_id for c in park_candidates if c.ticket_id}
+    salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
+    salvaged_result_by_ticket = {
+        c.ticket_id: c.salvage_result
+        for c in salvage_candidates
+        if c.ticket_id and c.salvage_result
+    }
+    blocked: list[str] = []
+    merged_completed: list[str] = []
+    if (
+        recovered_ids
+        or merged_tids
+        or gh_blocked_tids
+        or parked_ids
+        or salvaged_ticket_ids_set
+    ):
+        with dev_queue_lock():
+            store = load_dev_queue()
+            changed = False
+            for task in store.tasks:
+                if task.status != QueueItemStatus.RUNNING:
+                    continue
+                if task.ticket_id in recovered_ids:
+                    task.status = QueueItemStatus.PENDING
+                    task.session_id = None
+                    changed = True
+                elif task.ticket_id in merged_tids:
+                    task.status = QueueItemStatus.COMPLETED
+                    task.session_id = None
+                    merged_completed.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in gh_blocked_tids:
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    task.session_id = None
+                    changed = True
+                elif task.ticket_id in parked_ids:
+                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    blocked.append(task.ticket_id)
+                    changed = True
+                elif task.ticket_id in salvaged_ticket_ids_set:
+                    result = salvaged_result_by_ticket[task.ticket_id]
+                    task.status = _queue_status_for_salvaged(result)
+                    changed = True
+            if changed:
+                save_dev_queue(store)
+
+    for candidate in revert_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+        _cleanup_timed_out_worktree(session, candidate.ticket_id)
+        cause = (
+            _CAUSE_USAGE_LIMIT
+            if session.reap_reason is ReapReason.USAGE_LIMIT_CUTOFF
+            else _CAUSE_IDLE_STALL
+        )
+        record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "elapsed_seconds": candidate.elapsed_seconds,
+                "cause": cause,
+                "last_assistant_message_excerpt": "",
+            },
+        )
+
+    for candidate in park_candidates:
+        session = session_by_id[candidate.session_id]
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _SILENTLY_IDLE_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+        )
+        _deps.fire_push_notification(session.name, session.client)
+
+    # Why: no _cleanup_timed_out_worktree for merged — PR shipped, worktree
+    # content is already in main; pruning it is not our responsibility.
+    for candidate in merged_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "crashed": False,
+                "salvaged": False,
+                "reason": _PHANTOM_REAP_MERGED_REASON,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _GH_CHECK_BLOCKED_REASON,
+                "breadcrumbs": str(session.worktree_path)
+                if session.worktree_path
+                else "",
+                "crashed": False,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
+    for candidate in salvage_candidates:
+        session = session_by_id[candidate.session_id]
+        if candidate.salvage_result is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result
+        completed_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "crashed": False,
+            "salvaged": True,
+            "status": candidate.salvage_result.status,
+        }
+        record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+
+    for candidate in routed_sentinel_candidates:
+        if candidate.routed_sentinel is None:
+            continue
+        session = session_by_id[candidate.session_id]
+        routed_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "crashed": False,
+            "salvaged": True,
+            "status": candidate.routed_sentinel.status,
+        }
+        record_event(OrchestratorEventType.SESSION_COMPLETED, routed_payload)
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+
+    salvage_git: list[_SalvageCandidate] = [
+        (
+            c.session_id,
+            c.ticket_id,
+            c.branch,
+            c.worktree_path_str,
+            c.post_review_clean,
+        )
+        for c in salvage_git_candidates_list
+        if c.branch is not None and c.worktree_path_str is not None
+    ]
+
+    return blocked, merged_completed, salvage_git
+
+
+def flag_silently_idle_daemon_sessions(
+    state: CwState,
+    *,
+    now: datetime,
+    native_live: set[str],
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask] | None = None,
+) -> tuple[list[str], list[_SalvageCandidate]]:
+    """Flag DAEMON RUNNING sessions idle past the watchdog budget with no sentinel.
+
+    These are sessions that stalled without emitting a terminal signal — typically
+    because the child process self-backgrounded a subagent and exited before
+    the subagent returned (GitHub #105, #121). They appear ACTIVE/IDLE in cw
+    state while producing no output.
+
+    Only targets sessions whose ``surface_ref`` is currently in *native_live*
+    (the daemon still has them). Sessions with a dead surface ref are handled
+    by the phantom sweep → PENDING for retry.
+
+    Confirm-before-reap (#545): a session must fail the liveness check on
+    ``config.idle_confirm_observations`` consecutive watchdog ticks before it
+    is dispositioned. ``session.idle_observation_count`` is incremented each
+    tick a session fails; it is reset to 0 on recovery. This prevents a single
+    quiet poll from killing a healthy DAEMON worker.
+
+    Returns a tuple of:
+    - list of ticket IDs whose queue task was set to BLOCKED_ON_USER
+    - list of git-state salvage candidates for the post-lock pass:
+      (session_id, ticket_id, branch, worktree_path_str, post_review_clean)
+    """
+    if task_by_ticket is None:
+        task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live=native_live,
+        config=config,
+        task_by_ticket=task_by_ticket,
+    )
+    blocked, _merged_completed, salvage_git = _act_on_idle_candidates(
+        state, candidates, now=now, config=config
+    )
+    return blocked, salvage_git

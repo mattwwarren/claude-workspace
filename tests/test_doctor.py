@@ -131,13 +131,13 @@ def test_run_doctor_reap_flag_reconciles_and_reports(
     # Non-empty live set bypasses reconcile's outage guard; "gone" still
     # isn't live so phantom is still reaped.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     from cw.models import OrchestratorConfig, ReapPolicy
 
     monkeypatch.setattr(
-        "cw.reconcile.load_orchestrator_config",
+        "cw.reconcile.core.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 

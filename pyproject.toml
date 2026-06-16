@@ -148,7 +148,7 @@ ignore = [
 # reconcile defers the dispatch import inside _apply_sentinel_to_task to
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.
-"src/cw/reconcile.py" = ["PLC0415"]
+"src/cw/reconcile/_shared.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]
