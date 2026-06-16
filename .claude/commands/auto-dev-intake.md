@@ -147,7 +147,7 @@ rules below are tracker-aware.
      exit 1
    fi
    CW_SESSION=$(jq -r '.session_id' "$CW_CTX")
-   TICKET=$(jq -r '.ticket_id // ""' "$CW_CTX" 2>/dev/null || echo "")
+   TICKET=$(jq -r '.ticket_id' "$CW_CTX")
    cw event record stage.entered \
      --correlation-id "$TICKET" \
      --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
