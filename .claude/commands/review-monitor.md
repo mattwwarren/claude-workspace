@@ -216,7 +216,12 @@ This refreshes thread state, resolves any threads that GitHub has auto-resolved,
 
 When the `check` output for a PR has `completed: true`, `pr_state: "MERGED"`, AND `deferred_threads` is non-empty, the PR landed with one or more reviewer points that we replied-to-defer (matched `is_deferral` language — "follow up", "next PR", "later", etc.) but never resolved in-code. The author already deemed them out-of-scope for the merging PR; the merge would otherwise drop them on the floor.
 
-For each `deferred_threads` entry create one Linear ticket via the Linear MCP plugin (`mcp__plugin_linear_linear__save_issue`):
+For each `deferred_threads` entry, create one follow-up ticket **via the active tracker** — do NOT hardcode Linear. Resolve the tracker once from `.claude/project-config.yaml` → `tracking.primary.system` (recognized: `github-issues` | `linear`; absent or missing → `linear`, the legacy default). Then file with the matching tool:
+
+- **`linear`:** the Linear MCP plugin (`mcp__plugin_linear_linear__save_issue`).
+- **`github-issues`:** `gh issue create -R <repo> --title <title> --body <body>`. NEVER call the Linear MCP in a github-issues repo — it is the wrong tracker and a headless run will stall on the unanswerable OAuth prompt.
+
+Ticket fields (identical for both trackers):
 
 - **Title:** `Follow-up from PR #<n>: <file>:<line>` (truncate file to basename if path is long)
 - **Description:**
@@ -233,12 +238,15 @@ For each `deferred_threads` entry create one Linear ticket via the Linear MCP pl
 
   **GitHub thread:** <url>
   ```
-- **Project:** route by repo / branch-prefix using the existing mapping the rest of the skill uses for ticketing (Platform for non-client work, otherwise the client project).
-- **Assignee:** the PR's author (`gh pr view <n> --json author --jq .author.login`), mapped to their Linear user.
+
+Tracker-specific routing and assignment:
+
+- **`linear`** — **Project:** route by repo / branch-prefix using the existing mapping the rest of the skill uses for ticketing (Platform for non-client work, otherwise the client project). **Assignee:** the PR's author (`gh pr view <n> --json author --jq .author.login`), mapped to their Linear user.
+- **`github-issues`** — file the issue in `<repo>` itself. **Assignee:** the PR's author's GitHub login (`gh issue edit <new_issue> --add-assignee <login>`, or `--assignee` on create). Apply the repo's follow-up/tech-debt label if one exists.
 
 Skip the PR if `deferred_threads` is empty — no follow-ups needed.
 
-After ticket creation, log a summary row: `#<n> | author | MERGED — N follow-up ticket(s) filed: <LIN-1234>, <LIN-1235>`.
+After ticket creation, log a summary row: `#<n> | author | MERGED — N follow-up ticket(s) filed: <ref>, <ref>` where `<ref>` is the active tracker's id (e.g. `LIN-1234` for Linear, `#456` for github-issues).
 
 The `check` call already ran `complete_pr` on the script side; nothing further to do for the monitoring state.
 

@@ -20,10 +20,16 @@ Checks performed:
                                    stale state).
 - ``cw_doctor_clean``       (soft)  ``cw doctor`` reports zero issues.
 - ``ticket_open``           (hard)  ``gh issue view <id>`` returns
-                                   ``state=OPEN``.
-- ``no_open_pr_for_ticket`` (hard)  ``gh pr list --search "<id>"`` returns
-                                   no PR whose title or body references the
-                                   ticket as already in flight.
+                                   ``state=OPEN`` (github-issues tracker).
+                                   Soft-skipped for non-github trackers, whose
+                                   ticket store is unreachable from a script.
+- ``no_open_pr_for_ticket`` (hard)  github-issues: ``gh pr list --search``
+                                   finds no in-flight PR referencing the
+                                   ticket. Other trackers: keyed off the
+                                   ``auto-dev/<id>`` branch head instead.
+
+The active tracker is resolved from ``.claude/project-config.yaml``
+(``tracking.primary.system``); absent/unrecognized falls back to ``linear``.
 - ``not_already_queued``    (hard)  the ticket is not already RUNNING or
                                    PENDING in ``cw dev-queue status``.
 """
@@ -42,6 +48,30 @@ from typing import Any
 _GLOBAL_AGENTS = Path.home() / ".claude" / "agents"
 _REQUIRED_AGENTS = ("plan-reviewer.md", "plan-soundness-reviewer.md")
 _DEV_QUEUE_BLOCKING_STATES = {"PENDING", "RUNNING", "CLAIMED"}
+
+# Tracker resolution: honor .claude/project-config.yaml rather than assuming gh.
+_RECOGNIZED_TRACKERS = ("github-issues", "linear")
+_DEFAULT_TRACKER = "linear"  # legacy default per auto-dev-intake.md
+_AUTO_DEV_BRANCH_PREFIX = "auto-dev/"
+
+
+def _resolve_tracker(repo_root: Path) -> str:
+    """Resolve ``tracking.primary.system`` from .claude/project-config.yaml.
+
+    Defaults to the legacy ``linear`` behavior when the file is absent or the
+    value is missing/unrecognized. Uses a minimal line scan (the file format is
+    controlled and has a single ``system:`` key) so this standalone script has
+    no hard PyYAML dependency.
+    """
+    path = repo_root / ".claude" / "project-config.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return _DEFAULT_TRACKER
+    match = re.search(r"^\s*system:\s*(\S+)", text, re.MULTILINE)
+    if match and match.group(1) in _RECOGNIZED_TRACKERS:
+        return match.group(1)
+    return _DEFAULT_TRACKER
 
 
 def _check_agents(repo_root: Path) -> dict[str, Any]:
@@ -123,7 +153,21 @@ def _check_cw_doctor() -> tuple[dict[str, Any], dict[str, Any]]:
     return hard, soft
 
 
-def _check_ticket_open(ticket: str, repo: str) -> dict[str, Any]:
+def _check_ticket_open(ticket: str, repo: str, tracker: str) -> dict[str, Any]:
+    if tracker != "github-issues":
+        # The gh-issue existence probe assumes a GitHub issue number; a Linear
+        # id (GEN-403) would make `gh issue view` fail. Ticket existence on a
+        # non-github tracker needs that tracker's MCP, unreachable from a
+        # script — degrade to a soft, non-blocking skip.
+        return {
+            "name": "ticket_open",
+            "passed": True,
+            "severity": "soft",
+            "detail": (
+                f"skipped — {tracker} ticket existence is not verifiable from"
+                " preflight (needs the tracker MCP, unreachable from a script)"
+            ),
+        }
     gh = shutil.which("gh")
     if gh is None:
         return {
@@ -166,7 +210,7 @@ def _check_ticket_open(ticket: str, repo: str) -> dict[str, Any]:
     }
 
 
-def _check_no_open_pr(ticket: str, repo: str) -> dict[str, Any]:
+def _check_no_open_pr(ticket: str, repo: str, tracker: str) -> dict[str, Any]:
     gh = shutil.which("gh")
     if gh is None:
         return {
@@ -175,25 +219,18 @@ def _check_no_open_pr(ticket: str, repo: str) -> dict[str, Any]:
             "severity": "hard",
             "detail": "gh CLI not on PATH",
         }
-    # Search both title and body for the ticket reference. The smoke test
-    # should not dispatch onto a ticket that already has work in flight.
-    search = f"#{ticket} in:title,body is:pr is:open"
-    proc = subprocess.run(
-        [
-            gh,
-            "pr",
-            "list",
-            "-R",
-            repo,
-            "--search",
-            search,
-            "--json",
-            "number,title,url",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    # PRs live on GitHub regardless of tracker. For github-issues, search by the
+    # issue reference in title/body. For any other tracker, the issue number is
+    # not a GitHub one, so key off the deterministic auto-dev branch instead.
+    if tracker == "github-issues":
+        search = f"#{ticket} in:title,body is:pr is:open"
+        argv = [gh, "pr", "list", "-R", repo, "--search", search,
+                "--json", "number,title,url"]  # fmt: skip
+    else:
+        branch = f"{_AUTO_DEV_BRANCH_PREFIX}{ticket}"
+        argv = [gh, "pr", "list", "-R", repo, "--head", branch, "--state",
+                "open", "--json", "number,title,url"]  # fmt: skip
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         return {
             "name": "no_open_pr_for_ticket",
@@ -212,11 +249,15 @@ def _check_no_open_pr(ticket: str, repo: str) -> dict[str, Any]:
             "severity": "hard",
             "detail": f"gh output not valid JSON: {exc}",
         }
-    # gh's free-text search is fuzzy — filter to PRs whose title actually
-    # references the ticket (avoids false-positives from unrelated PRs that
-    # mention the number in passing).
-    pattern = re.compile(rf"(^|\D){re.escape(ticket)}(\D|$)")
-    matching = [pr for pr in prs if pattern.search(pr.get("title", ""))]
+    if tracker == "github-issues":
+        # gh's free-text search is fuzzy — filter to PRs whose title actually
+        # references the ticket (avoids false-positives from unrelated PRs that
+        # mention the number in passing).
+        pattern = re.compile(rf"(^|\D){re.escape(ticket)}(\D|$)")
+        matching = [pr for pr in prs if pattern.search(pr.get("title", ""))]
+    else:
+        # --head is an exact branch match — any returned PR is this ticket's.
+        matching = list(prs)
     if not matching:
         return {
             "name": "no_open_pr_for_ticket",
@@ -349,14 +390,15 @@ def main() -> int:
     args = parser.parse_args()
     ticket = args.ticket_id.lstrip("#")
     repo_root = _resolve_repo_root()
+    tracker = _resolve_tracker(repo_root)
 
     checks: list[dict[str, Any]] = []
     checks.append(_check_agents(repo_root))
     hard_doctor, soft_doctor = _check_cw_doctor()
     checks.append(hard_doctor)
     checks.append(soft_doctor)
-    checks.append(_check_ticket_open(ticket, args.repo))
-    checks.append(_check_no_open_pr(ticket, args.repo))
+    checks.append(_check_ticket_open(ticket, args.repo, tracker))
+    checks.append(_check_no_open_pr(ticket, args.repo, tracker))
     checks.append(_check_not_queued(ticket, args.client))
 
     hard_failed = any(
@@ -367,6 +409,7 @@ def main() -> int:
         "ticket_id": ticket,
         "client": args.client,
         "repo": args.repo,
+        "tracker": tracker,
         "checks": checks,
     }
     json.dump(report, sys.stdout)
