@@ -176,7 +176,7 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
 
 **On all gates pass:** Proceed to Checkpoint 2 (existing logic).
 
-**Headless only — emit `stage.entered` (`s2_impl_complete`) before Checkpoint 2:**
+**Headless only — on all gates pass, emit `stage.entered` (`s2_impl_complete`):**
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
