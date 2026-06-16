@@ -186,7 +186,7 @@ Prerequisite: the implementation branch must already be on origin. Step 2's Impl
 2. Spawn the fix agent with `isolation: "worktree"` and `run_in_background: true`. The agent's **first actions** must be:
    ```bash
    git fetch origin
-   git checkout -b <branch-name> origin/<branch-name>
+   git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent (cw may pre-provision this branch, #712)
    git log --oneline -1  # verify at expected impl commit
 
    # Refresh with latest main so the fix lands on top of upstream moves.
@@ -278,7 +278,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
 ```bash
 # From the main session's worktree
 git fetch origin <branch-name>
-git checkout -b <branch-name> origin/<branch-name>   # or git checkout <branch-name> if already local
+git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent — cw provisions this worktree on <branch-name> (#712), so plain -b would fail "already exists"
 git merge origin/main --no-edit                      # refresh with main (see Step 3b.2 rationale)
 # apply edits via Read/Edit/Write tools
 # run quality gates

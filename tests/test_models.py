@@ -174,6 +174,18 @@ class TestClientConfig:
         )
         assert c.default_branch == "develop"
 
+    def test_feature_branch_prefix_default(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.feature_branch_prefix == "dev"
+
+    def test_feature_branch_prefix_custom(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            feature_branch_prefix="feat",
+        )
+        assert c.feature_branch_prefix == "feat"
+
     def test_default_auto_purposes(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.auto_purposes == [

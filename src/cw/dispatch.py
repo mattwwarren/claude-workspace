@@ -49,7 +49,6 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
-    AUTO_DEV_LABEL_PREFIX,
     reconcile,
     resolve_headless_budget,
     ticket_id_for_session,
@@ -494,14 +493,24 @@ def dispatch_tick(
                     break
 
                 try:
-                    branch = f"{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}"
+                    # Provision the worktree on the feature branch the auto-dev
+                    # skills push to (`<feature_branch_prefix>/<id>`, e.g.
+                    # dev/662) so cw and the worker agree on one branch — no
+                    # mid-pipeline rename that would trip the reuse guard (#712).
+                    # The session NAME still uses AUTO_DEV_LABEL_PREFIX (set in
+                    # the executor), which reconcile parses for the ticket id.
+                    branch = f"{client.feature_branch_prefix}/{task.ticket_id}"
                     # Create a real git worktree (idempotent — returns existing
                     # path if already created). Replaces a previous bug where
                     # dispatch made an empty directory and relied on
                     # ``claude -w`` to turn it into a worktree, which never
                     # worked because that flag takes a name rather than a path.
                     try:
-                        worktree_path = create_worktree(client, branch)
+                        # allow_dirty_reuse: staged stages reuse one per-ticket
+                        # worktree and legitimately leave cross-stage churn (#712).
+                        worktree_path = create_worktree(
+                            client, branch, allow_dirty_reuse=True
+                        )
                     except StaleWorktreeError:
                         # A stale worktree (wrong branch / not a worktree) refused
                         # reuse (#404). No session exists yet, so reconcile's
