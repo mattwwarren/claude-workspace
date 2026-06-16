@@ -4924,6 +4924,7 @@ class TestDevQueueRunQuiet:
             native_daemon: object = None,
             emit: object = None,
             auto_ff: bool = True,
+            client: str | None = None,
         ) -> None:
             captured_emit.append(emit)
 
@@ -4952,6 +4953,7 @@ class TestDevQueueRunQuiet:
             native_daemon: object = None,
             emit: object = None,
             auto_ff: bool = True,
+            client: str | None = None,
         ) -> None:
             captured_emit.append(emit)
 
@@ -4981,6 +4983,7 @@ class TestDevQueueRunQuiet:
             native_daemon: object = None,
             emit: object = None,
             auto_ff: bool = True,
+            client: str | None = None,
         ) -> None:
             captured_auto_ff.append(auto_ff)
 
@@ -5009,6 +5012,7 @@ class TestDevQueueRunQuiet:
             native_daemon: object = None,
             emit: object = None,
             auto_ff: bool = True,
+            client: str | None = None,
         ) -> None:
             captured_auto_ff.append(auto_ff)
 

@@ -191,6 +191,7 @@ def dispatch_tick(
     warned_fetch_fail: set[str] | None = None,
     usage_limited_until: datetime | None = None,
     auto_ff: bool = True,
+    client_filter: str | None = None,
 ) -> DispatchTickResult:
     """Run one dispatch tick.
 
@@ -230,6 +231,10 @@ def dispatch_tick(
             states (``"ahead"``, ``"diverged"``, ``"detached"``) still
             fall through to the stale-block path. Pass ``False`` to
             restore legacy block-only behavior.
+        client_filter: When set, narrow the client loop to this single
+            client name. The caller is responsible for validating that the
+            name exists before calling; an unknown name silently produces
+            an empty tick.
 
     Returns:
         :class:`DispatchTickResult` with ``spawned`` count and
@@ -253,6 +258,8 @@ def dispatch_tick(
     if reconcile_report is not None and reconcile_report.usage_limited:
         any_usage_limit_detected = True
     clients = load_effective_clients()
+    if client_filter is not None:
+        clients = {client_filter: clients[client_filter]}
     state = load_state()
     spawned = 0
 
@@ -1036,6 +1043,7 @@ def run_dispatch_loop(
     native_daemon: NativeDaemonClient | None = None,
     emit: Callable[[str], None] | None = None,
     auto_ff: bool = True,
+    client: str | None = None,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -1059,6 +1067,8 @@ def run_dispatch_loop(
             True (default), stale-but-behind repos are fast-forwarded
             automatically. Pass False to restore legacy block-only
             behavior (``--no-auto-ff`` CLI flag).
+        client: When set, scope each tick to this single client's queue.
+            Validated at the CLI boundary before this function is called.
     """
     config = load_effective_config()
 
@@ -1092,6 +1102,7 @@ def run_dispatch_loop(
             warned_fetch_fail=warned_fetch_fail,
             usage_limited_until=usage_limited_until,
             auto_ff=auto_ff,
+            client_filter=client,
         )
 
         if result.usage_limit_detected and not once:
