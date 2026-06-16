@@ -21,6 +21,32 @@ Spawn a **general-purpose** agent in a worktree. Dispatch shape depends on mode 
 - **Interactive mode:** `isolation: "worktree"`, `run_in_background: true` (parallel — the parent waits for the next user gate anyway, no orphan hazard).
 - **`--headless` mode:** `isolation: "worktree"`, **synchronous** (omit `run_in_background`). Same orphan-hazard rationale as the Step 1b Plan agent fix (`750ea77`). Impl runs can be long; synchronous wait is the price of pipeline completion. If the impl tool call hits a runtime cap, that is a separate failure mode to ticket — `session.timeout` is louder than silent orphan-COMPLETED.
 
+### Worktree Isolation Guard (headless) — #402
+
+**A headless worker MUST NEVER run a git mutation against the operator's main
+checkout.** The authoritative working directory for this stage is the worktree
+recorded as `worktree_path` in `.claude/cw-context.json` (injected by `cw` at
+spawn — see `spawn.py:_write_hook_context`); the impl agent additionally runs
+inside its own `isolation: "worktree"` sandbox. Every `git`, `git -C <path>`,
+or `cd`-then-git invocation in this stage MUST target that worktree (or the
+trap-cleaned temp worktree created below), **never** the client's
+`workspace_path` (the operator's live checkout).
+
+This codifies the invariant behind the #402 isolation breach, where a worker's
+`git checkout` resolved "the workspace" to the operator's main checkout and
+switched their branch out from under them. The interactive "continue manually
+from the worktree" fallback (and any direct-git fallback that assumes the main
+session's checkout is the work tree) **does not apply in headless mode**:
+
+- If the isolation worktree or `worktree_path` is unreachable, or any step is
+  tempted to fall back to direct git on another checkout, **do NOT fall back**
+  — EXIT `blocked` with `blocker.reason: "impl_failed"` and let the
+  orchestrator re-dispatch on a fresh worktree. Mutating a shared checkout to
+  make progress is never an acceptable workaround.
+- Before any commit/push, confirm the cwd resolves under `worktree_path` (or
+  `$TMPWT`); if it resolves to `workspace_path`, abort the operation and exit
+  `blocked` rather than proceeding.
+
 ### Pre-Stage Detector Guard
 
 Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#resume-detection)):
