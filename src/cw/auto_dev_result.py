@@ -81,6 +81,8 @@ Status = Literal[
 # producer bug — it would silently degrade for downstream tools that key off
 # the version field.
 _V2_STATUSES: frozenset[str] = frozenset({"no_op"})
+# Lowest schema_version that may legally carry a v2-introduced status.
+_MIN_V2_SCHEMA_VERSION = 2
 # Statuses introduced in v4 (issue #191). Per rollout exception (issue #316),
 # accepted under all supported schema versions (v2, v3, v4) until the producer
 # skill bumps its emitted schema_version to v4.
@@ -395,7 +397,7 @@ class AutoDevResult(BaseModel):
     def _check_invariants(self) -> AutoDevResult:
         # §8 status/version compat: v2-introduced statuses cannot ride on a
         # v1-tagged payload.
-        if self.schema_version < 2 and self.status in _V2_STATUSES:
+        if self.schema_version < _MIN_V2_SCHEMA_VERSION and self.status in _V2_STATUSES:
             msg = (
                 f"status={self.status!r} requires schema_version>=2, "
                 f"got {self.schema_version}"

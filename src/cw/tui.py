@@ -64,17 +64,21 @@ class DetailLevel(StrEnum):
     VERBOSE = "verbose"
 
 
+_SECONDS_PER_MINUTE = 60
+_SECONDS_PER_HOUR = 3600
+
+
 def _format_elapsed(started_at: datetime, now: datetime) -> str:
     """Return a short ``HhMmSs``-style elapsed time string."""
     delta = max(now - started_at, now - now)  # Guard against clock skew.
     total_seconds = int(delta.total_seconds())
-    if total_seconds < 60:
+    if total_seconds < _SECONDS_PER_MINUTE:
         return f"{total_seconds}s"
-    if total_seconds < 3600:
-        minutes, seconds = divmod(total_seconds, 60)
+    if total_seconds < _SECONDS_PER_HOUR:
+        minutes, seconds = divmod(total_seconds, _SECONDS_PER_MINUTE)
         return f"{minutes}m{seconds:02d}s"
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes = remainder // 60
+    hours, remainder = divmod(total_seconds, _SECONDS_PER_HOUR)
+    minutes = remainder // _SECONDS_PER_MINUTE
     return f"{hours}h{minutes:02d}m"
 
 

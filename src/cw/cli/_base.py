@@ -105,6 +105,11 @@ def main(verbose: int) -> None:
     _configure_logging(verbose)
 
 
+_SECONDS_PER_MINUTE = 60
+_SECONDS_PER_HOUR = 3600
+_SECONDS_PER_DAY = 86400
+
+
 def _relative_time(dt: datetime | None) -> str:
     """Format a datetime as a relative time string."""
     if dt is None:
@@ -114,15 +119,15 @@ def _relative_time(dt: datetime | None) -> str:
     delta = now - dt
     seconds = int(delta.total_seconds())
 
-    if seconds < 60:
+    if seconds < _SECONDS_PER_MINUTE:
         return "just now"
-    if seconds < 3600:
-        m = seconds // 60
+    if seconds < _SECONDS_PER_HOUR:
+        m = seconds // _SECONDS_PER_MINUTE
         return f"{m}m ago"
-    if seconds < 86400:
-        h = seconds // 3600
+    if seconds < _SECONDS_PER_DAY:
+        h = seconds // _SECONDS_PER_HOUR
         return f"{h}h ago"
-    d = seconds // 86400
+    d = seconds // _SECONDS_PER_DAY
     return f"{d}d ago"
 
 

@@ -594,21 +594,20 @@ def _apply_sentinel_to_task(
             clients = _deps.load_effective_clients()
             last_result = sentinel.model_dump(mode="json")
             apply_staged_decision(target, sentinel.status, last_result, clients)
-        else:
-            # BlockedResult: sentinel failed to parse or was malformed.
-            if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+        # BlockedResult: sentinel failed to parse or was malformed.
+        elif sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+            target.status = QueueItemStatus.FAILED
+        elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
+            if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
                 target.status = QueueItemStatus.FAILED
-            elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
-                if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
-                    target.status = QueueItemStatus.FAILED
-                else:
-                    target.status = QueueItemStatus.PENDING
-                    target.session_id = None
-            elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+            else:
                 target.status = QueueItemStatus.PENDING
                 target.session_id = None
-            else:
-                target.status = QueueItemStatus.COMPLETED
+        elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+            target.status = QueueItemStatus.PENDING
+            target.session_id = None
+        else:
+            target.status = QueueItemStatus.COMPLETED
 
         save_dev_queue(store)
 
