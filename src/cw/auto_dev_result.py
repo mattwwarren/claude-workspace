@@ -393,8 +393,8 @@ class AutoDevResult(BaseModel):
             return _STAGE_REACHED_ALIASES[v]
         return v
 
-    @model_validator(mode="after")
-    def _check_invariants(self) -> AutoDevResult:
+    def _check_status_pairings(self) -> None:
+        """§8/§3.3/§4.3/§5.1 status-coupled invariants (version, pr, blocker)."""
         # §8 status/version compat: v2-introduced statuses cannot ride on a
         # v1-tagged payload.
         if self.schema_version < _MIN_V2_SCHEMA_VERSION and self.status in _V2_STATUSES:
@@ -461,6 +461,8 @@ class AutoDevResult(BaseModel):
             msg = f"branch must be null when status is {self.status!r}"
             raise ValueError(msg)
 
+    def _check_stage_invariants(self) -> None:
+        """§3.3/§4.x stage-coupled invariants (pre-impl exits, pre-flight)."""
         # §3.3 lines_actual is None iff exited before impl (stage1_plan or
         # stage1_pre_flight — both exit before any implementation work).
         exited_pre_impl = self.stage_reached in ("stage1_plan", "stage1_pre_flight")
@@ -494,9 +496,6 @@ class AutoDevResult(BaseModel):
         # stage1_pre_flight can exit as no_op (work not needed) or blocked
         # (work needed but a pre-flight gate failed, e.g. Origin Sync — see
         # issue #226). Other statuses still violate the pre-impl contract.
-        pre_flight_blocked = (
-            self.stage_reached == "stage1_pre_flight" and self.status == "blocked"
-        )
         if self.stage_reached == "stage1_pre_flight" and self.status not in (
             "no_op",
             "blocked",
@@ -506,6 +505,12 @@ class AutoDevResult(BaseModel):
                 f"('no_op', 'blocked'), got status={self.status!r}"
             )
             raise ValueError(msg)
+
+    def _check_next_actions_invariants(self) -> None:
+        """§4.3/§4.4 next_actions and pending-array invariants."""
+        pre_flight_blocked = (
+            self.stage_reached == "stage1_pre_flight" and self.status == "blocked"
+        )
 
         # Pre-flight + blocked is a retry/escalation shape: next_actions must
         # be non-empty and drawn from the allowed verb set. The generic
@@ -575,6 +580,11 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
+    @model_validator(mode="after")
+    def _check_invariants(self) -> AutoDevResult:
+        self._check_status_pairings()
+        self._check_stage_invariants()
+        self._check_next_actions_invariants()
         return self
 
 
@@ -641,12 +651,37 @@ def extract_block(text: str) -> str | None:
     return matches[-1].group(1)
 
 
-def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
-    """Parse a worker's stdout and return either the result or a synthetic blocker.
+_KNOWN_STATUSES: frozenset[str] = frozenset(
+    {
+        "shipped",
+        "stage_complete",
+        "plan_pending_approval",
+        "review_pending_approval",
+        "merge_gate_blocked",
+        "scope_exceeded",
+        "forbidden_area",
+        "blocked",
+        "no_op",
+        "ambiguities_pending_resolution",
+        "premises_pending_verification",
+    }
+)
+_PRE_IMPL_STAGES: frozenset[str] = frozenset({"stage1_pre_flight", "stage1_plan"})
 
-    Handles all six §6 failure modes by returning a :class:`BlockedResult`
-    rather than raising. Callers can branch on ``isinstance(result,
-    AutoDevResult)`` or check ``result.status``.
+
+def _effective_stage(payload: dict[str, Any]) -> object:
+    """Resolve ``stage_reached`` through the alias table (raw value if no alias)."""
+    raw_stage = payload.get("stage_reached", "")
+    if isinstance(raw_stage, str):
+        return _STAGE_REACHED_ALIASES.get(raw_stage, raw_stage)
+    return raw_stage
+
+
+def _locate_raw_block(text: str) -> str | BlockedResult:
+    """Locate the single sentinel payload in *text* or describe why it's unusable.
+
+    Returns the inner JSON text (sentinel-framed or loose code-fenced fallback)
+    or a :class:`BlockedResult` for §6 (1), (2), and (6) framing failures.
     """
     # §6 (6) multi-block detection comes first: even if the LAST block is
     # well-formed, the contract says exactly one per invocation.
@@ -661,39 +696,47 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
             ),
         )
 
-    if not matches:
-        if _OPEN_SENTINEL in text:
-            # §6 (2) opening sentinel present, close missing — skill crashed mid-emit
-            return BlockedResult(
-                blocker=Blocker(
-                    stage="unknown",
-                    reason=BLOCKER_REASON_NO_RESULT_EMITTED,
-                    details=(
-                        f"opening sentinel present, close missing; tail:\n{_tail(text)}"
-                    ),
-                ),
-            )
-        # §6 (1) No AUTO_DEV_RESULT markers. Tolerate bare code-fenced JSON:
-        # the producer occasionally emits the payload in a ``` block without
-        # sentinel framing (GitHub #337). Accept iff the last fenced block
-        # parses as a JSON object with both schema_version and status.
-        loose_json = _extract_loose_sentinel_json(text)
-        if loose_json is None:
-            return BlockedResult(
-                blocker=Blocker(
-                    stage="unknown",
-                    reason=BLOCKER_REASON_NO_RESULT_EMITTED,
-                    details=f"no sentinel block in stdout; tail:\n{_tail(text)}",
-                ),
-            )
-        _log.warning(
-            "auto-dev: sentinel emitted as bare code-fenced JSON without "
-            "AUTO_DEV_RESULT markers; using loose fallback (GitHub #337)"
-        )
-        raw_block = loose_json
-    else:
-        raw_block = _strip_code_fence(matches[0].group(1))
+    if matches:
+        return _strip_code_fence(matches[0].group(1))
 
+    if _OPEN_SENTINEL in text:
+        # §6 (2) opening sentinel present, close missing — skill crashed mid-emit
+        return BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason=BLOCKER_REASON_NO_RESULT_EMITTED,
+                details=(
+                    f"opening sentinel present, close missing; tail:\n{_tail(text)}"
+                ),
+            ),
+        )
+
+    # §6 (1) No AUTO_DEV_RESULT markers. Tolerate bare code-fenced JSON:
+    # the producer occasionally emits the payload in a ``` block without
+    # sentinel framing (GitHub #337). Accept iff the last fenced block
+    # parses as a JSON object with both schema_version and status.
+    loose_json = _extract_loose_sentinel_json(text)
+    if loose_json is None:
+        return BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason=BLOCKER_REASON_NO_RESULT_EMITTED,
+                details=f"no sentinel block in stdout; tail:\n{_tail(text)}",
+            ),
+        )
+    _log.warning(
+        "auto-dev: sentinel emitted as bare code-fenced JSON without "
+        "AUTO_DEV_RESULT markers; using loose fallback (GitHub #337)"
+    )
+    return loose_json
+
+
+def _decode_payload(raw_block: str) -> dict[str, Any] | BlockedResult:
+    """Decode the sentinel JSON and pre-validate version/status (§6 (3)-(5)).
+
+    Returns the payload dict on success or a :class:`BlockedResult` for the
+    parse/shape/version/status failure modes.
+    """
     # §6 (3) JSON does not parse.
     try:
         payload: Any = json.loads(raw_block)
@@ -741,19 +784,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
     # §6 (5) unknown status — short-circuit before Pydantic raises a
     # ValidationError on the closed Literal.
     raw_status = payload.get("status")
-    if raw_status not in {
-        "shipped",
-        "stage_complete",
-        "plan_pending_approval",
-        "review_pending_approval",
-        "merge_gate_blocked",
-        "scope_exceeded",
-        "forbidden_area",
-        "blocked",
-        "no_op",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
-    }:
+    if raw_status not in _KNOWN_STATUSES:
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
@@ -764,193 +795,199 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
             ),
         )
 
-    # Pre-validation normalization for no_op + stray pr/branch/commits (issue
-    # #367). The producer sometimes emits status=no_op alongside a non-null pr
-    # or branch when the pipeline ran far enough to create a branch/PR before
-    # determining no work was needed. AutoDevResult._check_invariants (§3.3)
-    # correctly rejects this shape; leniency here applies only at the stdout-
-    # parse boundary where producer drift is expected. Does NOT apply to
-    # shipped or blocked — those contradictions are genuinely ambiguous and
-    # should still fail loudly.
-    if raw_status == "no_op":
-        stray: list[str] = []
-        if payload.get("pr") is not None:
-            stray.append("pr")
-            payload["pr"] = None
-        if payload.get("branch") is not None:
-            stray.append("branch")
-            payload["branch"] = None
-        if payload.get("commits"):
-            stray.append("commits")
-            payload["commits"] = []
-        # Coerce stray scope.lines_actual on pre-impl exits (issue #399).
-        # A no_op at stage1_pre_flight or stage1_plan exited before any
-        # implementation work; lines_actual must be null. The producer
-        # sometimes emits a non-null value, tripping the §3.3 cross-field
-        # invariant and causing the sentinel to fail as validation_failed.
-        scope_dict = payload.get("scope")
-        if isinstance(scope_dict, dict) and scope_dict.get("lines_actual") is not None:
-            raw_stage = payload.get("stage_reached", "")
-            effective_stage = (
-                _STAGE_REACHED_ALIASES.get(raw_stage, raw_stage)
-                if isinstance(raw_stage, str)
-                else raw_stage
-            )
-            if effective_stage in ("stage1_pre_flight", "stage1_plan"):
-                stray.append("scope.lines_actual")
-                scope_dict["lines_actual"] = None
-        if stray:
-            _log.warning(
-                "auto-dev: no_op sentinel carried non-null %s; coercing to clean "
-                "no_op (ticket=%s, schema_version=%s)",
-                stray,
-                payload.get("ticket_id", "unknown"),
-                payload.get("schema_version"),
-            )
+    return payload
 
-    # Pre-validation normalization for scope_exceeded / forbidden_area + stray
-    # branch / lines_actual (issue #430 case 4). A producer that exits with
-    # scope_exceeded or forbidden_area at/after stage2_impl may emit a non-null
-    # branch (§3.3 pre-branch invariant) and/or a non-null lines_actual that
-    # violates the pre-impl invariant (only when stage is stage1_pre_flight or
-    # stage1_plan). Extend the no_op stray-branch/lines coerce to these statuses.
-    # Post-impl stages require non-null lines_actual per §3.3 — do not coerce
-    # lines_actual when the stage is post-impl (stage2_impl and later).
-    # Only applies at the parse boundary; strict model_validate still rejects.
-    if raw_status in ("scope_exceeded", "forbidden_area"):
-        stray_term: list[str] = []
-        if payload.get("branch") is not None:
-            stray_term.append("branch")
-            payload["branch"] = None
-        if payload.get("commits"):
-            stray_term.append("commits")
-            payload["commits"] = []
-        scope_dict_term = payload.get("scope")
-        if (
-            isinstance(scope_dict_term, dict)
-            and scope_dict_term.get("lines_actual") is not None
-        ):
-            raw_stage_term = payload.get("stage_reached", "")
-            effective_stage_term = (
-                _STAGE_REACHED_ALIASES.get(raw_stage_term, raw_stage_term)
-                if isinstance(raw_stage_term, str)
-                else raw_stage_term
-            )
-            # Only coerce lines_actual on pre-impl exits (same rule as no_op).
-            # Post-impl stages (stage2_impl+) require non-null lines_actual
-            # per §3.3; leave them intact.
-            if effective_stage_term in ("stage1_pre_flight", "stage1_plan"):
-                stray_term.append("scope.lines_actual")
-                scope_dict_term["lines_actual"] = None
-        if stray_term:
-            _log.warning(
-                "auto-dev: %s sentinel carried non-null %s; coercing to clean "
-                "%s (ticket=%s, schema_version=%s)",
-                raw_status,
-                stray_term,
-                raw_status,
-                payload.get("ticket_id", "unknown"),
-                payload.get("schema_version"),
-            )
 
-    # Pre-validation normalization for ambiguities_pending_resolution /
-    # premises_pending_verification with empty arrays (issue #430 case 1).
-    # A producer that omits the ambiguities/premises key (defaults to []) or
-    # emits an empty list hits the §4.4 A5 invariant and becomes
-    # validation_failed. Accept empty arrays by injecting a minimal placeholder
-    # so the payload passes model_validate. Leniency applies only at the parse
-    # boundary; strict model_validate still rejects (negative tests preserved).
-    if raw_status == "ambiguities_pending_resolution":
-        raw_ambiguities = payload.get("ambiguities")
-        if not raw_ambiguities:  # None or [] both need coercing
-            _log.warning(
-                "auto-dev: ambiguities_pending_resolution sentinel has empty "
-                "ambiguities; coercing to minimal placeholder "
-                "(ticket=%s, schema_version=%s)",
-                payload.get("ticket_id", "unknown"),
-                payload.get("schema_version"),
-            )
-            payload["ambiguities"] = [{}]
-    if raw_status == "premises_pending_verification":
-        raw_premises = payload.get("premises")
-        if not raw_premises:  # None or [] both need coercing
-            _log.warning(
-                "auto-dev: premises_pending_verification sentinel has empty "
-                "premises; coercing to minimal placeholder "
-                "(ticket=%s, schema_version=%s)",
-                payload.get("ticket_id", "unknown"),
-                payload.get("schema_version"),
-            )
-            payload["premises"] = [{}]
-
-    # Pre-validation normalization for blocked + stray next_actions (issue
-    # #371 — follow-up to #367/#370). A producer bug emitted status=blocked
-    # alongside next_actions=['redispatch_ticket'] (or similar non-user-directed
-    # verbs). The §4.3 terminal-reject invariant rejects the whole sentinel as
-    # validation_failed, masking the real blocker. Coerce: drop stray
-    # next_actions, preserve the original blocker intact. Leniency applies only
-    # at the parse boundary (same scoping as the no_op coerce above).
-    # Two legitimate shapes carry next_actions on blocked and MUST NOT be coerced:
-    #   - pre-flight blocked (stage_reached='stage1_pre_flight'), and
-    #   - user-directed blocked (all next_actions start with user_* prefixes).
-    if raw_status == "blocked":
-        raw_next_actions = payload.get("next_actions")
-        if isinstance(raw_next_actions, list) and raw_next_actions:
-            is_pre_flight = payload.get("stage_reached") == "stage1_pre_flight"
-            is_user_directed = all(
-                isinstance(a, str) and a.startswith(USER_DIRECTED_PREFIXES)
-                for a in raw_next_actions
-            )
-            if not is_pre_flight and not is_user_directed:
-                _log.warning(
-                    "auto-dev: blocked sentinel carried stray next_actions=%r; "
-                    "dropping next_actions, preserving blocker "
-                    "(ticket=%s, schema_version=%s)",
-                    raw_next_actions,
-                    payload.get("ticket_id", "unknown"),
-                    payload.get("schema_version"),
-                )
-                payload["next_actions"] = []
-
-    # Pre-validation normalization for pre-impl stages + lines_actual=0
-    # (issue #416, follow-up from #399). Workers sometimes emit lines_actual=0
-    # instead of null at pre-impl stages. Only integer 0 is coerced; any other
-    # non-null value stays intact (hard error per §3.3 invariant). Applies to
-    # all statuses (distinct from the no_op coerce above which is status-gated).
-    _scope_gen = payload.get("scope")
-    if isinstance(_scope_gen, dict):
-        _raw_stage_gen = payload.get("stage_reached", "")
-        _eff_stage_gen = (
-            _STAGE_REACHED_ALIASES.get(_raw_stage_gen, _raw_stage_gen)
-            if isinstance(_raw_stage_gen, str)
-            else _raw_stage_gen
+def _coerce_no_op_strays(payload: dict[str, Any]) -> None:
+    """Drop stray pr/branch/commits/lines_actual on a no_op payload (issue #367)."""
+    stray: list[str] = []
+    if payload.get("pr") is not None:
+        stray.append("pr")
+        payload["pr"] = None
+    if payload.get("branch") is not None:
+        stray.append("branch")
+        payload["branch"] = None
+    if payload.get("commits"):
+        stray.append("commits")
+        payload["commits"] = []
+    # Coerce stray scope.lines_actual on pre-impl exits (issue #399).
+    # A no_op at stage1_pre_flight or stage1_plan exited before any
+    # implementation work; lines_actual must be null. The producer
+    # sometimes emits a non-null value, tripping the §3.3 cross-field
+    # invariant and causing the sentinel to fail as validation_failed.
+    scope_dict = payload.get("scope")
+    if (
+        isinstance(scope_dict, dict)
+        and scope_dict.get("lines_actual") is not None
+        and _effective_stage(payload) in _PRE_IMPL_STAGES
+    ):
+        stray.append("scope.lines_actual")
+        scope_dict["lines_actual"] = None
+    if stray:
+        _log.warning(
+            "auto-dev: no_op sentinel carried non-null %s; coercing to clean "
+            "no_op (ticket=%s, schema_version=%s)",
+            stray,
+            payload.get("ticket_id", "unknown"),
+            payload.get("schema_version"),
         )
-        if (
-            _eff_stage_gen in ("stage1_pre_flight", "stage1_plan")
-            and _scope_gen.get("lines_actual") == 0
-        ):
-            _log.warning(
-                "auto-dev: pre-impl sentinel had lines_actual=0; coercing to null "
-                "(ticket=%s, schema_version=%s)",
-                payload.get("ticket_id", "unknown"),
-                payload.get("schema_version"),
-            )
-            _scope_gen["lines_actual"] = None
 
-    # Pre-validation normalization for shipped + missing wait_for_ci (issue
-    # #417). An already-auto-merged PR legitimately exits without wait_for_ci.
-    # The §4.3 model_validator rejects this; coerce at the parse boundary.
-    # The strict model_validator rule is preserved — this covers producer drift.
+
+def _coerce_terminal_strays(payload: dict[str, Any], raw_status: str) -> None:
+    """Drop stray branch/commits/lines_actual on scope_exceeded/forbidden_area.
+
+    Issue #430 case 4. Post-impl stages require non-null lines_actual per §3.3;
+    lines_actual is only coerced on pre-impl exits (same rule as no_op).
+    """
+    stray_term: list[str] = []
+    if payload.get("branch") is not None:
+        stray_term.append("branch")
+        payload["branch"] = None
+    if payload.get("commits"):
+        stray_term.append("commits")
+        payload["commits"] = []
+    scope_dict_term = payload.get("scope")
+    if (
+        isinstance(scope_dict_term, dict)
+        and scope_dict_term.get("lines_actual") is not None
+        and _effective_stage(payload) in _PRE_IMPL_STAGES
+    ):
+        stray_term.append("scope.lines_actual")
+        scope_dict_term["lines_actual"] = None
+    if stray_term:
+        _log.warning(
+            "auto-dev: %s sentinel carried non-null %s; coercing to clean "
+            "%s (ticket=%s, schema_version=%s)",
+            raw_status,
+            stray_term,
+            raw_status,
+            payload.get("ticket_id", "unknown"),
+            payload.get("schema_version"),
+        )
+
+
+def _coerce_empty_pending_array(
+    payload: dict[str, Any], key: str, raw_status: str
+) -> None:
+    """Inject a minimal placeholder for an empty ambiguities/premises array.
+
+    Issue #430 case 1 — accept empty arrays at the parse boundary so the §4.4
+    A5 invariant does not turn producer drift into validation_failed.
+    """
+    if not payload.get(key):  # None or [] both need coercing
+        _log.warning(
+            "auto-dev: %s sentinel has empty %s; coercing to minimal "
+            "placeholder (ticket=%s, schema_version=%s)",
+            raw_status,
+            key,
+            payload.get("ticket_id", "unknown"),
+            payload.get("schema_version"),
+        )
+        payload[key] = [{}]
+
+
+def _coerce_blocked_next_actions(payload: dict[str, Any]) -> None:
+    """Drop stray next_actions on a blocked payload, preserving the blocker.
+
+    Issue #371. Two legitimate shapes carry next_actions on blocked and MUST
+    NOT be coerced: pre-flight blocked (stage_reached='stage1_pre_flight'), and
+    user-directed blocked (all next_actions start with user_* prefixes).
+    """
+    raw_next_actions = payload.get("next_actions")
+    if not (isinstance(raw_next_actions, list) and raw_next_actions):
+        return
+    is_pre_flight = payload.get("stage_reached") == "stage1_pre_flight"
+    is_user_directed = all(
+        isinstance(a, str) and a.startswith(USER_DIRECTED_PREFIXES)
+        for a in raw_next_actions
+    )
+    if not is_pre_flight and not is_user_directed:
+        _log.warning(
+            "auto-dev: blocked sentinel carried stray next_actions=%r; "
+            "dropping next_actions, preserving blocker "
+            "(ticket=%s, schema_version=%s)",
+            raw_next_actions,
+            payload.get("ticket_id", "unknown"),
+            payload.get("schema_version"),
+        )
+        payload["next_actions"] = []
+
+
+def _coerce_pre_impl_zero_lines(payload: dict[str, Any]) -> None:
+    """Coerce lines_actual=0 to null on pre-impl stages (issue #416).
+
+    Only integer 0 is coerced; any other non-null value stays intact (hard
+    error per §3.3). Status-agnostic, unlike the no_op coerce.
+    """
+    scope_gen = payload.get("scope")
+    if (
+        isinstance(scope_gen, dict)
+        and _effective_stage(payload) in _PRE_IMPL_STAGES
+        and scope_gen.get("lines_actual") == 0
+    ):
+        _log.warning(
+            "auto-dev: pre-impl sentinel had lines_actual=0; coercing to null "
+            "(ticket=%s, schema_version=%s)",
+            payload.get("ticket_id", "unknown"),
+            payload.get("schema_version"),
+        )
+        scope_gen["lines_actual"] = None
+
+
+def _coerce_shipped_wait_for_ci(payload: dict[str, Any]) -> None:
+    """Inject wait_for_ci on a shipped payload that omits it (issue #417)."""
+    na = payload.get("next_actions")
+    if isinstance(na, list) and "wait_for_ci" not in na:
+        _log.warning(
+            "auto-dev: shipped sentinel missing wait_for_ci; injecting "
+            "(ticket=%s, schema_version=%s)",
+            payload.get("ticket_id", "unknown"),
+            payload.get("schema_version"),
+        )
+        payload["next_actions"] = [*na, "wait_for_ci"]
+
+
+def _normalize_payload(payload: dict[str, Any], raw_status: str) -> None:
+    """Apply all parse-boundary leniency coercions in place (producer drift).
+
+    Each coercion is a documented, status-gated relaxation of a §3/§4 invariant
+    that the strict ``model_validate`` still enforces. See the individual
+    ``_coerce_*`` helpers for the per-issue rationale.
+    """
+    if raw_status == "no_op":
+        _coerce_no_op_strays(payload)
+    if raw_status in ("scope_exceeded", "forbidden_area"):
+        _coerce_terminal_strays(payload, raw_status)
+    if raw_status == "ambiguities_pending_resolution":
+        _coerce_empty_pending_array(payload, "ambiguities", raw_status)
+    if raw_status == "premises_pending_verification":
+        _coerce_empty_pending_array(payload, "premises", raw_status)
+    if raw_status == "blocked":
+        _coerce_blocked_next_actions(payload)
+    # Status-agnostic: applies regardless of raw_status (distinct from above).
+    _coerce_pre_impl_zero_lines(payload)
     if raw_status == "shipped":
-        _na = payload.get("next_actions")
-        if isinstance(_na, list) and "wait_for_ci" not in _na:
-            _log.warning(
-                "auto-dev: shipped sentinel missing wait_for_ci; injecting "
-                "(ticket=%s, schema_version=%s)",
-                payload.get("ticket_id", "unknown"),
-                payload.get("schema_version"),
-            )
-            payload["next_actions"] = [*_na, "wait_for_ci"]
+        _coerce_shipped_wait_for_ci(payload)
+
+
+def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
+    """Parse a worker's stdout and return either the result or a synthetic blocker.
+
+    Handles all six §6 failure modes by returning a :class:`BlockedResult`
+    rather than raising. Callers can branch on ``isinstance(result,
+    AutoDevResult)`` or check ``result.status``.
+    """
+    located = _locate_raw_block(text)
+    if isinstance(located, BlockedResult):
+        return located
+
+    decoded = _decode_payload(located)
+    if isinstance(decoded, BlockedResult):
+        return decoded
+
+    payload = decoded
+    raw_status = payload["status"]
+    _normalize_payload(payload, raw_status)
 
     try:
         return AutoDevResult.model_validate(payload)

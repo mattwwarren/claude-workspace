@@ -40,8 +40,10 @@ from cw.exceptions import CwError
 from cw.models import (
     WORKER_PURPOSES,
     CompletionReason,
+    CwState,
     OrchestratorEventType,
     QueueItemStatus,
+    Session,
     SessionOrigin,
     SessionStatus,
     TicketTask,
@@ -288,6 +290,181 @@ def _display_status() -> None:
             click.echo(f"  {s.name}")
 
 
+def _read_stop_hook_payload() -> tuple[dict[str, object], str] | None:
+    """Read the Stop-hook JSON from stdin and extract its ``cwd``.
+
+    Returns ``(hook_payload, cwd_value)`` when stdin holds a JSON object with a
+    string ``cwd``, else ``None``. Best-effort: every failure mode (unreadable
+    stdin, empty body, malformed JSON, missing cwd) is a silent no-op.
+    """
+    try:
+        stdin_text = sys.stdin.read()
+    except (OSError, ValueError):
+        return None
+    if not stdin_text:
+        return None
+    try:
+        hook_payload = json.loads(stdin_text)
+    except json.JSONDecodeError:
+        return None
+    cwd_value = hook_payload.get("cwd") if isinstance(hook_payload, dict) else None
+    if not isinstance(cwd_value, str):
+        return None
+    return hook_payload, cwd_value
+
+
+def _resolve_signal_stop_context() -> (
+    tuple[dict[str, object], dict[str, object], str, str] | None
+):
+    """Read and validate the Stop-hook payload + cw-context.json.
+
+    Returns ``(hook_payload, context, cwd_value, cw_session_id)`` when every
+    required field is present and well-typed, else ``None`` (silent no-op so
+    hook execution never blocks claude from exiting). See :func:`signal_stop`.
+    """
+    payload = _read_stop_hook_payload()
+    if payload is None:
+        return None
+    hook_payload, cwd_value = payload
+
+    context_path = Path(cwd_value) / ".claude" / "cw-context.json"
+    if not context_path.is_file():
+        return None
+    try:
+        context = json.loads(context_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(context, dict):
+        return None
+
+    cw_session_id = context.get("session_id")
+    if not isinstance(cw_session_id, str):
+        return None
+
+    return hook_payload, context, cwd_value, cw_session_id
+
+
+def _handle_headless_no_sentinel(
+    state: CwState,
+    session: Session,
+    *,
+    now: datetime,
+    claude_session_id: object,
+    context: dict[str, object],
+    ticket_id_value: object,
+    hook_payload: dict[str, object],
+) -> bool:
+    """Resolve a sentinel-less headless Stop hook: defer or time out.
+
+    Under the resolved headless budget the call defers (returns True without
+    mutating state) so a later Stop hook or reconcile can retry. Over budget
+    it records a TIMED_OUT transition via :func:`_record_headless_timeout`.
+    Returns True in both cases — the caller must stop processing.
+    """
+    elapsed = (now - session.started_at).total_seconds()
+    headless_config = load_orchestrator_config()
+    stop_task: TicketTask | None = None
+    if isinstance(ticket_id_value, str):
+        stop_store = load_dev_queue()
+        stop_task = next(
+            (t for t in stop_store.tasks if t.ticket_id == ticket_id_value),
+            None,
+        )
+    budget = resolve_headless_budget(stop_task, session, headless_config)
+    if elapsed < budget:
+        # Under budget — defer. Another Stop hook turn will fire, or
+        # reconcile will eventually catch a phantom and CRASH it.
+        return True
+    # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
+    _record_headless_timeout(
+        state,
+        session,
+        now=now,
+        elapsed=elapsed,
+        claude_session_id=claude_session_id,
+        context=context,
+        ticket_id_value=ticket_id_value,
+        hook_payload=hook_payload,
+    )
+    return True
+
+
+def _handle_user_origin_stop(
+    state: CwState,
+    session: Session,
+    claude_session_id: object,
+) -> bool:
+    """Handle a Stop hook for a USER-origin (interactive) session.
+
+    Issue #165 Phase B: mark an ACTIVE session IDLE (no SESSION_COMPLETED,
+    no daemon stop). A non-ACTIVE session is left untouched. Returns True
+    when the caller should stop processing (always, for USER origin).
+    """
+    if session.status != SessionStatus.ACTIVE:
+        # BACKGROUNDED (or any non-ACTIVE state) — silent no-op so a
+        # Stop hook firing on a session the user has explicitly
+        # parked doesn't flip its status.
+        return True
+    session.status = SessionStatus.IDLE
+    if isinstance(claude_session_id, str):
+        session.claude_session_id = claude_session_id
+    save_state(state)
+    return True
+
+
+def _record_headless_timeout(
+    state: CwState,
+    session: Session,
+    *,
+    now: datetime,
+    elapsed: float,
+    claude_session_id: object,
+    context: dict[str, object],
+    ticket_id_value: object,
+    hook_payload: dict[str, object],
+) -> None:
+    """Mark a budget-exceeded headless session TIMED_OUT and revert its task.
+
+    Transitions *session* to TIMED_OUT, persists state, emits
+    ``SESSION_TIMED_OUT``, reverts the owning RUNNING TicketTask to PENDING so
+    the dispatch loop can retry, and best-effort stops the daemon worker.
+    See issue #176.
+    """
+    last_msg = hook_payload.get("last_assistant_message", "")
+    excerpt = str(last_msg)[:500] if last_msg else ""
+    session.status = SessionStatus.TIMED_OUT
+    session.completed_at = now
+    session.completed_reason = CompletionReason.TIMED_OUT
+    if isinstance(claude_session_id, str):
+        session.claude_session_id = claude_session_id
+    save_state(state)
+    timed_out_payload: dict[str, object] = {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": context.get("client"),
+        "ticket_id": ticket_id_value,
+        "claude_session_id": claude_session_id,
+        "elapsed_seconds": elapsed,
+        "last_assistant_message_excerpt": excerpt,
+    }
+    record_event(OrchestratorEventType.SESSION_TIMED_OUT, timed_out_payload)
+    # Revert the owning TicketTask from RUNNING → PENDING so the
+    # dispatch loop can retry this ticket on the next tick.
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for task in store.tasks:
+            if (
+                task.ticket_id == ticket_id_value
+                and task.status == QueueItemStatus.RUNNING
+            ):
+                task.status = QueueItemStatus.PENDING
+                task.session_id = None
+                break
+        save_dev_queue(store)
+    if session.surface_ref is not None:
+        get_native_daemon_client().stop(session.surface_ref)
+
+
 @main.command(name="signal-stop")
 @handle_errors
 def signal_stop() -> None:
@@ -315,32 +492,10 @@ def signal_stop() -> None:
     turn while the subagent is still running. Completing the session
     here would orphan the subagent. See issue #151.
     """
-    try:
-        stdin_text = sys.stdin.read()
-    except (OSError, ValueError):
+    resolved_context = _resolve_signal_stop_context()
+    if resolved_context is None:
         return
-    if not stdin_text:
-        return
-    try:
-        hook_payload = json.loads(stdin_text)
-    except json.JSONDecodeError:
-        return
-    cwd_value = hook_payload.get("cwd") if isinstance(hook_payload, dict) else None
-    if not isinstance(cwd_value, str):
-        return
-    context_path = Path(cwd_value) / ".claude" / "cw-context.json"
-    if not context_path.is_file():
-        return
-    try:
-        context = json.loads(context_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(context, dict):
-        return
-
-    cw_session_id = context.get("session_id")
-    if not isinstance(cw_session_id, str):
-        return
+    hook_payload, context, cwd_value, cw_session_id = resolved_context
 
     bg_tasks = hook_payload.get("background_tasks")
     if isinstance(bg_tasks, list) and bg_tasks:
@@ -405,15 +560,7 @@ def signal_stop() -> None:
         # native_daemon.stop (no roster entry to clean up). DAEMON-origin
         # falls through to the existing COMPLETED transition below.
         if session.origin is SessionOrigin.USER:
-            if session.status != SessionStatus.ACTIVE:
-                # BACKGROUNDED (or any non-ACTIVE state) — silent no-op so a
-                # Stop hook firing on a session the user has explicitly
-                # parked doesn't flip its status.
-                return
-            session.status = SessionStatus.IDLE
-            if isinstance(claude_session_id, str):
-                session.claude_session_id = claude_session_id
-            save_state(state)
+            _handle_user_origin_stop(state, session, claude_session_id)
             return
 
         # Issue #176 Layer 1: headless backstop.
@@ -448,58 +595,15 @@ def signal_stop() -> None:
                 claude_session_id if isinstance(claude_session_id, str) else None,
             )
             if parsed_sentinel is None:
-                elapsed = (now - session.started_at).total_seconds()
-                _headless_config = load_orchestrator_config()
-                _stop_task: TicketTask | None = None
-                if isinstance(ticket_id_value, str):
-                    _stop_store = load_dev_queue()
-                    _stop_task = next(
-                        (
-                            t
-                            for t in _stop_store.tasks
-                            if t.ticket_id == ticket_id_value
-                        ),
-                        None,
-                    )
-                _budget = resolve_headless_budget(_stop_task, session, _headless_config)
-                if elapsed < _budget:
-                    # Under budget — defer. Another Stop hook turn will fire, or
-                    # reconcile will eventually catch a phantom and CRASH it.
-                    return
-                # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
-                last_msg = hook_payload.get("last_assistant_message", "")
-                excerpt = str(last_msg)[:500] if last_msg else ""
-                session.status = SessionStatus.TIMED_OUT
-                session.completed_at = now
-                session.completed_reason = CompletionReason.TIMED_OUT
-                if isinstance(claude_session_id, str):
-                    session.claude_session_id = claude_session_id
-                save_state(state)
-                timed_out_payload: dict[str, object] = {
-                    "session_id": session.id,
-                    "session_name": session.name,
-                    "client": context.get("client"),
-                    "ticket_id": ticket_id_value,
-                    "claude_session_id": claude_session_id,
-                    "elapsed_seconds": elapsed,
-                    "last_assistant_message_excerpt": excerpt,
-                }
-                record_event(OrchestratorEventType.SESSION_TIMED_OUT, timed_out_payload)
-                # Revert the owning TicketTask from RUNNING → PENDING so the
-                # dispatch loop can retry this ticket on the next tick.
-                with dev_queue_lock():
-                    store = load_dev_queue()
-                    for task in store.tasks:
-                        if (
-                            task.ticket_id == ticket_id_value
-                            and task.status == QueueItemStatus.RUNNING
-                        ):
-                            task.status = QueueItemStatus.PENDING
-                            task.session_id = None
-                            break
-                    save_dev_queue(store)
-                if session.surface_ref is not None:
-                    get_native_daemon_client().stop(session.surface_ref)
+                _handle_headless_no_sentinel(
+                    state,
+                    session,
+                    now=now,
+                    claude_session_id=claude_session_id,
+                    context=context,
+                    ticket_id_value=ticket_id_value,
+                    hook_payload=hook_payload,
+                )
                 return
 
         # Issue #251: directly update the dev-queue task *before* marking the

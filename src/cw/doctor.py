@@ -1038,13 +1038,13 @@ def _check_claude_version() -> CheckResult:
     return CheckResult("claude-version", ok=True, detail=version_line)
 
 
-def _check_cw_version() -> CheckResult:
-    """Check whether the installed cw matches the source repo's pyproject.toml version.
+def _resolve_cw_source_path() -> Path | CheckResult:
+    """Resolve the local source dir for the installed cw, or a skip CheckResult.
 
-    Silent-skips (ok=True, warn=False) for registry/PyPI installs and when
-    package metadata is absent — source-version comparison only makes sense
-    for local installs. Warns (ok=True, warn=True) when installed is behind
-    source or when the source path is stale/unreadable.
+    Returns the source :class:`Path` for an editable/local install. For a
+    registry/PyPI install (no package metadata, no/foreign ``direct_url.json``)
+    returns an ``ok=True, warn=False`` skip :class:`CheckResult` that the
+    caller propagates unchanged.
     """
     try:
         dist = importlib.metadata.distribution(_CW_PACKAGE_NAME)
@@ -1084,7 +1084,20 @@ def _check_cw_version() -> CheckResult:
             detail="installed from registry; skipping source check",
         )
 
-    source_path = Path(urllib.parse.urlparse(url).path)
+    return Path(urllib.parse.urlparse(url).path)
+
+
+def _check_cw_version() -> CheckResult:
+    """Check whether the installed cw matches the source repo's pyproject.toml version.
+
+    Silent-skips (ok=True, warn=False) for registry/PyPI installs and when
+    package metadata is absent — source-version comparison only makes sense
+    for local installs. Warns (ok=True, warn=True) when installed is behind
+    source or when the source path is stale/unreadable.
+    """
+    source_path = _resolve_cw_source_path()
+    if isinstance(source_path, CheckResult):
+        return source_path
 
     if not source_path.exists():
         return CheckResult(
