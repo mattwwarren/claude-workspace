@@ -803,6 +803,85 @@ class TestConsumeCompletesTasks:
 
         assert task.stage == Stage.IMPL
 
+    def test_consume_persists_sentinel_before_advance_decision(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Event-stdout sentinel is persisted BEFORE the advance decision (#694).
+
+        Regression: ``consume_completed_sessions`` must persist ``last_result``
+        from the event's stdout before ``_apply_events_to_store`` reads it.
+        Otherwise a freshly-completed stage has ``last_result=None`` at decision
+        time -> status None -> Rule 6 -> BLOCKED_ON_USER, and the staged pipeline
+        never advances. Unlike the sibling consume tests, this session starts
+        with ``last_result`` unset; only the event stdout carries the sentinel,
+        exercising the real persist-before-decide path the unit-level
+        ``_apply_events_to_store`` tests cannot reach.
+        """
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-694",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.PLAN,
+            session_id="sess-694",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # Fresh session: last_result NOT pre-populated -- only the event stdout
+        # carries the sentinel, exercising persist-before-decide ordering.
+        sess = Session(
+            id="sess-694",
+            name="test-client/auto-dev/GEN-694",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        stdout = (
+            "<<<AUTO_DEV_RESULT\n"
+            '{"schema_version": 4, "ticket_id": "GEN-694",'
+            ' "status": "plan_pending_approval",'
+            ' "stage_reached": "stage1_plan",'
+            ' "scope": {"tier": "small", "files": 4, "lines_estimate": 258,'
+            ' "lines_actual": 0, "forbidden_touched": false},'
+            ' "plan_source": "github_issue_existing", "branch": null,'
+            ' "worktree_path": "/tmp/wt", "fork_point_sha": null,'
+            ' "commits": [], "pr": null,'
+            ' "review": {"must_fix_initial": 0, "should_fix": 0,'
+            ' "fix_cycles_used": 0},'
+            ' "health": {"lowest_agent_confidence": "HIGH",'
+            ' "any_incomplete_risk": false, "shortcuts": [],'
+            ' "recommendation": "PROCEED", "downgrade_applied": false,'
+            ' "fix_loop_escalated": false},'
+            ' "friction_highlights": [], "ambiguities": [], "blocker": null,'
+            ' "next_actions": []}\n'
+            "AUTO_DEV_RESULT>>>\n"
+        )
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": "GEN-694",
+                "session_id": "sess-694",
+                "stdout": stdout,
+            },
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        advanced = load_dev_queue().tasks[0]
+        # Small-tier plan_pending_approval auto-advances PLAN -> IMPL (PENDING),
+        # NOT BLOCKED_ON_USER -- proves the sentinel was persisted pre-decision.
+        assert advanced.status == QueueItemStatus.PENDING
+        assert advanced.stage == Stage.IMPL
+
     def test_consume_null_last_result_routes_to_completed(
         self,
         tmp_dispatch_dirs: Path,

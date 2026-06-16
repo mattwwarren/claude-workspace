@@ -933,6 +933,21 @@ def consume_completed_sessions() -> int:
     if not events:
         return 0
 
+    # Persist sentinel-block summaries on Sessions BEFORE the advance
+    # decision, so _apply_events_to_store reads each just-completed session's
+    # last_result (status + scope.tier) instead of a stale/None value. Without
+    # this ordering, a freshly-completed stage has last_result=None at decision
+    # time → status=None → Rule 6 → BLOCKED_ON_USER, so the staged pipeline
+    # never advances (#694). Producer side (worker stdout capture) is gated on
+    # the orchestrator P1.A wiring; this consumer is forward-compatible with
+    # events that lack a ``stdout`` payload (such an event leaves last_result
+    # unset → the conservative-safe BLOCKED_ON_USER default).
+    for event in events:
+        session_id = event.payload.get("session_id")
+        stdout = event.payload.get("stdout")
+        if isinstance(session_id, str) and isinstance(stdout, str):
+            persist_last_result(session_id, stdout)
+
     with dev_queue_lock():
         store = load_dev_queue()
         clients = load_effective_clients()
@@ -940,16 +955,6 @@ def consume_completed_sessions() -> int:
         # Advance cursor inside the dev-queue lock so the cursor never
         # moves past events whose queue mutations haven't been persisted yet.
         advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
-
-    # Persist sentinel-block summaries on Sessions whose completion event
-    # carried captured stdout. Producer side (worker stdout capture) is
-    # gated on the orchestrator P1.A wiring; this consumer is forward-
-    # compatible with events that lack a ``stdout`` payload.
-    for event in events:
-        session_id = event.payload.get("session_id")
-        stdout = event.payload.get("stdout")
-        if isinstance(session_id, str) and isinstance(stdout, str):
-            persist_last_result(session_id, stdout)
 
     return completed
 
