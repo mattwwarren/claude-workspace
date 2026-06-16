@@ -228,7 +228,7 @@ class TestCli:
             assert "Test error message" in result.output
 
     def test_daemon_once_emits_informational_banner(self) -> None:
-        """cw daemon --once prints banner naming dev-queue dispatch and pointing to cw dev-queue run."""
+        """cw daemon --once: banner names dev-queue, points to cw dev-queue run."""
         runner = CliRunner()
         result = runner.invoke(main, ["daemon", "--once"])
         assert result.exit_code == 0
