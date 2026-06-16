@@ -227,14 +227,13 @@ class TestCli:
             assert result.exit_code != 0
             assert "Test error message" in result.output
 
-    def test_daemon_once_emits_deprecation_warning(self) -> None:
-        """cw daemon --once prints deprecation warning (via click.echo err=True)."""
+    def test_daemon_once_emits_deprecation_notice(self) -> None:
+        """cw daemon --once: banner calls it deprecated, redirects to dev-queue run."""
         runner = CliRunner()
         result = runner.invoke(main, ["daemon", "--once"])
         assert result.exit_code == 0
-        assert "Note: cw daemon's PR-dispatch role is deprecated as of 0.11." in (
-            result.output
-        )
+        assert "deprecated and has no effect" in result.output
+        assert "cw dev-queue run" in result.output
 
 
 class TestLogging:
