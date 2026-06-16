@@ -50,6 +50,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0005](0005-single-state-lock.md) | All `sessions.json` mutations go through a single state lock | Proposed |
 | [0006](0006-reaping-is-gated-by-an-authority.md) | Reaping is gated by an authority, not automatic | Accepted |
 | [0007](0007-reconcile-cadence-and-ownership.md) | Reconcile cadence and ownership: on-demand, ticker, or daemon primary runner | Proposed |
+| [0008](0008-tracker-resolution-is-a-typed-seam.md) | Tracker resolution is a declared descriptor, not bespoke code | Proposed |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.
