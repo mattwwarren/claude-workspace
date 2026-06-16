@@ -2052,6 +2052,12 @@ def dev_queue_status(client: str | None) -> None:
     default=True,
     help="Disable automatic fast-forward of local main (legacy block-only behavior).",
 )
+@click.option(
+    "--client",
+    "-c",
+    default=None,
+    help="Dispatch only this client's queue.",
+)
 @handle_errors
 def dev_queue_run(
     max_parallel: int | None,
@@ -2060,8 +2066,11 @@ def dev_queue_run(
     parent: str | None,
     quiet: bool,
     auto_ff: bool,
+    client: str | None,
 ) -> None:
     """Run the dispatch loop, spawning sessions for pending tickets."""
+    if client is not None:
+        get_client(client)
     run_dispatch_loop(
         max_parallel=max_parallel,
         once=once,
@@ -2069,6 +2078,7 @@ def dev_queue_run(
         parent=parent,
         emit=None if quiet else click.echo,
         auto_ff=auto_ff,
+        client=client,
     )
 
 

@@ -2465,11 +2465,31 @@ class TestRunDispatchLoopVerbose:
 
         def _three_tick_dispatch(
             config: OrchestratorConfig,
-            **kwargs: object,
-        ) -> int:
+            *,
+            use_plan: bool = False,
+            parent: str | None = None,
+            native_daemon: FakeNativeDaemonClient | None = None,
+            emit: Callable[[str], None] | None = None,
+            warned_stale: set[tuple[str, str]] | None = None,
+            warned_fetch_fail: set[str] | None = None,
+            usage_limited_until: datetime | None = None,
+            auto_ff: bool = True,
+            client_filter: str | None = None,
+        ) -> DispatchTickResult:
             nonlocal tick_count
             tick_count += 1
-            return original_dispatch_tick(config, **kwargs)
+            return original_dispatch_tick(
+                config,
+                use_plan=use_plan,
+                parent=parent,
+                native_daemon=native_daemon,
+                emit=emit,
+                warned_stale=warned_stale,
+                warned_fetch_fail=warned_fetch_fail,
+                usage_limited_until=usage_limited_until,
+                auto_ff=auto_ff,
+                client_filter=client_filter,
+            )
 
         monkeypatch.setattr("cw.dispatch.dispatch_tick", _three_tick_dispatch)
 
@@ -3640,3 +3660,109 @@ class TestSingleLaneBackwardCompat:
         result2 = dispatch_tick(simple_config, native_daemon=daemon)
         # Cap=1, running=1 → no spawn on second tick
         assert result2.spawned == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: dispatch_tick client_filter
+# ---------------------------------------------------------------------------
+
+
+class TestClientFilter:
+    """client_filter narrows the dispatch loop to a single client."""
+
+    def test_client_filter_ticks_only_targeted_client(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """With client_filter='client-a', only client-a's task is spawned."""
+        ws_a = make_git_repo("workspace/cf-client-a")
+        ws_b = make_git_repo("workspace/cf-client-b")
+        client_a = ClientConfig(
+            name="cf-client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-cf-a",
+        )
+        client_b = ClientConfig(
+            name="cf-client-b",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-cf-b",
+        )
+
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            f"  cf-client-a:\n"
+            f"    workspace_path: {client_a.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_a.worktree_base}\n"
+            f"  cf-client-b:\n"
+            f"    workspace_path: {client_b.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_b.worktree_base}\n"
+        )
+
+        add_ticket(TicketTask(ticket_id="CF-A1", client="cf-client-a"))
+        add_ticket(TicketTask(ticket_id="CF-B1", client="cf-client-b"))
+
+        config = OrchestratorConfig(default_ceiling=1)
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(
+            config, native_daemon=daemon, client_filter="cf-client-a"
+        )
+
+        assert result.spawned == 1
+        store = load_dev_queue()
+        running = store.running()
+        assert len(running) == 1
+        assert running[0].client == "cf-client-a"
+        assert running[0].ticket_id == "CF-A1"
+
+    def test_client_filter_none_dispatches_all_clients(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Without client_filter, both clients are dispatched."""
+        ws_a = make_git_repo("workspace/cf-all-a")
+        ws_b = make_git_repo("workspace/cf-all-b")
+        client_a = ClientConfig(
+            name="cf-all-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-cf-all-a",
+        )
+        client_b = ClientConfig(
+            name="cf-all-b",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-cf-all-b",
+        )
+
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            f"  cf-all-a:\n"
+            f"    workspace_path: {client_a.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_a.worktree_base}\n"
+            f"  cf-all-b:\n"
+            f"    workspace_path: {client_b.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_b.worktree_base}\n"
+        )
+
+        add_ticket(TicketTask(ticket_id="ALL-A1", client="cf-all-a"))
+        add_ticket(TicketTask(ticket_id="ALL-B1", client="cf-all-b"))
+
+        config = OrchestratorConfig(default_ceiling=1)
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(config, native_daemon=daemon)
+
+        assert result.spawned == 2
