@@ -2366,9 +2366,9 @@ class TestSignalStop:
         known deterministic or transient failure reason.
         """
         from cw.auto_dev_result import BlockedResult, Blocker
-        from cw.cli import _apply_sentinel_to_task
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.reconcile import _apply_sentinel_to_task
 
         _worktree, session = self._setup_headless_session(
             tmp_path, "sess-263-unknown-reason", "worktree-263-unknown-reason"
@@ -5024,6 +5024,96 @@ class TestDevQueueRunQuiet:
         assert captured_auto_ff == [False], (
             f"Expected auto_ff=False with --no-auto-ff but got: {captured_auto_ff!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: dev-queue run --client
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueRunClientFilter:
+    """Tests for --client/-c scoping on cw dev-queue run."""
+
+    def test_client_flag_passed_to_run_dispatch_loop(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--client X passes client='X' to run_dispatch_loop."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
+
+        captured_client: list[str | None] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+            auto_ff: bool = True,
+            client: str | None = None,
+        ) -> None:
+            captured_client.append(client)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "run", "--once", "--client", "my-client"]
+        )
+        assert result.exit_code == 0, result.output
+        assert captured_client == ["my-client"], (
+            f"Expected client='my-client' but got: {captured_client!r}"
+        )
+
+    def test_no_client_flag_passes_none_to_run_dispatch_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitting --client passes client=None to run_dispatch_loop."""
+        from cw import cli as cli_module
+        from cw.cli import main
+
+        captured_client: list[str | None] = []
+
+        def _fake_loop(
+            *,
+            max_parallel: object = None,
+            once: bool = False,
+            use_plan: bool = False,
+            parent: object = None,
+            native_daemon: object = None,
+            emit: object = None,
+            auto_ff: bool = True,
+            client: str | None = None,
+        ) -> None:
+            captured_client.append(client)
+
+        monkeypatch.setattr(cli_module, "run_dispatch_loop", _fake_loop)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "run", "--once"])
+        assert result.exit_code == 0, result.output
+        assert captured_client == [None], (
+            f"Expected client=None but got: {captured_client!r}"
+        )
+
+    def test_unknown_client_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--client unknown-name exits with non-zero and mentions the name."""
+        from cw.cli import main
+
+        _write_clients_yaml_for_test(tmp_config_dir, [("real-client", str(tmp_path))])
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "run", "--once", "--client", "unknown-name"]
+        )
+        assert result.exit_code != 0
+        assert "unknown-name" in result.output
 
 
 # ---------------------------------------------------------------------------
