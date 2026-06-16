@@ -3543,3 +3543,122 @@ class TestReapSessionBySelector:
         assert len(events) == 0, (
             f"Expected no SESSION_REAP_AUTHORIZED for terminal session, got {events}"
         )
+
+
+class TestCheckProjectConfigs:
+    """_check_project_configs validates each client's .claude/project-config.yaml."""
+
+    def _write_config(self, root: Path, system: str) -> None:
+        cfg_dir = root / ".claude"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "project-config.yaml").write_text(
+            f"tracking:\n  primary:\n    system: {system}\n", encoding="utf-8"
+        )
+
+    def _client(self, root: Path) -> ClientConfig:
+        from cw.models import ClientConfig
+
+        return ClientConfig(name="client-a", workspace_path=root)
+
+    def test_github_issues_with_gh_present_is_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _check_project_configs
+
+        monkeypatch.setattr("cw.doctor._gh_on_path", lambda: True)
+        self._write_config(tmp_path, "github-issues")
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].warn is False
+
+    def test_github_issues_without_gh_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _check_project_configs
+
+        monkeypatch.setattr("cw.doctor._gh_on_path", lambda: False)
+        self._write_config(tmp_path, "github-issues")
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is True
+        assert results[0].warn is True
+        assert "gh" in results[0].detail
+
+    def test_linear_system_is_recognized(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_project_configs
+
+        self._write_config(tmp_path, "linear")
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is True
+        assert "linear" in results[0].detail.lower()
+
+    def test_unrecognized_system_fails(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_project_configs
+
+        self._write_config(tmp_path, "jira")
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is False
+        assert "jira" in results[0].detail
+
+    def test_missing_file_warns_defaulting(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_project_configs
+
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is True
+        assert results[0].warn is True
+        assert "github-issues" in results[0].detail
+
+    def test_malformed_yaml_fails(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_project_configs
+
+        cfg_dir = tmp_path / ".claude"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "project-config.yaml").write_text(
+            "tracking: [unclosed\n", encoding="utf-8"
+        )
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is False
+
+    def test_repo_path_wins_over_workspace_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _check_project_configs
+        from cw.models import ClientConfig
+
+        monkeypatch.setattr("cw.doctor._gh_on_path", lambda: True)
+        repo = tmp_path / "repo"
+        worktree = tmp_path / "wt"
+        repo.mkdir()
+        worktree.mkdir()
+        self._write_config(repo, "github-issues")
+        client = ClientConfig(
+            name="client-a",
+            workspace_path=worktree,
+            repo_path=repo,
+            branch="dev/x",
+        )
+        results = _check_project_configs({"client-a": client})
+        assert results[0].ok is True
+
+    def test_empty_clients_yields_no_results(self) -> None:
+        from cw.doctor import _check_project_configs
+
+        assert _check_project_configs({}) == []
+
+    def test_run_doctor_includes_project_config_check(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        _stub_claude_version_ok(monkeypatch)
+        monkeypatch.setattr("cw.doctor._gh_on_path", lambda: True)
+        self._write_config(tmp_path, "github-issues")
+        monkeypatch.setattr(
+            "cw.doctor.load_clients",
+            lambda: {"client-a": self._client(tmp_path)},
+        )
+        report = run_doctor()
+        names = [c.name for c in report.checks]
+        assert "project-config/client-a" in names
+        assert report.ok

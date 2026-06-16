@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import importlib.metadata
 import json
+import shutil
 import subprocess as _sp
 import tomllib
 import urllib.parse
@@ -51,7 +52,7 @@ from cw.reconcile import SPAWN_GRACE_SECONDS, reconcile, ticket_id_for_session
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
-    from cw.models import CwState, DevQueueStore, Session
+    from cw.models import ClientConfig, CwState, DevQueueStore, Session
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,102 @@ _LOOP_STALL_CONSECUTIVE_TICKS = 3
 _TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
     {SessionStatus.COMPLETED, SessionStatus.TIMED_OUT}
 )
+
+
+# Tracker systems cw recognizes in .claude/project-config.yaml. Anything else
+# is a config error: the headless worker would silently fall back to its
+# built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
+_RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
+
+# Repo-relative path to the per-client tracker config the auto-dev skills read.
+_PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
+
+
+def _gh_on_path() -> bool:
+    """True when the ``gh`` binary is resolvable on PATH (testable seam)."""
+    return shutil.which("gh") is not None
+
+
+def _tracker_system(raw: object) -> object:
+    """Extract ``tracking.primary.system`` from parsed YAML, or None if absent."""
+    if not isinstance(raw, dict):
+        return None
+    tracking = raw.get("tracking")
+    if not isinstance(tracking, dict):
+        return None
+    primary = tracking.get("primary")
+    if not isinstance(primary, dict):
+        return None
+    return primary.get("system")
+
+
+def _tracker_prereq_result(name: str, system: object, path: Path) -> CheckResult:
+    """Build the CheckResult for a recognized tracker's prerequisite probe."""
+    if system == "github-issues":
+        if _gh_on_path():
+            return CheckResult(name, ok=True, detail=f"github-issues ({path})")
+        return CheckResult(
+            name,
+            ok=True,
+            warn=True,
+            detail="github-issues tracker but `gh` is not on PATH",
+        )
+    # linear: cw cannot deterministically probe the Linear MCP from here, so
+    # surface it informationally rather than fail.
+    return CheckResult(
+        name,
+        ok=True,
+        detail=f"linear tracker ({path}); requires Linear MCP reachable in worker",
+    )
+
+
+def _check_project_configs(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """Validate each client's ``.claude/project-config.yaml`` tracker config.
+
+    Per client, resolves the repo root (``repo_path`` when worktree-based, else
+    ``workspace_path``), reads ``.claude/project-config.yaml``, and checks that
+    ``tracking.primary.system`` is a recognized tracker whose prerequisites are
+    present. An absent file warns (github-issues is the documented default);
+    an unrecognized system or a parse failure is a hard failure.
+    """
+    results: list[CheckResult] = []
+    for client_name, client in clients.items():
+        root = client.repo_path or client.workspace_path
+        path = root / _PROJECT_CONFIG_RELPATH
+        name = f"project-config/{client_name}"
+        if not path.exists():
+            results.append(
+                CheckResult(
+                    name,
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"no project-config.yaml at {path};"
+                        " headless workers default to github-issues"
+                    ),
+                )
+            )
+            continue
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            results.append(CheckResult(name, ok=False, detail=f"parse failed: {exc}"))
+            continue
+        system = _tracker_system(raw)
+        if system not in _RECOGNIZED_TRACKERS:
+            results.append(
+                CheckResult(
+                    name,
+                    ok=False,
+                    detail=(
+                        f"tracking.primary.system={system!r} is not recognized"
+                        f" (expected one of {sorted(_RECOGNIZED_TRACKERS)})"
+                    ),
+                )
+            )
+            continue
+        results.append(_tracker_prereq_result(name, system, path))
+    return results
 
 
 def _check_config_file() -> CheckResult:
@@ -788,6 +885,13 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report = DoctorReport(version=__version__)
     report.checks.append(_check_config_file())
     report.checks.append(_check_orchestrator_config())
+    # Per-client tracker config. A broken clients.yaml is already surfaced by
+    # _check_config_file; degrade to no clients rather than crash the run.
+    try:
+        _clients = load_clients()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        _clients = {}
+    report.checks.extend(_check_project_configs(_clients))
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
