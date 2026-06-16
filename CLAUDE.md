@@ -52,7 +52,11 @@ uv run diff-cover coverage.xml --compare-branch=origin/main \
 Pre-commit hooks enforce gates 1–4 automatically (`uv run pre-commit install`).
 
 **Requirements:**
-- `ruff check` - **ZERO violations allowed**
+- `ruff check` - **ZERO violations allowed**. Function-level complexity is gated by
+  the `PLR` rules: ≤12 branches (`PLR0912`), ≤50 statements (`PLR0915`), ≤6 returns
+  (`PLR0911`). When a function trips these, **extract helpers** — don't suppress.
+  `PLR0913` (too-many-arguments) is intentionally disabled: Click injects one
+  parameter per option and the rule fights helper extraction (see `pyproject.toml`).
 - `ruff format --check` - **ZERO reformats** (run `ruff format` to fix; `ruff check` does NOT enforce formatting)
 - `mypy --strict` - **ZERO type errors allowed**
 - Test suite - **100% pass rate required**

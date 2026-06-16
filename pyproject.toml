@@ -99,6 +99,7 @@ select = [
     "PLC",  # pylint convention
     "PLE",  # pylint error
     "PLW",  # pylint warning
+    "PLR",  # pylint refactor (complexity: too-many-branches/statements/returns)
     "TID",  # flake8-tidy-imports
     "TCH",  # flake8-type-checking
     "PERF", # perflint
@@ -120,6 +121,15 @@ ignore = [
     "T201",  # print() is our UI output mechanism (via click.echo, but also direct)
     "S603",  # subprocess calls (git, etc.)
     "S607",  # partial executable path is expected
+    # too-many-arguments: Click commands inject one parameter per @click.option
+    # (the command's arg list IS its CLI surface — stock Click has no struct
+    # binding), and the rule pulls directly against PLR0912/0915: extracting a
+    # helper to cut branches/statements forces passing that working state in as
+    # parameters. The strong complexity rules (PLR0912/0915) still flag any
+    # function that does too much. A parameter-object refactor (e.g. a
+    # ReconcileContext) is the right fix for genuine arg-clumps and should be
+    # done intentionally, not to satisfy the linter.
+    "PLR0913",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -167,6 +177,7 @@ ignore = [
     "S108",     # /tmp socket paths are part of the cmux protocol spec
     "PLC0415",  # inline imports used in test methods that need monkeypatching first
     "TRY003",   # long messages in test asserts are intentional for debug clarity
+    "PLR2004",  # magic values in assertions (== 2, len() == 3) are fine in tests
 ]
 
 [tool.mypy]

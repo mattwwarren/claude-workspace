@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
 from cw.cli import (
@@ -2104,6 +2104,55 @@ class TestSignalStop:
         s2_after = next(s for s in load_state().sessions if s.id == session2.id)
         assert s2_after.status == SessionStatus.ACTIVE
 
+    def _seed_seq_session(
+        self,
+        *,
+        session_id: str,
+        surface_ref: str,
+        started_at: datetime,
+        workspace: Path,
+        worktree: Path,
+    ) -> Session:
+        """Append a DAEMON ACTIVE session on a shared worktree to state and persist."""
+        session = Session(
+            id=session_id,
+            name="test-client/auto-dev/137",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            surface_ref=surface_ref,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        return session
+
+    def _invoke_signal_stop(
+        self,
+        runner: CliRunner,
+        *,
+        claude_id: str,
+        worktree: Path,
+        frozen_at: datetime,
+    ) -> Result:
+        """Invoke ``cw signal-stop`` with a Stop-hook payload at a frozen time."""
+        with freeze_time(frozen_at):
+            return runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": claude_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+
     def test_signal_stop_blocked_retry_shipped_sequence_completes_task(
         self,
         tmp_config_dir: Path,
@@ -2139,21 +2188,13 @@ class TestSignalStop:
         worktree.mkdir(parents=True, exist_ok=True)
 
         # === Attempt 1: session1 runs, emits blocked+retry_eligible ===
-        session1 = Session(
-            id="sess-285-seq-s1",
-            name="test-client/auto-dev/137",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
-            workspace_path=workspace,
-            worktree_path=worktree,
-            status=SessionStatus.ACTIVE,
+        session1 = self._seed_seq_session(
+            session_id="sess-285-seq-s1",
             surface_ref="aabb1100",
             started_at=dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            workspace=workspace,
+            worktree=worktree,
         )
-        state = load_state()
-        state.sessions.append(session1)
-        save_state(state)
 
         dev_store = DevQueueStore(
             tasks=[
@@ -2180,18 +2221,12 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         runner = CliRunner()
-        with freeze_time(dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
-            r1 = runner.invoke(
-                main,
-                ["signal-stop"],
-                input=json.dumps(
-                    {
-                        "session_id": s1_claude_id,
-                        "cwd": str(worktree),
-                        "hook_event_name": "Stop",
-                    }
-                ),
-            )
+        r1 = self._invoke_signal_stop(
+            runner,
+            claude_id=s1_claude_id,
+            worktree=worktree,
+            frozen_at=dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC),
+        )
         assert r1.exit_code == 0, r1.output
 
         task_after_1 = next(
@@ -2201,21 +2236,13 @@ class TestSignalStop:
         assert task_after_1.status == QueueItemStatus.BLOCKED_ON_USER
 
         # === Dispatch re-claims: session2 spawned, cw-context.json overwritten ===
-        session2 = Session(
-            id="sess-285-seq-s2",
-            name="test-client/auto-dev/137",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
-            workspace_path=workspace,
-            worktree_path=worktree,
-            status=SessionStatus.ACTIVE,
+        session2 = self._seed_seq_session(
+            session_id="sess-285-seq-s2",
             surface_ref="ccdd2200",
             started_at=dt.datetime(2026, 1, 1, 0, 6, 0, tzinfo=UTC),
+            workspace=workspace,
+            worktree=worktree,
         )
-        state2 = load_state()
-        state2.sessions.append(session2)
-        save_state(state2)
 
         # B2: apply_staged_decision needs the pipeline to route shipped → COMPLETED.
         # Place task at terminal stage (FINALIZE) so shipped there → COMPLETED.
@@ -2234,18 +2261,12 @@ class TestSignalStop:
         # === Stale hook fires for session1 after cw-context.json overwrite ===
         # Hook payload still carries session1's Claude UUID ("aabb1100-…");
         # cw-context.json now has session2's CW ID. Guard must drop this.
-        with freeze_time(dt.datetime(2026, 1, 1, 0, 6, 1, tzinfo=UTC)):
-            r_stale = runner.invoke(
-                main,
-                ["signal-stop"],
-                input=json.dumps(
-                    {
-                        "session_id": s1_claude_id,
-                        "cwd": str(worktree),
-                        "hook_event_name": "Stop",
-                    }
-                ),
-            )
+        r_stale = self._invoke_signal_stop(
+            runner,
+            claude_id=s1_claude_id,
+            worktree=worktree,
+            frozen_at=dt.datetime(2026, 1, 1, 0, 6, 1, tzinfo=UTC),
+        )
         assert r_stale.exit_code == 0, r_stale.output
 
         task_after_stale = next(
@@ -2264,18 +2285,12 @@ class TestSignalStop:
         s2_claude_id = "ccdd2200-session2-full-uuid"
         self._write_transcript(worktree, s2_claude_id, _SENTINEL_285_SHIPPED, fake_home)
 
-        with freeze_time(dt.datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)):
-            r2 = runner.invoke(
-                main,
-                ["signal-stop"],
-                input=json.dumps(
-                    {
-                        "session_id": s2_claude_id,
-                        "cwd": str(worktree),
-                        "hook_event_name": "Stop",
-                    }
-                ),
-            )
+        r2 = self._invoke_signal_stop(
+            runner,
+            claude_id=s2_claude_id,
+            worktree=worktree,
+            frozen_at=dt.datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC),
+        )
         assert r2.exit_code == 0, r2.output
 
         task_final = next(
