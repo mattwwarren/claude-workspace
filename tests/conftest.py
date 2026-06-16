@@ -80,7 +80,7 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # their own monkeypatch.setattr call; pytest patches stack and the
     # test-level patch wins.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         list,
     )
 

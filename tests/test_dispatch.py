@@ -1228,13 +1228,13 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
     # Non-empty live set bypasses reconcile's outage guard; "dead" ref still
     # isn't live so the phantom is reaped as intended.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     from cw.models import OrchestratorConfig, ReapPolicy
 
     monkeypatch.setattr(
-        "cw.reconcile.load_orchestrator_config",
+        "cw.reconcile.core.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
@@ -1306,13 +1306,13 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
 
     # Non-empty live set bypasses outage guard; "dead" ref still isn't live.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     from cw.models import OrchestratorConfig, ReapPolicy
 
     monkeypatch.setattr(
-        "cw.reconcile.load_orchestrator_config",
+        "cw.reconcile.core.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
     daemon = FakeNativeDaemonClient()

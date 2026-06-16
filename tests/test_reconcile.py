@@ -103,7 +103,7 @@ def test_claude_agents_json_parses_subprocess_output(
 
         return _Result()
 
-    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
     result = _claude_agents_json()
     assert result == [{"sessionId": "abc12345"}, {"sessionId": "def67890"}]
 
@@ -121,7 +121,7 @@ def test_claude_agents_json_returns_empty_on_non_list(
 
         return _Result()
 
-    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_run)
+    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
     result = _claude_agents_json()
     assert result == []
 
@@ -204,7 +204,7 @@ def test_reconcile_matches_short_id_against_full_uuid_session_id(
 
     # Real daemon shape: sessionId is the full UUID.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": full_uuid}],
     )
 
@@ -296,13 +296,13 @@ def test_reconcile_marks_phantom_completed_crashed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """reconcile flips phantom sessions to COMPLETED/CRASHED and persists."""
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     state = CwState(sessions=[_mk_session("s1", "missing-ref")])
     save_state(state)
 
     # Non-empty live set bypasses outage guard; "missing-ref" is still not live.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     report = reconcile()
@@ -323,7 +323,7 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When a DAEMON session for a ticket is phantom, revert its task."""
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     sess = _mk_session("sess-daemon", "dead-ref")
     sess.origin = SessionOrigin.DAEMON
     sess.name = "client-a/auto-dev/TKT-1"
@@ -338,7 +338,7 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
 
     # Non-empty live set bypasses outage guard; "dead-ref" still isn't live.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     report = reconcile()
@@ -383,10 +383,10 @@ def test_reconcile_clears_session_id_on_revert(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     reconcile()
 
     queue = load_dev_queue()
@@ -406,7 +406,7 @@ def test_reconcile_noop_when_no_phantoms(
     save_state(CwState(sessions=[sess]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": full_uuid}],
     )
     report = reconcile()
@@ -433,7 +433,7 @@ def test_reconcile_refuses_to_mass_reap_on_empty_live_set(
     save_state(state)
 
     # Daemon reachable, empty roster → guard fires (daemon_errored=False)
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", list)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
     report = reconcile()
 
     assert report.phantom_session_ids == []
@@ -464,7 +464,7 @@ def test_reconcile_refuses_to_mass_reap_when_daemon_errors(
     def _boom() -> list[dict[str, object]]:
         raise subprocess.CalledProcessError(1, ["claude", "agents", "--json"])
 
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", _boom)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _boom)
     report = reconcile()
 
     assert report.phantom_session_ids == []
@@ -490,7 +490,7 @@ def test_reconcile_with_native_live_proceeds(
     save_state(CwState(sessions=[_mk_session("dead-native", "missing-short-id")]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     report = reconcile()
@@ -586,7 +586,7 @@ def test_reconcile_timed_out_task_revert_called_during_reconcile(
     # No ACTIVE/IDLE sessions with surface_refs, so outage guard doesn't trip
     # even with an empty live set. Monkeypatch _claude_agents_json to avoid
     # subprocess.run calls in tests.
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", list)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
     report = reconcile()
 
     assert "43" in report.reverted_ticket_ids
@@ -768,7 +768,7 @@ def test_reconcile_merges_completed_silent_reverts_into_report(
     save_dev_queue(dev_store)
 
     # No ACTIVE/IDLE sessions with surface_refs → outage guard won't trip.
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", list)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
     report = reconcile()
 
     assert "TKT-TO" in report.reverted_ticket_ids
@@ -1062,7 +1062,7 @@ def test_revert_stalled_headless_sessions_stops_daemon_surface(
 
     daemon = FakeNativeDaemonClient()
     short_id = daemon.spawn_bg(cwd=tmp_path, prompt="seed")
-    monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
 
     sess = _mk_headless_daemon_session(
         "stop-me", worktree, started_at, surface_ref=short_id
@@ -1101,11 +1101,11 @@ def test_revert_stalled_cleans_up_worktree(
 
     removed: list[tuple[str, str, bool]] = []
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile.remove_worktree",
+        "cw.reconcile._shared.remove_worktree",
         lambda client, branch, *, force=False: removed.append(
             (client.name, branch, force)
         ),
@@ -1136,10 +1136,10 @@ def test_revert_stalled_worktree_cleanup_is_best_effort(
         raise WorktreeError(msg)
 
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.remove_worktree", boom)
+    monkeypatch.setattr("cw.reconcile._shared.remove_worktree", boom)
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1169,7 +1169,7 @@ def test_revert_stalled_skips_cleanup_when_no_branch(
         calls.append(name)
         return ClientConfig(name=name, workspace_path=tmp_path / "ws")
 
-    monkeypatch.setattr("cw.reconcile.get_client", record_get_client)
+    monkeypatch.setattr("cw.reconcile._shared.get_client", record_get_client)
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1212,15 +1212,17 @@ def test_revert_stalled_skips_removal_and_blocks_task_when_dirty(
 
     removed: list[str] = []
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile.remove_worktree",
+        "cw.reconcile._shared.remove_worktree",
         lambda _client, branch, *, _force=False: removed.append(branch),
     )
     # Simulate dirty worktree (has unsaved work)
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1259,17 +1261,19 @@ def test_revert_stalled_removes_when_clean(
 
     removed: list[tuple[str, str, bool]] = []
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile.remove_worktree",
+        "cw.reconcile._shared.remove_worktree",
         lambda client, branch, *, force=False: removed.append(
             (client.name, branch, force)
         ),
     )
     # Clean worktree
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1640,7 +1644,7 @@ def test_reconcile_crashed_phantom_salvages_shipped_sentinel(
     # Only "live-ref" is live → "gone-ref" is a phantom; non-empty roster
     # keeps the outage guard from tripping.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "live-ref"}],
     )
     with freezegun.freeze_time(now):
@@ -1684,8 +1688,8 @@ def test_reconcile_includes_stalled_reverts_in_report(
 
     # After revert_stalled_headless_sessions fires, session becomes TIMED_OUT,
     # so the outage guard won't trip. Monkeypatch to avoid subprocess.run.
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", list)
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     with freezegun.freeze_time(now):
         report = reconcile()
 
@@ -1992,7 +1996,7 @@ def test_flag_silently_idle_daemon_sessions_transitions_past_budget(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+    with patch("cw.reconcile._deps.fire_push_notification") as mock_notify:
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -2068,8 +2072,8 @@ def test_flag_silently_idle_watchdog_does_not_stop_working_worker(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=True),
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=True),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
     ):
         result, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=_auto_config()
@@ -2352,11 +2356,11 @@ def test_flag_silently_idle_salvages_shipped_sentinel(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
         # Transcript mtime is real-time (May 2026) but now is fake (Jan 2026);
         # negative diff < window_seconds would falsely mark the worker alive.
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -2412,9 +2416,9 @@ def test_flag_silently_idle_salvages_no_op_sentinel(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -2472,9 +2476,9 @@ def test_silently_idle_parked_session_salvaged_on_next_pass(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -2537,7 +2541,7 @@ def test_flag_silently_idle_no_salvage_without_sentinel_still_parks(
         )
     )
 
-    with patch("cw.reconcile.fire_push_notification"):
+    with patch("cw.reconcile._deps.fire_push_notification"):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
@@ -2594,7 +2598,7 @@ def test_reconcile_includes_silently_idle_in_report(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": full_uuid}],
     )
     with freezegun.freeze_time(now):
@@ -2651,7 +2655,7 @@ def test_confirm_before_reap_first_observation_no_disposition(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+    with patch("cw.reconcile._deps.fire_push_notification") as mock_notify:
         blocked, salvage_git = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -2716,7 +2720,7 @@ def test_confirm_before_reap_second_observation_fires(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+    with patch("cw.reconcile._deps.fire_push_notification") as mock_notify:
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -2786,7 +2790,7 @@ def test_confirm_before_reap_liveness_recovery_resets_counter(
     )
 
     # Liveness check returns True (worker is alive this tick).
-    with patch("cw.reconcile._transcript_recently_active", return_value=True):
+    with patch("cw.reconcile.idle._transcript_recently_active", return_value=True):
         blocked, salvage_git = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -2802,7 +2806,7 @@ def test_confirm_before_reap_liveness_recovery_resets_counter(
     assert reloaded.idle_observation_count == 0
 
     # A new idle observation now starts the count at 1 (not 2).
-    with patch("cw.reconcile._transcript_recently_active", return_value=False):
+    with patch("cw.reconcile.idle._transcript_recently_active", return_value=False):
         blocked2, _ = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -2855,9 +2859,9 @@ def test_confirm_before_reap_sentinel_salvage_not_deferred(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
     ):
         blocked, _salvage_git = flag_silently_idle_daemon_sessions(
             state=CwState(sessions=[sess]),
@@ -2916,16 +2920,18 @@ def test_confirm_before_reap_git_salvage_deferred(
     )
 
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "dev/git-deferred-branch",
     )
     monkeypatch.setattr(
-        "cw.reconcile._salvage_terminal_result", lambda *_a, **_kw: None
+        "cw.reconcile._shared.salvage_terminal_result", lambda *_a, **_kw: None
     )
     monkeypatch.setattr(
-        "cw.reconcile._transcript_recently_active", lambda *_a, **_kw: False
+        "cw.reconcile.idle._transcript_recently_active", lambda *_a, **_kw: False
     )
-    monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda *_a, **_kw: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._awaiting_subagent", lambda *_a, **_kw: False
+    )
 
     state = CwState(sessions=[sess])
 
@@ -2989,7 +2995,7 @@ def test_confirm_before_reap_park_deferred(
         )
     )
 
-    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+    with patch("cw.reconcile._deps.fire_push_notification") as mock_notify:
         blocked, _ = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -3050,7 +3056,7 @@ def test_confirm_before_reap_attempts_unchanged(
 
     # Run three observations — one counter-only, then threshold fires recover.
     config = _auto_config(idle_confirm_observations=2)
-    with patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()):
+    with patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()):
         # First observation: no disposition.
         flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=config
@@ -3144,7 +3150,7 @@ def test_confirm_before_reap_single_observation_config(
         )
     )
 
-    with patch("cw.reconcile.fire_push_notification") as mock_notify:
+    with patch("cw.reconcile._deps.fire_push_notification") as mock_notify:
         blocked, _ = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -3405,7 +3411,7 @@ def test_flag_silently_idle_fires_when_project_dir_missing(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    with patch("cw.reconcile.fire_push_notification"):
+    with patch("cw.reconcile._deps.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -3454,7 +3460,7 @@ def test_flag_silently_idle_fires_when_session_id_file_missing(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    with patch("cw.reconcile.fire_push_notification"):
+    with patch("cw.reconcile._deps.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -3503,7 +3509,7 @@ def test_flag_silently_idle_fires_when_transcript_predates_session(
     before_start = (started_at - timedelta(seconds=60)).timestamp()
     os.utime(str(transcript), (before_start, before_start))
 
-    with patch("cw.reconcile.fire_push_notification"):
+    with patch("cw.reconcile._deps.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -3553,7 +3559,7 @@ def test_flag_silently_idle_fires_on_stale_transcript(
     stale_ts = (now - timedelta(seconds=past_window)).timestamp()
     os.utime(str(transcript), (stale_ts, stale_ts))
 
-    with patch("cw.reconcile.fire_push_notification"):
+    with patch("cw.reconcile._deps.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -3602,7 +3608,7 @@ def test_flag_silently_idle_fires_when_no_transcript_in_project_dir(
     state = CwState(sessions=[sess])
     save_state(state)
 
-    with patch("cw.reconcile.fire_push_notification"):
+    with patch("cw.reconcile._deps.fire_push_notification"):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -3700,7 +3706,7 @@ def test_awaiting_subagent_true_when_tail_is_pending_tool_use(
         + "\n"
     )
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is True
 
 
@@ -3731,7 +3737,7 @@ def test_awaiting_subagent_false_when_tool_result_delivered(
     ]
     transcript.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is False
 
 
@@ -3762,7 +3768,7 @@ def test_awaiting_subagent_false_when_pending_tool_use_too_old(
         + "\n"
     )
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is False
 
 
@@ -3795,7 +3801,7 @@ def test_awaiting_subagent_true_for_20_min_old_tool_use(
         + "\n"
     )
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is True
 
 
@@ -3828,7 +3834,7 @@ def test_awaiting_subagent_false_for_35_min_old_tool_use(
         + "\n"
     )
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is False
 
 
@@ -3872,9 +3878,9 @@ def test_flag_silently_idle_skips_worker_awaiting_subagent(
     )
 
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=True),
-        patch("cw.reconcile.fire_push_notification") as mock_notify,
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=True),
+        patch("cw.reconcile._deps.fire_push_notification") as mock_notify,
     ):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state, now=now, native_live={"live-ref"}, config=_auto_config()
@@ -3956,10 +3962,10 @@ def test_flag_silently_idle_auto_recovers_under_cap(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile.fire_push_notification") as mock_notify,
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._deps.fire_push_notification") as mock_notify,
     ):
         flag_silently_idle_daemon_sessions(
             state,
@@ -4022,16 +4028,16 @@ def test_flag_silently_idle_recover_cleans_up_worktree(
 
     removed: list[tuple[str, str, bool]] = []
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
-        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile._deps.fire_push_notification"),
         patch(
-            "cw.reconcile.get_client",
+            "cw.reconcile._shared.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         ),
         patch(
-            "cw.reconcile.remove_worktree",
+            "cw.reconcile._shared.remove_worktree",
             lambda client, branch, *, force=False: removed.append(
                 (client.name, branch, force)
             ),
@@ -4090,11 +4096,11 @@ def test_flag_silently_idle_recover_skips_cleanup_when_no_branch(
         return ClientConfig(name=name, workspace_path=tmp_path / "ws")
 
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
-        patch("cw.reconcile.fire_push_notification"),
-        patch("cw.reconcile.get_client", record_get_client),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile._deps.fire_push_notification"),
+        patch("cw.reconcile._shared.get_client", record_get_client),
     ):
         flag_silently_idle_daemon_sessions(
             state,
@@ -4187,10 +4193,10 @@ def test_flag_silently_idle_usage_limit_emits_distinct_cause(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._deps.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
             state,
@@ -4251,10 +4257,10 @@ def test_flag_silently_idle_no_usage_limit_emits_idle_stall_cause(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._deps.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
             state,
@@ -4403,10 +4409,10 @@ def test_flag_silently_idle_parks_when_cap_exhausted(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile.fire_push_notification") as mock_notify,
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._deps.fire_push_notification") as mock_notify,
     ):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
             state,
@@ -4456,7 +4462,7 @@ def test_awaiting_subagent_skips_blank_lines_and_bad_json(
         + "\n"
     )
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is True
 
 
@@ -4482,7 +4488,7 @@ def test_awaiting_subagent_skips_non_list_content(
         + "\n"
     )
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         # Nothing to track — returns False (no pending tool_use)
         assert _awaiting_subagent(sess, now) is False
 
@@ -4511,7 +4517,7 @@ def test_awaiting_subagent_handles_invalid_timestamp(
         + "\n"
     )
     sess = _make_daemon_session(claude_session_id="sess-uuid")
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         # invalid ts → last_tool_use_ts = None → returns False
         assert _awaiting_subagent(sess, now) is False
 
@@ -4528,7 +4534,7 @@ def test_awaiting_subagent_returns_false_on_oserror(
     # Point at a file that does not exist
     sess = _make_daemon_session(claude_session_id="no-such-file")
     # project_dir exists but the specific .jsonl doesn't
-    with patch("cw.reconcile._session_project_dir", return_value=project_dir):
+    with patch("cw.reconcile._shared._session_project_dir", return_value=project_dir):
         assert _awaiting_subagent(sess, now) is False
 
 
@@ -4570,10 +4576,10 @@ def test_flag_silently_idle_recover_skips_non_running_task(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile._checked_out_branch", return_value=None),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._deps.checked_out_branch", return_value=None),
     ):
         result, _salvage = flag_silently_idle_daemon_sessions(
             state,
@@ -4616,7 +4622,7 @@ def test_reconcile_tolerates_malformed_json_from_claude_agents(
         msg = "bad json"
         raise json.JSONDecodeError(msg, "", 0)
 
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", _bad_json)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _bad_json)
 
     # Must not raise
     report = reconcile()
@@ -4650,7 +4656,7 @@ def test_reconcile_tolerates_file_not_found_from_claude_agents(
         msg = "No such file or directory: 'claude'"
         raise FileNotFoundError(msg)
 
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", _no_binary)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _no_binary)
 
     # Must not raise
     report = reconcile()
@@ -4802,7 +4808,7 @@ def test_salvage_all_terminal_statuses_from_phantom(
     )
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "live-ref"}],
     )
     with freezegun.freeze_time(now):
@@ -4875,7 +4881,7 @@ def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
     )
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "live-ref"}],
     )
     with freezegun.freeze_time(now):
@@ -5109,7 +5115,7 @@ def test_backfill_claude_session_id_happy_path(
     assert sess.claude_session_id is None
     save_state(CwState(sessions=[sess]))
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": full_uuid}]
     )
     reconcile()
     # Reload from disk to verify persistence
@@ -5134,7 +5140,7 @@ def test_backfill_claude_session_id_no_overwrite(
     sess.claude_session_id = existing
     save_state(CwState(sessions=[sess]))
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": full_uuid}]
     )
     reconcile()
     reloaded = next(s for s in load_state().sessions if s.id == "no-overwrite-1")
@@ -5155,7 +5161,7 @@ def test_backfill_claude_session_id_not_in_roster(
     )
     save_state(CwState(sessions=[sess]))
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": full_uuid}]
     )
     reconcile()
     reloaded = next(s for s in load_state().sessions if s.id == "not-in-roster-1")
@@ -5182,7 +5188,7 @@ def test_backfill_claude_session_id_outage(
     def _raise(*args: object, **kwargs: object) -> None:
         raise _subprocess.CalledProcessError(1, "claude")
 
-    monkeypatch.setattr("cw.reconcile._claude_agents_json", _raise)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _raise)
     # Must not raise
     reconcile()
     reloaded = next(s for s in load_state().sessions if s.id == "outage-1")
@@ -5213,7 +5219,7 @@ def test_backfill_claude_session_id_same_tick_liveness(
     _write_idle_transcript(home, worktree, filename=f"{full_uuid}.jsonl")
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": full_uuid}]
     )
     reconcile()
 
@@ -5248,7 +5254,7 @@ def test_backfill_claude_session_id_guard_branches(
 
     save_state(CwState(sessions=[daemon_no_ref, user_sess]))
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": full_uuid}]
     )
     reconcile()
 
@@ -5275,7 +5281,7 @@ def test_backfill_claude_session_id_malformed_roster(
     save_state(CwState(sessions=[sess]))
     # Roster has a malformed entry alongside the valid one
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": 12345}, {"sessionId": full_uuid}],
     )
     reconcile()
@@ -5318,7 +5324,7 @@ def test_backfill_claude_session_id_transcript_fallback(
     # An empty list would trigger the outage guard and abort reconcile entirely.
     other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": other_uuid}]
     )
     # Write transcript named <short_id>-<uuid>.jsonl
     tx_path = _write_idle_transcript(
@@ -5354,7 +5360,7 @@ def test_backfill_claude_session_id_agents_primary_over_transcript(
     save_state(CwState(sessions=[sess]))
     # Agents map has the real uuid
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": full_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": full_uuid}]
     )
     # Transcript with a different stem — should NOT win
     tx_path = _write_idle_transcript(
@@ -5387,7 +5393,7 @@ def test_backfill_claude_session_id_no_transcript_fallback(
     # Non-matching session so outage guard doesn't fire
     other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": other_uuid}]
     )
     # Manually create the project dir so it exists but is empty
     encoded = str(worktree).replace("/", "-").replace(".", "-")
@@ -5421,7 +5427,7 @@ def test_backfill_claude_session_id_stale_transcript(
     # Non-matching session so outage guard doesn't fire
     other_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json", lambda: [{"sessionId": other_uuid}]
+        "cw.reconcile.core._claude_agents_json", lambda: [{"sessionId": other_uuid}]
     )
     tx_path = _write_idle_transcript(
         home, worktree, filename=f"{transcript_stem}.jsonl"
@@ -5637,18 +5643,20 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-PD",
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
 
     reconcile()
 
@@ -5692,19 +5700,21 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-PC",
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
     reconcile()
 
@@ -5733,7 +5743,7 @@ def test_phantom_reverted_not_emitted_for_user_origin(
     save_dev_queue(DevQueueStore(tasks=[]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
 
@@ -5779,18 +5789,20 @@ def test_phantom_dirty_worktree_routes_to_blocked_on_user(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-421D",
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
 
     report = reconcile()
 
@@ -5834,19 +5846,21 @@ def test_phantom_clean_worktree_routes_to_pending(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-421C",
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
     report = reconcile()
 
@@ -5887,18 +5901,20 @@ def test_dirty_phantom_task_not_re_claimable(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-421N",
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
 
     reconcile()
 
@@ -5935,17 +5951,19 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
         )
     )
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSD"
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSD"
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
     reconcile()
 
     events = read_events(
@@ -5981,18 +5999,20 @@ def test_phantom_reverted_event_carries_queue_status_pending(
         )
     )
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/TICK-QSC"
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSC"
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     reconcile()
 
     events = read_events(
@@ -6052,13 +6072,15 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-dirty"
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-dirty"
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
 
     reverted = revert_timed_out_tasks()
 
@@ -6101,13 +6123,15 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/to-clean"
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-clean"
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
 
     reverted = revert_timed_out_tasks()
 
@@ -6139,13 +6163,15 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-dirty"
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/cs-dirty"
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
 
     reverted = revert_completed_silent_tasks()
 
@@ -6177,13 +6203,15 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/cs-clean"
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/cs-clean"
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
 
     reverted = revert_completed_silent_tasks()
 
@@ -6264,7 +6292,7 @@ def test_salvage_skipped_not_emitted_for_terminal_sentinel(
     fake_result.cost_usd = None
     fake_result.status = "shipped"
     monkeypatch.setattr(
-        "cw.reconcile._salvage_terminal_result",
+        "cw.reconcile._shared.salvage_terminal_result",
         lambda *_args, **_kwargs: (fake_result, "fake-claude-id"),
     )
 
@@ -6285,7 +6313,7 @@ def test_compute_worktree_dirty_returns_false_when_get_client_raises(
     from cw.reconcile import _compute_worktree_dirty
 
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda _name: (_ for _ in ()).throw(ValueError("no such client")),
     )
     assert _compute_worktree_dirty("missing-client", "some-branch") is False
@@ -6390,7 +6418,7 @@ class TestCompleteTimedOutMergedTasks:
         save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket",
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
             lambda _tid, **_kw: (True, True),
         )
 
@@ -6446,7 +6474,7 @@ class TestCompleteTimedOutMergedTasks:
             call_count += 1
             return None, False
 
-        monkeypatch.setattr("cw.reconcile.pr_is_merged_for_ticket", _unavailable)
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _unavailable)
 
         completed = complete_timed_out_merged_tasks()
 
@@ -6483,7 +6511,7 @@ class TestCompleteTimedOutMergedTasks:
             return True, True
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket", _transient_then_merged
+            "cw.reconcile._deps.pr_is_merged_for_ticket", _transient_then_merged
         )
 
         completed = complete_timed_out_merged_tasks()
@@ -6517,7 +6545,7 @@ class TestCompleteTimedOutMergedTasks:
             call_count += 1
             return True, True
 
-        monkeypatch.setattr("cw.reconcile.pr_is_merged_for_ticket", _merged)
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _merged)
 
         complete_timed_out_merged_tasks()
         assert call_count == 1
@@ -6548,7 +6576,7 @@ class TestCompleteTimedOutMergedTasks:
         save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket",
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
             lambda _tid, **_kw: (False, True),
         )
 
@@ -6590,7 +6618,7 @@ class TestCompleteTimedOutMergedTasks:
             return True, True
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket", _should_not_be_called
+            "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
         )
 
         with freezegun.freeze_time(fixed_now):
@@ -6616,7 +6644,7 @@ class TestCompleteTimedOutMergedTasks:
         save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket",
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
             lambda _tid, **_kw: (True, True),
         )
 
@@ -6653,7 +6681,7 @@ class TestCompleteTimedOutMergedTasks:
             return True, True
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket", _should_not_be_called
+            "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
         )
 
         # Must not raise
@@ -6688,7 +6716,7 @@ class TestCompleteTimedOutMergedTasks:
             return True, True
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket", _should_not_be_called
+            "cw.reconcile._deps.pr_is_merged_for_ticket", _should_not_be_called
         )
 
         completed = complete_timed_out_merged_tasks()
@@ -6801,14 +6829,16 @@ class TestSalvageCommittedNoPrSessions:
                 return result
             return result
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        )
         # First call (pre-check): no PR; second call (idempotency): no PR
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_subprocess_run)
+        monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_subprocess_run)
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client",
+            "cw.reconcile._deps.get_native_daemon_client",
             MagicMock,
         )
 
@@ -6865,12 +6895,14 @@ class TestSalvageCommittedNoPrSessions:
         )
         # No stage event written → post_review_clean=False
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
         )
         monkeypatch.setattr(
-            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
 
         candidates = [("sess-low", ticket_id, "dev/low-branch", str(worktree), False)]
@@ -6933,11 +6965,13 @@ class TestSalvageCommittedNoPrSessions:
         def _capture_push(name: str, client: str, **_kw: object) -> None:
             push_calls.append((name, client))
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
         )
-        monkeypatch.setattr("cw.reconcile.fire_push_notification", _capture_push)
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile._deps.fire_push_notification", _capture_push)
 
         candidates = [
             ("sess-idem-low", ticket_id, "dev/idem-low-branch", str(worktree), False)
@@ -6993,10 +7027,14 @@ class TestSalvageCommittedNoPrSessions:
                 return False, True  # outer check: no PR
             return True, True  # idempotency re-check: PR now exists
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
-        monkeypatch.setattr("cw.reconcile.pr_exists_for_branch", _pr_exists_side_effect)
         monkeypatch.setattr(
-            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", _pr_exists_side_effect
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
 
         candidates = [("sess-idem", ticket_id, "dev/idem-branch", str(worktree), True)]
@@ -7043,9 +7081,11 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (None, False)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (None, False)
         )
 
         candidates = [
@@ -7091,7 +7131,9 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: False)
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: False
+        )
 
         candidates = [
             ("sess-nocommits", ticket_id, "dev/nc-branch", str(worktree), True)
@@ -7152,19 +7194,21 @@ class TestSalvageCommittedNoPrSessions:
         def _mock_remove(*args: object, **kwargs: object) -> None:
             remove_worktree_calls.append(args)
 
-        monkeypatch.setattr("cw.reconcile.remove_worktree", _mock_remove)
+        monkeypatch.setattr("cw.reconcile._shared.remove_worktree", _mock_remove)
         # Patch _checked_out_branch to return a valid branch (triggers salvage_git)
         monkeypatch.setattr(
-            "cw.reconcile._checked_out_branch",
+            "cw.reconcile._deps.checked_out_branch",
             lambda _p: "dev/nodelete-branch",
         )
         monkeypatch.setattr(
-            "cw.reconcile._salvage_terminal_result", lambda *_a, **_kw: None
+            "cw.reconcile._shared.salvage_terminal_result", lambda *_a, **_kw: None
         )
         monkeypatch.setattr(
-            "cw.reconcile._transcript_recently_active", lambda *_a, **_kw: False
+            "cw.reconcile.idle._transcript_recently_active", lambda *_a, **_kw: False
         )
-        monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda *_a, **_kw: False)
+        monkeypatch.setattr(
+            "cw.reconcile.idle._awaiting_subagent", lambda *_a, **_kw: False
+        )
 
         state = CwState(sessions=[sess])
         _, salvage_git = flag_silently_idle_daemon_sessions(
@@ -7289,12 +7333,14 @@ class TestSalvageCommittedNoPrSessions:
             },
         )
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
         )
         monkeypatch.setattr(
-            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
 
         # post_review_clean=False (different session_id → _detect_post_review_clean
@@ -7319,9 +7365,11 @@ class TestSalvageCommittedNoPrSessions:
         save_state(CwState(sessions=[]))  # empty — no sessions
         save_dev_queue(DevQueueStore(tasks=[]))
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
 
         candidates = [
@@ -7363,10 +7411,12 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        )
         # (None, True) = transient error, gh available
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (None, True)
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (None, True)
         )
 
         completed = salvage_committed_no_pr_sessions(
@@ -7404,9 +7454,11 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (True, True)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (True, True)
         )
 
         completed = salvage_committed_no_pr_sessions(
@@ -7450,13 +7502,17 @@ class TestSalvageCommittedNoPrSessions:
             msg = f"unexpected call: {args}"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
         )
-        monkeypatch.setattr("cw.reconcile.subprocess.run", _subprocess_push_fails)
         monkeypatch.setattr(
-            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.subprocess.run", _subprocess_push_fails
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
 
         completed = salvage_committed_no_pr_sessions(
@@ -7505,13 +7561,17 @@ class TestSalvageCommittedNoPrSessions:
             msg = f"unexpected call: {args}"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
         monkeypatch.setattr(
-            "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
         )
-        monkeypatch.setattr("cw.reconcile.subprocess.run", _subprocess_create_fails)
         monkeypatch.setattr(
-            "cw.reconcile.fire_push_notification", lambda *_a, **_kw: None
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.subprocess.run", _subprocess_create_fails
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
 
         completed = salvage_committed_no_pr_sessions(
@@ -7605,7 +7665,7 @@ class TestDetectPostReviewClean:
             msg = "disk error"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.reconcile.read_events", _raise)
+        monkeypatch.setattr("cw.reconcile._shared.read_events", _raise)
 
         sess = Session(
             id="sess-exc",
@@ -7976,10 +8036,10 @@ def test_reap_reason_phantom_surface(
         )
     )
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
-    monkeypatch.setattr("cw.reconcile.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
     reconcile()
 
@@ -8046,11 +8106,11 @@ def test_reap_reason_idle_stall(
     )
 
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile._detect_usage_limit", return_value=False),
-        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
-        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._shared.detect_usage_limit", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile._deps.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
             state,
@@ -8101,11 +8161,11 @@ def test_reap_reason_usage_limit_cutoff(
     )
 
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile._detect_usage_limit", return_value=True),
-        patch("cw.reconcile.get_native_daemon_client", return_value=MagicMock()),
-        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._shared.detect_usage_limit", return_value=True),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile._deps.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
             state,
@@ -8155,9 +8215,9 @@ def test_reap_reason_retry_cap_parked(
     )
 
     with (
-        patch("cw.reconcile._transcript_recently_active", return_value=False),
-        patch("cw.reconcile._awaiting_subagent", return_value=False),
-        patch("cw.reconcile.fire_push_notification"),
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
             state,
@@ -8290,12 +8350,14 @@ def test_reap_reason_salvage_completed(
         result.stdout = "https://github.com/org/repo/pull/99\n"
         return result
 
-    monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
     monkeypatch.setattr(
-        "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
     )
-    monkeypatch.setattr("cw.reconcile.subprocess.run", _fake_subprocess_run)
-    monkeypatch.setattr("cw.reconcile.get_native_daemon_client", MagicMock)
+    monkeypatch.setattr(
+        "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+    )
+    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
     candidates = [("salv-comp-1", ticket_id, "dev/salv-comp", str(worktree), True)]
     salvage_committed_no_pr_sessions(candidates)
@@ -8341,11 +8403,15 @@ def test_reap_reason_salvage_parked(
         )
     )
 
-    monkeypatch.setattr("cw.reconcile._has_commits_beyond_base", lambda _p: True)
     monkeypatch.setattr(
-        "cw.reconcile.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
     )
-    monkeypatch.setattr("cw.reconcile.fire_push_notification", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+    )
 
     candidates = [("salv-park-1", ticket_id, "dev/salv-park", str(worktree), False)]
     salvage_committed_no_pr_sessions(candidates)
@@ -8918,9 +8984,9 @@ def test_detect_idle_candidates_recover_counter_when_liveness_restored(
 
     # Patch transcript recently active → True
     monkeypatch.setattr(
-        "cw.reconcile._transcript_recently_active", lambda _s, _n, **_kw: True
+        "cw.reconcile.idle._transcript_recently_active", lambda _s, _n, **_kw: True
     )
-    monkeypatch.setattr("cw.reconcile._awaiting_subagent", lambda _s, _n: False)
+    monkeypatch.setattr("cw.reconcile.idle._awaiting_subagent", lambda _s, _n: False)
 
     candidates = _detect_idle_candidates(
         state,
@@ -8970,10 +9036,12 @@ def test_detect_idle_candidates_salvage_git(
     snap = _state_queue_snapshot()
 
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch", lambda _p: "auto-dev/idle-sgit-1"
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-sgit-1"
     )
-    monkeypatch.setattr("cw.reconcile._detect_post_review_clean", lambda _s: False)
-    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda _c, _p: False)
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
 
     candidates = _detect_idle_candidates(
         state,
@@ -9020,7 +9088,9 @@ def test_detect_idle_candidates_worktree_dirty_flag(
     save_dev_queue(DevQueueStore(tasks=[task]))
     snap = _state_queue_snapshot()
 
-    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda _c, _p: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: True
+    )
 
     candidates = _detect_idle_candidates(
         state,
@@ -9175,7 +9245,9 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     save_dev_queue(DevQueueStore(tasks=[]))
     snap = _state_queue_snapshot()
 
-    monkeypatch.setattr("cw.reconcile._worktree_dirty_by_path", lambda _c, _p: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: True
+    )
 
     candidates = _detect_phantom_candidates(
         state,
@@ -9203,15 +9275,17 @@ def test_act_on_stalled_revert_task_updates_state_and_queue(
     now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
     monkeypatch.setattr(
-        "cw.reconcile.get_native_daemon_client",
+        "cw.reconcile._deps.get_native_daemon_client",
         FakeNativeDaemonClient,
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False)
-    monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
+    monkeypatch.setattr("cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None)
 
     sess = _mk_headless_daemon_session("act-revert-1", worktree, started_at)
     state = CwState(sessions=[sess])
@@ -9266,7 +9340,7 @@ def test_act_on_stalled_salvage_completion(
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
 
     monkeypatch.setattr(
-        "cw.reconcile.get_native_daemon_client",
+        "cw.reconcile._deps.get_native_daemon_client",
         FakeNativeDaemonClient,
     )
 
@@ -9517,7 +9591,7 @@ def test_act_on_stalled_salvage_completion_emits_session_completed(
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
 
     monkeypatch.setattr(
-        "cw.reconcile.get_native_daemon_client",
+        "cw.reconcile._deps.get_native_daemon_client",
         FakeNativeDaemonClient,
     )
 
@@ -9604,7 +9678,7 @@ def test_act_on_idle_revert_task_routes_pending_emits_timed_out(
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
 
     monkeypatch.setattr(
-        "cw.reconcile.get_native_daemon_client",
+        "cw.reconcile._deps.get_native_daemon_client",
         FakeNativeDaemonClient,
     )
 
@@ -9660,7 +9734,7 @@ def test_act_on_idle_revert_task_usage_limit_detected_sets_cause(
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
 
     monkeypatch.setattr(
-        "cw.reconcile.get_native_daemon_client",
+        "cw.reconcile._deps.get_native_daemon_client",
         FakeNativeDaemonClient,
     )
 
@@ -9705,7 +9779,7 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
 
     monkeypatch.setattr(
-        "cw.reconcile.get_native_daemon_client",
+        "cw.reconcile._deps.get_native_daemon_client",
         FakeNativeDaemonClient,
     )
 
@@ -9858,10 +9932,12 @@ class TestActOnStalledCandidatesSignalOnly:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
         removed: list[str] = []
         monkeypatch.setattr(
-            "cw.reconcile.remove_worktree",
+            "cw.reconcile._shared.remove_worktree",
             lambda _c, branch, **_kw: removed.append(branch),
         )
 
@@ -9918,7 +9994,7 @@ class TestActOnStalledCandidatesSignalOnly:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         sess = _mk_headless_daemon_session("so-idem-1", worktree, started_at)
@@ -9968,16 +10044,18 @@ class TestActOnStalledCandidatesSignalOnly:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
         monkeypatch.setattr(
-            "cw.reconcile.get_client",
+            "cw.reconcile._shared.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         sess = _mk_headless_daemon_session("auto-stalled-1", worktree, started_at)
         state = CwState(sessions=[sess])
@@ -10024,15 +10102,19 @@ class TestActOnIdleCandidatesSignalOnly:
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
         monkeypatch.setattr(
-            "cw.reconcile.get_client",
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         sess = _mk_live_idle_daemon_session(
             "so-idle-1", "live-ref", started_at, idle_observation_count=2
@@ -10082,7 +10164,9 @@ class TestActOnIdleCandidatesSignalOnly:
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
 
-        monkeypatch.setattr("cw.reconcile.fire_push_notification", lambda *_a: None)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a: None
+        )
 
         sess = _mk_live_idle_daemon_session(
             "so-idle-park-1", "live-ref", started_at, idle_observation_count=2
@@ -10128,15 +10212,19 @@ class TestActOnIdleCandidatesSignalOnly:
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
         monkeypatch.setattr(
-            "cw.reconcile.get_client",
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         sess = _mk_live_idle_daemon_session(
             "auto-idle-1", "live-ref", started_at, idle_observation_count=2
@@ -10187,7 +10275,7 @@ class TestActOnPhantomCandidatesSignalOnly:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -10237,7 +10325,7 @@ class TestActOnPhantomCandidatesSignalOnly:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -10287,7 +10375,7 @@ class TestActOnPhantomCandidatesSignalOnly:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -10728,20 +10816,24 @@ class TestActOnStalledCandidatesPerLane:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
         monkeypatch.setattr(
-            "cw.reconcile.get_client",
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
         _fast_client = _client_with_lane(
             "client-a", "fast", ReapPolicy.AUTO, workspace_path=tmp_path / "ws"
         )
         monkeypatch.setattr(
-            "cw.reconcile.load_effective_clients",
+            "cw.reconcile._deps.load_effective_clients",
             lambda: {"client-a": _fast_client},
         )
 
@@ -10793,12 +10885,14 @@ class TestActOnStalledCandidatesPerLane:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
         _slow_client = _client_with_lane(
             "client-a", "slow", ReapPolicy.SIGNAL_ONLY, workspace_path=tmp_path / "ws"
         )
         monkeypatch.setattr(
-            "cw.reconcile.load_effective_clients",
+            "cw.reconcile._deps.load_effective_clients",
             lambda: {"client-a": _slow_client},
         )
 
@@ -10853,20 +10947,24 @@ class TestActOnIdleCandidatesPerLane:
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
         monkeypatch.setattr(
-            "cw.reconcile.get_client",
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
         _fast_client_idle = _client_with_lane(
             "client-a", "fast", ReapPolicy.AUTO, workspace_path=tmp_path / "ws"
         )
         monkeypatch.setattr(
-            "cw.reconcile.load_effective_clients",
+            "cw.reconcile._deps.load_effective_clients",
             lambda: {"client-a": _fast_client_idle},
         )
 
@@ -10920,12 +11018,14 @@ class TestActOnIdleCandidatesPerLane:
         now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
         _slow_client_idle = _client_with_lane(
             "client-a", "slow", ReapPolicy.SIGNAL_ONLY, workspace_path=tmp_path / "ws"
         )
         monkeypatch.setattr(
-            "cw.reconcile.load_effective_clients",
+            "cw.reconcile._deps.load_effective_clients",
             lambda: {"client-a": _slow_client_idle},
         )
 
@@ -10980,13 +11080,13 @@ class TestActOnPhantomCandidatesPerLane:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
         _fast_ph_client = _client_with_lane(
             "client-a", "fast", ReapPolicy.AUTO, workspace_path=tmp_path / "ws"
         )
         monkeypatch.setattr(
-            "cw.reconcile.load_effective_clients",
+            "cw.reconcile._deps.load_effective_clients",
             lambda: {"client-a": _fast_ph_client},
         )
 
@@ -11037,13 +11137,13 @@ class TestActOnPhantomCandidatesPerLane:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
         _slow_ph_client = _client_with_lane(
             "client-a", "slow", ReapPolicy.SIGNAL_ONLY, workspace_path=tmp_path / "ws"
         )
         monkeypatch.setattr(
-            "cw.reconcile.load_effective_clients",
+            "cw.reconcile._deps.load_effective_clients",
             lambda: {"client-a": _slow_ph_client},
         )
 
@@ -11103,15 +11203,19 @@ class TestMixedLanePolicySingleTick:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.reconcile.get_native_daemon_client", lambda: daemon)
         monkeypatch.setattr(
-            "cw.reconcile.get_client",
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         from cw.models import LaneConfig
 
@@ -11124,7 +11228,7 @@ class TestMixedLanePolicySingleTick:
             ],
         )
         monkeypatch.setattr(
-            "cw.reconcile.load_effective_clients",
+            "cw.reconcile._deps.load_effective_clients",
             lambda: {"client-a": client},
         )
 
@@ -11307,7 +11411,9 @@ class TestRouteEmittedSentinel:
         )
 
         mock_daemon = MagicMock()
-        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
             state = load_state()
             blocked, _salvage = flag_silently_idle_daemon_sessions(
                 state,
@@ -11465,7 +11571,9 @@ class TestRouteEmittedSentinel:
         )
 
         mock_daemon = MagicMock()
-        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
             state = load_state()
             blocked, _salvage = flag_silently_idle_daemon_sessions(
                 state,
@@ -11556,7 +11664,9 @@ class TestRouteEmittedSentinel:
         )
 
         mock_daemon = MagicMock()
-        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
             state = load_state()
             blocked, _salvage = flag_silently_idle_daemon_sessions(
                 state,
@@ -11609,7 +11719,9 @@ class TestRouteEmittedSentinel:
         )
 
         mock_daemon = MagicMock()
-        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
             state = load_state()
             # signal_only policy — normally gates reaps.
             blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -11660,7 +11772,9 @@ class TestRouteEmittedSentinel:
         )
 
         mock_daemon = MagicMock()
-        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
             state = load_state()
             flag_silently_idle_daemon_sessions(
                 state,
@@ -11716,7 +11830,9 @@ class TestRouteEmittedSentinel:
         )
 
         mock_daemon = MagicMock()
-        with patch("cw.reconcile.get_native_daemon_client", return_value=mock_daemon):
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
             state = load_state()
             blocked, _salvage = flag_silently_idle_daemon_sessions(
                 state,
@@ -11764,9 +11880,11 @@ class TestWorldStateCheckBeforeRevert:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         sess = _mk_headless_daemon_session("stalled-merged-1", worktree, started_at)
         state = CwState(sessions=[sess])
@@ -11829,9 +11947,11 @@ class TestWorldStateCheckBeforeRevert:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         sess = _mk_headless_daemon_session("stalled-ghblock-1", worktree, started_at)
         state = CwState(sessions=[sess])
@@ -11890,9 +12010,11 @@ class TestWorldStateCheckBeforeRevert:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         sess = _mk_headless_daemon_session("idle-merged-1", worktree, started_at)
         state = CwState(sessions=[sess])
@@ -11951,9 +12073,11 @@ class TestWorldStateCheckBeforeRevert:
         now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
-        monkeypatch.setattr("cw.reconcile.remove_worktree", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
 
         sess = _mk_headless_daemon_session("idle-ghblock-1", worktree, started_at)
         state = CwState(sessions=[sess])
@@ -12015,7 +12139,7 @@ class TestWorldStateCheckBeforeRevert:
         now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         sess = _mk_phantom_daemon_session("phantom-merged-1", started_at)
@@ -12080,7 +12204,7 @@ class TestWorldStateCheckBeforeRevert:
         now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
 
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         sess = _mk_phantom_daemon_session("phantom-ghblock-1", started_at)
@@ -12151,19 +12275,19 @@ class TestWorldStateCheckBeforeRevert:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket",
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
             lambda _tid: (True, True),
         )
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
         monkeypatch.setattr(
-            "cw.reconcile._claude_agents_json",
+            "cw.reconcile.core._claude_agents_json",
             list,
         )
-        monkeypatch.setattr("cw.reconcile.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
         monkeypatch.setattr(
-            "cw.reconcile.salvage_committed_no_pr_sessions", lambda _c: []
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
         )
 
         with freezegun.freeze_time(now):
@@ -12199,19 +12323,19 @@ class TestWorldStateCheckBeforeRevert:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         monkeypatch.setattr(
-            "cw.reconcile.pr_is_merged_for_ticket",
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
             lambda _tid: (None, False),
         )
         monkeypatch.setattr(
-            "cw.reconcile.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
         monkeypatch.setattr(
-            "cw.reconcile._claude_agents_json",
+            "cw.reconcile.core._claude_agents_json",
             list,
         )
-        monkeypatch.setattr("cw.reconcile.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
         monkeypatch.setattr(
-            "cw.reconcile.salvage_committed_no_pr_sessions", lambda _c: []
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
         )
 
         with freezegun.freeze_time(now):
