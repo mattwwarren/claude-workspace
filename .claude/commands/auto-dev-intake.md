@@ -142,7 +142,11 @@ rules below are tracker-aware.
    **Headless only — initialize correlation context and emit `stage.entered` (`s0_intake`):**
    ```bash
    CW_CTX=".claude/cw-context.json"
-   CW_SESSION=$(jq -r '.session_id // "unknown"' "$CW_CTX" 2>/dev/null || echo "unknown")
+   if [[ ! -f "$CW_CTX" ]]; then
+     echo "FATAL: $CW_CTX not found — headless invariant violated; stage events will not correlate." >&2
+     exit 1
+   fi
+   CW_SESSION=$(jq -r '.session_id' "$CW_CTX")
    TICKET=$(jq -r '.ticket_id // ""' "$CW_CTX" 2>/dev/null || echo "")
    cw event record stage.entered \
      --correlation-id "$TICKET" \
