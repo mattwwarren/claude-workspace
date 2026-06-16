@@ -14,6 +14,7 @@ import freezegun
 import pytest
 
 from cw._util import claude_project_dir
+from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state, save_state, sessions_lock
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -33,6 +34,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
@@ -47,6 +49,7 @@ from cw.reconcile import (
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+    _apply_sentinel_to_task,
     _claude_agents_json,
     _has_terminal_sentinel,
     complete_timed_out_merged_tasks,
@@ -2329,6 +2332,9 @@ def test_flag_silently_idle_salvages_shipped_sentinel(
         home, worktree, "claude-idle-uuid-1", _shipped_salvage_payload()
     )
     save_state(CwState(sessions=[sess]))
+    # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
+    # Ship at FINALIZE (terminal) → COMPLETED; must have clients.yaml on disk.
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
     save_dev_queue(
         DevQueueStore(
             tasks=[
@@ -2338,6 +2344,7 @@ def test_flag_silently_idle_salvages_shipped_sentinel(
                     status=QueueItemStatus.RUNNING,
                     session_id="idle-salv-1",
                     attempts=2,  # at cap — would park without salvage
+                    stage=Stage.FINALIZE,  # terminal; shipped here → COMPLETED
                 )
             ]
         )
@@ -11282,6 +11289,9 @@ class TestRouteEmittedSentinel:
             home, worktree, "claude-578-uuid-1", _shipped_salvage_payload()
         )
         save_state(CwState(sessions=[sess]))
+        # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
+        # Ship at FINALIZE (terminal) → COMPLETED; must have clients.yaml on disk.
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -11290,6 +11300,7 @@ class TestRouteEmittedSentinel:
                         client="client-a",
                         status=QueueItemStatus.RUNNING,
                         session_id="578-detect",
+                        stage=Stage.FINALIZE,  # terminal; shipped here → COMPLETED
                     )
                 ]
             )
@@ -11580,6 +11591,9 @@ class TestRouteEmittedSentinel:
             home, worktree, "claude-578-uuid-6", _shipped_salvage_payload()
         )
         save_state(CwState(sessions=[sess]))
+        # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
+        # Ship at FINALIZE (terminal) → COMPLETED; must have clients.yaml on disk.
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -11588,6 +11602,7 @@ class TestRouteEmittedSentinel:
                         client="client-a",
                         status=QueueItemStatus.RUNNING,
                         session_id="578-sigonly",
+                        stage=Stage.FINALIZE,  # terminal; shipped here → COMPLETED
                     )
                 ]
             )
@@ -12206,4 +12221,176 @@ class TestWorldStateCheckBeforeRevert:
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "reconcile-ghblock-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# _apply_sentinel_to_task — staged advance tests (GitHub issue #698)
+# Regression coverage for the reconcile path that was unreachable in B2:
+# a plan_pending_approval sentinel with small scope must advance PLAN→IMPL
+# via _apply_sentinel_to_task, not fall through to BLOCKED_ON_USER via the
+# stale monolith mapping.
+# ---------------------------------------------------------------------------
+
+
+def _write_staged_clients_yaml(tmp_config_dir: Path, client_name: str) -> None:
+    """Write a minimal staged clients.yaml for _apply_sentinel_to_task tests.
+
+    Uses the same tmp_config_dir that tmp_config_dir fixture redirected
+    cw.config.CLIENTS_FILE into, so load_effective_clients() resolves it.
+    """
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    clients_file = config_dir / "clients.yaml"
+    clients_file.write_text(
+        f"clients:\n"
+        f"  {client_name}:\n"
+        f"    workspace_path: /tmp/ws-staged\n"
+        f"    default_branch: main\n"
+        f"    pipeline:\n"
+        f"      stages: [plan, impl, review, finalize]\n"
+    )
+
+
+def _plan_pending_approval_sentinel(
+    ticket_id: str, scope_tier: str | None
+) -> AutoDevResult:
+    """Build a valid AutoDevResult for status=plan_pending_approval at stage1_plan.
+
+    Reproduces the real #663 dogfood sentinel: PLAN stage exits before impl
+    so lines_actual=None and scope.tier may be None (B2 pre-impl exempt rule).
+    """
+    return AutoDevResult.model_validate(
+        {
+            "schema_version": 4,
+            "ticket_id": ticket_id,
+            "status": "plan_pending_approval",
+            "stage_reached": "stage1_plan",
+            "scope": {
+                "tier": scope_tier,
+                "files": 4,
+                "lines_estimate": 120,
+                "lines_actual": None,
+                "forbidden_touched": False,
+            },
+            "plan_source": "github_issue_existing",
+            "branch": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                # None allowed pre-impl (§3.3 scope.tier/confidence exemption)
+                "lowest_agent_confidence": None,
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+            },
+            "next_actions": ["user_approve_plan"],
+        }
+    )
+
+
+class TestApplySentinelToTaskStagedAdvance:
+    """Regression tests for GitHub #698: _apply_sentinel_to_task must use the
+    staged advance decision (apply_staged_decision) rather than the stale
+    monolith mapping that predates B2.
+    """
+
+    def test_plan_pending_approval_small_scope_advances_plan_to_impl(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """plan_pending_approval + scope.tier='small' → PENDING at IMPL stage.
+
+        This is the exact production failure from #698: the monolith path
+        routed this sentinel to BLOCKED_ON_USER; the staged path auto-advances.
+        """
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+
+        ticket_id = "GH-698-small"
+        session_id = "sess-698-small"
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+            scope_hint="small",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier="small")
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING, (
+            f"expected PENDING (staged advance), got {t.status!r} — "
+            "monolith mapping was BLOCKED_ON_USER (#698)"
+        )
+        assert t.stage == Stage.IMPL, (
+            f"expected stage=IMPL after PLAN→IMPL advance, got {t.stage!r}"
+        )
+
+    def test_plan_pending_approval_null_tier_scope_hint_small_advances(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """plan_pending_approval + scope.tier=None + scope_hint='small' → IMPL.
+
+        Reproduces the #663 dogfood shape: real PLAN sentinels emit tier=None
+        (lines_actual unknown pre-impl). The #696 scope_hint fallback must
+        reach production via the reconcile path, not just the consume path.
+        """
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+
+        ticket_id = "GH-698-null-tier"
+        session_id = "sess-698-null-tier"
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+            scope_hint="small",  # fallback tier source per #696
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier=None)
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.IMPL
+
+    def test_plan_pending_approval_large_scope_blocks(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """plan_pending_approval + scope.tier='large' → BLOCKED_ON_USER (gate)."""
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+
+        ticket_id = "GH-698-large"
+        session_id = "sess-698-large"
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+            scope_hint="large",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier="large")
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.BLOCKED_ON_USER

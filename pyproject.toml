@@ -145,6 +145,10 @@ ignore = [
 # circular dependency. consume_completed_sessions() is a thin wrapper whose
 # deferred body import is the sanctioned mechanism, not a workaround.
 "src/cw/dev_queue.py" = ["PLC0415"]
+# reconcile defers the dispatch import inside _apply_sentinel_to_task to
+# break the reconcile ↔ dispatch circular dependency (#698). Inline import
+# at function level is the sanctioned mechanism, not a workaround.
+"src/cw/reconcile.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]

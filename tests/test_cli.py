@@ -36,6 +36,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TaskSpec,
     TicketTask,
 )
@@ -1893,15 +1894,18 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
 
-    def test_signal_stop_blocked_retry_eligible_reverts_to_pending(
+    def test_signal_stop_blocked_retry_eligible_routes_blocked_on_user(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """blocked + retry_eligible=True → task PENDING + session_id cleared.
+        """blocked + retry_eligible=True → task BLOCKED_ON_USER (B2 Rule 5).
 
-        The orchestrator should re-dispatch the ticket on the next tick.
+        Pre-B2 the monolith routing used retry_eligible to decide PENDING vs
+        COMPLETED; B2 unifies the routing table and treats blocked as a
+        STAGE_FAILURE → BLOCKED_ON_USER regardless of retry_eligible (#698).
+        The operator (or the orchestrate lane) decides whether to re-dispatch.
         """
         import datetime as dt
 
@@ -1951,19 +1955,21 @@ class TestSignalStop:
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
-        assert task.status == QueueItemStatus.PENDING
-        assert task.session_id is None
+        # B2: blocked → STAGE_FAILURE (Rule 5) → BLOCKED_ON_USER, not PENDING
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
-    def test_signal_stop_blocked_not_retry_eligible_marks_completed(
+    def test_signal_stop_blocked_not_retry_eligible_routes_blocked_on_user(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """blocked sentinel with retry_eligible=False → task COMPLETED (needs human).
+        """blocked sentinel with retry_eligible=False → BLOCKED_ON_USER (B2 Rule 5).
 
-        A non-retryable blocker signals that human intervention is required;
-        the task must not re-enter the dispatch queue automatically.
+        Pre-B2 the monolith routing mapped retry_eligible=False to COMPLETED.
+        B2 unifies the routing table: blocked is a STAGE_FAILURE (Rule 5) →
+        BLOCKED_ON_USER regardless of retry_eligible (#698). The operator
+        decides what to do with a non-retryable blocker.
         """
         import datetime as dt
 
@@ -2013,7 +2019,8 @@ class TestSignalStop:
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
-        assert task.status == QueueItemStatus.COMPLETED
+        # B2: blocked → STAGE_FAILURE (Rule 5) → BLOCKED_ON_USER, not COMPLETED
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_signal_stop_stale_hook_guard_drops_mismatched_session(
         self,
@@ -2188,8 +2195,8 @@ class TestSignalStop:
         task_after_1 = next(
             t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
         )
-        assert task_after_1.status == QueueItemStatus.PENDING
-        assert task_after_1.session_id is None
+        # B2: blocked → STAGE_FAILURE (Rule 5) → BLOCKED_ON_USER; session_id retained
+        assert task_after_1.status == QueueItemStatus.BLOCKED_ON_USER
 
         # === Dispatch re-claims: session2 spawned, cw-context.json overwritten ===
         session2 = Session(
@@ -2208,10 +2215,14 @@ class TestSignalStop:
         state2.sessions.append(session2)
         save_state(state2)
 
+        # B2: apply_staged_decision needs the pipeline to route shipped → COMPLETED.
+        # Place task at terminal stage (FINALIZE) so shipped there → COMPLETED.
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
         store2 = load_dev_queue()
         task2 = next(t for t in store2.tasks if t.ticket_id == self.SEED_TICKET_ID)
         task2.status = QueueItemStatus.RUNNING
         task2.session_id = session2.id
+        task2.stage = Stage.FINALIZE  # terminal; shipped here → COMPLETED
         task2.attempts = 2
         save_dev_queue(store2)
 
@@ -4402,6 +4413,28 @@ def _write_clients_yaml_for_test(
         lines.append(f"  {name}:\n")
         lines.append(f"    workspace_path: {ws}\n")
     (config_dir / "clients.yaml").write_text("".join(lines))
+
+
+def _write_staged_clients_yaml_for_test(
+    tmp_config_dir: Path,
+    client_name: str,
+    workspace_path: str = "/tmp/ws-test",
+) -> None:
+    """Write a staged clients.yaml for B2 advance decision tests.
+
+    Required when a sentinel routes through apply_staged_decision, which
+    calls _stage_advance and needs the client's pipeline on disk (#698).
+    """
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n"
+        f"  {client_name}:\n"
+        f"    workspace_path: {workspace_path}\n"
+        f"    default_branch: main\n"
+        f"    pipeline:\n"
+        f"      stages: [plan, impl, review, finalize]\n"
+    )
 
 
 def _make_git_workspace_for_test(tmp_path: Path, name: str) -> Path:
