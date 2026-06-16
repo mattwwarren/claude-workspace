@@ -244,6 +244,61 @@ class TestRenderBoardClientFilter:
         assert "MW-401" not in output
 
 
+class TestRenderBoardMultiLane:
+    """Multi-lane client: both lane headers/sections must render."""
+
+    def _state_with_two_lanes(self) -> BoardState:
+        from cw.models import ClientConfig
+
+        client_cfg = ClientConfig(
+            name="acme",
+            workspace_path=Path("/tmp/acme"),
+            lanes=[
+                LaneConfig(name="default"),
+                LaneConfig(name="fast"),
+            ],
+        )
+        tasks = [
+            TicketTask(
+                ticket_id="MW-501",
+                client="acme",
+                status=QueueItemStatus.PENDING,
+                stage=Stage.PLAN,
+                lane="default",
+            ),
+            TicketTask(
+                ticket_id="MW-502",
+                client="acme",
+                status=QueueItemStatus.RUNNING,
+                stage=Stage.IMPL,
+                lane="fast",
+            ),
+        ]
+        return BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(tasks=tasks),
+            clients={"acme": client_cfg},
+            config=OrchestratorConfig(),
+            now=NOW,
+        )
+
+    def test_both_lane_headers_render(self) -> None:
+        output = _render(self._state_with_two_lanes())
+        assert "acme / default" in output
+        assert "acme / fast" in output
+
+    def test_both_lane_tickets_render(self) -> None:
+        output = _render(self._state_with_two_lanes())
+        assert "MW-501" in output
+        assert "MW-502" in output
+
+    def test_lanes_are_separate_panels(self) -> None:
+        output = _render(self._state_with_two_lanes())
+        default_pos = output.index("acme / default")
+        fast_pos = output.index("acme / fast")
+        assert default_pos != fast_pos
+
+
 class TestRenderBoardSynthesisedLaneSkip:
     """Cover the synthesised-lane skip path (line 189 in board.py)."""
 
