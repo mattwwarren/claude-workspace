@@ -49,10 +49,7 @@ from cw.worktree import fast_forward_main
 
 @main.group(name="dev-queue")
 def dev_queue() -> None:
-    """Manage the orchestrator development queue.
-
-    Use `cw dev-queue run` to start the dispatch loop that processes pending tickets.
-    """
+    """Manage the orchestrator development queue."""
 
 
 @dev_queue.command(name="add")

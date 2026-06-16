@@ -227,13 +227,13 @@ class TestCli:
             assert result.exit_code != 0
             assert "Test error message" in result.output
 
-    def test_daemon_once_emits_informational_banner(self) -> None:
-        """cw daemon --once: banner names dev-queue, points to cw dev-queue run."""
+    def test_daemon_once_emits_deprecation_notice(self) -> None:
+        """cw daemon --once: banner calls it deprecated, redirects to dev-queue run."""
         runner = CliRunner()
         result = runner.invoke(main, ["daemon", "--once"])
         assert result.exit_code == 0
+        assert "deprecated and has no effect" in result.output
         assert "cw dev-queue run" in result.output
-        assert "does NOT dispatch dev-queue tickets" in result.output
 
 
 class TestLogging:

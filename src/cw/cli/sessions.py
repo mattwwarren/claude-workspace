@@ -559,19 +559,14 @@ def signal_stop() -> None:
 )
 @handle_errors
 def daemon() -> None:
-    """Informational shim — cw daemon does not dispatch dev-queue tickets.
+    """Deprecated no-op — emits a notice and exits.
 
-    cw daemon previously watched GitHub PRs and emitted PR lifecycle events.
-    That role has moved to the cw-pr-events channel. This command is now a
-    no-op that prints a clarifying message and exits.
-
-    To dispatch dev-queue tickets, use: cw dev-queue run
+    ``cw daemon`` never dispatched dev-queue tickets. To dispatch the
+    dev-queue, use ``cw dev-queue run``.
     """
     click.echo(
-        "Note: cw daemon watched GitHub PRs and emitted PR lifecycle events. "
-        "It does NOT dispatch dev-queue tickets — use `cw dev-queue run` for that. "
-        "The PR-watcher role has moved to the cw-pr-events channel; "
-        "this command is now a no-op.",
+        "Note: `cw daemon` is deprecated and has no effect — it never dispatched\n"
+        "dev-queue tickets. To dispatch the dev-queue, use `cw dev-queue run`.",
         err=True,
     )
 
