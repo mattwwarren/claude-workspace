@@ -174,9 +174,9 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
 - **Interactive:** AskUserQuestion with the failed-check output: "Implementation agent's completion claim failed gate <N>: <details>. Retry impl, abort ticket, or override?"
 - **Headless:** EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate <N> failed: <verbatim check output>"`. Do NOT spawn reviewers — the impl is not done.
 
-**On all gates pass:** Emit `stage.entered` (`s2_impl_complete`) then proceed to Checkpoint 2 (existing logic).
+**On all gates pass:** Proceed to Checkpoint 2 (existing logic).
 
-**Headless only:**
+**Headless only — emit `stage.entered` (`s2_impl_complete`) before Checkpoint 2:**
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
