@@ -148,13 +148,35 @@ def _check_cw_doctor() -> tuple[dict[str, Any], dict[str, Any]]:
     hard_failed = False
     is_clean = True
     hard_detail = "backend reachable, config parseable"
+    # rc=2 means Click rejected --json as an unknown option (stale cw build).
+    # Degrade gracefully rather than hard-blocking — a stale build that otherwise
+    # works is not a backend failure.
+    if proc.returncode == 2:
+        hard = {
+            "name": "cw_backend_healthy",
+            "passed": True,
+            "severity": "hard",
+            "detail": (
+                "cw doctor --json unsupported (stale cw build); "
+                "assumed healthy — run install-cw to upgrade"
+            ),
+        }
+        soft = {
+            "name": "cw_doctor_clean",
+            "passed": False,
+            "severity": "soft",
+            "detail": "cannot confirm clean (cw doctor --json unsupported)",
+        }
+        return hard, soft
     try:
         data = json.loads(proc.stdout)
         checks = data.get("checks", [])
         failed_core = [
             c
             for c in checks
-            if c.get("name") in _BACKEND_CORE_CHECKS and not c.get("ok", True)
+            if isinstance(c, dict)
+            and c.get("name") in _BACKEND_CORE_CHECKS
+            and not c.get("ok", True)
         ]
         hard_failed = bool(failed_core)
         if hard_failed:
@@ -162,12 +184,11 @@ def _check_cw_doctor() -> tuple[dict[str, Any], dict[str, Any]]:
                 f"{c.get('name', '?')}: {c.get('detail', 'failed')}"
                 for c in failed_core
             )
-        is_clean = bool(data.get("clean", True))
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        hard_failed = proc.returncode != 0
-        is_clean = proc.returncode == 0
-        if hard_failed:
-            hard_detail = output or "cw doctor exited non-zero with no output"
+        is_clean = bool(data.get("clean", False))
+    except (json.JSONDecodeError, AttributeError, TypeError) as exc:
+        hard_failed = True
+        is_clean = False
+        hard_detail = f"cw doctor --json output unparseable: {exc}"
     hard = {
         "name": "cw_backend_healthy",
         "passed": not hard_failed,

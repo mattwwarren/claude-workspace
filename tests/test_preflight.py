@@ -309,10 +309,13 @@ class TestCheckCwDoctor:
         hard, _soft = pf._check_cw_doctor()
         assert hard["passed"] is False
 
-    def test_json_parse_failure_zero_exit_is_healthy(
+    def test_json_parse_failure_any_exit_is_unhealthy(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If cw doctor --json output is unparseable but exits 0 → healthy."""
+        """If cw doctor --json output is unparseable → always hard fail (any rc).
+
+        Malformed stdout means doctor itself is broken regardless of exit code.
+        """
         pf = _load()
 
         class _Proc:
@@ -323,4 +326,57 @@ class TestCheckCwDoctor:
         monkeypatch.setattr(pf.shutil, "which", lambda _name: "/usr/bin/cw")
         monkeypatch.setattr(pf.subprocess, "run", lambda *_a, **_k: _Proc())
         hard, _soft = pf._check_cw_doctor()
-        assert hard["passed"] is True
+        assert hard["passed"] is False
+        assert "unparseable" in hard["detail"]
+
+    def test_stale_cw_build_rc2_degrades_gracefully(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """rc=2 (--json not supported by older cw) → degraded pass, not a hard block.
+
+        Click returns rc=2 with 'Error: No such option: --json' when the flag
+        is unrecognized. The backend may still be healthy; do not block the
+        smoke test on a build-version mismatch.
+        """
+        pf = _load()
+
+        class _Proc:
+            returncode = 2
+            stdout = ""
+            stderr = "Error: No such option: --json"
+
+        monkeypatch.setattr(pf.shutil, "which", lambda _name: "/usr/bin/cw")
+        monkeypatch.setattr(pf.subprocess, "run", lambda *_a, **_k: _Proc())
+        hard, soft = pf._check_cw_doctor()
+        assert hard["passed"] is True, "stale build must not hard-block backend check"
+        assert "stale cw build" in hard["detail"]
+        assert soft["passed"] is False
+
+    def test_daemon_reachable_failure_blocks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """daemon-reachable ok=False → cw_backend_healthy fails.
+
+        Note: current doctor.py uses warn=True (not ok=False) for daemon health;
+        this test uses a synthetic payload to verify allowlist membership.
+        """
+        pf = _load()
+        failing_checks = [
+            {
+                "name": "daemon-reachable",
+                "ok": False,
+                "warn": False,
+                "detail": "no response from daemon",
+            }
+        ]
+
+        class _Proc:
+            returncode = 1
+            stdout = _make_doctor_json(ok=False, clean=False, checks=failing_checks)
+            stderr = ""
+
+        monkeypatch.setattr(pf.shutil, "which", lambda _name: "/usr/bin/cw")
+        monkeypatch.setattr(pf.subprocess, "run", lambda *_a, **_k: _Proc())
+        hard, soft = pf._check_cw_doctor()
+        assert hard["passed"] is False
+        assert soft["passed"] is False
