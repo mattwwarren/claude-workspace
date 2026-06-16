@@ -6,6 +6,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-06-16
+
+The RFC 0005 **staged pipeline engine** goes live (milestone #8, Phase 1). The
+forward-compat seams from v1.1.3 are now wired: `dispatch_tick` spawns one
+session per stage (`/auto-dev-{plan,impl,review,finalize}`) and a stage-advance
+machine drives the ticket PLAN→IMPL→REVIEW→FINALIZE→COMPLETED. Validated
+end-to-end by dogfooding: the engine autonomously planned, implemented,
+reviewed, shipped, and auto-merged a real ticket (#475 via PR #706).
+
+### Added
+
+- **Staged dispatch engine — RFC 0005 B2** (#617): `dispatch_tick` spawns
+  per-stage via `ClaudeNativeExecutor` (no monolith prompt); `_stage_advance` +
+  the scope-gated advance decision in `_apply_events_to_store`; `stage_base_ref`
+  stamped at spawn and cleared on advance.
+- **`stage_complete` sentinel status** (#699): a PR-less intermediate
+  stage-success status so IMPL can advance to REVIEW. (PLAN/REVIEW advance via
+  the scope-gated `*_pending_approval` statuses; IMPL previously had no valid
+  success status and mis-emitted `shipped`, which the schema rejects without a
+  PR.)
+- **`cw dev-queue run --client/-c`** (#663): scope a dispatch tick to a single
+  client's queue instead of ticking all clients.
+- **Skill distribution on install** (#473 follow-on): `install.sh` now syncs
+  `.claude/commands/` *and* `.claude/skills/` into `~/.claude/` on every
+  install/upgrade, with a manifest-scoped prune that removes only paths cw
+  itself installed — foreign skills are never touched. cw-coupled commands and
+  skills that previously lived only in `~/.claude` (queue-issues, graduate-plan,
+  review-sweep, setup, cw-session-watch) are migrated into this repo as the
+  single source of truth.
+
+### Fixed
+
+- **Staged advance machine was unreachable in production** (#698): reconcile's
+  emitted-sentinel router (`_apply_sentinel_to_task`) routed completed-stage
+  tasks with the stale monolith mapping *before* the advance machine ran,
+  blocking every staged ticket at PLAN. The advance decision is extracted into
+  `apply_staged_decision` and shared by both the consume and reconcile paths.
+- **Scope-gated advance ignored a null `scope.tier`** (#696): a real PLAN
+  sentinel can emit `scope.tier=null` pre-impl; the advance machine now falls
+  back to `task.scope_hint` (mirroring reconcile's tier resolution) instead of
+  blocking small tickets.
+- **Sentinel persisted after the advance decision** (#694): `last_result` is now
+  written before the advance decision in `consume_completed_sessions` (forward-
+  compat for stdout-carrying completion events).
+- **Install served a stale cached wheel** (#473): `install.sh` now passes
+  `--reinstall --no-cache`, so a code-changed/version-unchanged rebuild is never
+  skipped.
+- **Headless worker isolation guard** (#402): `auto-dev-impl.md` codifies that a
+  headless worker's git operations target only its worktree
+  (`cw-context.json:worktree_path`), never the operator's main checkout; the
+  cw-side `worktree_path` injection landed earlier in `spawn.py`.
+
+### Changed
+
+- **`cli.py` split into a `cli/` package** (#705): the 3568-line module is broken
+  into focused submodules; no behavior change.
+- **Docs**: tracker-descriptor seam (ADR 0008), review-system-in-cw design
+  (RFC 0006), and the stage ledger (#692).
+
 ## [1.1.3] — 2026-06-14
 
 RFC 0005 forward-compat seams (milestone #7). Additive, dormant data-model and
