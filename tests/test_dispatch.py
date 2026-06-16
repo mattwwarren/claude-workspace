@@ -1499,7 +1499,7 @@ class TestDispatchTickSpawnErrors:
         assert spawned == 0
         assert daemon.spawn_calls == []
         # Stale tree force-removed for the ticket's branch before the revert.
-        assert removed == [("auto-dev/GEN-404S", True)]
+        assert removed == [("dev/GEN-404S", True)]
 
         queue = load_dev_queue()
         task = queue.tasks[0]
@@ -1612,7 +1612,7 @@ class TestDispatchTickSpawnErrors:
 
         assert spawned == 0
         # Removal with force=True must have been called
-        assert removed == [("auto-dev/GEN-425C", True)]
+        assert removed == [("dev/GEN-425C", True)]
         # Task reverted to PENDING (existing behaviour)
         queue = load_dev_queue()
         task = queue.tasks[0]

@@ -118,7 +118,10 @@ Spawn a **general-purpose** agent scoped to the implementation worktree. The age
 - Instruction to re-checkout the branch from origin AND refresh with main:
   ```bash
   git fetch origin
-  git checkout -b <branch-name> origin/<branch-name>
+  # -B (not -b): idempotent reset-to-origin. cw provisions the per-ticket
+  # worktree on this same feature branch (#712), so -b would fail "already
+  # exists"; -B resets it to origin regardless.
+  git checkout -B <branch-name> origin/<branch-name>
 
   # Refresh with latest main — catches any upstream commits that landed
   # between the last fix push and now. Required even though /prep-pr

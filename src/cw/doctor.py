@@ -52,7 +52,7 @@ from cw.reconcile import SPAWN_GRACE_SECONDS, reconcile, ticket_id_for_session
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, CwState, DevQueueStore, Session
+    from cw.models import ClientConfig, CwState, DevQueueStore, Session, TicketTask
 
 
 @dataclass(frozen=True)
@@ -548,6 +548,25 @@ def _check_wedge_task_running_completed_session(
     return findings
 
 
+def _resolve_wedge_branch(
+    task: TicketTask,
+    session_by_id: dict[str, Session],
+    clients: dict[str, ClientConfig],
+) -> str:
+    """Branch for a wedge check: the session's branch, else the feature prefix.
+
+    Falls back to ``<feature_branch_prefix>/<ticket>`` (``dev`` when the client
+    is unknown), mirroring what the staged pipeline provisions and pushes (#712).
+    """
+    if task.session_id is not None:
+        session = session_by_id.get(task.session_id)
+        if session is not None and session.branch:
+            return session.branch
+    client = clients.get(task.client)
+    prefix = client.feature_branch_prefix if client is not None else "dev"
+    return f"{prefix}/{task.ticket_id}"
+
+
 def _check_wedge_repo_ahead(
     state: CwState,
     queue: DevQueueStore,
@@ -560,19 +579,22 @@ def _check_wedge_repo_ahead(
     """
     findings: list[WedgeFinding] = []
     session_by_id = {s.id: s for s in state.sessions}
+    # A broken clients.yaml must not crash the doctor run; degrade to no
+    # clients and fall back to the default feature-branch prefix below
+    # (mirrors the guard around load_clients in run_doctor).
+    try:
+        clients = load_clients()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        clients = {}
     for task in queue.tasks:
         if task.status != QueueItemStatus.RUNNING:
             continue
         if task.worktree_path is None:
             continue
-        # Branch resolution: prefer session branch, fallback to auto-dev/<ticket>
-        branch: str | None = None
-        if task.session_id is not None:
-            session = session_by_id.get(task.session_id)
-            if session is not None:
-                branch = session.branch
-        if not branch:
-            branch = f"auto-dev/{task.ticket_id}"
+        # Branch resolution: prefer session branch, fallback to the client's
+        # configured feature branch (<feature_branch_prefix>/<ticket>, e.g.
+        # dev/662 — what the staged pipeline provisions and pushes, #712).
+        branch = _resolve_wedge_branch(task, session_by_id, clients)
         # Get remote URL from worktree
         try:
             remote_result = _sp.run(

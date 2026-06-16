@@ -606,6 +606,15 @@ class ClientConfig(BaseModel):
     repo_path: Path | None = None
     branch: str | None = None
     default_branch: str = "main"
+    # Prefix for the per-ticket feature branch the staged pipeline provisions
+    # and the auto-dev skills push to: ``<feature_branch_prefix>/<ticket_id>``
+    # (e.g. ``dev/662``). Single source of truth shared by cw's worktree
+    # provisioning (dispatch) and the skill's branch_pattern, so cw and the
+    # worker agree on one branch — no mid-pipeline rename that would trip the
+    # worktree-reuse guard (#712). Distinct from the session-name prefix
+    # ``auto-dev/`` (AUTO_DEV_LABEL_PREFIX), which stays for reconcile's
+    # ticket-from-session-name parsing.
+    feature_branch_prefix: str = "dev"
     worktree_base: Path | None = None
     auto_purposes: list[SessionPurpose] = Field(
         default_factory=lambda: list(DEFAULT_AUTO_PURPOSES),
