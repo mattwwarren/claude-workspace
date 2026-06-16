@@ -344,7 +344,7 @@ class TestOrchestrateRetireCli:
     ) -> None:
         """CLI prints 'No sessions retired.' when nothing was retired."""
         monkeypatch.setattr(
-            "cw.cli.retire_merged_prs",
+            "cw.cli.orchestrate.retire_merged_prs",
             lambda **_kw: [],
         )
         cli_runner = CliRunner()
@@ -359,7 +359,7 @@ class TestOrchestrateRetireCli:
     ) -> None:
         """CLI lists retired session IDs when sessions were retired."""
         monkeypatch.setattr(
-            "cw.cli.retire_merged_prs",
+            "cw.cli.orchestrate.retire_merged_prs",
             lambda **_kw: ["sess-abc", "sess-def"],
         )
         cli_runner = CliRunner()
@@ -1566,7 +1566,7 @@ class TestOrchestrateStart:
         """start --lane <declared> spawns ORCHESTRATE session with correct metadata."""
         _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr(
-            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
         )
 
         runner = CliRunner()
@@ -1591,7 +1591,7 @@ class TestOrchestrateStart:
         """start --lane <undeclared> exits non-zero with LaneNotFoundError message."""
         _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr(
-            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
         )
 
         runner = CliRunner()
@@ -1609,7 +1609,7 @@ class TestOrchestrateStart:
         """Second start on a lane with a live ORCHESTRATE session is rejected."""
         workspace = _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr(
-            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
         )
 
         # Seed a live ORCHESTRATE session for the lane.
@@ -1640,7 +1640,7 @@ class TestOrchestrateStart:
         """start succeeds when prior ORCHESTRATE session for lane is COMPLETED."""
         workspace = _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr(
-            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
         )
 
         # Prior ORCHESTRATE session is COMPLETED (terminal) — rebind allowed.
@@ -1678,7 +1678,7 @@ class TestOrchestrateStart:
         """--json emits parseable JSON with session_id, lane, client keys."""
         _write_client_with_lane(tmp_config_dir, "impl")
         monkeypatch.setattr(
-            "cw.cli.get_native_daemon_client", lambda: mock_native_daemon
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
         )
 
         runner = CliRunner()
@@ -1796,7 +1796,7 @@ def test_orchestrate_run_drain_authorizes_revert_task(
         reap_calls.append(selector)
         return True
 
-    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
 
     # Seed state with an active IMPL session
     from cw.config import load_state, save_state
@@ -1825,7 +1825,7 @@ def test_orchestrate_run_drain_authorizes_crash_complete(
         reap_calls.append(selector)
         return True
 
-    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
 
     from cw.config import load_state, save_state
 
@@ -1856,7 +1856,7 @@ def test_orchestrate_run_drain_logs_and_leaves_park_blocked(
         reap_calls.append(selector)
         return True
 
-    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
 
     from cw.config import load_state, save_state
 
@@ -1884,7 +1884,7 @@ def test_orchestrate_run_drain_idempotent_replay(
         reap_calls.append(selector)
         return True
 
-    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
 
     from cw.config import load_state, save_state
 
@@ -1919,7 +1919,7 @@ def test_orchestrate_run_drain_backgrounded_proceeds_to_reap_check(
         reap_calls.append(selector)
         return False  # inner guard would reject BACKGROUNDED
 
-    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
 
     from cw.config import load_state, save_state
 
@@ -1950,7 +1950,7 @@ def test_orchestrate_run_lane_isolation_adversarial(
         reap_calls.append(selector)
         return True
 
-    monkeypatch.setattr("cw.cli._reap_session_by_selector", fake_reap)
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
 
     from cw.config import load_state, save_state
 
@@ -2013,7 +2013,7 @@ def test_orchestrate_run_once_flag_exits(
         drain_calls.append((client, lane))
         return 0
 
-    monkeypatch.setattr("cw.cli._drain_reap_proposals", counting_drain)
+    monkeypatch.setattr("cw.cli.orchestrate._drain_reap_proposals", counting_drain)
 
     runner = CliRunner()
     result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-x", "--once"])
@@ -2036,7 +2036,7 @@ def test_orchestrate_run_keyboard_interrupt(
     def raising_drain(client: str, lane: str) -> int:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("cw.cli._drain_reap_proposals", raising_drain)
+    monkeypatch.setattr("cw.cli.orchestrate._drain_reap_proposals", raising_drain)
 
     runner = CliRunner()
     result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-x"])
@@ -2062,8 +2062,8 @@ def test_orchestrate_run_keyboard_interrupt_during_sleep(
     def raising_sleep(seconds: float) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("cw.cli._drain_reap_proposals", noop_drain)
-    monkeypatch.setattr("cw.cli.time.sleep", raising_sleep)
+    monkeypatch.setattr("cw.cli.orchestrate._drain_reap_proposals", noop_drain)
+    monkeypatch.setattr("cw.cli.orchestrate.time.sleep", raising_sleep)
 
     runner = CliRunner()
     result = runner.invoke(main, ["orchestrate", "run", "--lane", "lane-y"])

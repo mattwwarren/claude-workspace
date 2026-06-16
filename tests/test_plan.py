@@ -249,7 +249,7 @@ class TestCLIDevQueuePlan:
 
         # Register the planner client in the in-memory client config
         clients = {planner_client.name: planner_client}
-        monkeypatch.setattr("cw.cli.load_clients", lambda: clients)
+        monkeypatch.setattr("cw.cli.dev_queue.load_clients", lambda: clients)
         monkeypatch.setattr("cw.config.load_clients", lambda: clients)
 
         add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))
@@ -284,7 +284,7 @@ class TestCLIDevQueuePlan:
         from cw.cli import main
 
         clients = {planner_client.name: planner_client}
-        monkeypatch.setattr("cw.cli.load_clients", lambda: clients)
+        monkeypatch.setattr("cw.cli.dev_queue.load_clients", lambda: clients)
         monkeypatch.setattr("cw.config.load_clients", lambda: clients)
 
         add_ticket(TicketTask(ticket_id="GEN-1", client="planner-client"))

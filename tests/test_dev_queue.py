@@ -328,7 +328,7 @@ class TestCLIDevQueueAdd:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Patch events.record_event to no-op
-        monkeypatch.setattr("cw.cli.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(
             main, ["dev-queue", "add", "ABC-5", "--client", "genhealth"]
@@ -356,7 +356,7 @@ class TestCLIDevQueueAdd:
             "linear_prefix_map:\n"
             "  GEN: genhealth\n"
         )
-        monkeypatch.setattr("cw.cli.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "add", "GEN-100"])
         assert result.exit_code == 0, result.output
@@ -379,7 +379,7 @@ class TestCLIDevQueueAdd:
             "linear_prefix_map:\n"
             "  GEN: genhealth\n"
         )
-        monkeypatch.setattr("cw.cli.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "add", "GEN-100", "GEN-101"])
         assert result.exit_code == 0, result.output
@@ -392,7 +392,7 @@ class TestCLIDevQueueAdd:
         tmp_orchestrator_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("cw.cli.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "add", "UNKNOWN-1"])
         assert result.exit_code != 0
@@ -404,7 +404,7 @@ class TestCLIDevQueueAdd:
         tmp_orchestrator_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("cw.cli.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(
             main,

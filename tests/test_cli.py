@@ -92,7 +92,7 @@ class TestCli:
 
     def test_start_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.start_session") as mock_start:
+        with patch("cw.cli.sessions.start_session") as mock_start:
             runner.invoke(main, ["start", "my-client"])
             mock_start.assert_called_once_with(
                 "my-client",
@@ -103,7 +103,7 @@ class TestCli:
 
     def test_start_with_purpose(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.start_session") as mock_start:
+        with patch("cw.cli.sessions.start_session") as mock_start:
             runner.invoke(main, ["start", "--purpose", "idea", "my-client"])
             mock_start.assert_called_once_with(
                 "my-client",
@@ -114,7 +114,7 @@ class TestCli:
 
     def test_start_with_worktree(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.start_session") as mock_start:
+        with patch("cw.cli.sessions.start_session") as mock_start:
             runner.invoke(
                 main,
                 ["start", "--worktree", "feat/search", "my-client"],
@@ -128,7 +128,7 @@ class TestCli:
 
     def test_start_with_parent(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.start_session") as mock_start:
+        with patch("cw.cli.sessions.start_session") as mock_start:
             runner.invoke(
                 main,
                 ["start", "--parent", "abc12345", "my-client"],
@@ -142,20 +142,20 @@ class TestCli:
 
     def test_start_without_parent_passes_none(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.start_session") as mock_start:
+        with patch("cw.cli.sessions.start_session") as mock_start:
             runner.invoke(main, ["start", "my-client"])
             _, kwargs = mock_start.call_args
             assert kwargs.get("parent") is None
 
     def test_bg_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.background_session") as mock_bg:
+        with patch("cw.cli.sessions.background_session") as mock_bg:
             runner.invoke(main, ["bg"])
             mock_bg.assert_called_once_with(None, notify=None, auto=False)
 
     def test_bg_with_session_name(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.background_session") as mock_bg:
+        with patch("cw.cli.sessions.background_session") as mock_bg:
             runner.invoke(main, ["bg", "personal/debt"])
             mock_bg.assert_called_once_with(
                 "personal/debt",
@@ -165,25 +165,25 @@ class TestCli:
 
     def test_resume_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.resume_session") as mock_resume:
+        with patch("cw.cli.sessions.resume_session") as mock_resume:
             runner.invoke(main, ["resume", "my-session"])
             mock_resume.assert_called_once_with("my-session")
 
     def test_list_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli._display_sessions") as mock_list:
+        with patch("cw.cli.sessions._display_sessions") as mock_list:
             runner.invoke(main, ["list"])
             mock_list.assert_called_once()
 
     def test_status_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli._display_status") as mock_status:
+        with patch("cw.cli.sessions._display_status") as mock_status:
             runner.invoke(main, ["status"])
             mock_status.assert_called_once()
 
     def test_done_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.done_session") as mock_done:
+        with patch("cw.cli.sessions.done_session") as mock_done:
             runner.invoke(main, ["done", "my-session"])
             mock_done.assert_called_once_with(
                 "my-session",
@@ -193,7 +193,7 @@ class TestCli:
 
     def test_done_with_cleanup(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.done_session") as mock_done:
+        with patch("cw.cli.sessions.done_session") as mock_done:
             runner.invoke(main, ["done", "my-session", "--cleanup", "--force"])
             mock_done.assert_called_once_with(
                 "my-session",
@@ -203,7 +203,7 @@ class TestCli:
 
     def test_done_no_session_arg(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.done_session") as mock_done:
+        with patch("cw.cli.sessions.done_session") as mock_done:
             runner.invoke(main, ["done"])
             mock_done.assert_called_once_with(
                 None,
@@ -213,14 +213,14 @@ class TestCli:
 
     def test_config_dispatches(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.show_config") as mock_config:
+        with patch("cw.cli.config_cmds.show_config") as mock_config:
             runner.invoke(main, ["config"])
             mock_config.assert_called_once()
 
     def test_error_display(self) -> None:
         runner = CliRunner()
         with patch(
-            "cw.cli.start_session",
+            "cw.cli.sessions.start_session",
             side_effect=CwError("Test error message"),
         ):
             result = runner.invoke(main, ["start", "bad-client"])
@@ -320,7 +320,9 @@ class TestUpgradeWorkers:
         completed = SimpleNamespace(
             returncode=0, stdout="Respawned 3 workers\n", stderr=""
         )
-        with patch("cw.cli.subprocess.run", return_value=completed) as mock_run:
+        with patch(
+            "cw.cli.maintenance.subprocess.run", return_value=completed
+        ) as mock_run:
             result = runner.invoke(main, ["upgrade-workers"])
             mock_run.assert_called_once_with(
                 ["claude", "respawn", "--all"],
@@ -334,7 +336,7 @@ class TestUpgradeWorkers:
     def test_subprocess_nonzero_propagates_exit_code(self) -> None:
         runner = CliRunner()
         completed = SimpleNamespace(returncode=2, stdout="", stderr="boom\n")
-        with patch("cw.cli.subprocess.run", return_value=completed):
+        with patch("cw.cli.maintenance.subprocess.run", return_value=completed):
             result = runner.invoke(main, ["upgrade-workers"])
             assert result.exit_code == 2
             assert "boom" in result.output
@@ -342,7 +344,7 @@ class TestUpgradeWorkers:
     def test_claude_not_on_path(self) -> None:
         runner = CliRunner()
         with patch(
-            "cw.cli.subprocess.run",
+            "cw.cli.maintenance.subprocess.run",
             side_effect=FileNotFoundError(2, "No such file or directory", "claude"),
         ):
             result = runner.invoke(main, ["upgrade-workers"])
@@ -548,7 +550,7 @@ class TestSignalStop:
         """Direct-call the underlying callback with stdin raising OSError.
 
         CliRunner.invoke installs its own sys.stdin wrapper that out-races a
-        patch on ``cw.cli.sys.stdin``, so this case is exercised by calling
+        patch on ``cw.cli.sessions.sys.stdin``, so this case is exercised by calling
         the command's callback directly with a fake stdin instead.
         """
 
@@ -559,7 +561,7 @@ class TestSignalStop:
 
         callback = main.commands["signal-stop"].callback
         assert callable(callback)
-        with patch("cw.cli.sys.stdin", _RaisingStdin()):
+        with patch("cw.cli.sessions.sys.stdin", _RaisingStdin()):
             callback()
 
     def test_stops_native_bg_session_on_daemon_origin(
@@ -592,7 +594,7 @@ class TestSignalStop:
         save_state(state)
         self._write_context(worktree, session_id=session.id)
 
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -633,7 +635,7 @@ class TestSignalStop:
         self._write_context(session.worktree_path, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {"session_id": "claude-uuid", "cwd": str(session.worktree_path)}
@@ -672,7 +674,7 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         # Snapshot session state pre-call. The deferral path must leave it
         # byte-for-byte unchanged; asserting individual fields would mask
@@ -853,7 +855,7 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -900,7 +902,7 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         pre_state = load_state()
         pre_target = next(s for s in pre_state.sessions if s.id == session.id)
@@ -948,7 +950,7 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         pre_state = load_state()
         pre_target = next(s for s in pre_state.sessions if s.id == session.id)
@@ -1002,7 +1004,7 @@ class TestSignalStop:
         save_state(state)
         self._write_context(worktree, session_id=session.id)
 
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1119,7 +1121,7 @@ class TestSignalStop:
         target = next(s for s in state.sessions if s.id == session.id)
         target.surface_ref = short_id
         save_state(state)
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1232,10 +1234,10 @@ class TestSignalStop:
         (transcript_dir / f"{claude_session_id}.jsonl").write_text(
             json.dumps(record) + "\n"
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1319,10 +1321,10 @@ class TestSignalStop:
         (project_dir / f"{claude_session_id}.jsonl").write_text(
             json.dumps(record) + "\n"
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1385,7 +1387,7 @@ class TestSignalStop:
         self._write_headless_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1490,7 +1492,7 @@ class TestSignalStop:
         )
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1611,10 +1613,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_251_NO_OP, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1676,10 +1678,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_316_PREMISES_PENDING_V2, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1740,10 +1742,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_316_AMBIGUITIES_PENDING_V2, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1805,10 +1807,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1872,10 +1874,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1935,10 +1937,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -1999,10 +2001,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_251_BLOCKED_NO_RETRY, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -2073,10 +2075,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, stale_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -2172,10 +2174,10 @@ class TestSignalStop:
         self._write_transcript(
             worktree, s1_claude_id, _SENTINEL_251_BLOCKED_RETRY, fake_home
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         runner = CliRunner()
         with freeze_time(dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
@@ -2328,10 +2330,10 @@ class TestSignalStop:
             _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED,
             fake_home,
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
 
         hook_stdin = json.dumps(
             {
@@ -2450,7 +2452,7 @@ class TestSentinelPresentInTranscript:
         from cw.cli import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-170"
         worktree.mkdir(parents=True)
@@ -2474,7 +2476,7 @@ class TestSentinelPresentInTranscript:
         from cw.cli import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-200"
         worktree.mkdir(parents=True)
@@ -2492,7 +2494,7 @@ class TestSentinelPresentInTranscript:
         from cw.cli import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         worktree = tmp_path / "wt" / "auto-dev-201"
         worktree.mkdir(parents=True)
 
@@ -2518,7 +2520,7 @@ class TestSentinelPresentInTranscript:
         from cw.cli import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         worktree = tmp_path / "wt" / "auto-dev-202"
         worktree.mkdir(parents=True)
         encoded = str(worktree).replace("/", "-").replace(".", "-")
@@ -2555,7 +2557,7 @@ class TestSentinelPresentInTranscript:
         from cw.cli import _sentinel_present_in_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         worktree = tmp_path / "wt" / "auto-dev-203"
         worktree.mkdir(parents=True)
         encoded = str(worktree).replace("/", "-").replace(".", "-")
@@ -2910,7 +2912,7 @@ class TestParseSentinelFromTranscript:
         from cw.cli import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-215"
         worktree.mkdir(parents=True)
@@ -2933,7 +2935,7 @@ class TestParseSentinelFromTranscript:
         from cw.cli import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-214"
         worktree.mkdir(parents=True)
@@ -2959,7 +2961,7 @@ class TestParseSentinelFromTranscript:
         from cw.cli import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-bad"
         worktree.mkdir(parents=True)
@@ -2984,7 +2986,7 @@ class TestParseSentinelFromTranscript:
         from cw.cli import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-empty"
         worktree.mkdir(parents=True)
@@ -3003,7 +3005,7 @@ class TestParseSentinelFromTranscript:
         from cw.cli import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         worktree = tmp_path / "wt" / "auto-dev-missing"
         worktree.mkdir(parents=True)
 
@@ -3031,7 +3033,7 @@ class TestParseSentinelFromTranscript:
         from cw.cli import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         worktree = tmp_path / "wt" / "auto-dev-userblock"
         worktree.mkdir(parents=True)
         encoded = str(worktree).replace("/", "-").replace(".", "-")
@@ -3341,13 +3343,13 @@ class TestShowStatus:
 class TestBgNotifyCli:
     def test_bg_with_notify(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.background_session") as mock_bg:
+        with patch("cw.cli.sessions.background_session") as mock_bg:
             runner.invoke(main, ["bg", "--notify", "idea"])
             mock_bg.assert_called_once_with(None, notify="idea", auto=False)
 
     def test_bg_with_notify_short(self) -> None:
         runner = CliRunner()
-        with patch("cw.cli.background_session") as mock_bg:
+        with patch("cw.cli.sessions.background_session") as mock_bg:
             runner.invoke(main, ["bg", "-n", "idea"])
             mock_bg.assert_called_once_with(None, notify="idea", auto=False)
 
@@ -3460,10 +3462,10 @@ class TestInitCli:
         repo = make_git_repo("my-repo")
 
         with (
-            patch("cw.cli.register_mcp_servers") as mock_mcp,
-            patch("cw.cli.install_cw_allowlist") as mock_allow,
-            patch("cw.cli.install_sessionstart_hook") as mock_hook,
-            patch("cw.cli.install_claude_md_snippet") as mock_md,
+            patch("cw.cli.maintenance.register_mcp_servers") as mock_mcp,
+            patch("cw.cli.maintenance.install_cw_allowlist") as mock_allow,
+            patch("cw.cli.maintenance.install_sessionstart_hook") as mock_hook,
+            patch("cw.cli.maintenance.install_claude_md_snippet") as mock_md,
         ):
             runner = CliRunner()
             result = runner.invoke(
@@ -3495,11 +3497,11 @@ class TestInitCli:
         assert result.exit_code == 0, f"Setup failed: {result.output}"
 
         with (
-            patch("cw.cli.register_mcp_servers") as mock_mcp,
-            patch("cw.cli.install_cw_allowlist") as mock_allow,
-            patch("cw.cli.install_sessionstart_hook") as mock_hook,
-            patch("cw.cli.install_claude_md_snippet") as mock_md,
-            patch("cw.cli.init_client") as mock_init,
+            patch("cw.cli.maintenance.register_mcp_servers") as mock_mcp,
+            patch("cw.cli.maintenance.install_cw_allowlist") as mock_allow,
+            patch("cw.cli.maintenance.install_sessionstart_hook") as mock_hook,
+            patch("cw.cli.maintenance.install_claude_md_snippet") as mock_md,
+            patch("cw.cli.maintenance.init_client") as mock_init,
         ):
             result = runner.invoke(
                 main,
@@ -3582,10 +3584,10 @@ class TestInitCli:
         mock_hook = MagicMock()
         mock_md = MagicMock()
 
-        monkeypatch.setattr("cw.cli.register_mcp_servers", mock_mcp)
-        monkeypatch.setattr("cw.cli.install_cw_allowlist", mock_allow)
-        monkeypatch.setattr("cw.cli.install_sessionstart_hook", mock_hook)
-        monkeypatch.setattr("cw.cli.install_claude_md_snippet", mock_md)
+        monkeypatch.setattr("cw.cli.maintenance.register_mcp_servers", mock_mcp)
+        monkeypatch.setattr("cw.cli.maintenance.install_cw_allowlist", mock_allow)
+        monkeypatch.setattr("cw.cli.maintenance.install_sessionstart_hook", mock_hook)
+        monkeypatch.setattr("cw.cli.maintenance.install_claude_md_snippet", mock_md)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -3603,7 +3605,7 @@ class TestInitCli:
 class TestQueueNextCli:
     def test_next_empty_queue(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.peek_next", return_value=None):
+        with patch("cw.cli.queues.peek_next", return_value=None):
             result = runner.invoke(main, ["queue", "next", "my-client"])
             assert result.exit_code == 0
             assert "No pending items" in result.output
@@ -3620,7 +3622,7 @@ class TestQueueNextCli:
             ),
         )
         runner = CliRunner()
-        with patch("cw.cli.peek_next", return_value=item):
+        with patch("cw.cli.queues.peek_next", return_value=item):
             result = runner.invoke(main, ["queue", "next", "my-client"])
             assert result.exit_code == 0
             assert item.id in result.output
@@ -3638,7 +3640,7 @@ class TestQueueNextCli:
             ),
         )
         runner = CliRunner()
-        with patch("cw.cli.peek_next", return_value=item):
+        with patch("cw.cli.queues.peek_next", return_value=item):
             result = runner.invoke(
                 main,
                 ["queue", "next", "my-client", "--json"],
@@ -3648,7 +3650,7 @@ class TestQueueNextCli:
 
     def test_next_with_purpose(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.peek_next", return_value=None) as mock_peek:
+        with patch("cw.cli.queues.peek_next", return_value=None) as mock_peek:
             runner.invoke(
                 main,
                 ["queue", "next", "my-client", "--purpose", "impl"],
@@ -3662,7 +3664,7 @@ class TestQueueNextCli:
 class TestQueueClaimCli:
     def test_claim_empty_queue(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.claim_next", return_value=None):
+        with patch("cw.cli.queues.claim_next", return_value=None):
             result = runner.invoke(main, ["queue", "claim", "my-client"])
             assert result.exit_code == 0
             assert "No pending items" in result.output
@@ -3678,7 +3680,7 @@ class TestQueueClaimCli:
             ),
         )
         runner = CliRunner()
-        with patch("cw.cli.claim_next", return_value=item):
+        with patch("cw.cli.queues.claim_next", return_value=item):
             result = runner.invoke(main, ["queue", "claim", "my-client"])
             assert result.exit_code == 0
             assert "Claimed:" in result.output
@@ -3695,7 +3697,7 @@ class TestQueueClaimCli:
             ),
         )
         runner = CliRunner()
-        with patch("cw.cli.claim_next", return_value=item):
+        with patch("cw.cli.queues.claim_next", return_value=item):
             result = runner.invoke(
                 main,
                 ["queue", "claim", "my-client", "--json"],
@@ -3714,7 +3716,7 @@ class TestQueueClaimCli:
             ),
         )
         runner = CliRunner()
-        with patch("cw.cli.claim_by_id", return_value=item) as mock_claim:
+        with patch("cw.cli.queues.claim_by_id", return_value=item) as mock_claim:
             result = runner.invoke(
                 main,
                 ["queue", "claim", "my-client", "--id", "abc12345"],
@@ -3724,7 +3726,7 @@ class TestQueueClaimCli:
 
     def test_claim_with_purpose(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.claim_next", return_value=None) as mock_claim:
+        with patch("cw.cli.queues.claim_next", return_value=None) as mock_claim:
             runner.invoke(
                 main,
                 ["queue", "claim", "my-client", "--purpose", "debt"],
@@ -3738,7 +3740,7 @@ class TestQueueClaimCli:
 class TestQueueCompleteCli:
     def test_complete_success(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.complete_item") as mock_complete:
+        with patch("cw.cli.queues.complete_item") as mock_complete:
             result = runner.invoke(
                 main,
                 ["queue", "complete", "my-client", "abc123", "--result", "All done"],
@@ -3753,7 +3755,7 @@ class TestQueueCompleteCli:
 
     def test_complete_default_result(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.complete_item") as mock_complete:
+        with patch("cw.cli.queues.complete_item") as mock_complete:
             result = runner.invoke(
                 main,
                 ["queue", "complete", "my-client", "abc123"],
@@ -3768,7 +3770,7 @@ class TestQueueCompleteCli:
     def test_complete_not_found(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
         with patch(
-            "cw.cli.complete_item",
+            "cw.cli.queues.complete_item",
             side_effect=ValueError("Queue item not found: bad-id"),
         ):
             result = runner.invoke(
@@ -3781,7 +3783,7 @@ class TestQueueCompleteCli:
 class TestQueueFailCli:
     def test_fail_success(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.fail_item") as mock_fail:
+        with patch("cw.cli.queues.fail_item") as mock_fail:
             result = runner.invoke(
                 main,
                 ["queue", "fail", "my-client", "abc123", "--error", "Crashed"],
@@ -3796,7 +3798,7 @@ class TestQueueFailCli:
 
     def test_fail_default_error(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        with patch("cw.cli.fail_item") as mock_fail:
+        with patch("cw.cli.queues.fail_item") as mock_fail:
             result = runner.invoke(
                 main,
                 ["queue", "fail", "my-client", "abc123"],
@@ -3811,7 +3813,7 @@ class TestQueueFailCli:
     def test_fail_not_found(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
         with patch(
-            "cw.cli.fail_item",
+            "cw.cli.queues.fail_item",
             side_effect=ValueError("Queue item not found: bad-id"),
         ):
             result = runner.invoke(
@@ -3825,7 +3827,7 @@ class TestQueueListCli:
     def test_list_no_arg_requires_no_client(self, tmp_config_dir: Path) -> None:
         """No CLIENT arg should succeed (exit_code 0), not raise usage error."""
         runner = CliRunner()
-        with patch("cw.cli.load_clients", return_value={}):
+        with patch("cw.cli.queues.load_clients", return_value={}):
             result = runner.invoke(main, ["queue", "list"])
             assert result.exit_code == 0
             assert "Queue is empty." in result.output
@@ -3859,9 +3861,9 @@ class TestQueueListCli:
             ),
         }
         with (
-            patch("cw.cli.load_clients", return_value=clients),
+            patch("cw.cli.queues.load_clients", return_value=clients),
             patch(
-                "cw.cli.load_queue",
+                "cw.cli.queues.load_queue",
                 side_effect=lambda c: alpha_store if c == "alpha" else beta_store,
             ),
         ):
@@ -3890,8 +3892,8 @@ class TestQueueListCli:
             ),
         }
         with (
-            patch("cw.cli.load_clients", return_value=clients),
-            patch("cw.cli.load_queue", return_value=QueueStore(items=[])),
+            patch("cw.cli.queues.load_clients", return_value=clients),
+            patch("cw.cli.queues.load_queue", return_value=QueueStore(items=[])),
         ):
             result = runner.invoke(main, ["queue", "list"])
             assert result.exit_code == 0
@@ -3900,7 +3902,7 @@ class TestQueueListCli:
     def test_list_no_arg_zero_clients_empty(self, tmp_config_dir: Path) -> None:
         """Zero configured clients also shows 'Queue is empty.'"""
         runner = CliRunner()
-        with patch("cw.cli.load_clients", return_value={}):
+        with patch("cw.cli.queues.load_clients", return_value={}):
             result = runner.invoke(main, ["queue", "list"])
             assert result.exit_code == 0
             assert "Queue is empty." in result.output
@@ -3918,7 +3920,7 @@ class TestQueueListCli:
             ),
         )
         runner = CliRunner()
-        with patch("cw.cli.load_queue", return_value=QueueStore(items=[item])):
+        with patch("cw.cli.queues.load_queue", return_value=QueueStore(items=[item])):
             result = runner.invoke(main, ["queue", "list", "my-client"])
             assert result.exit_code == 0
             assert item.id in result.output
@@ -3929,7 +3931,7 @@ class TestQueueListCli:
         from cw.models import QueueStore
 
         runner = CliRunner()
-        with patch("cw.cli.load_queue", return_value=QueueStore(items=[])):
+        with patch("cw.cli.queues.load_queue", return_value=QueueStore(items=[])):
             result = runner.invoke(main, ["queue", "list", "my-client"])
             assert result.exit_code == 0
             assert "Queue is empty." in result.output
@@ -3966,8 +3968,8 @@ class TestQueueListCli:
 
         runner = CliRunner()
         with (
-            patch("cw.cli.load_clients", return_value=clients),
-            patch("cw.cli.load_queue", return_value=store),
+            patch("cw.cli.queues.load_clients", return_value=clients),
+            patch("cw.cli.queues.load_queue", return_value=store),
         ):
             result = runner.invoke(main, ["queue", "list", "--purpose", "impl"])
             assert result.exit_code == 0
@@ -4007,8 +4009,8 @@ class TestQueueListCli:
 
         runner = CliRunner()
         with (
-            patch("cw.cli.load_clients", return_value=clients),
-            patch("cw.cli.load_queue", return_value=store),
+            patch("cw.cli.queues.load_clients", return_value=clients),
+            patch("cw.cli.queues.load_queue", return_value=store),
         ):
             result = runner.invoke(main, ["queue", "list", "--status", "running"])
             assert result.exit_code == 0
@@ -4119,7 +4121,7 @@ class TestDevQueueRefreshAll:
                 "sha2sha2sha2sha2sha2sha2sha2sha2sha2sha2",
             )
 
-        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -4138,7 +4140,7 @@ class TestDevQueueRefreshAll:
         self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
 
         monkeypatch.setattr(
-            "cw.cli.fast_forward_main",
+            "cw.cli.dev_queue.fast_forward_main",
             lambda _c, **_kw: (
                 "abc123def456abc123def456abc123def456abc1",
                 "abc123def456abc123def456abc123def456abc1",
@@ -4162,7 +4164,7 @@ class TestDevQueueRefreshAll:
         self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
 
         monkeypatch.setattr(
-            "cw.cli.fast_forward_main",
+            "cw.cli.dev_queue.fast_forward_main",
             lambda _c, **_kw: (
                 "oldsha1oldsha1oldsha1oldsha1oldsha1oldsh",
                 "newsha2newsha2newsha2newsha2newsha2newsh",
@@ -4205,7 +4207,7 @@ class TestDevQueueRefreshAll:
                 raise WorktreeError(msg)
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -4228,7 +4230,7 @@ class TestDevQueueRefreshAll:
         self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
 
         monkeypatch.setattr(
-            "cw.cli.fast_forward_main",
+            "cw.cli.dev_queue.fast_forward_main",
             lambda _c, **_kw: ("aaa", "bbb"),
         )
 
@@ -4273,7 +4275,7 @@ class TestDevQueueRefreshAll:
                 raise MissingWorkspaceError(msg)
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -4297,7 +4299,7 @@ class TestDevQueueRefreshAll:
             msg = "workspace missing for client-a"
             raise MissingWorkspaceError(msg)
 
-        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -4338,7 +4340,7 @@ class TestDevQueueRefreshAll:
                 raise WorktreeError(msg)
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.cli.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -4721,12 +4723,14 @@ class TestPeek:
         (transcript_dir / f"{session.claude_session_id}.jsonl").write_text(
             json.dumps(record) + "\n"
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
     @staticmethod
     def _patch_empty_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Point ``Path.home`` at an empty tmp home (no transcript present)."""
-        monkeypatch.setattr("cw.cli.Path.home", lambda: tmp_path / "empty-home")
+        monkeypatch.setattr(
+            "cw.cli.sessions.Path.home", lambda: tmp_path / "empty-home"
+        )
 
     def test_peek_happy_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4865,7 +4869,7 @@ class TestPeek:
         (transcript_dir / f"{session.claude_session_id}.jsonl").write_text(
             json.dumps(user_record) + "\n"
         )
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         runner = CliRunner()
         result = runner.invoke(main, ["peek", session.name])
@@ -4887,8 +4891,8 @@ class TestWatchCommand:
     def test_watch_invokes_watch_flat(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from click.testing import CliRunner
 
-        from cw import cli
         from cw.cli import main
+        from cw.cli import sessions as cli
 
         called: list[object] = []
         monkeypatch.setattr(cli, "watch_flat", lambda **kwargs: called.append(kwargs))
@@ -4910,7 +4914,7 @@ class TestDevQueueRunQuiet:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """With --quiet, run_dispatch_loop is called with emit=None."""
-        from cw import cli as cli_module
+        from cw.cli import dev_queue as cli_module
         from cw.cli import main
 
         captured_emit: list[object] = []
@@ -4939,7 +4943,7 @@ class TestDevQueueRunQuiet:
 
     def test_verbose_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without --quiet, run_dispatch_loop is called with a non-None emit."""
-        from cw import cli as cli_module
+        from cw.cli import dev_queue as cli_module
         from cw.cli import main
 
         captured_emit: list[object] = []
@@ -4969,7 +4973,7 @@ class TestDevQueueRunQuiet:
 
     def test_auto_ff_on_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Bare invocation passes auto_ff=True to run_dispatch_loop."""
-        from cw import cli as cli_module
+        from cw.cli import dev_queue as cli_module
         from cw.cli import main
 
         captured_auto_ff: list[bool] = []
@@ -4998,7 +5002,7 @@ class TestDevQueueRunQuiet:
 
     def test_no_auto_ff_flag_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--no-auto-ff passes auto_ff=False to run_dispatch_loop."""
-        from cw import cli as cli_module
+        from cw.cli import dev_queue as cli_module
         from cw.cli import main
 
         captured_auto_ff: list[bool] = []
@@ -5038,7 +5042,7 @@ class TestDevQueueRunClientFilter:
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """--client X passes client='X' to run_dispatch_loop."""
-        from cw import cli as cli_module
+        from cw.cli import dev_queue as cli_module
         from cw.cli import main
 
         _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
@@ -5073,7 +5077,7 @@ class TestDevQueueRunClientFilter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Omitting --client passes client=None to run_dispatch_loop."""
-        from cw import cli as cli_module
+        from cw.cli import dev_queue as cli_module
         from cw.cli import main
 
         captured_client: list[str | None] = []
@@ -5547,7 +5551,7 @@ class TestDevQueueWait:
             session_id="sess-10",
         )
         monkeypatch.setattr(
-            "cw.cli.wait_for_terminal",
+            "cw.cli.dev_queue.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -5570,7 +5574,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.FAILED,
         )
         monkeypatch.setattr(
-            "cw.cli.wait_for_terminal",
+            "cw.cli.dev_queue.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -5592,7 +5596,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.CANCELLED,
         )
         monkeypatch.setattr(
-            "cw.cli.wait_for_terminal",
+            "cw.cli.dev_queue.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -5614,7 +5618,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.BLOCKED_ON_USER,
         )
         monkeypatch.setattr(
-            "cw.cli.wait_for_terminal",
+            "cw.cli.dev_queue.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -5679,7 +5683,7 @@ class TestDevQueueWait:
         def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
 
-        monkeypatch.setattr("cw.cli.wait_for_terminal", _raise_timeout)
+        monkeypatch.setattr("cw.cli.dev_queue.wait_for_terminal", _raise_timeout)
         runner = CliRunner()
         result = runner.invoke(
             main, ["dev-queue", "wait", "GEN-14", "--client", "genhealth"]
@@ -5701,7 +5705,7 @@ class TestDevQueueWait:
             session_id="sess-15",
         )
         monkeypatch.setattr(
-            "cw.cli.wait_for_terminal",
+            "cw.cli.dev_queue.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -5731,7 +5735,7 @@ class TestDevQueueWait:
             session_id=None,
         )
         monkeypatch.setattr(
-            "cw.cli.wait_for_terminal",
+            "cw.cli.dev_queue.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -5757,7 +5761,7 @@ class TestDevQueueWait:
         def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
 
-        monkeypatch.setattr("cw.cli.wait_for_terminal", _raise_timeout)
+        monkeypatch.setattr("cw.cli.dev_queue.wait_for_terminal", _raise_timeout)
         runner = CliRunner()
         result = runner.invoke(
             main,
@@ -5792,7 +5796,7 @@ class TestDevQueueWait:
             captured.append(timeout)
             return task
 
-        monkeypatch.setattr("cw.cli.wait_for_terminal", _capture)
+        monkeypatch.setattr("cw.cli.dev_queue.wait_for_terminal", _capture)
         runner = CliRunner()
         result = runner.invoke(
             main,
@@ -5944,7 +5948,7 @@ class TestDevQueueWaitSentinelAware:
         import json as _json
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-535"
@@ -5964,8 +5968,8 @@ class TestDevQueueWaitSentinelAware:
         _save_state(state)
 
         # No real sleep/monotonic needed — sentinel found on first poll.
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5989,7 +5993,7 @@ class TestDevQueueWaitSentinelAware:
         import json as _json
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-535b"
@@ -6024,8 +6028,8 @@ class TestDevQueueWaitSentinelAware:
 
         _save_state(state)
 
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6047,7 +6051,7 @@ class TestDevQueueWaitSentinelAware:
         import json as _json
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-535c"
@@ -6100,14 +6104,16 @@ class TestDevQueueWaitSentinelAware:
             )
             return parse_stdout(self._SHIPPED_SENTINEL)
 
-        monkeypatch.setattr("cw.cli._parse_sentinel_from_transcript", _fake_sentinel)
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue._parse_sentinel_from_transcript", _fake_sentinel
+        )
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
 
         # monotonic: first poll returns 0.0 (under deadline=300).
         # After first sleep, return 10.0 (still under deadline).
         monotonic_values = iter([0.0, 0.0, 10.0, 10.0])
         monkeypatch.setattr(
-            "cw.cli.time.monotonic", lambda: next(monotonic_values, 10.0)
+            "cw.cli.dev_queue.time.monotonic", lambda: next(monotonic_values, 10.0)
         )
 
         runner = CliRunner()
@@ -6133,7 +6139,7 @@ class TestDevQueueWaitSentinelAware:
         from cw.cli import _WAIT_EXIT_ATTENTION
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-535d"
@@ -6175,10 +6181,10 @@ class TestDevQueueWaitSentinelAware:
         # Strategy: mock _transcript_age_seconds to return a large value directly,
         # and mock _parse_sentinel_from_transcript to return None.
         monkeypatch.setattr(
-            "cw.cli._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
         )
         monkeypatch.setattr(
-            "cw.cli._transcript_age_seconds",
+            "cw.cli.dev_queue._transcript_age_seconds",
             lambda *_a, **_kw: 99999.0,  # very stale
         )
 
@@ -6187,10 +6193,12 @@ class TestDevQueueWaitSentinelAware:
 
         fake_daemon = FakeNativeDaemonClient()
         # Don't add surface_ref to roster → not in roster.
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: fake_daemon)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.get_native_daemon_client", lambda: fake_daemon
+        )
 
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6216,9 +6224,9 @@ class TestDevQueueWaitSentinelAware:
         # monotonic: first poll → 0.0; second call (deadline check) → 9999.0 (expired).
         monotonic_calls = iter([0.0, 9999.0])
         monkeypatch.setattr(
-            "cw.cli.time.monotonic", lambda: next(monotonic_calls, 9999.0)
+            "cw.cli.dev_queue.time.monotonic", lambda: next(monotonic_calls, 9999.0)
         )
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6250,7 +6258,7 @@ class TestDevQueueWaitSentinelAware:
             session_id="sess-536",
         )
         monkeypatch.setattr(
-            "cw.cli.wait_for_terminal",
+            "cw.cli.dev_queue.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         # Seed so load_dev_queue finds it on the fast-path.
@@ -6260,8 +6268,8 @@ class TestDevQueueWaitSentinelAware:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         # No sleep/monotonic needed — fast path fires immediately.
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6288,7 +6296,7 @@ class TestDevQueueWaitSentinelAware:
     ) -> None:
         """TERMINAL via sentinel without --json emits human-readable line."""
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "auto-dev-535f"
@@ -6306,8 +6314,8 @@ class TestDevQueueWaitSentinelAware:
 
         _save_state(CwState(sessions=[session]))
 
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6340,17 +6348,19 @@ class TestDevQueueWaitSentinelAware:
         _save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr(
-            "cw.cli._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
         )
         monkeypatch.setattr(
-            "cw.cli._transcript_age_seconds", lambda *_a, **_kw: 99999.0
+            "cw.cli.dev_queue._transcript_age_seconds", lambda *_a, **_kw: 99999.0
         )
         from cw.native_daemon import FakeNativeDaemonClient
 
         _fake_daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: _fake_daemon)
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.get_native_daemon_client", lambda: _fake_daemon
+        )
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6382,21 +6392,27 @@ class TestDevQueueWaitSentinelAware:
         _save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr(
-            "cw.cli._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
         )
         # Fresh transcript (not stale) → no ATTENTION.
-        monkeypatch.setattr("cw.cli._transcript_age_seconds", lambda *_a, **_kw: 5.0)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue._transcript_age_seconds", lambda *_a, **_kw: 5.0
+        )
         from cw.native_daemon import FakeNativeDaemonClient
 
         _fake_d = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.get_native_daemon_client", lambda: _fake_d)
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.get_native_daemon_client", lambda: _fake_d
+        )
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
 
         # First monotonic() call (deadline init): 0.0.
         # Subsequent calls (deadline checks): first returns 0.0 (alive),
         # then 9999.0 (deadline exceeded after heartbeat).
         mono_values = iter([0.0, 0.0, 9999.0])
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: next(mono_values, 9999.0))
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.time.monotonic", lambda: next(mono_values, 9999.0)
+        )
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6429,7 +6445,7 @@ class TestDevQueueWaitSentinelAware:
         from cw.cli import _transcript_age_seconds
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "no-transcript"
@@ -6460,7 +6476,7 @@ class TestDevQueueWaitSentinelAware:
         from cw.cli import _transcript_age_seconds
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "no-candidates"
@@ -6489,7 +6505,7 @@ class TestDevQueueWaitSentinelAware:
         from cw.cli import _transcript_age_seconds
 
         fake_home = tmp_path / "fake-home"
-        monkeypatch.setattr("cw.cli.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
 
         worktree = tmp_path / "wt" / "stale-mtime"
@@ -6538,8 +6554,10 @@ class TestDevQueueWaitSentinelAware:
         # First call for deadline init: 0.0; sleep→continue loop;
         # second deadline check (inside session-None branch): 9999.0 → timeout.
         mono_values = iter([0.0, 9999.0])
-        monkeypatch.setattr("cw.cli.time.monotonic", lambda: next(mono_values, 9999.0))
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.time.monotonic", lambda: next(mono_values, 9999.0)
+        )
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6594,7 +6612,7 @@ class TestDevQueueWaitDuplicateResolution:
 
         # Prevent consume_completed_sessions from doing real dispatch work
         monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
-        monkeypatch.setattr("cw.cli.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -7008,7 +7026,7 @@ class TestConfigGroup:
         """cw config (bare) calls show_config (backward compat)."""
         _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
         runner = CliRunner()
-        with patch("cw.cli.show_config") as mock_cfg:
+        with patch("cw.cli.config_cmds.show_config") as mock_cfg:
             result = runner.invoke(main, ["config"])
             assert result.exit_code == 0, result.output
             mock_cfg.assert_called_once()
@@ -7017,7 +7035,7 @@ class TestConfigGroup:
         """cw config show calls show_config."""
         _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
         runner = CliRunner()
-        with patch("cw.cli.show_config") as mock_cfg:
+        with patch("cw.cli.config_cmds.show_config") as mock_cfg:
             result = runner.invoke(main, ["config", "show"])
             assert result.exit_code == 0, result.output
             mock_cfg.assert_called_once()
@@ -7319,7 +7337,7 @@ class TestBoardCommand:
 
     def test_board_invokes_run_board(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """board command delegates to run_board."""
-        import cw.cli as cli_module
+        from cw.cli import maintenance as cli_module
 
         called: list[dict[str, object]] = []
         monkeypatch.setattr(cli_module, "run_board", lambda **kw: called.append(kw))
