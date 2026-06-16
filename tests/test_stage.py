@@ -112,6 +112,7 @@ def _running_task(
     client: str,
     session_id: str,
     stage: Stage = Stage.PLAN,
+    scope_hint: str | None = None,
 ) -> TicketTask:
     return TicketTask(
         ticket_id=ticket_id,
@@ -119,6 +120,7 @@ def _running_task(
         status=QueueItemStatus.RUNNING,
         session_id=session_id,
         stage=stage,
+        scope_hint=scope_hint,
     )
 
 
@@ -131,9 +133,12 @@ def _apply_and_check(
     last_result: dict | None,
     clients: dict,
     initial_stage: Stage = Stage.PLAN,
+    scope_hint: str | None = None,
 ) -> tuple[QueueItemStatus, Stage | None]:
     """Set up store + state, call _apply_events_to_store, return (status, stage)."""
-    task = _running_task(ticket_id, client_name, session_id, stage=initial_stage)
+    task = _running_task(
+        ticket_id, client_name, session_id, stage=initial_stage, scope_hint=scope_hint
+    )
     store = DevQueueStore(tasks=[task])
 
     sess = _make_session(
@@ -313,7 +318,7 @@ class TestDecisionTable:
         tmp_stage_dirs: Path,
         client_with_pipeline: ClientConfig,
     ) -> None:
-        """Rule 2d: plan_pending_approval with missing scope.tier -> BLOCKED_ON_USER."""
+        """Rule 2d: missing scope.tier + no scope_hint -> BLOCKED_ON_USER."""
         _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
         from cw.config import load_effective_clients
 
@@ -330,6 +335,77 @@ class TestDecisionTable:
             },
             clients=clients,
             initial_stage=Stage.PLAN,
+        )
+        assert status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_rule2e_null_tier_scope_hint_small_advances(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+    ) -> None:
+        """Rule 2e (#696): real PLAN sentinel has scope.tier=null; task.scope_hint
+        ='small' resolves the tier and the stage advances PLAN->IMPL.
+
+        Reproduces the #663 dogfood sentinel verbatim: a small ticket whose plan
+        stage emits scope.tier=null (lines_actual unknown pre-impl) must still
+        auto-advance via the scope_hint fallback, mirroring reconcile's
+        tier-unavailable resolution. Fails before the fix (null != "small" ->
+        BLOCKED_ON_USER).
+        """
+        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        from cw.config import load_effective_clients
+
+        clients = load_effective_clients()
+        status, stage = _apply_and_check(
+            ticket_id="T-R2E",
+            session_id="sess-r2e",
+            client_name=client_with_pipeline.name,
+            workspace_path=client_with_pipeline.workspace_path,
+            last_result={
+                "status": "plan_pending_approval",
+                "schema_version": 4,
+                "scope": {
+                    "tier": None,
+                    "files": 4,
+                    "lines_estimate": 258,
+                    "lines_actual": None,
+                    "forbidden_touched": False,
+                },
+            },
+            clients=clients,
+            initial_stage=Stage.PLAN,
+            scope_hint="small",
+        )
+        assert status == QueueItemStatus.PENDING
+        assert stage == Stage.IMPL
+
+    def test_rule2f_null_tier_scope_hint_large_blocked(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+    ) -> None:
+        """Rule 2f (#696): scope.tier=null + scope_hint='large' -> BLOCKED_ON_USER.
+
+        The scope_hint fallback resolves the tier as large, so the gate parks
+        for operator approval rather than auto-advancing.
+        """
+        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        from cw.config import load_effective_clients
+
+        clients = load_effective_clients()
+        status, _ = _apply_and_check(
+            ticket_id="T-R2F",
+            session_id="sess-r2f",
+            client_name=client_with_pipeline.name,
+            workspace_path=client_with_pipeline.workspace_path,
+            last_result={
+                "status": "plan_pending_approval",
+                "schema_version": 4,
+                "scope": {"tier": None},
+            },
+            clients=clients,
+            initial_stage=Stage.PLAN,
+            scope_hint="large",
         )
         assert status == QueueItemStatus.BLOCKED_ON_USER
 

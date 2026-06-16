@@ -765,6 +765,28 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
         task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
 
 
+def _resolve_scope_tier(
+    last_result: dict[str, object] | None, task: TicketTask
+) -> str | None:
+    """Resolve the effective scope tier for a scope-gated advance decision.
+
+    Precedence mirrors reconcile's tier-unavailable fallback (#314, #696):
+      1. ``last_result.scope.tier`` -- the plan sentinel's own classification.
+      2. ``task.scope_hint`` -- operator/queue hint, used when the sentinel
+         omits the tier.
+
+    Why: a real PLAN-stage sentinel can legitimately carry ``scope.tier=null``
+    (``lines_actual`` is unknown pre-impl), so a raw read blocked small tickets
+    that should flow PLAN->IMPL unattended (#663 dogfood). Returns ``None`` when
+    neither source supplies a tier -- the caller then blocks conservatively.
+    """
+    scope_val = last_result.get("scope") if last_result is not None else None
+    tier = scope_val.get("tier") if isinstance(scope_val, dict) else None
+    if isinstance(tier, str):
+        return tier
+    return task.scope_hint
+
+
 def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
     """Advance task to next pipeline stage, or mark COMPLETED at terminal stage.
 
@@ -876,10 +898,9 @@ def _apply_events_to_store(
             if status in SCOPE_GATED_APPROVAL_STATUSES:
                 # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
                 # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
-                scope_val = (
-                    last_result.get("scope") if last_result is not None else None
-                )
-                tier = scope_val.get("tier") if isinstance(scope_val, dict) else None
+                # Tier resolves from the sentinel's scope.tier, falling back to
+                # task.scope_hint when the sentinel omits it (#696).
+                tier = _resolve_scope_tier(last_result, task)
                 if tier == SCOPE_TIER_SMALL:
                     _stage_advance(task, clients)
                 else:
