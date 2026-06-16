@@ -135,6 +135,12 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # .claude/scripts/ is a scripts directory, not a Python package — no __init__.py needed.
 ".claude/scripts/*.py" = ["INP001"]
+# Operator tooling under .claude/ (PR review/finalize, queue-peek, smoke-test
+# preflight) is linted at the baseline ruff level but exempted from the package
+# complexity discipline — CLAUDE.md gate 1 scopes ruff complexity to src/ + tests/.
+# These are untested standalone scripts; extracting helpers solely to satisfy the
+# refactor rules would be unverified churn. (PLR0913 is already globally ignored.)
+".claude/**/*.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
 "src/cw/models.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
 ]
