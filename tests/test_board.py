@@ -294,8 +294,10 @@ class TestRenderBoardMultiLane:
 
     def test_lanes_are_separate_panels(self) -> None:
         output = _render(self._state_with_two_lanes())
-        default_pos = output.index("acme / default")
-        fast_pos = output.index("acme / fast")
+        default_pos = output.find("acme / default")
+        fast_pos = output.find("acme / fast")
+        assert default_pos != -1, "acme / default panel not found in output"
+        assert fast_pos != -1, "acme / fast panel not found in output"
         assert default_pos < fast_pos
 
 
