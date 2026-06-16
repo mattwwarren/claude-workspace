@@ -37,9 +37,6 @@ if TYPE_CHECKING:
 
     from rich.console import RenderableType
 
-# Module-level constant - ordered list of all pipeline stages for column headers.
-_STAGE_COLUMNS: list[Stage] = list(Stage)
-
 _MIN_INTERVAL_SECONDS: int = 1
 _MAX_INTERVAL_SECONDS: int = 60
 
@@ -112,6 +109,11 @@ def _build_lane_panel(
     client_cfg: ClientConfig | None,
 ) -> Panel:
     """Build one Rich Panel for a single client/lane combination."""
+    # Why: D1 (#624) specified one Panel per client containing a Table per lane.
+    # We use one Panel per client x lane instead: flat layout is identical for
+    # single-lane clients (today's norm) and simpler to render. Multi-lane
+    # clients get separate panels rather than a nested grouping. Revisit if
+    # per-client collapsing becomes a UX requirement.
     # Why: mirrors dispatch._lane_stats_for_client without importing the
     # private function.
     running = sum(
