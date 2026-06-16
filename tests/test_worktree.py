@@ -595,6 +595,66 @@ class TestCreateWorktree:
         with pytest.raises(StaleWorktreeError, match="unsaved work"):
             create_worktree(client, "feat/dirty")
 
+    def test_dirty_reuse_allowed_returns_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """allow_dirty_reuse tolerates same-branch dirty reuse (#712 staged pipeline).
+
+        The staged pipeline reuses one per-ticket worktree across stages; a prior
+        stage legitimately leaves uncommitted churn (e.g. uv.lock). With
+        allow_dirty_reuse the reuse returns the path instead of raising.
+        """
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "dev-662"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "branch" in args and "--show-current" in args:
+                result.stdout = "dev/662\n"
+            elif "status" in args:
+                result.stdout = " M uv.lock\n"  # cross-stage churn
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        result = create_worktree(client, "dev/662", allow_dirty_reuse=True)
+        assert result == wt_path
+
+    def test_dirty_reuse_allowed_still_refuses_branch_mismatch(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """allow_dirty_reuse relaxes the unsaved-work guard ONLY — a foreign
+        branch at the path is still refused (cross-ticket protection intact)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = tmp_path / "wt" / "dev-662"
+        wt_path.mkdir(parents=True)
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            result = MagicMock(returncode=0, stderr="")
+            if "branch" in args and "--show-current" in args:
+                result.stdout = "dev/999\n"  # foreign branch
+            else:
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(StaleWorktreeError, match="stale worktree"):
+            create_worktree(client, "dev/662", allow_dirty_reuse=True)
+
     def test_unpushed_commits_reuse_raises_stale_worktree_error(
         self,
         tmp_path: Path,

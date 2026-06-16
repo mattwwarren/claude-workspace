@@ -235,6 +235,7 @@ def create_worktree(
     branch: str,
     *,
     force: bool = False,
+    allow_dirty_reuse: bool = False,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -242,6 +243,13 @@ def create_worktree(
     already a worktree on *branch*. A pre-existing directory checked out on a
     *different* branch (or not a worktree at all) is treated as stale and
     raises :exc:`StaleWorktreeError` rather than being reused (see below).
+
+    *allow_dirty_reuse* relaxes the unsaved-work refusal **only** (the
+    branch-identity check still fires). The staged pipeline reuses one
+    per-ticket worktree across stages, where a prior stage legitimately leaves
+    uncommitted churn (e.g. ``uv.lock``); without this the FINALIZE-stage
+    reuse trips the guard and parks the ticket (#712). Cross-ticket protection
+    is unaffected — a foreign branch at the path is still refused.
     """
     wt_path = worktree_path_for(client, branch)
     git_cwd = _git_dir(client)
@@ -266,7 +274,7 @@ def create_worktree(
                 f"`git worktree remove --force {wt_path}`, then re-dispatch."
             )
             raise StaleWorktreeError(msg)
-        if worktree_has_unsaved_work(client, branch):
+        if not allow_dirty_reuse and worktree_has_unsaved_work(client, branch):
             msg = (
                 f"Refusing to reuse worktree at {wt_path} for branch {branch!r}: "
                 f"it has unsaved work (uncommitted changes or unpushed commits). "
