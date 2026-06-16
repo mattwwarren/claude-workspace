@@ -3296,7 +3296,7 @@ class TestShowStatus:
         # Non-empty live set prevents reconcile's outage guard from
         # refusing to mutate state; "impl" ref still isn't live so phantom is reaped.
         monkeypatch.setattr(
-            "cw.reconcile._claude_agents_json",
+            "cw.reconcile.core._claude_agents_json",
             lambda: [{"sessionId": "decoy000"}],
         )
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
@@ -3327,7 +3327,7 @@ class TestShowStatus:
         from cw.models import OrchestratorConfig, ReapPolicy
 
         monkeypatch.setattr(
-            "cw.reconcile.load_orchestrator_config",
+            "cw.reconcile.core.load_orchestrator_config",
             lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
         )
 
@@ -4049,13 +4049,13 @@ def test_display_status_reconciles_phantom_active_sessions(
     # Non-empty live set prevents the outage guard from aborting reconcile;
     # the "gone" surface_ref still isn't in the set so phantom1 is reaped.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     from cw.models import OrchestratorConfig, ReapPolicy
 
     monkeypatch.setattr(
-        "cw.reconcile.load_orchestrator_config",
+        "cw.reconcile.core.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 

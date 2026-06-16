@@ -154,20 +154,22 @@ def test_incident_421_phantom_dirty_worktree(
     )
     # Non-empty live set bypasses outage guard; "dead-agent" is still not live.
     monkeypatch.setattr(
-        "cw.reconcile._claude_agents_json",
+        "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
     # Incident #421: worktree was dirty at the time of phantom revert.
     # Drive dirtiness through worktree_path (not session.branch).
     monkeypatch.setattr(
-        "cw.reconcile._checked_out_branch",
+        "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICKET-421",
     )
     monkeypatch.setattr(
-        "cw.reconcile.get_client",
+        "cw.reconcile._shared.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
-    monkeypatch.setattr("cw.reconcile.worktree_has_unsaved_work", lambda _c, _b: True)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
 
     reconcile()
 
@@ -221,7 +223,7 @@ def test_incident_418_silently_idle_emits_salvage_skipped(
     )
     sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
     state = CwState(sessions=[sess])
-    monkeypatch.setattr("cw.reconcile._is_headless", lambda *_: True)
+    monkeypatch.setattr("cw.reconcile.stalled._is_headless", lambda *_: True)
 
     now = _NOW_418
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
@@ -253,7 +255,7 @@ def test_incident_418_terminal_sentinel_no_salvage_skip(
     # Real terminal sentinel — no paused_status key.
     sess.last_result = {"status": "shipped", "schema_version": 4}
     state = CwState(sessions=[sess])
-    monkeypatch.setattr("cw.reconcile._is_headless", lambda *_: True)
+    monkeypatch.setattr("cw.reconcile.stalled._is_headless", lambda *_: True)
 
     now = _NOW_418
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
