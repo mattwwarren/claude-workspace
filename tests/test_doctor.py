@@ -3667,3 +3667,57 @@ class TestCheckProjectConfigs:
         names = [c.name for c in report.checks]
         assert "project-config/client-a" in names
         assert report.ok
+
+    def test_gh_on_path_true_when_which_resolves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _gh_on_path
+
+        monkeypatch.setattr("cw.doctor.shutil.which", lambda _n: "/usr/bin/gh")
+        assert _gh_on_path() is True
+
+    def test_gh_on_path_false_when_which_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _gh_on_path
+
+        monkeypatch.setattr("cw.doctor.shutil.which", lambda _n: None)
+        assert _gh_on_path() is False
+
+    def test_tracker_system_non_dict_returns_none(self) -> None:
+        from cw.doctor import _tracker_system
+
+        assert _tracker_system("not-a-mapping") is None
+
+    def test_tracker_system_tracking_not_dict_returns_none(self) -> None:
+        from cw.doctor import _tracker_system
+
+        assert _tracker_system({"tracking": "x"}) is None
+
+    def test_tracker_system_primary_not_dict_returns_none(self) -> None:
+        from cw.doctor import _tracker_system
+
+        assert _tracker_system({"tracking": {"primary": "x"}}) is None
+
+    def test_tracker_system_extracts_value(self) -> None:
+        from cw.doctor import _tracker_system
+
+        assert _tracker_system({"tracking": {"primary": {"system": "linear"}}}) == (
+            "linear"
+        )
+
+    def test_run_doctor_degrades_when_load_clients_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from cw.exceptions import CwError
+
+        _stub_claude_version_ok(monkeypatch)
+
+        def _raise() -> dict[str, object]:
+            msg = "clients.yaml unreadable"
+            raise CwError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_clients", _raise)
+        report = run_doctor()
+        names = [c.name for c in report.checks]
+        assert not any(n.startswith("project-config/") for n in names)
