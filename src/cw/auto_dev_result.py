@@ -62,6 +62,11 @@ _TAIL_LINES = 40
 
 Status = Literal[
     "shipped",
+    # RFC 0005 B2 intermediate stage-success status (#699). PR-less: IMPL
+    # pushes a branch but does not create a PR (FINALIZE does). Accepted under
+    # all supported schema versions (same rollout exception as _V4_STATUSES)
+    # until the auto-dev-impl producer skill bumps its emitted schema_version.
+    "stage_complete",
     "plan_pending_approval",
     "review_pending_approval",
     "merge_gate_blocked",
@@ -94,7 +99,7 @@ SCOPE_GATED_APPROVAL_STATUSES: frozenset[str] = frozenset(
 PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = (
     _V4_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
 )
-STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped"})
+STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped", "stage_complete"})
 STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
     {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
 )
@@ -736,6 +741,7 @@ def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
     raw_status = payload.get("status")
     if raw_status not in {
         "shipped",
+        "stage_complete",
         "plan_pending_approval",
         "review_pending_approval",
         "merge_gate_blocked",

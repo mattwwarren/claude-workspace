@@ -2570,7 +2570,11 @@ class TestB2StatusSets:
     """RFC 0005 B2 stage-advance status sets and constants."""
 
     def test_stage_success_statuses(self) -> None:
-        assert frozenset({"shipped"}) == STAGE_SUCCESS_STATUSES
+        assert frozenset({"shipped", "stage_complete"}) == STAGE_SUCCESS_STATUSES
+
+    def test_stage_complete_in_stage_success_statuses(self) -> None:
+        """stage_complete (#699) in STAGE_SUCCESS_STATUSES — Rule 3 routes it."""
+        assert "stage_complete" in STAGE_SUCCESS_STATUSES
 
     def test_stage_failure_statuses(self) -> None:
         assert (
@@ -2598,3 +2602,110 @@ class TestB2StatusSets:
         # Both plan_pending_approval and review_pending_approval must be in PAUSED
         assert "plan_pending_approval" in PAUSED_FOR_USER_INPUT_STATUSES
         assert "review_pending_approval" in PAUSED_FOR_USER_INPUT_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# RFC 0005 B2 — stage_complete (#699)
+#
+# IMPL pushes a branch but does NOT create a PR (FINALIZE does). The old
+# sentinel used "shipped" which requires a non-null pr and wait_for_ci —
+# both absent from IMPL's output — causing validation_failed → retry cap →
+# FAILED. stage_complete is the PR-less intermediate stage-success status;
+# existing validators already enforce pr=null + no wait_for_ci for any
+# status != "shipped" and blocker=null for any status != "blocked".
+# ---------------------------------------------------------------------------
+
+
+def _stage_complete_payload() -> dict[str, Any]:
+    """Minimal valid stage_complete payload (RFC 0005 B2 IMPL completion, #699)."""
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-stage-complete",
+        "status": "stage_complete",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 60,
+            "lines_actual": 55,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": "dev/gen-stage-complete",
+        "worktree_path": "/tmp/wt/gen-stage-complete",
+        "fork_point_sha": "deadbeef",
+        "commits": ["sha-a", "sha-b"],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": [],
+    }
+
+
+class TestStageComplete:
+    """RFC 0005 B2 stage_complete status (#699) — PR-less intermediate stage success.
+
+    Existing validators already constrain stage_complete to (pr=null,
+    blocker=null, no wait_for_ci) because those checks key on status != "shipped"
+    and status != "blocked".  No new validator code is required.
+    """
+
+    def test_stage_complete_validates_ok(self) -> None:
+        """stage_complete with pr=None, blocker=None, no wait_for_ci passes."""
+        result = AutoDevResult.model_validate(_stage_complete_payload())
+        assert result.status == "stage_complete"
+        assert result.pr is None
+        assert result.blocker is None
+        assert "wait_for_ci" not in result.next_actions
+
+    def test_stage_complete_parses_via_parse_stdout(self) -> None:
+        """parse_stdout accepts stage_complete sentinel end-to-end."""
+        result = parse_stdout(_wrap_sentinel(_stage_complete_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+
+    def test_stage_complete_with_pr_set_raises(self) -> None:
+        """stage_complete + non-null pr violates the §3.3 pr-iff-shipped invariant."""
+        p = _stage_complete_payload()
+        p["pr"] = {
+            "number": 42,
+            "url": "https://github.com/foo/bar/pull/42",
+            "auto_merge": True,
+            "base": "main",
+        }
+        with pytest.raises(ValidationError, match="pr must be null"):
+            AutoDevResult.model_validate(p)
+
+    def test_stage_complete_with_wait_for_ci_raises(self) -> None:
+        """stage_complete + wait_for_ci violates §4.3 wait_for_ci-iff-shipped."""
+        p = _stage_complete_payload()
+        p["next_actions"] = ["wait_for_ci"]
+        with pytest.raises(ValidationError, match="wait_for_ci"):
+            AutoDevResult.model_validate(p)
+
+    def test_stage_complete_in_stage_success_statuses(self) -> None:
+        """stage_complete must be in STAGE_SUCCESS_STATUSES so Rule 3 triggers."""
+        assert "stage_complete" in STAGE_SUCCESS_STATUSES
+
+    def test_stage_complete_accepted_at_v2(self) -> None:
+        """stage_complete accepted under all supported schema versions (#699)."""
+        p = {**_stage_complete_payload(), "schema_version": 2}
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+
+    def test_stage_complete_accepted_at_v3(self) -> None:
+        """stage_complete is accepted under schema_version=3."""
+        p = {**_stage_complete_payload(), "schema_version": 3}
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"

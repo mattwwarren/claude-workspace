@@ -205,7 +205,7 @@ The Stage 2 agent prompt MUST include this trailer requirement in its commit ins
 
 ## Stage 2 Completion (headless only)
 
-After all Stage 2 steps complete successfully in headless mode (branch pushed, gates passed, impl-complete trailer present), emit the `AUTO_DEV_RESULT` sentinel:
+After all Stage 2 steps complete successfully in headless mode (branch pushed, gates passed, impl-complete trailer present), emit the `AUTO_DEV_RESULT` sentinel. IMPL completes the stage and advances the pipeline to review — it does NOT create a PR (FINALIZE owns that). Use `status: "stage_complete"` (not `"shipped"`); do NOT set `pr` or include `wait_for_ci` in `next_actions`.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-impl <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
@@ -218,7 +218,7 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
 {
   "schema_version": 4,
   "ticket_id": "<ticket-id>",
-  "status": "<shipped | blocked>",
+  "status": "<stage_complete | blocked>",
   "stage_reached": "stage2_impl",
   "scope": {"tier": "<small|large>", "files": 0, "lines_estimate": 0, "lines_actual": 0, "forbidden_touched": false},
   "plan_source": "<github_issue_existing | generated | free_text | none>",
