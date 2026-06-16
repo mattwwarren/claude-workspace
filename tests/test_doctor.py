@@ -85,7 +85,7 @@ class TestDoctorCli:
     ) -> None:
         # Simulate a failing check by stubbing run_doctor to return a failing report.
         monkeypatch.setattr(
-            "cw.cli.run_doctor",
+            "cw.cli.maintenance.run_doctor",
             lambda **_kwargs: DoctorReport(
                 version="0.0.0",
                 checks=[CheckResult("check-fail", ok=False, detail="broken")],
@@ -2127,7 +2127,7 @@ class TestDoctorJsonMode:
             state_file="/tmp/x.json",
         )
         monkeypatch.setattr(
-            "cw.cli.run_doctor",
+            "cw.cli.maintenance.run_doctor",
             lambda **_kw: __import__(
                 "cw.doctor", fromlist=["DoctorReport"]
             ).DoctorReport(
@@ -2184,7 +2184,7 @@ class TestDoctorJsonMode:
         from cw.cli import main
 
         monkeypatch.setattr(
-            "cw.cli.run_doctor",
+            "cw.cli.maintenance.run_doctor",
             lambda **_kw: __import__(
                 "cw.doctor", fromlist=["DoctorReport"]
             ).DoctorReport(
