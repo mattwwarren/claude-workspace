@@ -15,9 +15,11 @@ Checks performed:
 - ``agents_present``        (hard)  plan-reviewer + plan-soundness-reviewer
                                    exist under one of ``~/.claude/agents/``
                                    or the repo-local ``.claude/agents/``.
-- ``cw_backend_healthy``    (hard)  ``cw doctor`` exits 0 OR fails only on
-                                   non-backend categories (linkage drift,
-                                   stale state).
+- ``cw_backend_healthy``    (hard)  backend-core ``cw doctor`` checks pass
+                                   (sessions.json, dev_queue.json, clients.yaml,
+                                   claude-version, daemon-reachable). Non-core
+                                   failures (project-config, linkage, workspace)
+                                   do not block.
 - ``cw_doctor_clean``       (soft)  ``cw doctor`` reports zero issues.
 - ``ticket_open``           (hard)  ``gh issue view <id>`` returns
                                    ``state=OPEN`` (github-issues tracker).
@@ -48,6 +50,19 @@ from typing import Any
 _GLOBAL_AGENTS = Path.home() / ".claude" / "agents"
 _REQUIRED_AGENTS = ("plan-reviewer.md", "plan-soundness-reviewer.md")
 _DEV_QUEUE_BLOCKING_STATES = {"PENDING", "RUNNING", "CLAIMED"}
+
+# Check names from ``cw doctor --json`` that indicate the backend core is broken.
+# Failures in other checks (project-config, workspace, linkage) do not block the
+# smoke test — the backend can still dispatch even when tracker config is missing.
+_BACKEND_CORE_CHECKS = frozenset(
+    {
+        "sessions.json",
+        "dev_queue.json",
+        "clients.yaml",
+        "claude-version",
+        "daemon-reachable",
+    }
+)
 
 # Tracker resolution: honor .claude/project-config.yaml rather than assuming gh.
 _RECOGNIZED_TRACKERS = ("github-issues", "linear")
@@ -124,31 +139,46 @@ def _check_cw_doctor() -> tuple[dict[str, Any], dict[str, Any]]:
         }
         return hard, soft
     proc = subprocess.run(
-        [cw, "doctor"],
+        [cw, "doctor", "--json"],
         capture_output=True,
         text=True,
         check=False,
     )
     output = (proc.stdout + proc.stderr).strip()
-    # cw doctor exits 0 when everything passes. Backend-related failures are
-    # the only category that should hard-block a smoke test — linkage drift
-    # and stale-session warnings are normal on a working system.
-    hard_keywords = ("backend", "binary", "config", "parse")
-    output_lower = output.lower()
-    hard_failed = proc.returncode != 0 and any(k in output_lower for k in hard_keywords)
+    hard_failed = False
+    is_clean = True
+    hard_detail = "backend reachable, config parseable"
+    try:
+        data = json.loads(proc.stdout)
+        checks = data.get("checks", [])
+        failed_core = [
+            c
+            for c in checks
+            if c.get("name") in _BACKEND_CORE_CHECKS and not c.get("ok", True)
+        ]
+        hard_failed = bool(failed_core)
+        if hard_failed:
+            hard_detail = "; ".join(
+                f"{c.get('name', '?')}: {c.get('detail', 'failed')}"
+                for c in failed_core
+            )
+        is_clean = bool(data.get("clean", True))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        hard_failed = proc.returncode != 0
+        is_clean = proc.returncode == 0
+        if hard_failed:
+            hard_detail = output or "cw doctor exited non-zero with no output"
     hard = {
         "name": "cw_backend_healthy",
         "passed": not hard_failed,
         "severity": "hard",
-        "detail": output if hard_failed else "backend reachable, config parseable",
+        "detail": hard_detail,
     }
     soft = {
         "name": "cw_doctor_clean",
-        "passed": proc.returncode == 0,
+        "passed": is_clean,
         "severity": "soft",
-        "detail": "no issues"
-        if proc.returncode == 0
-        else f"cw doctor reported issues:\n{output}",
+        "detail": "no issues" if is_clean else f"cw doctor reported issues:\n{output}",
     }
     return hard, soft
 
