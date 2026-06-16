@@ -108,14 +108,12 @@ def _build_lane_panel(
     tasks_in_lane: list[TicketTask],
     client_cfg: ClientConfig | None,
 ) -> Panel:
-    """Build one Rich Panel for a single client/lane combination.
-
+    """Build one Rich Panel for a single client/lane combination."""
     # Why: D1 (#624) specified one Panel per client containing a Table per lane.
     # We use one Panel per client x lane instead: flat layout is identical for
     # single-lane clients (today's norm) and simpler to render. Multi-lane
     # clients get separate panels rather than a nested grouping. Revisit if
     # per-client collapsing becomes a UX requirement.
-    """
     # Why: mirrors dispatch._lane_stats_for_client without importing the
     # private function.
     running = sum(

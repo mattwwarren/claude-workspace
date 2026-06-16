@@ -296,7 +296,7 @@ class TestRenderBoardMultiLane:
         output = _render(self._state_with_two_lanes())
         default_pos = output.index("acme / default")
         fast_pos = output.index("acme / fast")
-        assert default_pos != fast_pos
+        assert default_pos < fast_pos
 
 
 class TestRenderBoardSynthesisedLaneSkip:
