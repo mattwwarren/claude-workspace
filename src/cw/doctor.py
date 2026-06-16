@@ -191,8 +191,10 @@ def _check_project_configs(clients: dict[str, ClientConfig]) -> list[CheckResult
                     ok=True,
                     warn=True,
                     detail=(
-                        f"no project-config.yaml at {path};"
-                        " headless workers default to github-issues"
+                        f"no project-config.yaml at {path}; headless workers"
+                        " fall back to the legacy Linear MCP default and can"
+                        " stall on OAuth — pin tracking.primary.system"
+                        " (github-issues or linear)"
                     ),
                 )
             )

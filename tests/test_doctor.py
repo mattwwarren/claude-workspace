@@ -3600,13 +3600,18 @@ class TestCheckProjectConfigs:
         assert results[0].ok is False
         assert "jira" in results[0].detail
 
-    def test_missing_file_warns_defaulting(self, tmp_path: Path) -> None:
+    def test_missing_file_warns_legacy_linear_default(self, tmp_path: Path) -> None:
+        # An absent project-config.yaml means the worker falls back to the
+        # legacy Linear MCP default, which stalls headless on OAuth — the warn
+        # must name that risk and recommend pinning, NOT claim a github default.
         from cw.doctor import _check_project_configs
 
         results = _check_project_configs({"client-a": self._client(tmp_path)})
         assert results[0].ok is True
         assert results[0].warn is True
-        assert "github-issues" in results[0].detail
+        detail = results[0].detail.lower()
+        assert "linear" in detail
+        assert "pin" in detail
 
     def test_malformed_yaml_fails(self, tmp_path: Path) -> None:
         from cw.doctor import _check_project_configs
