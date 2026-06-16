@@ -61,6 +61,28 @@ Pre-commit hooks enforce gates 1–4 automatically (`uv run pre-commit install`)
 
 Report format: Only actionable problems. Zero praise, zero summaries.
 
+## Module Size
+
+Keep source modules under **~1000 lines**. This is a review-enforced convention
+(ruff has no module-line rule) — treat it as a ceiling, not a target.
+
+- **Approaching ~800 lines:** a yellow flag. Check whether the module still owns
+  a single concern; if it has accreted several, plan a split.
+- **Exceeding ~1000 lines:** split it into a package — one submodule per concern,
+  with an `__init__.py` that re-exports the public surface so import sites stay
+  stable. `cw.cli` and `cw.reconcile` follow this shape.
+- **Cohesion beats raw count.** Do not split a cohesive module just to clear the
+  number (e.g. `reconcile/_shared.py` is large but is shared infrastructure for a
+  single concern). Conversely, a smaller module mixing unrelated concerns is
+  still a smell.
+- Extract helpers rather than letting individual functions grow unbounded; long
+  functions with many branches or arguments are the usual driver of oversized
+  modules.
+
+Test files map 1:1 onto source modules (see Testing), so this ceiling targets
+`src/` modules; an oversized test file mirrors an oversized source module and is
+resolved by splitting the source.
+
 ## Testing
 
 Tests across test files (see `tests/`). Test files map one-to-one
