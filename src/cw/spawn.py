@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
 from cw.config import load_state, save_state, sessions_lock
-from cw.exceptions import CwError, HookContextConflictError, WorktreeError
-from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus, TicketTask
+from cw.events import record_event
+from cw.exceptions import (
+    CwError,
+    HookContextConflictError,
+    SpawnUnregisteredError,
+    WorktreeError,
+)
+from cw.models import (
+    OrchestratorEventType,
+    Session,
+    SessionOrigin,
+    SessionPurpose,
+    SessionStatus,
+    TicketTask,
+)
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import _csid_from_transcript
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
@@ -22,6 +37,8 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig
     from cw.native_daemon import NativeDaemonClient
+
+_log = logging.getLogger(__name__)
 
 # Schema version for cw-context.json. Increment when the shape changes so
 # workers can detect whether they are reading a context written by an older cw.
@@ -40,6 +57,15 @@ _LINEAR_MCP_DISALLOW = "mcp__plugin_linear_linear__*"
 # See GitHub issue #733 (regression from #726).
 _LINEAR_MCP_DISALLOW_ARG = f"--disallowed-tools={_LINEAR_MCP_DISALLOW}"
 
+# Roster-registration verification: after spawn_bg returns a short id, poll
+# roster.json until the id appears. Isolates the silent-spawn flake (#520)
+# where the supervisor accepts the short id without adopting the worker.
+# Sized to be well under SPAWN_GRACE_SECONDS (30s) so reconcile's grace gate
+# does not fire before this check can fail fast.
+_ROSTER_POLL_INTERVAL_SECS: float = 1.0
+_ROSTER_POLL_TIMEOUT_SECS: float = 10.0
+_SPAWN_FAIL_REASON_UNREGISTERED = "spawn_unregistered"
+
 
 def _git_clean_env() -> dict[str, str]:
     """Return os.environ with GIT_* vars stripped.
@@ -49,6 +75,57 @@ def _git_clean_env() -> dict[str, str]:
     subprocess.run git call operates on the path it is explicitly given via -C.
     """
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def _verify_roster_registration(
+    daemon: NativeDaemonClient,
+    short_id: str,
+    ticket_id: str | None = None,
+    *,
+    timeout: float = _ROSTER_POLL_TIMEOUT_SECS,
+    interval: float = _ROSTER_POLL_INTERVAL_SECS,
+) -> None:
+    """Poll the daemon roster until *short_id* appears, or raise.
+
+    After ``claude --bg`` returns a short id, the supervisor may still not have
+    adopted the worker (GitHub issue #520). Polling here catches the flake
+    within the spawn call rather than leaving a phantom RUNNING session that
+    burns a 30-minute idle cycle before the watchdog reaps it.
+
+    Emits a ``SESSION_SPAWN_UNREGISTERED`` event before raising so the failure
+    is diagnosable in the event inbox.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if short_id in daemon.list_live_session_short_ids():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
+    _log.warning(
+        "spawn_unregistered: worker %r absent from roster after %.0fs poll; "
+        "treating spawn as failed (ticket=%s)",
+        short_id,
+        timeout,
+        ticket_id,
+    )
+    record_event(
+        OrchestratorEventType.SESSION_SPAWN_UNREGISTERED,
+        {
+            "surface_ref": short_id,
+            "ticket_id": ticket_id,
+            "reason": _SPAWN_FAIL_REASON_UNREGISTERED,
+            "poll_timeout_secs": timeout,
+        },
+        correlation_id=ticket_id,
+    )
+    msg = (
+        f"Spawned worker {short_id!r} never appeared in the daemon roster "
+        f"within {timeout:.0f}s ({_SPAWN_FAIL_REASON_UNREGISTERED}). "
+        "The supervisor likely did not adopt the worker; treat spawn as failed."
+    )
+    raise SpawnUnregisteredError(msg)
 
 
 def _validate_worktree(path: Path) -> None:
@@ -253,6 +330,8 @@ def spawn_create_impl(
     wall_clock_budget_seconds: int | None = None,
     lane: str | None = None,
     purpose: SessionPurpose = SessionPurpose.IMPL,
+    _roster_poll_timeout: float = _ROSTER_POLL_TIMEOUT_SECS,
+    _roster_poll_interval: float = _ROSTER_POLL_INTERVAL_SECS,
 ) -> str:
     """Create a daemon-spawned session via the native Claude background daemon.
 
@@ -271,6 +350,11 @@ def spawn_create_impl(
     state save: ``sess.parent_session_id = parent.id`` and appends
     ``sess.id`` to ``parent.worker_session_ids``. Raises :class:`CwError`
     if the parent session is not in state.
+
+    After spawning, polls the daemon roster to verify the worker was
+    actually adopted. Raises :class:`~cw.exceptions.SpawnUnregisteredError`
+    if the short id never appears within *_roster_poll_timeout* seconds.
+    The underscore-prefixed poll parameters are injectable for testing only.
     """
     _validate_worktree(worktree)
 
@@ -327,6 +411,13 @@ def spawn_create_impl(
         prompt=prompt,
         extra_args=final_extra or None,
         permission_mode=permission_mode,
+    )
+    _verify_roster_registration(
+        daemon,
+        sess.surface_ref,
+        ticket_id,
+        timeout=_roster_poll_timeout,
+        interval=_roster_poll_interval,
     )
 
     csid = _csid_from_transcript(sess)

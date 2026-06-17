@@ -26,7 +26,13 @@ from cw.models import (
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
-from cw.spawn import _LINEAR_MCP_DISALLOW_ARG, _write_hook_context
+from cw.spawn import (
+    _LINEAR_MCP_DISALLOW_ARG,
+    _ROSTER_POLL_INTERVAL_SECS,
+    _ROSTER_POLL_TIMEOUT_SECS,
+    _verify_roster_registration,
+    _write_hook_context,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import check_not_main_checkout, create_worktree, remove_worktree
 
@@ -344,6 +350,8 @@ def resume_session(
     session_name: str,
     *,
     native_daemon: NativeDaemonClient | None = None,
+    _roster_poll_timeout: float = _ROSTER_POLL_TIMEOUT_SECS,
+    _roster_poll_interval: float = _ROSTER_POLL_INTERVAL_SECS,
 ) -> None:
     """Resume a backgrounded session by attaching to its daemon session.
 
@@ -352,6 +360,8 @@ def resume_session(
         native_daemon: NativeDaemonClient instance. Defaults to
                        get_native_daemon_client(). Inject FakeNativeDaemonClient
                        for tests.
+
+    The underscore-prefixed poll parameters are injectable for testing only.
     """
     daemon = native_daemon or get_native_daemon_client()
 
@@ -430,6 +440,12 @@ def resume_session(
             cwd=session_cwd,
             prompt=full_prompt,
             extra_args=extra_args or None,
+        )
+        _verify_roster_registration(
+            daemon,
+            new_short_id,
+            timeout=_roster_poll_timeout,
+            interval=_roster_poll_interval,
         )
 
         def _update_dead(state: CwState) -> None:
