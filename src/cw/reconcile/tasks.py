@@ -24,9 +24,9 @@ from cw.models import (
 )
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
-    AUTO_DEV_LABEL_PREFIX,
     _DIRTY_WORKTREE_REASON,
     _TIMED_OUT_MERGED_REASON,
+    AUTO_DEV_LABEL_PREFIX,
     ticket_id_for_session,
 )
 
