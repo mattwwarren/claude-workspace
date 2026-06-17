@@ -39,6 +39,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    _CSID_MISMATCH_REASON,
     _DIRTY_WORKTREE_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
@@ -52,6 +53,7 @@ from cw.reconcile import (
     _apply_sentinel_to_task,
     _claude_agents_json,
     _has_terminal_sentinel,
+    _verify_supervisor_session_id,
     complete_timed_out_merged_tasks,
     compute_drift,
     flag_silently_idle_daemon_sessions,
@@ -12853,3 +12855,182 @@ class TestApplySentinelToTaskStagedAdvance:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+class TestVerifySupervisorSessionId:
+    """_verify_supervisor_session_id compares stored csid against supervisor state."""
+
+    def _mk_daemon_session(
+        self,
+        sid: str,
+        surface_ref: str | None,
+        claude_session_id: str | None,
+        status: SessionStatus = SessionStatus.ACTIVE,
+    ) -> Session:
+        return Session(
+            id=sid,
+            name=f"client-a/auto-dev/{sid}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=status,
+            workspace_path=ClientConfig(
+                name="client-a", workspace_path=Path("/tmp/ws")
+            ).workspace_path,
+            surface_ref=surface_ref,
+            claude_session_id=claude_session_id,
+            started_at=datetime(2026, 4, 19, tzinfo=UTC),
+        )
+
+    def _write_supervisor_state(
+        self, jobs_path: Path, short_id: str, resume_id: str
+    ) -> None:
+        job_dir = jobs_path / short_id
+        job_dir.mkdir(parents=True)
+        (job_dir / "state.json").write_text(
+            json.dumps({"resumeSessionId": resume_id}),
+            encoding="utf-8",
+        )
+
+    def test_matching_id_is_noop(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resumeSessionId matches claude_session_id — no mutation, no event."""
+        short_id = "a1b2c3d4"
+        full_uuid = "a1b2c3d4-0000-0000-0000-000000000001"
+        jobs_path = tmp_config_dir / "jobs"
+        self._write_supervisor_state(jobs_path, short_id, full_uuid)
+
+        session = self._mk_daemon_session("s1", short_id, full_uuid)
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda sid, **_kw: full_uuid if sid == short_id else None,
+        )
+        cleared = _verify_supervisor_session_id(load_state())
+        assert cleared == 0
+        assert load_state().sessions[0].surface_ref == short_id
+
+    def test_mismatch_clears_surface_ref(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resumeSessionId differs from claude_session_id — surface_ref cleared."""
+        short_id = "b2c3d4e5"
+        stored_csid = "b2c3d4e5-0000-0000-0000-000000000001"
+        supervisor_resume_id = "ffffffff-dead-beef-dead-beefdeadbeef"
+
+        session = self._mk_daemon_session("s2", short_id, stored_csid)
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda sid, **_kw: supervisor_resume_id if sid == short_id else None,
+        )
+        cleared = _verify_supervisor_session_id(load_state())
+        assert cleared == 1
+        updated = load_state().sessions[0]
+        assert updated.surface_ref is None
+
+    def test_mismatch_emits_needs_attention_event(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On mismatch, SESSION_NEEDS_ATTENTION is emitted with csid_mismatch."""
+        short_id = "c3d4e5f6"
+        stored_csid = "c3d4e5f6-0000-0000-0000-000000000001"
+        supervisor_resume_id = "ffffffff-dead-beef-dead-beefdeadbeef"
+
+        session = self._mk_daemon_session("s3", short_id, stored_csid)
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda sid, **_kw: supervisor_resume_id if sid == short_id else None,
+        )
+        _verify_supervisor_session_id(load_state())
+
+        events = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert any(
+            ev.payload.get("paused_status") == _CSID_MISMATCH_REASON for ev in events
+        )
+
+    def test_missing_state_json_is_noop(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No state.json → no continuity claim → no mutation."""
+        short_id = "d4e5f6a7"
+        stored_csid = "d4e5f6a7-0000-0000-0000-000000000001"
+
+        session = self._mk_daemon_session("s4", short_id, stored_csid)
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda _sid, **_kw: None,
+        )
+        cleared = _verify_supervisor_session_id(load_state())
+        assert cleared == 0
+        assert load_state().sessions[0].surface_ref == short_id
+
+    def test_no_claude_session_id_is_skipped(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Session without claude_session_id is skipped — nothing to compare."""
+        short_id = "e5f6a7b8"
+        session = self._mk_daemon_session("s5", short_id, None)
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        called: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+        )
+        cleared = _verify_supervisor_session_id(load_state())
+        assert cleared == 0
+        assert called == []
+
+    def test_no_surface_ref_is_skipped(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Session without surface_ref has nothing to look up — skipped."""
+        full_uuid = "f6a7b8c9-0000-0000-0000-000000000001"
+        session = self._mk_daemon_session("s6", None, full_uuid)
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        called: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+        )
+        cleared = _verify_supervisor_session_id(load_state())
+        assert cleared == 0
+        assert called == []
+
+    def test_completed_session_is_skipped(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-live (COMPLETED) sessions are not checked."""
+        short_id = "a7b8c9d0"
+        stored_csid = "a7b8c9d0-0000-0000-0000-000000000001"
+        session = self._mk_daemon_session(
+            "s7", short_id, stored_csid, status=SessionStatus.COMPLETED
+        )
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        called: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+        )
+        cleared = _verify_supervisor_session_id(load_state())
+        assert cleared == 0
+        assert called == []
