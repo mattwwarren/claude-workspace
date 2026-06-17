@@ -77,3 +77,67 @@ def _iter_assistant_text_blocks(transcript_path: Path) -> Iterator[str]:
                         yield text
     except OSError:
         return
+
+
+def _iter_tool_result_text(block: dict[str, object]) -> Iterator[str]:
+    """Yield the text of a single ``tool_result`` content block.
+
+    Anthropic transcripts encode a tool result's ``content`` either as a plain
+    string or as a list of ``{"type": "text", "text": ...}`` sub-blocks. Yields
+    nothing for any other shape.
+    """
+    content = block.get("content")
+    if isinstance(content, str):
+        yield content
+    elif isinstance(content, list):
+        for sub in content:
+            if isinstance(sub, dict) and sub.get("type") == "text":
+                text = sub.get("text")
+                if isinstance(text, str):
+                    yield text
+
+
+def _iter_sentinel_text_blocks(transcript_path: Path) -> Iterator[str]:
+    """Yield every text block that may carry an AUTO_DEV_RESULT sentinel.
+
+    Superset of :func:`_iter_assistant_text_blocks`: yields assistant ``text``
+    blocks AND ``tool_result`` block content (a worker's Bash stdout). A worker
+    may emit the sentinel via ``cat <<EOF`` rather than as plain assistant text,
+    landing the frame in a tool_result block — scanning only assistant text
+    misses it and the stage stalls (GitHub #731). User prose ``text`` blocks and
+    the ``tool_use`` command echo are deliberately NOT yielded, to avoid
+    surfacing the prompt's schema example or a duplicate of the same frame.
+
+    A missing file, an I/O error, or a malformed line/record yields nothing
+    rather than raising. Blocks are yielded in file order.
+    """
+    if not transcript_path.is_file():
+        return
+    try:
+        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                is_assistant = record.get("type") == "assistant"
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if is_assistant and block_type == "text":
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            yield text
+                    elif block_type == "tool_result":
+                        yield from _iter_tool_result_text(block)
+    except OSError:
+        return
