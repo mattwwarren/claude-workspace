@@ -246,7 +246,7 @@ def _resolve_branch_start_point(client: ClientConfig, git_cwd: Path) -> str:
     if result.returncode == 0:
         # Why: origin/<default_branch> is already current because dispatch's freshness
         # gate fetched it earlier this tick; interactive cw start accepts a
-        # possibly-one-fetch-stale origin ref — still strictly better than HEAD-based base.
+        # possibly-one-fetch-stale origin ref — better than HEAD-based base.
         return origin_ref
 
     local_ref = client.default_branch
