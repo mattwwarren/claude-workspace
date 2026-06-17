@@ -22,10 +22,24 @@ _PORCELAIN_DETACHED = "detached"
 _GH_PR_LIST_STATE_ALL = "all"
 _GH_PR_LIST_LIMIT = "1"
 
+# gh PR state values returned in JSON output
+_GH_PR_STATE_MERGED = "MERGED"
+_GH_PR_STATE_CLOSED = "CLOSED"
+_GH_PR_STATE_OPEN = "OPEN"
+
 # Why -D not -d: squash-merged branches are never ancestors of main, so -d
 # (safe delete) always refuses them. We check PR state before removing, so
 # force-delete here is safe.
 _GIT_BRANCH_DELETE_FLAG = "-D"
+
+
+def _git_clean_env() -> dict[str, str]:
+    """Return os.environ with GIT_* vars stripped.
+
+    GIT_* vars (e.g. GIT_DIR, GIT_WORK_TREE) can misdirect git commands
+    when the calling process itself runs inside a git repo context.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
 class GcVerdict(enum.Enum):
@@ -137,7 +151,7 @@ def list_repo_worktrees(git_cwd: Path) -> list[WorktreeEntry]:
     which has the same path as *git_cwd*) is excluded from the result.
     Returns an empty list on any subprocess failure.
     """
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    clean_env = _git_clean_env()
     try:
         result = _sp.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -174,11 +188,18 @@ def list_repo_worktrees(git_cwd: Path) -> list[WorktreeEntry]:
 
 
 def check_pr_state(
-    branch: str, timeout: int = 10
+    branch: str, timeout: int = 10, *, cwd: Path | None = None
 ) -> tuple[str | None, int | None, bool]:
     """Return (state, pr_number, gh_available) for the most recent PR on *branch*.
 
     Calls ``gh pr list --head <branch> --state all --json state,number --limit 1``.
+
+    Args:
+        branch: The branch name to look up.
+        timeout: Seconds before the gh call is killed.
+        cwd: Working directory for the gh subprocess — gh infers the repo from CWD.
+             Pass the repo root so gh finds the right remote regardless of the
+             process's own CWD.
 
     Returns:
       (state, pr_number, True)  state is "MERGED", "OPEN", "CLOSED", or "" (no PRs)
@@ -204,6 +225,7 @@ def check_pr_state(
             text=True,
             check=False,
             timeout=timeout,
+            cwd=str(cwd) if cwd is not None else None,
         )
     except FileNotFoundError:
         return None, None, False
@@ -249,6 +271,25 @@ def _is_dirty(wt_path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def _verdict_for_state(
+    state: str | None,
+    wt_path: Path,
+    *,
+    include_closed: bool,
+) -> GcVerdict:
+    """Map gh PR state to a GcVerdict, calling _is_dirty only when needed."""
+    if state == _GH_PR_STATE_MERGED:
+        return GcVerdict.SKIP_DIRTY if _is_dirty(wt_path) else GcVerdict.REMOVE_MERGED
+    if state == _GH_PR_STATE_CLOSED:
+        if not include_closed:
+            return GcVerdict.KEEP_NO_PR
+        return GcVerdict.SKIP_DIRTY if _is_dirty(wt_path) else GcVerdict.REMOVE_CLOSED
+    if state == _GH_PR_STATE_OPEN:
+        return GcVerdict.KEEP_OPEN_PR
+    # "" (no PR) or None (transient error) — keep conservatively
+    return GcVerdict.KEEP_NO_PR
+
+
 def classify_worktrees(
     git_cwd: Path,
     timeout: int = 10,
@@ -270,6 +311,7 @@ def classify_worktrees(
     """
     entries = list_repo_worktrees(git_cwd)
     results: list[WorktreeGcResult] = []
+    _gh_seen_unavailable = False
 
     for entry in entries:
         if entry.locked:
@@ -288,9 +330,7 @@ def classify_worktrees(
             )
             continue
 
-        state, pr_number, gh_available = check_pr_state(entry.branch, timeout=timeout)
-
-        if not gh_available:
+        if _gh_seen_unavailable:
             results.append(
                 WorktreeGcResult(
                     entry=entry, verdict=GcVerdict.SKIP_GH_UNAVAILABLE, pr_number=None
@@ -298,22 +338,20 @@ def classify_worktrees(
             )
             continue
 
-        if state == "MERGED":
-            if _is_dirty(entry.path):
-                verdict: GcVerdict = GcVerdict.SKIP_DIRTY
-            else:
-                verdict = GcVerdict.REMOVE_MERGED
-        elif state == "CLOSED":
-            if include_closed and not _is_dirty(entry.path):
-                verdict = GcVerdict.REMOVE_CLOSED
-            else:
-                verdict = GcVerdict.KEEP_NO_PR
-        elif state == "OPEN":
-            verdict = GcVerdict.KEEP_OPEN_PR
-        else:
-            # "" (no PR) or None (transient error) — keep conservatively
-            verdict = GcVerdict.KEEP_NO_PR
+        state, pr_number, gh_available = check_pr_state(
+            entry.branch, timeout=timeout, cwd=git_cwd
+        )
 
+        if not gh_available:
+            _gh_seen_unavailable = True
+            results.append(
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.SKIP_GH_UNAVAILABLE, pr_number=None
+                )
+            )
+            continue
+
+        verdict = _verdict_for_state(state, entry.path, include_closed=include_closed)
         results.append(
             WorktreeGcResult(entry=entry, verdict=verdict, pr_number=pr_number)
         )
@@ -333,7 +371,7 @@ def remove_worktree_gc(
     Branch deletion is skipped when worktree removal fails to avoid leaving
     git in an inconsistent state (branch gone but worktree still registered).
     """
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    clean_env = _git_clean_env()
 
     wt_result = _sp.run(
         ["git", "worktree", "remove", "--force", str(entry.path)],

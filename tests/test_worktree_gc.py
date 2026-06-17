@@ -335,7 +335,7 @@ class TestClassifyWorktrees:
         ):
             results = classify_worktrees(tmp_path / "repo", include_closed=True)
 
-        assert results[0].verdict == GcVerdict.KEEP_NO_PR
+        assert results[0].verdict == GcVerdict.SKIP_DIRTY
 
     def test_open_pr_gets_keep_open_pr(self, tmp_path: Path) -> None:
         entries = [self._make_entry(tmp_path, "wt1", branch="dev/631")]
@@ -388,6 +388,42 @@ class TestClassifyWorktrees:
             results = classify_worktrees(tmp_path / "repo")
 
         assert results[0].pr_number == 735
+
+    def test_gh_unavailable_short_circuits_subsequent_entries(
+        self, tmp_path: Path
+    ) -> None:
+        """After first gh_available=False, remaining entries skip the gh call."""
+        entries = [
+            self._make_entry(tmp_path, "wt1", branch="dev/630"),
+            self._make_entry(tmp_path, "wt2", branch="dev/631"),
+            self._make_entry(tmp_path, "wt3", branch="dev/632"),
+        ]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch(
+                "cw.worktree_gc.check_pr_state", return_value=(None, None, False)
+            ) as mock_gh,
+        ):
+            results = classify_worktrees(tmp_path / "repo")
+
+        # gh was only called once — second and third entries short-circuited
+        mock_gh.assert_called_once()
+        assert all(r.verdict == GcVerdict.SKIP_GH_UNAVAILABLE for r in results)
+
+    def test_check_pr_state_receives_cwd(self, tmp_path: Path) -> None:
+        """classify_worktrees passes git_cwd to check_pr_state for gh repo context."""
+        repo = tmp_path / "repo"
+        entries = [self._make_entry(tmp_path, "wt1", branch="dev/630")]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch(
+                "cw.worktree_gc.check_pr_state", return_value=("OPEN", 736, True)
+            ) as mock_gh,
+        ):
+            classify_worktrees(repo)
+
+        _, kwargs = mock_gh.call_args
+        assert kwargs.get("cwd") == repo
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +571,7 @@ class TestWorktreeGcReport:
 
 
 def _pr_state_side_effect(
-    branch: str, timeout: int = 10
+    branch: str, timeout: int = 10, **_kw: object
 ) -> tuple[str | None, int | None, bool]:
     if branch == "dev/630":
         return "MERGED", 735, True
@@ -611,7 +647,7 @@ class TestRunWorktreeGc:
         ]
 
         def _closed_state(
-            branch: str, timeout: int = 10
+            branch: str, timeout: int = 10, **_kw: object
         ) -> tuple[str | None, int | None, bool]:
             return "CLOSED", 734, True
 
@@ -631,7 +667,7 @@ class TestRunWorktreeGc:
         ]
 
         def _closed_state(
-            branch: str, timeout: int = 10
+            branch: str, timeout: int = 10, **_kw: object
         ) -> tuple[str | None, int | None, bool]:
             return "CLOSED", 734, True
 

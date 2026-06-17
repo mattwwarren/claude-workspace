@@ -47,8 +47,7 @@ def _format_gc_result(gc_result: WorktreeGcResult, *, applied: bool) -> str:
     if gc_result.pr_number is not None:
         reason = f"{reason} #{gc_result.pr_number}"
 
-    _remove_verdicts = (GcVerdict.REMOVE_MERGED, GcVerdict.REMOVE_CLOSED)
-    if applied and gc_result.verdict in _remove_verdicts:
+    if applied and gc_result.verdict.name.startswith("REMOVE_"):
         return f"  removed {branch:<20}  ({reason})"
 
     return f"  {label}  {branch:<20}  [{reason}]"
