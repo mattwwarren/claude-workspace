@@ -80,6 +80,63 @@ def _revert_running_tasks_for_sessions(
     return reverted
 
 
+def _collect_timed_out_merged_candidates(
+    sessions: list[Session],
+    task_by_ticket: dict[str, TicketTask],
+    cutoff: datetime,
+) -> list[tuple[Session, str]]:
+    """Cheap pre-gh filter for ``complete_timed_out_merged_tasks`` (Phase 1).
+
+    Returns (session, ticket_id) pairs for TIMED_OUT DAEMON sessions inside the
+    lookback window whose dev-queue task is still PENDING. Makes zero gh calls.
+    """
+    # session.branch is None for all DAEMON sessions (spawn.py never sets it).
+    candidates: list[tuple[Session, str]] = []
+    for session in sessions:
+        if session.status != SessionStatus.TIMED_OUT:
+            continue
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        # Guard: completed_at may be None in legacy state files.
+        if session.completed_at is None:
+            continue
+        if session.completed_at < cutoff:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        if ticket_id is None:
+            continue
+        # Idempotency gate: only PENDING tasks are safe to auto-complete.
+        # RUNNING means a new session already picked it up; terminal means done.
+        task = task_by_ticket.get(ticket_id)
+        if task is None or task.status != QueueItemStatus.PENDING:
+            continue
+        candidates.append((session, ticket_id))
+    return candidates
+
+
+def _filter_merged_candidates(
+    candidates: list[tuple[Session, str]],
+) -> list[tuple[Session, str]]:
+    """One gh call per candidate to keep only merged-PR tickets (Phase 2).
+
+    Runs outside any lock. Stops scanning if the gh binary is absent; skips
+    candidates with transient gh errors or unmerged PRs.
+    """
+    to_complete: list[tuple[Session, str]] = []
+    for session, ticket_id in candidates:
+        merged, gh_available = _deps.pr_is_merged_for_ticket(ticket_id)
+        if not gh_available:
+            # gh binary absent — skip all remaining candidates.
+            break
+        if merged is None:
+            # Transient error — skip this session only.
+            continue
+        if merged:
+            to_complete.append((session, ticket_id))
+        # merged is False → leave PENDING.
+    return to_complete
+
+
 def complete_timed_out_merged_tasks() -> list[str]:
     """Upgrade PENDING TicketTasks to COMPLETED when their PR merged.
 
@@ -105,45 +162,14 @@ def complete_timed_out_merged_tasks() -> list[str]:
     }
 
     # Phase 1: Cheap filters before any gh subprocess call.
-    # session.branch is None for all DAEMON sessions (spawn.py never sets it).
-    candidates: list[tuple[Session, str]] = []
-    for session in state.sessions:
-        if session.status != SessionStatus.TIMED_OUT:
-            continue
-        if session.origin is not SessionOrigin.DAEMON:
-            continue
-        # Guard: completed_at may be None in legacy state files.
-        if session.completed_at is None:
-            continue
-        if session.completed_at < cutoff:
-            continue
-        ticket_id = ticket_id_for_session(session.name)
-        if ticket_id is None:
-            continue
-        # Idempotency gate: only PENDING tasks are safe to auto-complete.
-        # RUNNING means a new session already picked it up; terminal means done.
-        task = task_by_ticket.get(ticket_id)
-        if task is None or task.status != QueueItemStatus.PENDING:
-            continue
-        candidates.append((session, ticket_id))
-
+    candidates = _collect_timed_out_merged_candidates(
+        state.sessions, task_by_ticket, cutoff
+    )
     if not candidates:
         return []
 
     # Phase 2: One gh call per surviving candidate (outside any lock).
-    to_complete: list[tuple[Session, str]] = []
-    for session, ticket_id in candidates:
-        merged, gh_available = _deps.pr_is_merged_for_ticket(ticket_id)
-        if not gh_available:
-            # gh binary absent — skip all remaining candidates.
-            break
-        if merged is None:
-            # Transient error — skip this session only.
-            continue
-        if merged:
-            to_complete.append((session, ticket_id))
-        # merged is False → leave PENDING.
-
+    to_complete = _filter_merged_candidates(candidates)
     if not to_complete:
         return []
 

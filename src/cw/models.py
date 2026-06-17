@@ -692,6 +692,6 @@ class CwState(BaseModel):
     def find_by_name_or_id(self, identifier: str) -> Session | None:
         """Find a session by name (client/purpose) or ID."""
         for s in reversed(self.sessions):
-            if s.name == identifier or s.id == identifier:
+            if identifier in (s.name, s.id):
                 return s
         return None

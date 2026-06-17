@@ -64,17 +64,21 @@ class DetailLevel(StrEnum):
     VERBOSE = "verbose"
 
 
+_SECONDS_PER_MINUTE = 60
+_SECONDS_PER_HOUR = 3600
+
+
 def _format_elapsed(started_at: datetime, now: datetime) -> str:
     """Return a short ``HhMmSs``-style elapsed time string."""
     delta = max(now - started_at, now - now)  # Guard against clock skew.
     total_seconds = int(delta.total_seconds())
-    if total_seconds < 60:
+    if total_seconds < _SECONDS_PER_MINUTE:
         return f"{total_seconds}s"
-    if total_seconds < 3600:
-        minutes, seconds = divmod(total_seconds, 60)
+    if total_seconds < _SECONDS_PER_HOUR:
+        minutes, seconds = divmod(total_seconds, _SECONDS_PER_MINUTE)
         return f"{minutes}m{seconds:02d}s"
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes = remainder // 60
+    hours, remainder = divmod(total_seconds, _SECONDS_PER_HOUR)
+    minutes = remainder // _SECONDS_PER_MINUTE
     return f"{hours}h{minutes:02d}m"
 
 
@@ -580,6 +584,42 @@ def _key_listener_thread(key_queue: queue.SimpleQueue[str]) -> None:
         return
 
 
+def _handle_action_key(
+    key: str,
+    rows: list[WatchRow],
+    cursor: int,
+    notice_queue: queue.SimpleQueue[str],
+) -> None:
+    """Run the side effect for an action key ('o', 'p', 'c').
+
+    These keys never move the cursor, quit, or force a refresh; they only
+    spawn an external process or enqueue an operator notice.
+    """
+    n = len(rows)
+
+    if key == "o":
+        if n > 0 and rows[cursor].worktree_path is not None:
+            editor = os.environ.get("EDITOR", "vi")
+            subprocess.run(
+                [editor, str(rows[cursor].worktree_path)],
+                check=False,
+            )
+        else:
+            notice_queue.put("no worktree for this row")
+        return
+
+    if key == "p":
+        row = rows[cursor] if n > 0 else None
+        if shutil.which("cw") is not None and row is not None and row.session_id:
+            subprocess.run(["cw", "queue-peek", row.session_id], check=False)
+        else:
+            notice_queue.put("queue-peek not available")
+        return
+
+    if key == "c":
+        notice_queue.put("spawn-complete not available (obs ticket not yet landed)")
+
+
 def _handle_key(
     key: str,
     rows: list[WatchRow],
@@ -607,28 +647,8 @@ def _handle_key(
         new_cursor = max(cursor - 1, 0) if n > 0 else 0
         return new_cursor, False, False
 
-    if key == "o":
-        if n > 0 and rows[cursor].worktree_path is not None:
-            editor = os.environ.get("EDITOR", "vi")
-            subprocess.run(
-                [editor, str(rows[cursor].worktree_path)],
-                check=False,
-            )
-        else:
-            notice_queue.put("no worktree for this row")
-        return cursor, False, False
-
-    if key == "p":
-        row = rows[cursor] if n > 0 else None
-        if shutil.which("cw") is not None and row is not None and row.session_id:
-            subprocess.run(["cw", "queue-peek", row.session_id], check=False)
-        else:
-            notice_queue.put("queue-peek not available")
-        return cursor, False, False
-
-    if key == "c":
-        notice_queue.put("spawn-complete not available (obs ticket not yet landed)")
-        return cursor, False, False
+    if key in ("o", "p", "c"):
+        _handle_action_key(key, rows, cursor, notice_queue)
 
     return cursor, False, False
 

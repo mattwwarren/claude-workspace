@@ -405,6 +405,149 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
 }
 
 
+def _blocked_on_user_exit_code(task: TicketTask) -> int:
+    """Map a BLOCKED_ON_USER task to its ``dev-queue wait`` exit code.
+
+    Returns ``_WAIT_EXIT_ATTENTION`` when the block originated from a reap
+    proposal (the owning session has ``reap_proposed_at`` set, #542), else
+    ``_WAIT_EXIT_BLOCKED``.
+    """
+    if task.session_id is not None:
+        state = load_state()
+        session = next(
+            (s for s in state.sessions if s.id == task.session_id),
+            None,
+        )
+        if session is not None and session.reap_proposed_at is not None:
+            return _WAIT_EXIT_ATTENTION
+    return _WAIT_EXIT_BLOCKED
+
+
+def _handle_terminal_task(
+    task: TicketTask,
+    ticket_id: str,
+    resolved: str,
+    output_json: bool,
+) -> None:
+    """Emit terminal-status output and raise the mapped ``Exit`` for *task*.
+
+    Only call when ``task.status`` is one of COMPLETED / FAILED / CANCELLED /
+    BLOCKED_ON_USER. COMPLETED returns normally; every other terminal status
+    raises ``click.exceptions.Exit``.
+    """
+    status_str = task.status.value
+    if output_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ticket_id": ticket_id,
+                    "client": resolved,
+                    "status": status_str,
+                    "session_id": task.session_id,
+                    "state": "terminal",
+                    "sentinel_status": None,
+                    "pr_url": None,
+                }
+            )
+        )
+    else:
+        click.echo(f"Status: {status_str.upper()}")
+
+    if task.status == QueueItemStatus.COMPLETED:
+        return
+    if task.status == QueueItemStatus.BLOCKED_ON_USER:
+        raise click.exceptions.Exit(_blocked_on_user_exit_code(task))
+    raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
+
+
+def _handle_sentinel_terminal(
+    sentinel: AutoDevResult,
+    task: TicketTask,
+    ticket_id: str,
+    resolved: str,
+    output_json: bool,
+) -> None:
+    """Emit sentinel-terminal output and raise the mapped ``Exit`` for *sentinel*."""
+    exit_code = _WAIT_STATUS_EXIT.get(sentinel.status, _WAIT_EXIT_FAILED)
+    pr_url = sentinel.pr.url if sentinel.pr is not None else None
+    if output_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ticket_id": ticket_id,
+                    "client": resolved,
+                    "status": task.status.value,
+                    "session_id": task.session_id,
+                    "state": "terminal",
+                    "sentinel_status": sentinel.status,
+                    "pr_url": pr_url,
+                }
+            )
+        )
+    else:
+        click.echo(
+            f"Sentinel: {sentinel.status.upper()}" + (f" ({pr_url})" if pr_url else "")
+        )
+    raise click.exceptions.Exit(exit_code)
+
+
+def _raise_if_deadline_exceeded(
+    deadline: float,
+    ticket_id: str,
+    resolved: str,
+    timeout_seconds: float,
+    output_json: bool,
+) -> None:
+    """Emit timeout output and raise ``Exit`` when the hard ceiling has passed.
+
+    No-op (returns) while time remains, so callers can fall through to a
+    poll-sleep. Used by every poll-and-retry branch in ``dev-queue wait``.
+    """
+    if time.monotonic() >= deadline:
+        _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
+        raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
+
+
+def _handle_attention(
+    task: TicketTask,
+    session: Session,
+    ticket_id: str,
+    resolved: str,
+    output_json: bool,
+    *,
+    now: datetime,
+    transcript_age: float | None,
+) -> None:
+    """Emit ATTENTION output and raise ``Exit(_WAIT_EXIT_ATTENTION)``.
+
+    Only called when the attention predicate holds, which guarantees
+    ``transcript_age`` is non-None; the ``or 0.0`` is a defensive default.
+    """
+    elapsed_seconds = (now - session.started_at).total_seconds()
+    age = transcript_age if transcript_age is not None else 0.0
+    if output_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ticket_id": ticket_id,
+                    "client": resolved,
+                    "status": task.status.value,
+                    "session_id": task.session_id,
+                    "state": "attention",
+                    "sentinel_status": None,
+                    "pr_url": None,
+                    "elapsed_seconds": elapsed_seconds,
+                    "transcript_age_seconds": transcript_age,
+                }
+            )
+        )
+    else:
+        click.echo(
+            f"ATTENTION: {ticket_id} stalled (transcript {age:.0f}s old, not in roster)"
+        )
+    raise click.exceptions.Exit(_WAIT_EXIT_ATTENTION)
+
+
 def _emit_wait_timeout(
     ticket_id: str,
     resolved: str,
@@ -591,46 +734,17 @@ def dev_queue_wait(
             QueueItemStatus.CANCELLED,
             QueueItemStatus.BLOCKED_ON_USER,
         }:
-            status_str = task.status.value
-            if output_json:
-                click.echo(
-                    json.dumps(
-                        {
-                            "ticket_id": ticket_id,
-                            "client": resolved,
-                            "status": status_str,
-                            "session_id": task.session_id,
-                            "state": "terminal",
-                            "sentinel_status": None,
-                            "pr_url": None,
-                        }
-                    )
-                )
-            else:
-                click.echo(f"Status: {status_str.upper()}")
-
-            if task.status == QueueItemStatus.COMPLETED:
-                return
-            if task.status == QueueItemStatus.BLOCKED_ON_USER:
-                # BLOCKED_ON_USER from a reap proposal → ATTENTION (#542 fix).
-                if task.session_id is not None:
-                    _state = load_state()
-                    _session = next(
-                        (s for s in _state.sessions if s.id == task.session_id),
-                        None,
-                    )
-                    if _session is not None and _session.reap_proposed_at is not None:
-                        raise click.exceptions.Exit(_WAIT_EXIT_ATTENTION)
-                raise click.exceptions.Exit(_WAIT_EXIT_BLOCKED)
-            raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
+            # COMPLETED returns; every other terminal status raises Exit.
+            _handle_terminal_task(task, ticket_id, resolved, output_json)
+            return
 
         # --- Step 2: resolve the session ---
         session_id = task.session_id
         if session_id is None:
             # Spawn-window grace: session hasn't registered yet — keep polling.
-            if time.monotonic() >= deadline:
-                _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
-                raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
+            _raise_if_deadline_exceeded(
+                deadline, ticket_id, resolved, timeout_seconds, output_json
+            )
             time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
             continue
 
@@ -638,9 +752,9 @@ def dev_queue_wait(
         session = next((s for s in cw_state.sessions if s.id == session_id), None)
         if session is None:
             # Session not in state yet — spawn-window grace, keep polling.
-            if time.monotonic() >= deadline:
-                _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
-                raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
+            _raise_if_deadline_exceeded(
+                deadline, ticket_id, resolved, timeout_seconds, output_json
+            )
             time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
             continue
 
@@ -655,29 +769,8 @@ def dev_queue_wait(
         # BlockedResult means framing present but payload unusable — treat as
         # not-yet-terminal (could be a partial write); keep polling.
         if isinstance(sentinel, AutoDevResult):
-            # TERMINAL: map sentinel status → exit code
-            exit_code = _WAIT_STATUS_EXIT.get(sentinel.status, _WAIT_EXIT_FAILED)
-            pr_url = sentinel.pr.url if sentinel.pr is not None else None
-            if output_json:
-                click.echo(
-                    json.dumps(
-                        {
-                            "ticket_id": ticket_id,
-                            "client": resolved,
-                            "status": task.status.value,
-                            "session_id": task.session_id,
-                            "state": "terminal",
-                            "sentinel_status": sentinel.status,
-                            "pr_url": pr_url,
-                        }
-                    )
-                )
-            else:
-                click.echo(
-                    f"Sentinel: {sentinel.status.upper()}"
-                    + (f" ({pr_url})" if pr_url else "")
-                )
-            raise click.exceptions.Exit(exit_code)
+            # TERMINAL: emit and raise the mapped exit code.
+            _handle_sentinel_terminal(sentinel, task, ticket_id, resolved, output_json)
 
         # --- Step 5: HEARTBEAT / ATTENTION ---
         now = datetime.now(UTC)
@@ -704,35 +797,21 @@ def dev_queue_wait(
         )
 
         if is_attention:
-            elapsed_seconds = (now - session.started_at).total_seconds()
-            if output_json:
-                click.echo(
-                    json.dumps(
-                        {
-                            "ticket_id": ticket_id,
-                            "client": resolved,
-                            "status": task.status.value,
-                            "session_id": task.session_id,
-                            "state": "attention",
-                            "sentinel_status": None,
-                            "pr_url": None,
-                            "elapsed_seconds": elapsed_seconds,
-                            "transcript_age_seconds": transcript_age,
-                        }
-                    )
-                )
-            else:
-                click.echo(
-                    f"ATTENTION: {ticket_id} stalled "
-                    f"(transcript {transcript_age:.0f}s old, not in roster)"
-                )
-            raise click.exceptions.Exit(_WAIT_EXIT_ATTENTION)
+            _handle_attention(
+                task,
+                session,
+                ticket_id,
+                resolved,
+                output_json,
+                now=now,
+                transcript_age=transcript_age,
+            )
 
         # HEARTBEAT: no terminal sentinel but transcript advancing (or session
         # hasn't hit the budget yet) — keep polling within the hard ceiling.
-        if time.monotonic() >= deadline:
-            _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
-            raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
+        _raise_if_deadline_exceeded(
+            deadline, ticket_id, resolved, timeout_seconds, output_json
+        )
 
         time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
 

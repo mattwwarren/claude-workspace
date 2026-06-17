@@ -308,6 +308,10 @@ def load_state() -> CwState:
 
 _VALID_SESSION_ORIGINS = frozenset(v.value for v in SessionOrigin)
 
+# Schema version at which surface_ref became hex-only; legacy multiplexer
+# surface_refs are cleared only during the upgrade pass from below this version.
+_HEX_SURFACE_REF_SCHEMA_VERSION = 5
+
 
 def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw sessions.json payload into a currently-valid shape.
@@ -336,7 +340,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             # string set by the live daemon path; re-clearing it on every
             # load would wipe valid programmatic writes (e.g. test fixtures,
             # daemon-spawn short ids that happen to look like plain strings).
-            if on_disk_version < 5:
+            if on_disk_version < _HEX_SURFACE_REF_SCHEMA_VERSION:
                 _clear_non_hex_surface_refs(session_raw)
             _coerce_session_origin(session_raw)
             _fill_linkage_field_defaults(session_raw)

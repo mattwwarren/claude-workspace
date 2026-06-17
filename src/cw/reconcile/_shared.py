@@ -594,21 +594,20 @@ def _apply_sentinel_to_task(
             clients = _deps.load_effective_clients()
             last_result = sentinel.model_dump(mode="json")
             apply_staged_decision(target, sentinel.status, last_result, clients)
-        else:
-            # BlockedResult: sentinel failed to parse or was malformed.
-            if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+        # BlockedResult: sentinel failed to parse or was malformed.
+        elif sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+            target.status = QueueItemStatus.FAILED
+        elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
+            if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
                 target.status = QueueItemStatus.FAILED
-            elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
-                if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
-                    target.status = QueueItemStatus.FAILED
-                else:
-                    target.status = QueueItemStatus.PENDING
-                    target.session_id = None
-            elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+            else:
                 target.status = QueueItemStatus.PENDING
                 target.session_id = None
-            else:
-                target.status = QueueItemStatus.COMPLETED
+        elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+            target.status = QueueItemStatus.PENDING
+            target.session_id = None
+        else:
+            target.status = QueueItemStatus.COMPLETED
 
         save_dev_queue(store)
 
@@ -621,6 +620,29 @@ def _session_project_dir(session: Session) -> Path | None:
     return claude_project_dir(worktree)
 
 
+def _newest_surface_ref_transcript(project_dir: Path, session: Session) -> Path | None:
+    """Return the newest ``<surface_ref>*.jsonl`` newer than session start, else None.
+
+    The ``surface_ref``-prefix glob excludes sibling transcripts from other
+    sessions that share the same project dir (reused worktree). Do NOT fall
+    back to an unscoped ``*.jsonl`` glob — that would silently read a
+    different session's transcript. Caller guarantees ``surface_ref`` is set.
+    """
+    surface_ref = session.surface_ref
+    candidates = sorted(
+        project_dir.glob(f"{surface_ref}*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+    newest = candidates[0]
+    mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
+    if mtime <= session.started_at:
+        return None
+    return newest
+
+
 def _locate_session_transcript(session: Session) -> Path | None:
     """Return the session's transcript path, or None if not locatable.
 
@@ -631,11 +653,6 @@ def _locate_session_transcript(session: Session) -> Path | None:
        with mtime strictly after ``session.started_at``, else None
        (reused-worktree stale-transcript guard, #358/#372).
     3. No project_dir, or neither identifier set → None.
-
-    The ``surface_ref``-prefix glob in step 2 excludes sibling transcripts
-    from other sessions that share the same project dir (reused worktree).
-    Do NOT fall back to an unscoped ``*.jsonl`` glob — that would silently
-    read a different session's transcript.
     """
     project_dir = _session_project_dir(session)
     if project_dir is None or not project_dir.is_dir():
@@ -645,18 +662,7 @@ def _locate_session_transcript(session: Session) -> Path | None:
             path = project_dir / f"{session.claude_session_id}.jsonl"
             return path if path.is_file() else None
         if session.surface_ref is not None:
-            candidates = sorted(
-                project_dir.glob(f"{session.surface_ref}*.jsonl"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not candidates:
-                return None
-            newest = candidates[0]
-            mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
-            if mtime <= session.started_at:
-                return None
-            return newest
+            return _newest_surface_ref_transcript(project_dir, session)
     except OSError:
         return None
     return None

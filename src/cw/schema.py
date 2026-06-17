@@ -74,6 +74,17 @@ def _resolve_ref(ref: str, defs: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _primitive_type_str(field_schema: dict[str, Any], defs: dict[str, Any]) -> str:
+    """Render the plain ``type`` keyword (array/null/scalar) of a field schema."""
+    t = field_schema.get("type", "")
+    if t == "array":
+        items = field_schema.get("items", {})
+        return f"list[{_type_str(items, defs)}]"
+    if t == "null":
+        return "null"
+    return t or "object"
+
+
 def _type_str(field_schema: dict[str, Any], defs: dict[str, Any]) -> str:
     """Extract a concise, human-readable type string from a field schema."""
     if "$ref" in field_schema:
@@ -88,13 +99,7 @@ def _type_str(field_schema: dict[str, Any], defs: dict[str, Any]) -> str:
         )
     if "const" in field_schema:
         return repr(field_schema["const"])
-    t = field_schema.get("type", "")
-    if t == "array":
-        items = field_schema.get("items", {})
-        return f"list[{_type_str(items, defs)}]"
-    if t == "null":
-        return "null"
-    return t or "object"
+    return _primitive_type_str(field_schema, defs)
 
 
 def _render_submodel(

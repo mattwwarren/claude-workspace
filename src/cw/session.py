@@ -15,6 +15,7 @@ from cw.config import get_client, load_state, mutate_state, save_state, sessions
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
+    ClientConfig,
     CompletionReason,
     CwState,
     Session,
@@ -55,6 +56,74 @@ def _attach_session(short_id: str) -> None:
     session; Ctrl+D terminates the daemon session in all attached terminals).
     """
     subprocess.run(["claude", "attach", short_id], check=False)
+
+
+def _resolve_start_worktree(
+    client: ClientConfig, worktree: str | None
+) -> tuple[ClientConfig, Path | None, str | None]:
+    """Resolve the worktree for a starting session.
+
+    Returns the (possibly updated) client, the worktree path (or None), and the
+    worktree branch (or None). For worktree-mode clients the branch is taken
+    from the client config and the client's workspace_path is rebound to the new
+    worktree; otherwise an explicit ``worktree`` branch is honored.
+    """
+    worktree_path: Path | None = None
+    worktree_branch: str | None = worktree
+    if client.is_worktree_client:
+        branch = client.branch
+        if branch is None:
+            msg = "Worktree client must have branch set"
+            raise CwError(msg)
+        click.echo(f"Creating worktree for branch '{branch}'...")
+        worktree_path = create_worktree(client, branch)
+        check_not_main_checkout(worktree_path, client)
+        worktree_branch = branch
+        client = client.model_copy(update={"workspace_path": worktree_path})
+        click.echo(f"Worktree ready: {worktree_path}")
+    elif worktree:
+        click.echo(f"Creating worktree for branch '{worktree}'...")
+        worktree_path = create_worktree(client, worktree)
+        check_not_main_checkout(worktree_path, client)
+        click.echo(f"Worktree ready: {worktree_path}")
+    return client, worktree_path, worktree_branch
+
+
+def _resume_or_skip_existing(
+    existing: Session | None,
+    *,
+    parent: str | None,
+    daemon: NativeDaemonClient,
+) -> bool:
+    """Handle an existing backgrounded/active session for ``start_session``.
+
+    Returns True if the caller should return early (the existing session was
+    resumed or is already active); False if a new session should be spawned.
+    Raises CwError if ``--parent`` is applied to an existing session.
+    """
+    if existing and existing.status == SessionStatus.BACKGROUNDED:
+        if parent is not None:
+            msg = (
+                f"Cannot apply --parent to existing backgrounded session "
+                f"{existing.name}. Resume without --parent, or complete the "
+                f"existing session first."
+            )
+            raise CwError(msg)
+        click.echo(f"Found backgrounded session: {existing.name}")
+        resume_session(existing.name, native_daemon=daemon)
+        return True
+
+    if existing and existing.status == SessionStatus.ACTIVE:
+        if parent is not None:
+            msg = (
+                f"Cannot apply --parent — session {existing.name} is already "
+                f"active. Complete or background it first."
+            )
+            raise CwError(msg)
+        click.echo(f"Session already active: {existing.name}")
+        return True
+
+    return False
 
 
 def start_session(
@@ -101,48 +170,11 @@ def start_session(
             raise CwError(msg)
 
     # Auto-resolve worktree for worktree-mode clients
-    worktree_path: Path | None = None
-    worktree_branch: str | None = worktree
-    if client.is_worktree_client:
-        branch = client.branch
-        if branch is None:
-            msg = "Worktree client must have branch set"
-            raise CwError(msg)
-        click.echo(f"Creating worktree for branch '{branch}'...")
-        worktree_path = create_worktree(client, branch)
-        check_not_main_checkout(worktree_path, client)
-        worktree_branch = branch
-        client = client.model_copy(update={"workspace_path": worktree_path})
-        click.echo(f"Worktree ready: {worktree_path}")
-    elif worktree:
-        click.echo(f"Creating worktree for branch '{worktree}'...")
-        worktree_path = create_worktree(client, worktree)
-        check_not_main_checkout(worktree_path, client)
-        click.echo(f"Worktree ready: {worktree_path}")
+    client, worktree_path, worktree_branch = _resolve_start_worktree(client, worktree)
 
     # Check for existing backgrounded session — resume it rather than spawning.
     existing = state.find_session(client_name, purpose)
-
-    if existing and existing.status == SessionStatus.BACKGROUNDED:
-        if parent is not None:
-            msg = (
-                f"Cannot apply --parent to existing backgrounded session "
-                f"{existing.name}. Resume without --parent, or complete the "
-                f"existing session first."
-            )
-            raise CwError(msg)
-        click.echo(f"Found backgrounded session: {existing.name}")
-        resume_session(existing.name, native_daemon=daemon)
-        return
-
-    if existing and existing.status == SessionStatus.ACTIVE:
-        if parent is not None:
-            msg = (
-                f"Cannot apply --parent — session {existing.name} is already "
-                f"active. Complete or background it first."
-            )
-            raise CwError(msg)
-        click.echo(f"Session already active: {existing.name}")
+    if _resume_or_skip_existing(existing, parent=parent, daemon=daemon):
         return
 
     # Determine cwd: worktree-eligible purposes use worktree_path when available.
