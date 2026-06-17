@@ -1,0 +1,70 @@
+# Handoff: B2 (staged engine) shipped + INSTALLED → #663 staged dogfood in flight → Wave-2 rest
+
+**Date:** 2026-06-16 (UTC). **From:** the milestone-#8 Wave-2 orchestration session (B2 redo + scripts-cluster + first real staged dogfood).
+**Prior handoff:** `2026-06-15-wave1-shipped-wave2-next.md` (Wave-1 B1+D1, timeout knobs, the redundant-PR + redispatch lessons — still useful). Read it for the dispatch recipe + well-behaved-orchestrator playbook.
+
+## TL;DR for the next session
+1. **The staged engine (B2) is now BOTH merged AND installed.** `cw` was rebuilt from main via `uv tool install --force .`. Dispatch now spawns per-stage (`/auto-dev-plan|impl|review|finalize <id> --headless`), not the monolith.
+2. **#663 is mid staged-dogfood right now** — driven by a background ticker. Watch it finish, validate the per-stage walk, capture bugs. (Details below.)
+3. **Then continue milestone #8:** `#618 B3 → #619 B4 (parity exit bar) → #620-623 C* → #625-626 E*`, plus #662 (D1 follow-up).
+
+## Shipped this session (all merged to main, clean, level with origin)
+
+- **#617 B2 / PR #677 — RFC 0005 stage advance loop + executor-by-stage spawn.** The real engine wiring. `dispatch_tick` spawns per-stage via `ClaudeNativeExecutor` (no monolith prompt); `_stage_advance` + the 6-rule decision table in `_apply_events_to_store` (`dispatch.py`); `stage_base_ref` stamped at spawn; `clients` threaded into `_apply_events_to_store` AND its 2nd caller `_spawn_complete_impl` (`cli.py`); status frozensets in `auto_dev_result.py`; full `test_stage.py` (all 6 rules incl. shipped@terminal→COMPLETED, scope-gated approval small→advance/large→blocked, idempotency, session_id/stage_base_ref cleared on advance) + `test_spawn.py`.
+  - **First attempt (PR #665) was REVERTED (#667).** It shipped the *consumer half only* (advance machine) while leaving the spawn on the monolith — a `shipped@PLAN` would advance→loop. Re-hardened (v2 resolutions on #617: producer+consumer MUST land together + an e2e gate) → correct redo (#677). Lesson stands: **never merge the consumer half of a staged pipeline without the producer half.**
+- **Scripts cluster (all merged):** **#668 / PR #676** (dead `utils/__init__.py` re-exports removed), **#670 / PR #679** (CI smoke-import gate `.claude/scripts/check_imports.py` — now live in CI), **#669 / PR #693** (cron failure-enqueue `|| true` swallow → if/else that logs; the ticket's "state-dir mismatch" was a misread, descoped).
+- **#678 filed** — design ticket: promote review-monitor's deterministic brain into `cw` subcommands, keep LLM judgment as the `/review-monitor` skill. Absorbs/relates #673/#674/#664/#670/#671/#672. **Design-pass, not auto-dev.** (Operator handling elsewhere.)
+- **#694 / PR #695 — the dogfood's payoff bug.** The staged advance machine **never advanced** — `consume_completed_sessions` made the advance decision (`_apply_events_to_store`, reads `session.last_result`) BEFORE the `persist_last_result` loop that writes `last_result` from the worker stdout. Every freshly-completed stage saw `last_result=None` → Rule 6 → BLOCKED_ON_USER. Found by dogfooding #663 (clean `plan_pending_approval`/`tier=small` PLAN blocked instead of advancing). Fix = reorder (persist before decide). Regression test `test_consume_persists_sentinel_before_advance_decision` drives the real `consume_completed_sessions` path (stdout-only sentinel, `last_result` unset) — **verified it fails on the old ordering**. The unit `test_stage.py` tests missed it because they pre-populate `last_result`.
+
+## ⚠️ THE GOTCHA THAT COST US HALF THE SESSION — read this
+
+**Merging to main ≠ running it. `cw` is a `uv tool` install; the running binary lags main until you reinstall.**
+
+- For most of this session `cw --version` = **1.1.3 (pre-B2 monolith)** even though B2 was merged. **Every dispatch before the reinstall (#617, #668, #670, #669, and the first #663) ran the MONOLITH engine**, not staged. Proof: the daemon roster showed `/auto-dev <id> --headless`, not `/auto-dev-<stage>`.
+- **Corrections to anything earlier that said "main is staged":** that was true of the *code*, not the *tool*. And the "#670/#669 transition hazard / self-resolved via `_spawn_complete_impl` no_op" narrative was **wrong** — there was no transition; the running cw had no advance machine, so they completed via the old monolith consume. The hazard is real only *after* B2 is installed (a monolith-spawned task in flight + staged consumer → loop), which is why the reinstall sequence below clears the queue first.
+- **B2 did NOT bump the version** — `cw --version` STILL reads 1.1.3 post-install. Verify the *code*, not the version: `grep -c _stage_advance <installed>/cw/dispatch.py` (installed pkg under `~/.local/share/uv/tools/claude-workspace/lib/python*/site-packages/cw/`). This is exactly **#666** ("unreleased dispatch/reconcile/spawn changes since v1.1.3") — cut a release so version reflects reality.
+- **Reinstall recipe (used this session):** `cd <repo> && uv tool install --reinstall --no-cache .` then verify the actual code in the installed package (`~/.local/share/uv/tools/claude-workspace/lib/python*/site-packages/cw/`). **Do this after every merge of cw-behavior code before expecting it to run.**
+- **`--force` ALONE IS NOT ENOUGH — it reused a stale cached wheel this session.** Because the version is unbumped (1.1.3), `uv tool install --force .` skipped the rebuild (no "Building…" line) and reinstalled the OLD code — the #694 fix didn't land until `--reinstall --no-cache`. ALWAYS verify the installed *code* (not the version, not the install exit) after reinstalling; the clean signal of a real rebuild is a "Built claude-workspace @ file://…" line. Bumping the version (#666) fixes this properly.
+
+## #663 staged dogfood — STILL BLOCKED at PLAN; real blocker = #696 (next session fixes)
+
+The dogfood proved the staged engine **cannot yet advance a real ticket.** Both runs blocked at PLAN. Honest diagnosis (two bugs, one red herring):
+
+- **#694 (PR #695, MERGED) — real latent fix, but INERT in production.** First-run hypothesis was an ordering bug (`_apply_events_to_store` decides before `persist_last_result` writes `last_result`). Reordered + regression test that genuinely fails on the old order. **BUT real `SESSION_COMPLETED` events carry no `stdout`** (producer-side capture "gated on P1.A wiring", unwired), so `persist_last_result` never runs in production — `last_result` is populated by **`reconcile.py:800`** instead. So #694 is correct forward-compat but did **not** fix #663. (Keep it; don't expect it to help until stdout-capture lands.)
+- **#696 (P1, OPEN) — the ACTUAL blocker.** The advance machine's scope-gated rule reads `last_result.scope.tier == "small"` **raw**. A real PLAN sentinel came back `scope.tier=null` (`files=4, lines_estimate=258, lines_actual=null`) → `null != "small"` → `BLOCKED_ON_USER`. `reconcile.py:378-403` already has a tier-unavailable fallback (per-tier config default / `scope_hint`, #314) that B2 **doesn't reuse**. **Fix direction (recommended): mirror reconcile's tier-resolution in the advance machine.** Unit tests missed it (`test_stage.py` pre-sets `tier="small"`).
+
+**Dogfood verdict:** per-stage spawning works (`/auto-dev-plan 663` confirmed); the **advance/auto-approve path is broken on real sentinels** (#696). Fix #696 → reinstall (`--reinstall --no-cache`) → re-dogfood #663 → expect PLAN(small)→IMPL→REVIEW→FINALIZE→COMPLETED + a `--client/-c` PR. THAT is the green parity signal (and the substance of B4). Until then, **the installed cw is staged-but-non-advancing — every dispatch blocks at PLAN.** To dispatch via auto-dev before #696 lands, reinstall a pre-B2 monolith build, or fix #696 first.
+
+**Driver/queue note:** I accidentally ran two dogfood tickers briefly (a stray shell `&` + the tracked one) — harmless duplicate ticks. #663 task cleared from the queue. Driver script at `/tmp/cw-dogfood-663.sh`, last timeline `/tmp/cw-dogfood-663.log`.
+- **Driven by a background ticker** (was bash `b579pv1eb`, log `/tmp/cw-dogfood-663.log`). **Staged dispatch advances one stage per tick** (PLAN→IMPL→REVIEW→FINALIZE, each a separate session re-claimed on the next tick), so it needs *repeated* ticks — the ticker runs `cw dev-queue run --once` every 90s and exits when #663 is terminal. If that process is gone when you resume, just re-run the loop or tick manually until #663 reaches `completed`.
+- **What to validate (this is the parity check B4 will formalize):**
+  - Each stage spawns its own per-stage prompt (`/auto-dev-{plan,impl,review,finalize} 663`), visible in `~/.claude/daemon/roster.json` and `cw status` labels.
+  - PLAN (small scope) **auto-advances** to IMPL (scope-gated approval, `tier=small`) rather than parking BLOCKED_ON_USER. #663 should classify small (cli.py + dispatch.py + tests). If it parks at `blocked_on_user` after PLAN, check whether scope came back `large` or the sentinel lacked `scope.tier`.
+  - It reaches `completed` and ships a real PR for the `--client/-c` feature — **NOT** a spurious post-ship `PENDING` re-spawn (that would be the #665 regression resurfacing).
+  - `stage_base_ref` gets stamped (and cleared on advance).
+- **#663 ticket itself is hardened** (resolutions posted; `get_client` guard in `dev_queue_run`, `client_filter` narrowing after `load_effective_clients()`, 4 `_fake_loop` stubs). Hardening re-verified valid against post-B2 main.
+- **If the dogfood surfaces a bug:** file it, and if it's an engine defect (loop, wrong stage, missing advance), treat like the #665 revert — don't let a broken engine sit installed. Worst case `uv tool install --force` a known-good main.
+
+## Remaining milestone #8 (dependency order)
+`#618 B3 → #619 B4 (Phase-1 exit bar) → #620-623 C* → #625-626 E*`, plus **#662** (D1 follow-up, anytime) and **#663** (finishing now).
+- **#618 B3** = shared per-ticket worktree lifecycle across stages. NB: B2 already gets basic same-worktree reuse for free (branch name is ticket-scoped, `create_worktree` idempotent), so B3 is about hardening (reap/teardown across stages). **Harden before dispatch** (Plan Reviewer sweep vs current main, scope fence, `## Touch-point Contract` requirement). Slight ouroboros risk: a *staged* worker modifying worktree-lifecycle code the engine uses — consider dispatching B3 and watching the first stage closely, or do it monolith-style if nervous.
+- **#619 B4** = parity verification vs monolith — the formal version of the #663 dogfood.
+
+## Operator state (a fresh session must know)
+- **main clean, level with origin.** `cw` INSTALLED = B2 (staged), version string still 1.1.3 (unbumped — see #666).
+- **orchestrator.yaml:** `per_client_ceiling claude-workspace: 3`, `reap_policy: auto`, `idle_watchdog_seconds: 1800`. Big tickets: dispatch with `cw dev-queue add <id> -t 7200`; staged per-stage sessions are shorter so the wall-clock bites less, but the 1800s idle watchdog can still reap a long single subagent.
+- **dev-queue:** claude-workspace had 615/612/613/614/616/624/617(x2)/668/670/669 terminal + #663 running (dogfood). Other clients carry residual rows; the global `cw dev-queue run` tick spawns across ALL clients (currently they're clean).
+- **Branches pruned:** dev/617, dev/668, dev/670, dev/669, plus the earlier dev/616/624 and the revert branch — all deleted local+remote. Worktrees under `~/.cw/wt/` + agent worktrees under `.claude/worktrees/` linger (#630 backlog — do NOT mass-remove).
+- **Monitors:** all per-session/PR monitors fired + done; the #663 dogfood ticker (`b579pv1eb`) may still be running — check `/tmp/cw-dogfood-663.log`.
+- **Open in milestone #8:** #618,619 (B3,B4), #620-623 (C*), #625,626 (E*), #662 (D1 follow-up), #663 (re-dogfood after #696). **#696 (P1) GATES everything staged — the installed engine blocks at PLAN until it's fixed.** Design-pass (operator's): #675, #678. Release: #666 (also fixes the version-unbumped install-cache trap). Bugs found dogfooding: #694 (merged, latent), #696 (open, the real blocker).
+- **⚠️ FIRST THING NEXT SESSION:** the installed cw is staged-but-non-advancing. Either fix #696 then `uv tool install --reinstall --no-cache .` + re-dogfood #663, OR install a pre-B2 monolith build if you must dispatch other tickets via auto-dev before #696.
+
+## Lessons (carry forward)
+- **Reinstall after merging cw-behavior code** (`uv tool install --force .`); verify installed *code*, not `--version` (unbumped). The #1 time-sink this session.
+- **Staged ≠ monolith operationally:** staged needs repeated ticks (one stage per tick); a single `--once` only spawns PLAN. Use a ticking loop or continuous `cw dev-queue run`.
+- **Producer+consumer of a staged pipeline must land together** (#665 revert).
+- **When a pre-flight resolution contradicts/descopes the ticket body, edit the body too** — a worker plans against the body (#669 spun 60min, zero commits; hand-fixed in 2 min). Captured to wiki auto-memory.
+- **Verify world-state via the real artifact** (`gh pr list --head dev/<id>`, roster prompt), never trust queue status or `--version` alone.
+- **Dogfooding earns its keep:** one real staged dispatch surfaced a critical engine bug (#696), a latent ordering bug (#694), and two install/release gotchas (reinstall-after-merge; `--force` cache trap) — none catchable by unit tests/CI, which pre-populate `last_result`/`scope.tier`. Always dogfood a behavior change on a real ticket before trusting it.
+- **Don't over-trust your first root-cause.** I diagnosed #663 as #694 (ordering), shipped a fix + green regression test, and it STILL blocked — the real cause was #696 (tier=null) and production events don't even carry the `stdout` #694 keyed on. When a fix "should" work but the symptom persists, re-diagnose from real data before shipping more (Abigail oath: stop at debugging depth 2+).
+- **`last_result` provenance:** populated by `reconcile.py:800` in production (NOT consume's `persist_last_result`, which needs event `stdout` that isn't wired). Any logic reading `session.last_result` must account for reconcile being the writer + tier possibly null.

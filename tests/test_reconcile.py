@@ -1415,6 +1415,7 @@ def _write_salvage_transcript(
     payload: dict[str, Any],
     *,
     surface_ref: str = "fake-short-id",
+    emit_via: str = "text",
 ) -> Path:
     """Write a transcript jsonl under ``home`` carrying a wrapped sentinel.
 
@@ -1426,21 +1427,54 @@ def _write_salvage_transcript(
     ``_locate_session_transcript``'s surface_ref-prefix glob can find it.
     The full stem (``<surface_ref>-<uuid>``) becomes the stored
     ``claude_session_id``.
+
+    ``emit_via`` controls where the sentinel frame lands:
+    - ``"text"`` (default): inside an assistant text block (the common case).
+    - ``"tool_result"``: inside a Bash tool_result (stdout) block, as happens
+      when a worker emits the sentinel via ``cat <<EOF`` (#731). The assistant
+      record carries only narrative + the tool_use command echo, so the frame
+      is reachable ONLY by scanning tool_result blocks.
     """
     encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
     project_dir.mkdir(parents=True, exist_ok=True)
     body = json.dumps(payload)
-    sentinel = f"narrative\n<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
+    frame = f"<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
+    stem = f"{surface_ref}-{claude_session_id}"
+    path = project_dir / f"{stem}.jsonl"
+    if emit_via == "tool_result":
+        records = [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Now emitting the sentinel."},
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": f"cat <<'EOF'\n{frame}EOF"},
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "content": frame}],
+                },
+            },
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        return path
     record = {
         "type": "assistant",
         "message": {
             "role": "assistant",
-            "content": [{"type": "text", "text": sentinel}],
+            "content": [{"type": "text", "text": f"narrative\n{frame}"}],
         },
     }
-    stem = f"{surface_ref}-{claude_session_id}"
-    path = project_dir / f"{stem}.jsonl"
     path.write_text(json.dumps(record) + "\n")
     return path
 
@@ -1772,6 +1806,72 @@ def test_reconcile_phantom_routes_stage_complete_advance_sentinel(
     assert task.stage == Stage.REVIEW
     assert task.status == QueueItemStatus.PENDING
     assert task.session_id is None
+
+
+def test_reconcile_phantom_routes_tool_result_emitted_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom whose stage_complete sentinel was emitted via Bash tool_result.
+
+    GitHub #731 (#722 dogfood): a worker that emits the sentinel with
+    ``cat <<EOF`` lands the frame in a tool_result (stdout) block, not assistant
+    text. The transcript scanners must find it there — otherwise neither the
+    #716 phantom-advance nor the idle ROUTE_EMITTED_SENTINEL path can route it,
+    and the stage stalls. Reproduces #722; fails before the #731 scan fix.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-toolres"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        "salv-toolres", worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "salv-toolres"
+    _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-uuid-toolres",
+        payload,
+        surface_ref="gone-ref",
+        emit_via="tool_result",
+    )
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-toolres",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-toolres",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert "salv-toolres" not in report.reverted_ticket_ids
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-toolres")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-toolres")
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.PENDING
 
 
 def test_reconcile_phantom_non_advance_sentinel_not_routed(

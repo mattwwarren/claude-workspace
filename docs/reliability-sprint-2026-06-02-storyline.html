@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Overnight Shift — Reliability Sprint, 2026-06-02</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0d13;
+    --bg-2:#0e131b;
+    --panel:#121925;
+    --panel-2:#161f2e;
+    --line:#1f2a3a;
+    --ink:#e9edf2;
+    --muted:#94a1b4;
+    --faint:#5d6b80;
+    --teal:#4fd6c0;       /* autonomous ship */
+    --amber:#ffb454;      /* orchestrator judgment */
+    --coral:#ff6b6b;      /* defect caught in review */
+    --teal-dim:rgba(79,214,192,.14);
+    --amber-dim:rgba(255,180,84,.14);
+    --coral-dim:rgba(255,107,107,.14);
+    --serif:'Bricolage Grotesque','JetBrains Mono',system-ui,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--mono);
+    font-weight:400;
+    font-size:15px;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(900px 600px at 78% -5%, rgba(79,214,192,.10), transparent 60%),
+      radial-gradient(800px 700px at 10% 18%, rgba(255,180,84,.07), transparent 55%),
+      radial-gradient(1000px 900px at 90% 100%, rgba(255,107,107,.05), transparent 60%);
+  }
+  /* faint grid texture */
+  body::after{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.4;
+    background-image:
+      linear-gradient(rgba(120,150,190,.035) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(120,150,190,.035) 1px,transparent 1px);
+    background-size:46px 46px;
+    mask-image:linear-gradient(180deg,black,transparent 30%,transparent 70%,black);
+  }
+  .wrap{position:relative;z-index:1;max-width:1080px;margin:0 auto;padding:0 28px}
+
+  /* ---------- top scroll progress ---------- */
+  #progress{position:fixed;top:0;left:0;height:2px;width:0;z-index:50;
+    background:linear-gradient(90deg,var(--teal),var(--amber),var(--coral));
+    box-shadow:0 0 10px rgba(79,214,192,.6)}
+
+  /* ---------- HERO ---------- */
+  header{min-height:100vh;display:flex;flex-direction:column;justify-content:center;
+    padding:90px 0 60px;position:relative}
+  .kicker{font-size:12.5px;letter-spacing:.42em;text-transform:uppercase;color:var(--teal);
+    margin-bottom:26px;display:flex;align-items:center;gap:14px}
+  .kicker::before{content:"";width:34px;height:1px;background:var(--teal);display:inline-block}
+  .blink{width:8px;height:14px;background:var(--teal);display:inline-block;animation:blink 1.15s steps(1) infinite;box-shadow:0 0 8px var(--teal)}
+  @keyframes blink{50%{opacity:0}}
+  h1{font-family:var(--serif);font-weight:800;font-size:clamp(54px,10vw,132px);line-height:.9;
+    letter-spacing:-.035em;margin-bottom:8px}
+  h1 em{font-style:normal;color:var(--amber)}
+  .sub{font-family:var(--serif);font-weight:500;font-size:clamp(21px,3.2vw,32px);color:var(--muted);
+    letter-spacing:-.015em;margin-bottom:40px;max-width:760px}
+  .meta-row{display:flex;flex-wrap:wrap;gap:10px 26px;font-size:12.5px;color:var(--faint);
+    letter-spacing:.04em;margin-bottom:48px}
+  .meta-row b{color:var(--ink);font-weight:500}
+
+  /* the prompt card */
+  .prompt{background:linear-gradient(180deg,var(--panel),var(--bg-2));border:1px solid var(--line);
+    border-radius:12px;padding:0;max-width:780px;overflow:hidden;
+    box-shadow:0 30px 80px -40px rgba(0,0,0,.8),inset 0 1px 0 rgba(255,255,255,.03)}
+  .prompt .bar{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line);
+    background:rgba(255,255,255,.015)}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .dot.r{background:#ff5f56}.dot.y{background:#ffbd2e}.dot.g{background:#27c93f}
+  .prompt .title{font-size:12px;color:var(--faint);margin-left:8px;letter-spacing:.06em}
+  .prompt .body{padding:22px 24px;font-size:14px;line-height:1.8;color:var(--muted)}
+  .prompt .body .you{color:var(--teal);font-weight:500}
+  .prompt .body .grant{color:var(--amber)}
+  .prompt .body strong{color:var(--ink);font-weight:500}
+  .scroll-hint{margin-top:50px;font-size:12px;color:var(--faint);letter-spacing:.2em;text-transform:uppercase;
+    display:flex;align-items:center;gap:12px;animation:float 2.4s ease-in-out infinite}
+  @keyframes float{50%{transform:translateY(7px)}}
+
+  /* ---------- generic section ---------- */
+  section{padding:88px 0;position:relative}
+  .eyebrow{font-size:12px;letter-spacing:.34em;text-transform:uppercase;color:var(--amber);
+    margin-bottom:18px;display:flex;align-items:center;gap:12px}
+  .eyebrow::before{content:"";width:26px;height:1px;background:var(--amber)}
+  h2{font-family:var(--serif);font-weight:700;font-size:clamp(34px,5.5vw,58px);line-height:1.0;
+    letter-spacing:-.03em;margin-bottom:22px;max-width:880px}
+  h2 em{font-style:normal;color:var(--teal)}
+  .lead{font-size:16px;color:var(--muted);max-width:720px;line-height:1.8;margin-bottom:10px}
+  .lead b{color:var(--ink);font-weight:500}
+
+  /* ---------- stats band ---------- */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;margin-top:30px}
+  .stat{background:var(--panel);padding:30px 22px;text-align:left}
+  .stat .n{font-family:var(--serif);font-weight:800;font-size:clamp(40px,5.5vw,62px);line-height:1;letter-spacing:-.04em}
+  .stat .n.teal{color:var(--teal)}.stat .n.amber{color:var(--amber)}.stat .n.coral{color:var(--coral)}.stat .n.ink{color:var(--ink)}
+  .stat .l{font-size:11.5px;color:var(--faint);letter-spacing:.08em;text-transform:uppercase;margin-top:12px}
+  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
+
+  /* ---------- pre-flight catches ---------- */
+  .catches{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:34px}
+  .catch{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--amber);
+    border-radius:10px;padding:24px 26px}
+  .catch h3{font-family:var(--mono);font-size:13px;font-weight:700;letter-spacing:.04em;color:var(--amber);
+    text-transform:uppercase;margin-bottom:12px}
+  .catch p{font-size:14px;color:var(--muted);line-height:1.7}
+  .catch code{font-family:var(--mono);color:var(--ink);background:rgba(255,255,255,.05);padding:1px 6px;
+    border-radius:4px;font-size:12.5px}
+  @media(max-width:760px){.catches{grid-template-columns:1fr}}
+
+  /* ---------- model diagram ---------- */
+  .model{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-top:34px}
+  .node{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px 16px;
+    text-align:center;position:relative}
+  .node .ic{font-size:20px;margin-bottom:10px}
+  .node .nm{font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--ink);margin-bottom:6px}
+  .node .ds{font-size:11px;color:var(--faint);line-height:1.5}
+  .node:not(:last-child)::after{content:"→";position:absolute;right:-11px;top:50%;transform:translateY(-50%);
+    color:var(--faint);font-size:14px;z-index:2}
+  @media(max-width:760px){.model{grid-template-columns:1fr 1fr}.node::after{display:none!important}}
+
+  /* ---------- legend ---------- */
+  .legend{display:flex;flex-wrap:wrap;gap:22px;margin-top:30px;padding:18px 22px;background:var(--bg-2);
+    border:1px solid var(--line);border-radius:10px;font-size:12.5px;color:var(--muted)}
+  .legend span{display:flex;align-items:center;gap:9px}
+  .ld{width:12px;height:12px;border-radius:50%}
+  .ld.teal{background:var(--teal);box-shadow:0 0 8px var(--teal)}
+  .ld.amber{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+  .ld.coral{background:var(--coral);box-shadow:0 0 8px var(--coral)}
+
+  /* ---------- TIMELINE ---------- */
+  .timeline{position:relative;margin-top:20px;padding-left:0}
+  .spine{position:absolute;left:118px;top:10px;bottom:10px;width:2px;
+    background:linear-gradient(180deg,var(--teal),var(--amber) 55%,var(--coral));opacity:.5}
+  @media(max-width:760px){.spine{left:60px}}
+
+  .wave-head{display:flex;align-items:baseline;gap:18px;margin:48px 0 8px;padding-left:150px;position:relative}
+  .wave-head:first-child{margin-top:8px}
+  .wave-head .wnum{position:absolute;left:0;width:118px;text-align:right;padding-right:0;
+    font-family:var(--serif);font-weight:800;font-size:34px;color:var(--faint);letter-spacing:-.03em}
+  .wave-head .wt{font-family:var(--mono);font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink);font-weight:700}
+  .wave-head .wd{font-size:12px;color:var(--faint);letter-spacing:.03em}
+  @media(max-width:760px){.wave-head{padding-left:88px}.wave-head .wnum{width:60px;font-size:20px}}
+
+  .entry{position:relative;padding-left:150px;margin:14px 0;opacity:0;transform:translateY(22px);
+    transition:opacity .6s ease,transform .6s ease}
+  .entry.in{opacity:1;transform:none}
+  @media(max-width:760px){.entry{padding-left:88px}}
+  .entry .time{position:absolute;left:0;width:96px;text-align:right;top:20px;
+    font-size:12px;color:var(--faint);letter-spacing:.02em}
+  @media(max-width:760px){.entry .time{width:44px;font-size:10px;top:22px}}
+  .entry .node-dot{position:absolute;left:112px;top:22px;width:14px;height:14px;border-radius:50%;
+    background:var(--bg);border:2px solid var(--teal);z-index:2}
+  @media(max-width:760px){.entry .node-dot{left:54px}}
+  .entry.j .node-dot{border-color:var(--amber)}
+  .entry.d .node-dot{border-color:var(--coral)}
+  .entry .node-dot::after{content:"";position:absolute;inset:2px;border-radius:50%;background:var(--teal);opacity:.85}
+  .entry.j .node-dot::after{background:var(--amber)}
+  .entry.d .node-dot::after{background:var(--coral)}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:20px 24px;
+    transition:border-color .25s,transform .25s,box-shadow .25s}
+  .card:hover{border-color:var(--teal);transform:translateX(4px);box-shadow:-6px 0 0 -1px var(--teal-dim)}
+  .entry.j .card:hover{border-color:var(--amber);box-shadow:-6px 0 0 -1px var(--amber-dim)}
+  .entry.d .card:hover{border-color:var(--coral);box-shadow:-6px 0 0 -1px var(--coral-dim)}
+  .card .top{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:9px}
+  .tag{font-size:11px;font-weight:700;letter-spacing:.05em;padding:3px 9px;border-radius:5px}
+  .tag.pr{background:var(--teal-dim);color:var(--teal)}
+  .tag.iss{background:rgba(255,255,255,.05);color:var(--muted)}
+  .card h4{font-family:var(--mono);font-size:15px;font-weight:500;color:var(--ink);line-height:1.4;flex:1;min-width:60%}
+  .card .file{font-size:11.5px;color:var(--faint)}
+  .card p{font-size:13.5px;color:var(--muted);line-height:1.7;margin-top:4px}
+  .card code{font-family:var(--mono);color:var(--ink);background:rgba(255,255,255,.05);padding:1px 5px;border-radius:4px;font-size:12px}
+  .badge{display:inline-flex;align-items:center;gap:7px;margin-top:13px;font-size:12px;font-weight:500;
+    padding:7px 12px;border-radius:7px;line-height:1.5}
+  .badge.j{background:var(--amber-dim);color:var(--amber)}
+  .badge.d{background:var(--coral-dim);color:var(--coral)}
+  .badge .bt{font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:10.5px;white-space:nowrap}
+  .badge .bx{color:var(--muted);font-weight:400}
+
+  /* lifecycle strip (data-driven, 4-phase) */
+  .life{margin-top:15px;border-top:1px dashed var(--line);padding-top:13px}
+  .lbar{display:flex;height:8px;border-radius:5px;overflow:hidden;background:var(--bg-2);gap:2px}
+  .seg{min-width:6px;border-radius:4px}
+  .seg.plan{background:rgba(79,214,192,.28)}
+  .seg.build{background:rgba(79,214,192,.6)}
+  .seg.test{background:var(--teal)}
+  .seg.rev{background:var(--amber)}
+  .lrow{display:flex;align-items:center;flex-wrap:wrap;gap:6px 7px;margin-top:11px;font-size:11px;color:var(--faint)}
+  .lrow .t{letter-spacing:.03em;white-space:nowrap;color:var(--muted)}
+  .pill{font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;letter-spacing:.01em;white-space:nowrap}
+  .pill.plan{background:rgba(79,214,192,.08);color:rgba(79,214,192,.72)}
+  .pill.build{background:rgba(79,214,192,.13);color:var(--teal)}
+  .pill.test{background:rgba(79,214,192,.2);color:var(--teal)}
+  .pill.rev{background:var(--amber-dim);color:var(--amber)}
+  .lmeta{margin-top:10px;font-size:10.5px;color:var(--faint);letter-spacing:.05em}
+  .lmeta::before{content:"↻ ";color:var(--amber)}
+  .lcap{display:flex;flex-wrap:wrap;gap:18px;margin-top:24px;padding:14px 20px;background:var(--bg-2);
+    border:1px solid var(--line);border-radius:10px;font-size:11.5px;color:var(--muted)}
+  .lcap span{display:flex;align-items:center;gap:8px}
+  .lcap i{width:22px;height:8px;border-radius:3px;display:inline-block}
+
+  /* gantt — absolute-time parallelism view */
+  .gantt{margin:30px 0 10px;border:1px solid var(--line);border-radius:13px;background:var(--bg-2);
+    padding:22px 24px 16px;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
+  .gantt-h{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:18px;
+    display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center}
+  .gantt-h b{color:var(--muted);font-weight:500}
+  .gantt-h .lg{display:inline-flex;align-items:center;gap:6px}
+  .gantt-h .lg i{width:16px;height:8px;border-radius:3px;display:inline-block}
+  .gbody{position:relative}
+  .gfield{position:absolute;left:92px;right:0;top:0;bottom:0;pointer-events:none}
+  .gvline{position:absolute;top:0;bottom:0;width:1px;background:rgba(120,150,190,.10)}
+  .grow{display:flex;align-items:center;height:21px;margin:3.5px 0;position:relative}
+  .glabel{width:92px;flex:none;font-size:11px;color:var(--muted);text-align:right;padding-right:16px;white-space:nowrap}
+  .glabel b{color:var(--ink);font-weight:500}
+  .gtrack{position:relative;flex:1;height:100%}
+  .gbar{position:absolute;top:5px;height:11px;border-radius:4px;display:flex;overflow:hidden;
+    min-width:5px;box-shadow:0 1px 5px rgba(0,0,0,.45)}
+  .gbar .gw{background:linear-gradient(90deg,rgba(79,214,192,.5),var(--teal))}
+  .gbar .gr{background:var(--amber)}
+  .gbar:hover{outline:1px solid rgba(255,255,255,.25);outline-offset:1px}
+  .gaxis{position:relative;height:16px;margin-left:92px;margin-top:9px;border-top:1px solid var(--line)}
+  .gtick{position:absolute;top:5px;font-size:10px;color:var(--faint);transform:translateX(-50%);white-space:nowrap}
+  .gtick::before{content:"";position:absolute;top:-6px;left:50%;width:1px;height:6px;background:var(--faint);opacity:.6}
+  @media(max-width:760px){.glabel,.gfield{} .gantt{padding:18px 14px 14px} .glabel{width:60px;padding-right:9px;font-size:10px} .gfield{left:60px} .gaxis{margin-left:60px}}
+
+  /* ---------- hardening loop ---------- */
+  .loop{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:34px}
+  .lcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px}
+  .lcard .ln{font-family:var(--serif);font-size:34px;font-weight:800;letter-spacing:-.03em;color:var(--coral);line-height:1}
+  .lcard h4{font-size:13px;font-weight:700;color:var(--ink);margin:12px 0 8px;letter-spacing:.03em}
+  .lcard p{font-size:13px;color:var(--muted);line-height:1.65}
+  .lcard .filed{margin-top:12px;font-size:11.5px;color:var(--teal);letter-spacing:.04em}
+  @media(max-width:760px){.loop{grid-template-columns:1fr}}
+
+  /* ---------- finale ---------- */
+  .finale{text-align:center;padding:110px 0 80px}
+  .finale .big{font-family:var(--serif);font-weight:800;font-size:clamp(42px,7vw,82px);line-height:1.0;letter-spacing:-.035em;margin-bottom:24px}
+  .finale .big em{font-style:normal;color:var(--teal)}
+  .finale .verify{display:inline-flex;align-items:center;gap:12px;font-size:14px;color:var(--muted);
+    background:var(--bg-2);border:1px solid var(--line);border-radius:999px;padding:12px 24px;margin-bottom:14px}
+  .finale .verify b{color:var(--teal);font-weight:700}
+  .finale .note{font-size:13px;color:var(--faint);max-width:560px;margin:18px auto 0;line-height:1.7}
+
+  /* takeaways */
+  .takeaways{margin-top:60px;display:grid;grid-template-columns:1fr 1fr;gap:18px;text-align:left}
+  .tk{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:26px 28px}
+  .tk .num{font-family:var(--serif);font-weight:800;font-size:22px;letter-spacing:-.02em;color:var(--amber)}
+  .tk h4{font-size:14px;font-weight:700;color:var(--ink);margin:8px 0 9px}
+  .tk p{font-size:13.5px;color:var(--muted);line-height:1.7}
+  @media(max-width:760px){.takeaways{grid-template-columns:1fr}}
+
+  footer{border-top:1px solid var(--line);padding:34px 0 60px;font-size:12px;color:var(--faint);
+    display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px;letter-spacing:.03em}
+  footer .accent{color:var(--teal)}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+
+<div class="wrap">
+
+  <!-- ============ HERO ============ -->
+  <header>
+    <div class="kicker">Reliability Sprint · 2026&#8209;06&#8209;02 overnight <span class="blink"></span></div>
+    <h1>The <em>Overnight</em><br>Shift</h1>
+    <p class="sub">I went to bed with a broken dogfood and a pile of bugs. I woke up to 14 merged PRs and a green main.</p>
+    <div class="meta-row">
+      <span><b>Project:</b> claude&#8209;workspace (cw)</span>
+      <span><b>Operator:</b> asleep 😴</span>
+      <span><b>Window:</b> 10:44&nbsp;PM → 1:55&nbsp;AM (~3h)</span>
+      <span><b>Escalations to human:</b> 0</span>
+    </div>
+
+    <div class="prompt">
+      <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="title">the prompt that started it — 10:44 PM</span></div>
+      <div class="body">
+        "We have several open bugs that need fixing. <span class="you">Checkout the sprint-planning branch and read <strong>docs/reliability-sprint-2026-06-02.md</strong></span> to prepare queued tickets and transitions between dependencies.
+        <strong>I'd like to see how far you can get while I sleep.</strong>
+        <span class="grant">Permission granted to open new bugs as encountered. Permission granted to re-prioritize to fix dogfood issues. Permission granted for all pushes and PRs with auto-merge.</span>
+        Keep the work flowing. If you find a showstopper, you bring it to me. But this is your time to shine.
+        <strong>Ask me questions before you start.</strong>"
+      </div>
+    </div>
+
+    <div class="scroll-hint">scroll to replay the night ↓</div>
+  </header>
+
+  <!-- ============ THE SETUP ============ -->
+  <section id="setup">
+    <div class="eyebrow">How we got here</div>
+    <h2>It started with a tool that was <em>being a bum.</em></h2>
+    <p class="lead">The day before, I tried to dogfood <b>cw</b> — the multi-session orchestrator this repo <i>is</i> — and it misbehaved. State got clobbered. Failures vanished silently. Worktrees got force-removed with unsaved work in them. Classic "the tool I built to run agents can't reliably run agents" energy.</p>
+    <p class="lead">Instead of one-off patching, I turned the frustration into a <b>reliability sweep</b>: five parallel audits, each hunting one defect class — unsynchronized state writes, silent failures, worktree/git safety, parser false-rejects, event-bus edges. That sweep produced a manifest: <b>13 tickets across 4 waves</b>, with the same-file collisions mapped so they could be dispatched safely. Then I handed it the keys and went to bed.</p>
+  </section>
+
+  <!-- ============ STATS ============ -->
+  <section id="stats" style="padding-top:20px">
+    <div class="stats">
+      <div class="stat"><div class="n teal">14</div><div class="l">PRs merged to main</div></div>
+      <div class="stat"><div class="n amber">5</div><div class="l">hard-barriered waves</div></div>
+      <div class="stat"><div class="n ink">~2h</div><div class="l">first merge → last merge</div></div>
+      <div class="stat"><div class="n teal">1695</div><div class="l">tests green · 0 failures</div></div>
+    </div>
+  </section>
+
+  <!-- ============ PRE-FLIGHT ============ -->
+  <section id="preflight">
+    <div class="eyebrow">Before it touched anything</div>
+    <h2>It didn't trust the plan. <em>It checked it.</em></h2>
+    <p class="lead">"Ask me questions before you start" was the instruction — and the first thing it did with that latitude was find two ways the night could have silently failed, and surface them <b>before</b> a single line of code changed.</p>
+    <div class="catches">
+      <div class="catch">
+        <h3>① The dispatch rig was already broken</h3>
+        <p>The orchestrator config pointed <code>claude-workspace</code> at a <code>personal/</code> path that <b>no longer existed</b> — the repo had moved to <code>projects/</code>. Any headless dispatch would have failed at the gate. It diagnosed the move from 36 stale completed rows, repointed the config, and only then proceeded.</p>
+      </div>
+      <div class="catch">
+        <h3>② The plan's ticket numbers were transposed</h3>
+        <p>The manifest called the clients.yaml-lock ticket <code>#428</code> and the isolation ticket <code>#429</code>; GitHub had them <b>reversed</b>. Rather than dispatch by a wrong number, it resolved every ticket <b>by content</b>, re-derived the wave plan against the real issue bodies, and flagged the discrepancy.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ OPERATING MODEL ============ -->
+  <section id="model">
+    <div class="eyebrow">The operating model</div>
+    <h2>One orchestrator. Many <em>disposable</em> hands.</h2>
+    <p class="lead">The main session never wrote feature code. It stayed clean and coordinated — spawning a fresh isolated agent per ticket, enforcing a <b>hard barrier between waves</b>, and gating every merge behind its own review.</p>
+    <div class="model">
+      <div class="node"><div class="ic">🗂️</div><div class="nm">QUEUE</div><div class="ds">tickets, deps &amp; wave order</div></div>
+      <div class="node"><div class="ic">🤖</div><div class="nm">SPAWN</div><div class="ds">1 sonnet agent / ticket, own worktree</div></div>
+      <div class="node"><div class="ic">🔍</div><div class="nm">REVIEW</div><div class="ds">orchestrator reads the diff itself</div></div>
+      <div class="node"><div class="ic">✅</div><div class="nm">GATE</div><div class="ds">full suite + CI green</div></div>
+      <div class="node"><div class="ic">🚀</div><div class="nm">MERGE</div><div class="ds">squash · advance · next wave</div></div>
+    </div>
+    <div class="legend">
+      <span><span class="ld teal"></span> Autonomous ship — agent implemented, gates passed clean</span>
+      <span><span class="ld amber"></span> Orchestrator judgment — a call the human would've made</span>
+      <span><span class="ld coral"></span> Defect caught in review — agent's own work, fixed before merge</span>
+    </div>
+  </section>
+
+  <!-- ============ TIMELINE ============ -->
+  <section id="timeline">
+    <div class="eyebrow">The night, merge by merge</div>
+    <h2>Two hours. Fourteen merges. <em>Nobody awake.</em></h2>
+    <p class="lead">Each card carries the real lifecycle of that ticket, reconstructed from the worker session transcripts + git. The teal ramp is the autonomous worker — <b>plan</b> (read the ticket), <b>build</b> (write code, running the suite as it goes), <b>verify</b> (settle: final test + self-review, no more edits) — then the amber hand-off is the orchestrator's <b>review · CI · merge</b>. Times are real; the bar is proportional to minutes.</p>
+    <div class="lcap">
+      <span><i class="seg plan"></i> plan — reads ticket</span>
+      <span><i class="seg build"></i> build — writes code (+ tests as it goes)</span>
+      <span><i class="seg test"></i> verify — final test + self-review</span>
+      <span><i class="seg rev"></i> review · CI · merge — orchestrator</span>
+    </div>
+
+    <div class="gantt" id="gantt"></div>
+
+    <div class="timeline">
+      <div class="spine"></div>
+
+      <!-- WAVE 0 -->
+      <div class="wave-head"><span class="wnum">0</span><span class="wt">Foundation</span><span class="wd">light up the instrumentation · 2 tickets, serial (#423 → #420, shared cli.py)</span></div>
+
+      <div class="entry d">
+        <div class="time">11:55&nbsp;PM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #434</span><span class="tag iss">#423</span><span class="file">cli.py</span></div>
+          <h4>Configure a logging handler at the CLI entrypoint</h4>
+          <p>Every <code>_log.*</code> call in daemon/dispatch/reconcile was being discarded — all existing instrumentation was dark. This lit it up.</p>
+          <div class="badge d"><span class="bt">Caught</span><span class="bx">Agent stalled before committing. The orchestrator verified state directly, then found <b>two defects the agent introduced</b>: <code>basicConfig(force=True)</code> seized pytest's logging and hung the whole suite; an in-process <code>sys.modules</code> reimport test polluted 9 later tests. Fixed both → green.</span></div>
+        </div>
+      </div>
+
+      <div class="entry j">
+        <div class="time">12:09&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #435</span><span class="tag iss">#420</span><span class="file">dispatch.py</span></div>
+          <h4>Operator-visible stdout for <code>cw dev-queue run</code></h4>
+          <p>Per-tick progress now prints instead of vanishing. <b>Serialized after #423</b> — the orchestrator noticed both tickets actually touch <code>cli.py</code>, so the doc's "parallel-safe" claim was wrong.</p>
+          <div class="badge j"><span class="bt">Judgment</span><span class="bx">First CI run failed only on <code>ruff format --check</code> — a gate the sprint doc never documented. It reformatted, repushed, <b>added the gate to every future agent prompt</b>, and filed #436.</span></div>
+        </div>
+      </div>
+
+      <!-- WAVE 1 -->
+      <div class="wave-head"><span class="wnum">1</span><span class="wt">Stop the bleeding</span><span class="wd">data-loss &amp; corruption · 5 tickets · #424 alone, then up to 4 workers concurrent (12:42–1:06 AM)</span></div>
+
+      <div class="entry j">
+        <div class="time">12:30&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #437</span><span class="tag iss">#424</span><span class="file">config.py + 6 sites</span></div>
+          <h4>Lock <code>sessions.json</code> across read-modify-write</h4>
+          <p>The primary state file had no lock — concurrent dispatch lost updates. The fix wraps every <code>save_state</code> call site under <code>sessions_lock()</code>.</p>
+          <div class="badge j"><span class="bt">Deep review</span><span class="bx">A 445-line diff in cli.py looked like a red flag for holding a lock across a subprocess spawn — a deadlock vector. The orchestrator traced the lock scope through spawn/dispatch/reconcile, confirmed the agent had <b>deliberately tightened</b> it (spawn happens outside the lock), verified ordering vs <code>dev_queue_lock</code>, then found an unguarded write in <code>doctor.py:624</code> — out of scope, so it filed follow-up #438 rather than scope-creeping.</span></div>
+        </div>
+      </div>
+
+      <div class="entry teal">
+        <div class="time">12:43&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #439</span><span class="tag iss">#425</span><span class="file">reconcile.py · dispatch.py</span></div>
+          <h4>Dirty-check before force-removing a stale worktree</h4>
+          <p>Lands the shared <code>worktree_has_unsaved_work</code> helper — the one that nearly ate my work during the dogfood. Merging it <b>unblocked #426</b>, which reuses the helper.</p>
+        </div>
+      </div>
+
+      <div class="entry teal">
+        <div class="time">12:52&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #441</span><span class="tag iss">#426</span><span class="file">worktree.py</span></div>
+          <h4>Refuse dirty worktree reuse in <code>create_worktree</code></h4>
+          <p>No more silently clobbering a worktree that has uncommitted changes. Shipped in parallel with #427 — distinct files, so parallel-safe.</p>
+        </div>
+      </div>
+
+      <div class="entry j">
+        <div class="time">12:52&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #440</span><span class="tag iss">#427</span><span class="file">spawn.py · session.py</span></div>
+          <h4>Atomic hook-context writes + refuse live-session overwrite</h4>
+          <p>Hook context is now written atomically and won't blow away a running session's context.</p>
+          <div class="badge j"><span class="bt">Hidden gates</span><span class="bx">CI surfaced a <b>second</b> undocumented gate — diff-cover patch-coverage. The orchestrator drove the patch to 100% coverage, rebased onto fresh main, and folded the diff-cover requirement into the remaining agent prompts too.</span></div>
+        </div>
+      </div>
+
+      <div class="entry teal">
+        <div class="time">1:06&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #442</span><span class="tag iss">#429</span><span class="file">config.py</span></div>
+          <h4>Atomic + locked <code>clients.yaml</code> write</h4>
+          <p>The config file the operator edits live is now corruption-safe under concurrent writes. Last ticket of Wave 1.</p>
+        </div>
+      </div>
+
+      <!-- WAVE 2 -->
+      <div class="wave-head"><span class="wnum">2</span><span class="wt">Don't die quietly</span><span class="wd">loop survival · 2 workers spawned together at 1:07 AM</span></div>
+
+      <div class="entry teal">
+        <div class="time">1:12&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #443</span><span class="tag iss">#432</span><span class="file">reconcile.py</span></div>
+          <h4>Tolerate malformed roster JSON · honor <code>idle_watchdog=0</code></h4>
+          <p>One bad <code>claude agents --json</code> payload no longer wedges reconcile, and a zero idle-watchdog is now respected instead of treated as "off."</p>
+        </div>
+      </div>
+
+      <div class="entry teal">
+        <div class="time">1:16&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #444</span><span class="tag iss">#390</span><span class="file">daemon.py</span></div>
+          <h4>Per-client + whole-tick guard in <code>run_watcher_tick</code></h4>
+          <p>One client's exception can't take down the whole watcher tick anymore — the loop survives a single bad actor.</p>
+        </div>
+      </div>
+
+      <!-- WAVE 3 -->
+      <div class="wave-head"><span class="wnum">3</span><span class="wt">Don't strand good work</span><span class="wd">parser &amp; reconcile wedges · 2 workers concurrent (~1:18 AM)</span></div>
+
+      <div class="entry teal">
+        <div class="time">1:27&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #445</span><span class="tag iss">#430</span><span class="file">auto_dev_result.py</span></div>
+          <h4>Coerce legitimate-but-sparse result sentinels</h4>
+          <p>A valid but minimal <code>AUTO_DEV_RESULT</code> block was being false-rejected, stranding completed work. Now parsed leniently.</p>
+        </div>
+      </div>
+
+      <div class="entry teal">
+        <div class="time">1:30&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #446</span><span class="tag iss">#431</span><span class="file">reconcile.py</span></div>
+          <h4>Salvage all terminal statuses · skip parked sessions</h4>
+          <p>Reconcile now salvages every terminal state instead of a subset, and leaves intentionally-parked sessions alone.</p>
+        </div>
+      </div>
+
+      <!-- WAVE 4 -->
+      <div class="wave-head"><span class="wnum">4</span><span class="wt">Hardening</span><span class="wd">also-filed, off the critical path · 2 workers concurrent + 1 orchestrator-authored doc</span></div>
+
+      <div class="entry j">
+        <div class="time">1:35&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #447</span><span class="tag iss">#436</span><span class="file">docs / quality-gate</span></div>
+          <h4>Document the full CI gate set</h4>
+          <p>The fix for the night's recurring pain: <code>ruff format</code>, <code>mypy --strict</code>, pre-commit, coverage thresholds and diff-cover are now <b>written down</b>.</p>
+          <div class="badge j"><span class="bt">Self-authored</span><span class="bx">This ticket didn't exist at bedtime. The orchestrator filed it after the gates bit it twice, so the next person (or agent) never rediscovers them the hard way.</span></div>
+        </div>
+      </div>
+
+      <div class="entry teal">
+        <div class="time">1:37&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #448</span><span class="tag iss">#428</span><span class="file">session.py · worktree.py</span></div>
+          <h4>Guard interactive-start isolation + <code>fast_forward_main</code></h4>
+          <p>Interactive <code>cw start</code> can't accidentally run un-isolated, and the main fast-forward path is guarded.</p>
+        </div>
+      </div>
+
+      <div class="entry d">
+        <div class="time">1:55&nbsp;AM</div><div class="node-dot"></div>
+        <div class="card">
+          <div class="top"><span class="tag pr">PR #449</span><span class="tag iss">#433</span><span class="file">history.py · channel servers</span></div>
+          <h4>Event-bus hardening — torn-read / TOCTOU / fsync / poll-lock</h4>
+          <p>The final ticket: hardened the event history and channel servers against torn reads, time-of-check/time-of-use races, and missing fsync.</p>
+          <div class="badge d"><span class="bt">Real bug, caught in review</span><span class="bx">The agent's TOCTOU fix closed the duplicate-delivery window — but <b>opened a lost-event window</b> in <code>subscribe_with_cursor</code>. The orchestrator spotted it reviewing the diff, wrote the fix itself, pushed it, and only merged once that CI came back green.</span></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ HARDENING LOOP ============ -->
+  <section id="loop">
+    <div class="eyebrow">The part I'm proudest of</div>
+    <h2>Every gate that bit it became a rule for the <em>next</em> agent.</h2>
+    <p class="lead">It didn't just fix tickets — it got <b>better at the job mid-shift.</b> Each undocumented CI gate that failed once was folded into the prompt for every remaining agent, so the same surprise never cost twice.</p>
+    <div class="loop">
+      <div class="lcard"><div class="ln">01</div><h4>Full-suite evidence, always</h4><p>After an agent's bad test hung the suite, every later agent had to run the <i>full</i> suite and paste the <code>N passed</code> line as proof. No "diff looks clean."</p><div class="filed">learned @ #423</div></div>
+      <div class="lcard"><div class="ln">02</div><h4>ruff format is a gate</h4><p>The doc never mentioned <code>ruff format --check</code>. CI did. Added to the review gate and every agent brief — then documented in #436.</p><div class="filed">learned @ #420 → filed #436</div></div>
+      <div class="lcard"><div class="ln">03</div><h4>Patch coverage ≥ the bar</h4><p>diff-cover patch-coverage was a hidden gate too. Folded into the prompts so agents wrote the tests up front instead of on the rebound.</p><div class="filed">learned @ #427</div></div>
+    </div>
+  </section>
+
+  <!-- ============ FINALE ============ -->
+  <section class="finale">
+    <div class="big">By <em>5:55 AM</em>, it was<br>done — and verified.</div>
+    <div class="verify">✓ &nbsp;Integrated main: ruff / format / <b>mypy --strict</b> clean</div><br>
+    <div class="verify"><b>1695</b> &nbsp;tests passed · 0 failures</div>
+    <p class="note">It didn't take the per-ticket greens on faith. It synced main with CI-equivalent deps and re-ran the whole suite end-to-end — caught that an ad-hoc count of 1507 was just a missing-extra artifact, then confirmed the honest <b>1695 / 0</b> on fully-integrated main before calling it.</p>
+
+    <div class="takeaways">
+      <div class="tk"><div class="num">i.</div><h4>The autonomy worked because the gates were real</h4><p>"While I sleep" isn't trust in a model — it's trust in a <i>loop</i>: isolated worktrees, hard wave barriers, a human-grade review gate, and CI as the final word. The agent was free precisely because it couldn't merge anything red.</p></div>
+      <div class="tk"><div class="num">ii.</div><h4>It escalated zero times — correctly</h4><p>The deal was "bring me showstoppers." There weren't any. Every surprise — broken config, transposed tickets, hung suite, hidden gates, a lost-event bug — was inside its authority to resolve. It resolved them and kept the work flowing.</p></div>
+      <div class="tk"><div class="num">iii.</div><h4>It reviewed its own workers like a skeptic</h4><p>Three of the night's best moments were the orchestrator <i>not</i> trusting an agent's output: a hung suite, a deadlock-shaped diff that was actually careful, and a real lost-event regression. Review caught all three.</p></div>
+      <div class="tk"><div class="num">iv.</div><h4>It left the codebase better than the tickets asked</h4><p>Two follow-ups filed (#436 done, #438 open), every CI gate documented, and a residual race surfaced rather than swept under. The scope stayed disciplined; the knowledge didn't leak away.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Reliability Sprint · <span class="accent">claude&#8209;workspace</span> · 2026&#8209;06&#8209;02 → 06&#8209;03</span>
+    <span>13 tickets + 1 doc gate · 14 PRs · merged to <span class="accent">53e4ec7</span></span>
+  </footer>
+
+</div>
+
+<script>
+  // scroll progress bar
+  const prog=document.getElementById('progress');
+  const onScroll=()=>{
+    const h=document.documentElement;
+    const max=h.scrollHeight-h.clientHeight;
+    prog.style.width=(max>0?(h.scrollTop/max*100):0)+'%';
+  };
+  window.addEventListener('scroll',onScroll,{passive:true});onScroll();
+
+  // ----- gantt: absolute-time parallelism (minutes since 10:00 PM EDT; s=spawn, w=worker-end/push, m=merged) -----
+  const G_T0=50, G_T1=235;            // 10:50 PM → 1:55 AM
+  const gpct=x=>((x-G_T0)/(G_T1-G_T0)*100);
+  const GANTT=[
+    {l:'#423',t:'logging',  s:54, w:70, m:115},
+    {l:'#420',t:'stdout',   s:117,w:124,m:128},
+    {l:'#424',t:'state lock',s:130,w:144,m:150},
+    {l:'#425',t:'wt remove',s:151,w:160,m:163},
+    {l:'#427',t:'hook ctx', s:161,w:165,m:172},
+    {l:'#429',t:'clients',  s:161,w:183,m:186},
+    {l:'#426',t:'wt reuse', s:164,w:166,m:172},
+    {l:'#432',t:'roster',   s:187,w:190,m:192},
+    {l:'#390',t:'daemon',   s:187,w:194,m:196},
+    {l:'#430',t:'parser',   s:197,w:204,m:207},
+    {l:'#431',t:'salvage',  s:198,w:204,m:210},
+    {l:'#428',t:'isolation',s:211,w:215,m:217},
+    {l:'#433',t:'event-bus',s:211,w:221,m:234},
+    {l:'#436',t:'doc gate', s:214,w:214,m:215},
+  ];
+  const G_TICKS=[[60,'11 PM'],[120,'12 AM'],[180,'1 AM']];
+  (function(){
+    const g=document.getElementById('gantt'); if(!g) return;
+    const grid=G_TICKS.map(([t])=>`<div class="gvline" style="left:${gpct(t)}%"></div>`).join('');
+    const rows=GANTT.map(d=>{
+      const left=gpct(d.s), width=Math.max(gpct(d.m)-gpct(d.s),0.5);
+      const wf=Math.max(d.w-d.s,0), rf=Math.max(d.m-d.w,0);
+      return `<div class="grow"><div class="glabel"><b>${d.l}</b> ${d.t}</div>`+
+        `<div class="gtrack"><div class="gbar" style="left:${left}%;width:${width}%" title="${d.l} ${d.t}">`+
+        `<div class="gw" style="flex:${wf}"></div><div class="gr" style="flex:${rf}"></div></div></div></div>`;
+    }).join('');
+    const ticks=G_TICKS.map(([t,lab])=>`<div class="gtick" style="left:${gpct(t)}%">${lab}</div>`).join('');
+    g.innerHTML=`<div class="gantt-h"><b>Parallel execution — every ticket on one clock</b>`+
+      `<span class="lg"><i class="seg test"></i> worker (plan→build→verify)</span>`+
+      `<span class="lg"><i class="seg rev"></i> review · CI · merge</span></div>`+
+      `<div class="gbody"><div class="gfield">${grid}</div>${rows}</div>`+
+      `<div class="gaxis">${ticks}</div>`;
+  })();
+
+  // ----- lifecycle data, keyed by PR# (all times EDT; reconstructed from worker transcripts + git) -----
+  const LIFE={
+    434:{start:'22:54',merged:'23:55',ph:[['plan',0.8],['build',1.6],['test',8],['rev',50]],meta:'worker did plan→build→test in ~12m then STALLED pre-commit → 45m orchestrator recovery + commit · 1 review'},
+    435:{start:'23:57',merged:'00:08',ph:[['plan',3],['build',3.7],['test',0.8],['rev',3.4]],meta:'2 CI rounds — first run failed only on ruff-format · 23 edits'},
+    437:{start:'00:10',merged:'00:30',ph:[['plan',2.7],['build',10.1],['test',1],['rev',5.4]],meta:'cross-cutting — 44 edits across 7 files · 6m of the review was deadlock-scope tracing'},
+    439:{start:'00:31',merged:'00:43',ph:[['plan',1.9],['build',6.8],['test',0.6],['rev',2.4]],meta:'lands the shared worktree helper → unblocks #426 · 1 review'},
+    441:{start:'00:44',merged:'00:52',ph:[['plan',0.7],['build',1.2],['test',0.5],['rev',5.4]],meta:'fastest worker — 2m start-to-commit · 1 review'},
+    440:{start:'00:41',merged:'00:52',ph:[['plan',1.6],['build',1.3],['test',0.8],['rev',6.7]],meta:'2 CI rounds — diff-cover patch-coverage rebase'},
+    442:{start:'00:41',merged:'01:06',ph:[['plan',1.1],['build',18.1],['test',2.6],['rev',2.3]],meta:'slowest worker — 18m build (12 edits, 17 test runs), ran in parallel · 1 review'},
+    443:{start:'01:07',merged:'01:12',ph:[['plan',0.8],['build',0.8],['test',1.1],['rev',1.8]],meta:'1 review'},
+    444:{start:'01:07',merged:'01:16',ph:[['plan',1.2],['build',4.5],['test',2.2],['rev',1.1]],meta:'1 review'},
+    445:{start:'01:17',merged:'01:27',ph:[['plan',1.8],['build',3.9],['test',0.5],['rev',3]],meta:'1 review'},
+    446:{start:'01:18',merged:'01:30',ph:[['plan',2.1],['build',3.3],['test',1.4],['rev',5]],meta:'1 review'},
+    447:{start:null,merged:'01:35',ph:[['rev',1]],meta:'orchestrator-authored doc — no agent spawned'},
+    448:{start:'01:31',merged:'01:37',ph:[['plan',1.6],['build',1.3],['test',1.1],['rev',1.8]],meta:'1 review'},
+    449:{start:'01:31',merged:'01:54',ph:[['plan',1.6],['build',5.7],['test',3],['rev',12.1]],meta:'2 rounds — lost-event regression caught in review (+12m fix) · 29 edits'},
+  };
+  const PHLABEL={plan:'plan',build:'build',test:'verify',rev:'review·CI'};
+  const fmtMin=m=> m<1 ? '<1m' : Math.round(m)+'m';
+  document.querySelectorAll('.card').forEach(card=>{
+    const tag=card.querySelector('.tag.pr');
+    if(!tag) return;
+    const pr=parseInt((tag.textContent.match(/\d+/)||[])[0],10);
+    const d=LIFE[pr]; if(!d) return;
+    const bar=d.ph.map(([c,m])=>`<i class="seg ${c}" style="flex:${Math.max(m,0.6)}"></i>`).join('');
+    const pills=d.ph.map(([c,m])=>`<span class="pill ${c}">${PHLABEL[c]} ${fmtMin(m)}</span>`).join('');
+    const startTxt=d.start?`<span class="t">◷ ${d.start}</span>`:`<span class="t">✎ authored</span>`;
+    const el=document.createElement('div');
+    el.className='life';
+    el.innerHTML=`<div class="lbar">${bar}</div>`+
+      `<div class="lrow">${startTxt}${pills}<span class="t">✓ ${d.merged} merged</span></div>`+
+      `<div class="lmeta">${d.meta}</div>`;
+    const badge=card.querySelector('.badge');
+    if(badge) card.insertBefore(el,badge); else card.appendChild(el);
+  });
+
+  // staggered reveal of timeline entries
+  const io=new IntersectionObserver((es)=>{
+    es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});
+  },{threshold:.18,rootMargin:'0px 0px -8% 0px'});
+  document.querySelectorAll('.entry').forEach(el=>io.observe(el));
+</script>
+</body>
+</html>

@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from cw._util import claude_project_dir
+from cw._util import _iter_sentinel_text_blocks, claude_project_dir
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
@@ -26,6 +26,7 @@ from cw.auto_dev_result import (
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     BlockedResult,
+    extract_block,
     parse_stdout,
 )
 from cw.config import (
@@ -503,6 +504,24 @@ def _detect_usage_limit(session: Session) -> bool:
     return bool(USAGE_LIMIT_RE.search(_assistant_text_from_transcript(transcript)))
 
 
+def _parse_sentinel_from_blocks(path: Path) -> AutoDevResult | BlockedResult | None:
+    """Parse the first transcript block carrying a complete sentinel frame.
+
+    Scans candidate blocks via :func:`_iter_sentinel_text_blocks` — assistant
+    text AND ``tool_result`` (Bash stdout) blocks — returning the parse of the
+    first block whose framing is complete. A worker may emit the sentinel via
+    ``cat <<EOF`` rather than as assistant text, landing the frame in a
+    tool_result block; scanning only assistant text misses it and the stage
+    stalls (GitHub #731). Mirrors the per-block scan in signal_stop's
+    ``_parse_sentinel_from_transcript`` so both paths agree. Returns ``None``
+    when no block carries a complete frame.
+    """
+    for text in _iter_sentinel_text_blocks(path):
+        if extract_block(text) is not None:
+            return parse_stdout(text)
+    return None
+
+
 def _salvage_terminal_result(
     session: Session,
 ) -> tuple[AutoDevResult, str] | None:
@@ -522,7 +541,7 @@ def _salvage_terminal_result(
     transcript = _locate_session_transcript(session)
     if transcript is None:
         return None
-    result = parse_stdout(_assistant_text_from_transcript(transcript))
+    result = _parse_sentinel_from_blocks(transcript)
     if (
         isinstance(result, AutoDevResult)
         and result.status in _SALVAGE_TERMINAL_STATUSES
@@ -538,17 +557,18 @@ def _parse_any_sentinel_from_transcript(
 
     Like :func:`_salvage_terminal_result` but applies no status filter — returns
     the result for any valid parse including PAUSED_FOR_USER_INPUT statuses that
-    :func:`_salvage_terminal_result` would skip.  Returns None only when no
-    sentinel framing is present (BLOCKER_REASON_NO_RESULT_EMITTED).
+    :func:`_salvage_terminal_result` would skip.  Returns None when no sentinel
+    framing is present (the no-frame case ``parse_stdout`` reports as
+    BLOCKER_REASON_NO_RESULT_EMITTED).
 
     Used by the ROUTE_EMITTED_SENTINEL detection path for sessions where the
-    sentinel was emitted but the Stop hook never fired.  See GitHub #578.
+    sentinel was emitted but the Stop hook never fired.  See GitHub #578, #731.
     """
     transcript = _locate_session_transcript(session)
     if transcript is None:
         return None
-    result = parse_stdout(_assistant_text_from_transcript(transcript))
-    if (
+    result = _parse_sentinel_from_blocks(transcript)
+    if result is None or (
         isinstance(result, BlockedResult)
         and result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
     ):

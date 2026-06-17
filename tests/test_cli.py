@@ -2482,6 +2482,61 @@ class TestSentinelPresentInTranscript:
 
         assert _sentinel_present_in_transcript(str(worktree), "uuid-with-sentinel")
 
+    def test_returns_true_when_sentinel_in_bash_tool_result(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel emitted via ``cat <<EOF`` lands in a tool_result block (#731).
+
+        The worker prints the frame to stdout with Bash; it appears in a
+        tool_result block (user-role record), not assistant text. signal_stop
+        must still detect it, else last_result stays null and the stage stalls.
+        """
+        from cw.cli import _sentinel_present_in_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-731"
+        worktree.mkdir(parents=True)
+        frame = (
+            "<<<AUTO_DEV_RESULT\n"
+            '{"schema_version": 2, "ticket_id": "731", "status": "shipped"}\n'
+            "AUTO_DEV_RESULT>>>\n"
+        )
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        records = [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Emitting the sentinel."},
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": f"cat <<'EOF'\n{frame}EOF"},
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "content": frame}],
+                },
+            },
+        ]
+        (project_dir / "uuid-toolresult.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n"
+        )
+
+        assert _sentinel_present_in_transcript(str(worktree), "uuid-toolresult")
+
     def test_returns_false_when_no_sentinel(
         self,
         tmp_path: Path,

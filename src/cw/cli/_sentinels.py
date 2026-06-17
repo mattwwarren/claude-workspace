@@ -8,7 +8,7 @@ command submodules import the same implementation.
 
 from __future__ import annotations
 
-from cw._util import _iter_assistant_text_blocks, claude_project_dir
+from cw._util import _iter_sentinel_text_blocks, claude_project_dir
 from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
@@ -31,10 +31,12 @@ def _parse_sentinel_from_transcript(
     blocks whose ``text`` fields hold the model output, JSON-escaped (real
     newlines become the two-character sequence ``\\n``). Running ``extract_block``
     against the raw file therefore misses sentinels that are valid in their
-    decoded form, so this scans each assistant text block individually after
-    JSON decoding. Returns None on any I/O error or when no complete sentinel
-    pair is found — distinct from a BlockedResult, which means the sentinel
-    framing was present but the inner payload was unusable (§6 failure modes).
+    decoded form, so this scans each candidate block individually after JSON
+    decoding — assistant text blocks AND ``tool_result`` blocks, since a worker
+    may emit the sentinel via ``cat <<EOF`` (landing it in Bash stdout rather
+    than assistant text; GitHub #731). Returns None on any I/O error or when no
+    complete sentinel pair is found — distinct from a BlockedResult, which means
+    the sentinel framing was present but the inner payload was unusable.
 
     Used by ``signal_stop`` for headless DAEMON sessions, whose result must
     be captured here because they bypass session lifecycle tracking entirely.
@@ -43,7 +45,7 @@ def _parse_sentinel_from_transcript(
     if not claude_session_id:
         return None
     transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
-    for text in _iter_assistant_text_blocks(transcript_path):
+    for text in _iter_sentinel_text_blocks(transcript_path):
         if extract_block(text) is not None:
             return parse_stdout(text)
     return None
