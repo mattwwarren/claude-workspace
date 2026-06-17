@@ -2084,3 +2084,243 @@ class TestSpawnCreateImplCsidBackfill:
         sess = state.find_by_name_or_id(session_id)
         assert sess is not None
         assert sess.claude_session_id is None
+
+
+# ---------------------------------------------------------------------------
+# Tests for #726: Linear MCP disallow-tools when tracker is github-issues
+# ---------------------------------------------------------------------------
+
+
+def _write_project_config(workspace: Path, system: str) -> None:
+    """Write a minimal .claude/project-config.yaml with the given tracker system."""
+    claude_dir = workspace / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    config = f"tracking:\n  primary:\n    system: {system}\n"
+    (claude_dir / "project-config.yaml").write_text(config, encoding="utf-8")
+
+
+class TestLinearMcpDisallow:
+    """Tests for #726: --disallowed-tools is injected when tracker=github-issues.
+
+    When a client's project-config.yaml declares github-issues as the tracker,
+    spawn_create_impl must add --disallowed-tools mcp__plugin_linear_linear__*
+    to the claude --bg extra_args so the Linear MCP is unreachable in the
+    headless worker (where OAuth cannot complete).
+    """
+
+    def test_github_issues_tracker_injects_disallow_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """github-issues tracker → --disallowed-tools mcp__plugin_linear_linear__*."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "gh-client"
+        workspace.mkdir(parents=True)
+        _write_project_config(workspace, "github-issues")
+        client = ClientConfig(name="gh-client", workspace_path=workspace)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-726-github-issues")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 726 --headless",
+            label="auto-dev-726",
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--disallowed-tools",
+            "mcp__plugin_linear_linear__*",
+        ]
+
+    def test_linear_tracker_does_not_inject_disallow_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """linear tracker → no --disallowed-tools flag."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "lin-client"
+        workspace.mkdir(parents=True)
+        _write_project_config(workspace, "linear")
+        client = ClientConfig(name="lin-client", workspace_path=workspace)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-726-linear")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev LIN-99 --headless",
+            label="auto-dev-LIN-99",
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] is None
+
+    def test_absent_project_config_does_not_inject_disallow_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """No project-config.yaml → no --disallowed-tools flag (fail-open)."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)  # no project-config.yaml
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-726-no-config")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 726 --headless",
+            label="auto-dev-726",
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] is None
+
+    def test_github_issues_with_worker_model_orders_model_before_disallow(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """github-issues + worker_model: --model first, then --disallowed-tools."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "gh-model-client"
+        workspace.mkdir(parents=True)
+        _write_project_config(workspace, "github-issues")
+        client = ClientConfig(
+            name="gh-model-client",
+            workspace_path=workspace,
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-726-model-disallow")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 726 --headless",
+            label="auto-dev-726",
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--model",
+            "claude-sonnet-4-6-20251015",
+            "--disallowed-tools",
+            "mcp__plugin_linear_linear__*",
+        ]
+
+    def test_github_issues_with_extra_args_appended_after_disallow(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Caller extra_args append after --disallowed-tools."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "gh-extra-client"
+        workspace.mkdir(parents=True)
+        _write_project_config(workspace, "github-issues")
+        client = ClientConfig(name="gh-extra-client", workspace_path=workspace)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-726-extra-args")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 726 --headless",
+            label="auto-dev-726",
+            native_daemon=daemon,
+            extra_args=["--resume", "abc12345"],
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--disallowed-tools",
+            "mcp__plugin_linear_linear__*",
+            "--resume",
+            "abc12345",
+        ]
+
+    def test_corrupt_project_config_does_not_inject_disallow_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Corrupt project-config.yaml → no --disallowed-tools (fail-open)."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "corrupt-client"
+        workspace.mkdir(parents=True)
+        claude_dir = workspace / ".claude"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "project-config.yaml").write_text(
+            ": invalid yaml {{{", encoding="utf-8"
+        )
+        client = ClientConfig(name="corrupt-client", workspace_path=workspace)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-726-corrupt-config")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 726 --headless",
+            label="auto-dev-726",
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] is None
+
+
+class TestReadTrackerSystem:
+    """Unit tests for _read_tracker_system edge cases (#726)."""
+
+    def _write_config(self, workspace: Path, content: str) -> None:
+        claude_dir = workspace / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "project-config.yaml").write_text(content, encoding="utf-8")
+
+    def test_non_dict_yaml_returns_none(self, tmp_path: Path) -> None:
+        """project-config.yaml containing a bare scalar → None (not a dict)."""
+        from cw.spawn import _read_tracker_system
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        self._write_config(workspace, "just-a-string\n")
+        client = ClientConfig(name="x", workspace_path=workspace)
+
+        assert _read_tracker_system(client) is None
+
+    def test_non_dict_tracking_returns_none(self, tmp_path: Path) -> None:
+        """tracking: is a scalar → None."""
+        from cw.spawn import _read_tracker_system
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        self._write_config(workspace, "tracking: not-a-dict\n")
+        client = ClientConfig(name="x", workspace_path=workspace)
+
+        assert _read_tracker_system(client) is None
+
+    def test_non_dict_primary_returns_none(self, tmp_path: Path) -> None:
+        """tracking.primary: is a scalar → None."""
+        from cw.spawn import _read_tracker_system
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        self._write_config(workspace, "tracking:\n  primary: not-a-dict\n")
+        client = ClientConfig(name="x", workspace_path=workspace)
+
+        assert _read_tracker_system(client) is None
