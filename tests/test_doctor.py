@@ -2783,7 +2783,7 @@ class TestCheckTimedOutMerged:
             "cw.doctor.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (True, True),
         )
-        results = _check_timed_out_merged(state)
+        results = _check_timed_out_merged(state, {})
         warn_results = [r for r in results if r.warn]
         assert len(warn_results) == 1
         assert "to-merged" in warn_results[0].detail
@@ -2805,7 +2805,7 @@ class TestCheckTimedOutMerged:
             "cw.doctor.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (False, True),
         )
-        results = _check_timed_out_merged(state)
+        results = _check_timed_out_merged(state, {})
         assert not any(r.warn for r in results)
 
     def test_user_origin_skipped(
@@ -2837,7 +2837,7 @@ class TestCheckTimedOutMerged:
             completed_at=datetime.now(UTC) - timedelta(days=1),
         )
         state = CwState(sessions=[session])
-        results = _check_timed_out_merged(state)
+        results = _check_timed_out_merged(state, {})
         assert not any(r.warn for r in results)
 
     def test_old_completed_at_skipped(
@@ -2869,7 +2869,7 @@ class TestCheckTimedOutMerged:
             completed_at=datetime.now(UTC) - timedelta(days=30),
         )
         state = CwState(sessions=[session])
-        results = _check_timed_out_merged(state)
+        results = _check_timed_out_merged(state, {})
         assert not any(r.warn for r in results)
 
     def test_no_branch_no_ticket_skipped(
@@ -2903,7 +2903,7 @@ class TestCheckTimedOutMerged:
             branch=None,
         )
         state = CwState(sessions=[session])
-        results = _check_timed_out_merged(state)
+        results = _check_timed_out_merged(state, {})
         assert not any(r.warn for r in results)
 
     def test_gh_unavailable_warns(
@@ -2923,7 +2923,7 @@ class TestCheckTimedOutMerged:
             "cw.doctor.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (None, False),
         )
-        results = _check_timed_out_merged(state)
+        results = _check_timed_out_merged(state, {})
         warn_results = [r for r in results if r.warn]
         assert len(warn_results) == 1
         assert "gh unavailable" in warn_results[0].detail
@@ -2945,7 +2945,68 @@ class TestCheckTimedOutMerged:
             "cw.doctor.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (None, True),
         )
-        results = _check_timed_out_merged(state)
+        results = _check_timed_out_merged(state, {})
+        assert not any(r.warn for r in results)
+
+    def test_custom_prefix_branch_key_used(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """feature_branch_prefix='feat' → branch='feat/<ticket>' passed to gh check."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import ClientConfig, CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-custom-prefix")
+        state = CwState(sessions=[session])
+        clients = {
+            "client-a": ClientConfig(
+                name="client-a",
+                workspace_path=tmp_path,
+                feature_branch_prefix="feat",
+            )
+        }
+
+        captured_branch: list[str] = []
+
+        def _capture(*_args: object, **kwargs: object) -> tuple[bool, bool]:
+            branch = kwargs.get("branch", "")
+            captured_branch.append(str(branch))
+            return True, True
+
+        monkeypatch.setattr("cw.doctor.pr_is_merged_for_ticket", _capture)
+
+        results = _check_timed_out_merged(state, clients)
+
+        assert captured_branch == ["feat/to-custom-prefix"]
+        assert any(r.warn for r in results)
+
+    def test_default_prefix_when_client_absent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """Client absent from clients dict → fallback branch='dev/<ticket>'."""
+        from cw.doctor import _check_timed_out_merged
+        from cw.models import CwState
+
+        session = self._make_timed_out_session(tmp_path, sid="to-absent-client")
+        state = CwState(sessions=[session])
+
+        captured_branch: list[str] = []
+
+        def _capture(*_args: object, **kwargs: object) -> tuple[bool, bool]:
+            branch = kwargs.get("branch", "")
+            captured_branch.append(str(branch))
+            return False, True
+
+        monkeypatch.setattr("cw.doctor.pr_is_merged_for_ticket", _capture)
+
+        results = _check_timed_out_merged(state, {})
+
+        assert captured_branch == ["dev/to-absent-client"]
         assert not any(r.warn for r in results)
 
 
