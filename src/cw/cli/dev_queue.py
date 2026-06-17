@@ -599,6 +599,7 @@ def _handle_reaped_mid_wait(
     task: TicketTask,
     ticket_id: str,
     resolved: str,
+    last_session_id: str | None,
     output_json: bool,
 ) -> None:
     """Emit ATTENTION output when a session is reaped during the wait loop.
@@ -614,10 +615,13 @@ def _handle_reaped_mid_wait(
                     "ticket_id": ticket_id,
                     "client": resolved,
                     "status": task.status.value,
-                    "session_id": None,
-                    "state": "reaped",
+                    "session_id": last_session_id,
+                    "state": "attention",
+                    "reason": "reaped_awaiting_redispatch",
                     "sentinel_status": None,
                     "pr_url": None,
+                    "elapsed_seconds": None,
+                    "transcript_age_seconds": None,
                 }
             )
         )
@@ -827,7 +831,9 @@ def dev_queue_wait(
                 # session_id was non-None on a prior poll and is now None.
                 # Reconcile reaped the session and reverted the task to PENDING;
                 # spawn-window grace does not apply — surface ATTENTION (#542).
-                _handle_reaped_mid_wait(task, ticket_id, resolved, output_json)
+                _handle_reaped_mid_wait(
+                    task, ticket_id, resolved, observed_session_id, output_json
+                )
             # Spawn-window grace: session hasn't registered yet — keep polling.
             _raise_if_deadline_exceeded(
                 deadline, ticket_id, resolved, timeout_seconds, output_json

@@ -6394,9 +6394,12 @@ class TestDevQueueWaitSentinelAware:
         )
         assert result.exit_code == _WAIT_EXIT_ATTENTION, result.output
         payload = _json.loads(result.output.strip())
-        assert payload["state"] == "reaped"
-        assert payload["session_id"] is None
+        assert payload["state"] == "attention"
+        assert payload["reason"] == "reaped_awaiting_redispatch"
+        assert payload["session_id"] == session_id
         assert payload["status"] == "pending"
+        assert payload["elapsed_seconds"] is None
+        assert payload["transcript_age_seconds"] is None
 
     def test_wait_attention_exit_code_constant(self) -> None:
         """_WAIT_EXIT_ATTENTION constant equals 3."""
