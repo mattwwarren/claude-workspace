@@ -9,12 +9,15 @@ docstring and ADR-0005/ADR-0006 for the invariants.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from cw.config import (
     load_orchestrator_config,
     load_state,
+    save_state,
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue
@@ -27,7 +30,6 @@ from cw.reconcile._shared import (
     _claude_agents_json,
     _looks_like_daemon_outage,
     _SalvageCandidate,
-    _verify_supervisor_session_id,
     compute_drift,
     ticket_id_for_session,
 )
@@ -47,6 +49,56 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+
+if TYPE_CHECKING:
+    from cw.models import CwState
+
+_log = logging.getLogger(__name__)
+
+
+def _verify_supervisor_session_id(state: CwState) -> int:
+    """Compare stored claude_session_id against the supervisor's resumeSessionId.
+
+    For each ACTIVE/IDLE DAEMON session whose ``surface_ref`` and
+    ``claude_session_id`` are both set, reads the supervisor per-session
+    ``~/.claude/jobs/<surface_ref>/state.json`` and checks whether its
+    ``resumeSessionId`` matches the stored ``claude_session_id``. On
+    mismatch: logs a warning and clears ``claude_session_id`` so
+    ``_backfill_claude_session_ids`` re-derives it on the next tick.
+    ``surface_ref`` is left intact so phantom detection in ``compute_drift``
+    continues to observe liveness.
+
+    A missing or unreadable ``state.json`` is treated as "no continuity
+    claim from the supervisor" and skipped (not an error). Returns the
+    number of sessions whose ``claude_session_id`` was cleared; saves
+    state when non-zero. See RFC 0001 Row 8 and GitHub issue #519.
+    """
+    cleared = 0
+    for session in state.sessions:
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if session.surface_ref is None or session.claude_session_id is None:
+            continue
+        resume_id = _deps.read_supervisor_resume_session_id(session.surface_ref)
+        if resume_id is None:
+            continue
+        if resume_id == session.claude_session_id:
+            continue
+        _log.warning(
+            "csid_mismatch: session=%s surface_ref=%s"
+            " stored_csid=%s supervisor_resume_id=%s — clearing claude_session_id",
+            session.id,
+            session.surface_ref,
+            session.claude_session_id,
+            resume_id,
+        )
+        session.claude_session_id = None
+        cleared += 1
+    if cleared:
+        save_state(state)
+    return cleared
 
 
 def reconcile() -> ReconcileReport:

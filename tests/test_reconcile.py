@@ -39,7 +39,6 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
-    _CSID_MISMATCH_REASON,
     _DIRTY_WORKTREE_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
@@ -12913,10 +12912,10 @@ class TestVerifySupervisorSessionId:
         assert cleared == 0
         assert load_state().sessions[0].surface_ref == short_id
 
-    def test_mismatch_clears_surface_ref(
+    def test_mismatch_clears_claude_session_id(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """resumeSessionId differs from claude_session_id — surface_ref cleared."""
+        """Mismatch: claude_session_id cleared, surface_ref left intact."""
         short_id = "b2c3d4e5"
         stored_csid = "b2c3d4e5-0000-0000-0000-000000000001"
         supervisor_resume_id = "ffffffff-dead-beef-dead-beefdeadbeef"
@@ -12932,12 +12931,18 @@ class TestVerifySupervisorSessionId:
         cleared = _verify_supervisor_session_id(load_state())
         assert cleared == 1
         updated = load_state().sessions[0]
-        assert updated.surface_ref is None
+        assert updated.claude_session_id is None
+        assert updated.surface_ref == short_id
 
-    def test_mismatch_emits_needs_attention_event(
-        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    def test_mismatch_logs_warning(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """On mismatch, SESSION_NEEDS_ATTENTION is emitted with csid_mismatch."""
+        """On mismatch, a warning containing 'csid_mismatch' is logged."""
+        import logging
+
         short_id = "c3d4e5f6"
         stored_csid = "c3d4e5f6-0000-0000-0000-000000000001"
         supervisor_resume_id = "ffffffff-dead-beef-dead-beefdeadbeef"
@@ -12950,14 +12955,10 @@ class TestVerifySupervisorSessionId:
             "cw.reconcile._deps.read_supervisor_resume_session_id",
             lambda sid, **_kw: supervisor_resume_id if sid == short_id else None,
         )
-        _verify_supervisor_session_id(load_state())
+        with caplog.at_level(logging.WARNING):
+            _verify_supervisor_session_id(load_state())
 
-        events = read_events(
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-        )
-        assert any(
-            ev.payload.get("paused_status") == _CSID_MISMATCH_REASON for ev in events
-        )
+        assert any("csid_mismatch" in rec.message for rec in caplog.records)
 
     def test_missing_state_json_is_noop(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch

@@ -58,7 +58,6 @@ from __future__ import annotations
 from cw.reconcile._shared import (
     _CAUSE_IDLE_STALL,
     _CAUSE_USAGE_LIMIT,
-    _CSID_MISMATCH_REASON,
     _DIRTY_WORKTREE_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
@@ -95,7 +94,6 @@ from cw.reconcile._shared import (
     _salvage_terminal_result,
     _session_project_dir,
     _transcript_recently_active,
-    _verify_supervisor_session_id,
     _worktree_dirty_by_path,
     compute_drift,
     resolve_headless_budget,
@@ -104,7 +102,11 @@ from cw.reconcile._shared import (
     resolve_reap_policy,
     ticket_id_for_session,
 )
-from cw.reconcile.core import _reconcile_locked, reconcile
+from cw.reconcile.core import (
+    _reconcile_locked,
+    _verify_supervisor_session_id,
+    reconcile,
+)
 from cw.reconcile.idle import (
     _act_on_idle_candidates,
     _detect_idle_candidates,
@@ -137,7 +139,6 @@ __all__ = [
     "TRANSCRIPT_LIVENESS_WINDOW_SECONDS",
     "_CAUSE_IDLE_STALL",
     "_CAUSE_USAGE_LIMIT",
-    "_CSID_MISMATCH_REASON",
     "_DIRTY_WORKTREE_REASON",
     "_NEEDS_SALVAGE_REASON",
     "_SALVAGE_KIND_GIT_STATE",
