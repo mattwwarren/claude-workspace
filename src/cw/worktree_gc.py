@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import subprocess as _sp
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -17,6 +17,8 @@ _PORCELAIN_WORKTREE = "worktree "
 _PORCELAIN_BRANCH = "branch refs/heads/"
 _PORCELAIN_LOCKED = "locked"
 _PORCELAIN_DETACHED = "detached"
+_PORCELAIN_BARE = "bare"
+_PORCELAIN_HEAD = "HEAD "
 
 # gh CLI subcommand args
 _GH_PR_LIST_STATE_ALL = "all"
@@ -28,8 +30,8 @@ _GH_PR_STATE_CLOSED = "CLOSED"
 _GH_PR_STATE_OPEN = "OPEN"
 
 # Why -D not -d: squash-merged branches are never ancestors of main, so -d
-# (safe delete) always refuses them. We check PR state before removing, so
-# force-delete here is safe.
+# (safe delete) always refuses them. We verify PR state and check for unsaved
+# work before removing, so force-delete here is safe.
 _GIT_BRANCH_DELETE_FLAG = "-D"
 
 
@@ -49,9 +51,11 @@ class GcVerdict(enum.Enum):
     REMOVE_CLOSED = "REMOVE_CLOSED"
     KEEP_OPEN_PR = "KEEP_OPEN_PR"
     KEEP_NO_PR = "KEEP_NO_PR"
+    KEEP_CLOSED_PR = "KEEP_CLOSED_PR"
     SKIP_LOCKED = "SKIP_LOCKED"
     SKIP_GH_UNAVAILABLE = "SKIP_GH_UNAVAILABLE"
     SKIP_DETACHED = "SKIP_DETACHED"
+    SKIP_BARE = "SKIP_BARE"
     SKIP_DIRTY = "SKIP_DIRTY"
 
 
@@ -61,13 +65,14 @@ GC_REMOVE_VERDICTS: frozenset[GcVerdict] = frozenset(
     {GcVerdict.REMOVE_MERGED, GcVerdict.REMOVE_CLOSED}
 )
 GC_KEEP_VERDICTS: frozenset[GcVerdict] = frozenset(
-    {GcVerdict.KEEP_OPEN_PR, GcVerdict.KEEP_NO_PR}
+    {GcVerdict.KEEP_OPEN_PR, GcVerdict.KEEP_NO_PR, GcVerdict.KEEP_CLOSED_PR}
 )
 GC_SKIP_VERDICTS: frozenset[GcVerdict] = frozenset(
     {
         GcVerdict.SKIP_LOCKED,
         GcVerdict.SKIP_GH_UNAVAILABLE,
         GcVerdict.SKIP_DETACHED,
+        GcVerdict.SKIP_BARE,
         GcVerdict.SKIP_DIRTY,
     }
 )
@@ -80,6 +85,7 @@ class WorktreeEntry:
     path: Path
     branch: str | None  # None means detached HEAD
     locked: bool
+    is_bare: bool = field(default=False)
 
 
 @dataclass(frozen=True)
@@ -104,12 +110,12 @@ class WorktreeGcReport:
 
     @property
     def kept(self) -> list[WorktreeGcResult]:
-        """Results that are kept (open PR or no PR)."""
+        """Results kept (open/no/closed PR without --include-closed)."""
         return [r for r in self.results if r.verdict in GC_KEEP_VERDICTS]
 
     @property
     def skipped(self) -> list[WorktreeGcResult]:
-        """Results that were skipped (locked, dirty, detached, or gh unavailable)."""
+        """Results skipped (locked, dirty, detached, bare, or gh unavailable)."""
         return [r for r in self.results if r.verdict in GC_SKIP_VERDICTS]
 
 
@@ -117,8 +123,8 @@ def _parse_worktree_blocks(stdout: str) -> list[dict[str, str]]:
     """Parse porcelain worktree output into a list of field dicts.
 
     Each block is separated by a blank line. Fields are key-value where
-    ``worktree``, ``HEAD``, ``branch`` have a value; ``locked`` and
-    ``detached`` are bare flags (value may be a reason string).
+    ``worktree``, ``HEAD``, ``branch`` have a value; ``locked``, ``detached``,
+    and ``bare`` are bare flags (value may be a reason string).
     """
     blocks: list[dict[str, str]] = []
     current: dict[str, str] = {}
@@ -137,8 +143,10 @@ def _parse_worktree_blocks(stdout: str) -> list[dict[str, str]]:
             current["detached"] = "1"
         elif stripped.startswith(_PORCELAIN_LOCKED):
             current["locked"] = "1"
-        elif stripped.startswith("HEAD "):
-            current["HEAD"] = stripped[5:]
+        elif stripped == _PORCELAIN_BARE:
+            current["bare"] = "1"
+        elif stripped.startswith(_PORCELAIN_HEAD):
+            current["HEAD"] = stripped[len(_PORCELAIN_HEAD) :]
     if current:
         blocks.append(current)
     return blocks
@@ -182,7 +190,10 @@ def list_repo_worktrees(git_cwd: Path) -> list[WorktreeEntry]:
             continue
         branch: str | None = block.get("branch")
         locked = "locked" in block
-        entries.append(WorktreeEntry(path=wt_path, branch=branch, locked=locked))
+        is_bare = "bare" in block
+        entries.append(
+            WorktreeEntry(path=wt_path, branch=branch, locked=locked, is_bare=is_bare)
+        )
 
     return entries
 
@@ -257,8 +268,38 @@ def check_pr_state(
     return state, pr_number, True
 
 
-def _is_dirty(wt_path: Path) -> bool:
-    """Return True if *wt_path* has uncommitted changes."""
+def _has_unpushed_commits(wt_path: Path, branch: str) -> bool:
+    """Return True if *wt_path* has commits not yet pushed to origin/<branch>.
+
+    Conservative: returns True on any subprocess error or when the remote ref
+    does not exist (meaning we can't confirm the branch is fully pushed).
+    """
+    try:
+        result = _sp.run(
+            ["git", "-C", str(wt_path), "log", f"origin/{branch}..HEAD", "--oneline"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_git_clean_env(),
+        )
+    except (OSError, FileNotFoundError):
+        return True  # conservative: treat as unpushed when git is unavailable
+    if result.returncode != 0:
+        # Remote ref may not exist or git failed — treat as unpushed conservatively.
+        return True
+    return bool(result.stdout.strip())
+
+
+def _is_dirty(wt_path: Path, branch: str) -> bool:
+    """Return True if *wt_path* has uncommitted changes or unpushed commits.
+
+    Checks both:
+    - Uncommitted changes (``git status --porcelain`` is non-empty)
+    - Unpushed commits (``git log origin/<branch>..HEAD`` is non-empty)
+
+    Conservative: returns True on any subprocess error so that a git failure
+    never allows a destructive removal to proceed.
+    """
     try:
         result = _sp.run(
             ["git", "-C", str(wt_path), "status", "--porcelain"],
@@ -268,27 +309,33 @@ def _is_dirty(wt_path: Path) -> bool:
             env=_git_clean_env(),
         )
     except (OSError, FileNotFoundError):
-        return False
-    return bool(result.stdout.strip())
+        return True  # conservative for destructive operation
+    if result.stdout.strip():
+        return True
+    return _has_unpushed_commits(wt_path, branch)
 
 
 def _verdict_for_state(
     state: str | None,
     wt_path: Path,
+    branch: str,
     *,
     include_closed: bool,
 ) -> GcVerdict:
     """Map gh PR state to a GcVerdict, calling _is_dirty only when needed."""
-    if state == _GH_PR_STATE_MERGED:
-        return GcVerdict.SKIP_DIRTY if _is_dirty(wt_path) else GcVerdict.REMOVE_MERGED
-    if state == _GH_PR_STATE_CLOSED:
-        if not include_closed:
-            return GcVerdict.KEEP_NO_PR
-        return GcVerdict.SKIP_DIRTY if _is_dirty(wt_path) else GcVerdict.REMOVE_CLOSED
     if state == _GH_PR_STATE_OPEN:
         return GcVerdict.KEEP_OPEN_PR
-    # "" (no PR) or None (transient error) — keep conservatively
-    return GcVerdict.KEEP_NO_PR
+    if state not in (_GH_PR_STATE_MERGED, _GH_PR_STATE_CLOSED):
+        # "" (no PR) or None (transient error) — keep conservatively
+        return GcVerdict.KEEP_NO_PR
+    if state == _GH_PR_STATE_CLOSED and not include_closed:
+        return GcVerdict.KEEP_CLOSED_PR
+    # MERGED, or CLOSED with include_closed=True — check for unsaved work first
+    if _is_dirty(wt_path, branch):
+        return GcVerdict.SKIP_DIRTY
+    if state == _GH_PR_STATE_MERGED:
+        return GcVerdict.REMOVE_MERGED
+    return GcVerdict.REMOVE_CLOSED
 
 
 def classify_worktrees(
@@ -296,27 +343,49 @@ def classify_worktrees(
     timeout: int = 10,
     *,
     include_closed: bool = False,
+    worktree_base: Path | None = None,
 ) -> list[WorktreeGcResult]:
     """Classify all non-main worktrees in the repo at *git_cwd*.
 
-    For each worktree:
-    - Locked → SKIP_LOCKED (gh never called)
-    - Detached HEAD → SKIP_DETACHED
-    - gh unavailable → SKIP_GH_UNAVAILABLE
-    - PR MERGED, dirty → SKIP_DIRTY
-    - PR MERGED, clean → REMOVE_MERGED
-    - PR CLOSED, include_closed=True, clean → REMOVE_CLOSED
-    - PR CLOSED, include_closed=True, dirty → SKIP_DIRTY
-    - PR CLOSED, include_closed=False → KEEP_NO_PR
-    - PR OPEN → KEEP_OPEN_PR
-    - No PR or transient error → KEEP_NO_PR (conservative)
+    Args:
+        git_cwd: Path to the main git checkout.
+        timeout: Seconds per ``gh`` CLI call.
+        include_closed: When True, CLOSED PRs are candidates for removal.
+        worktree_base: When given, only worktrees whose path is under this
+            directory are classified. Others are silently skipped. Used to
+            restrict GC to cw-managed worktrees.
+
+    Verdicts:
+        - Bare → SKIP_BARE (no PR lookup)
+        - Locked → SKIP_LOCKED (no PR lookup)
+        - Detached HEAD → SKIP_DETACHED
+        - gh unavailable → SKIP_GH_UNAVAILABLE
+        - PR MERGED, dirty → SKIP_DIRTY
+        - PR MERGED, clean → REMOVE_MERGED
+        - PR CLOSED, include_closed=True, clean → REMOVE_CLOSED
+        - PR CLOSED, include_closed=True, dirty → SKIP_DIRTY
+        - PR CLOSED, include_closed=False → KEEP_CLOSED_PR
+        - PR OPEN → KEEP_OPEN_PR
+        - No PR or transient error → KEEP_NO_PR (conservative)
     """
     entries = list_repo_worktrees(git_cwd)
     results: list[WorktreeGcResult] = []
     _gh_seen_unavailable = False
 
     for entry in entries:
+        if worktree_base is not None and not entry.path.is_relative_to(worktree_base):
+            continue
+
+        if entry.is_bare:
+            results.append(
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.SKIP_BARE, pr_number=None
+                )
+            )
+            continue
+
         if entry.locked:
+            _log.info("gc: skip locked worktree %s", entry.path)
             results.append(
                 WorktreeGcResult(
                     entry=entry, verdict=GcVerdict.SKIP_LOCKED, pr_number=None
@@ -353,7 +422,13 @@ def classify_worktrees(
             )
             continue
 
-        verdict = _verdict_for_state(state, entry.path, include_closed=include_closed)
+        verdict = _verdict_for_state(
+            state, entry.path, entry.branch, include_closed=include_closed
+        )
+        if verdict == GcVerdict.SKIP_DIRTY:
+            _log.info(
+                "gc: skip dirty worktree %s (branch=%s)", entry.path, entry.branch
+            )
         results.append(
             WorktreeGcResult(entry=entry, verdict=verdict, pr_number=pr_number)
         )
@@ -372,6 +447,10 @@ def remove_worktree_gc(
     Uses ``git worktree remove --force`` then ``git branch -D`` (force-delete).
     Branch deletion is skipped when worktree removal fails to avoid leaving
     git in an inconsistent state (branch gone but worktree still registered).
+
+    Why --force: squash-merged branches are never ancestors of main, so git's
+    built-in uncommitted-changes protection would refuse even clean worktrees.
+    The caller must verify there is no unsaved work before calling this function.
     """
     clean_env = _git_clean_env()
 
@@ -392,6 +471,10 @@ def remove_worktree_gc(
         )
         return
 
+    _log.info(
+        "remove_worktree_gc: removed worktree %s (branch=%s)", entry.path, entry.branch
+    )
+
     if delete_branch and entry.branch is not None:
         branch_result = _sp.run(
             ["git", "branch", _GIT_BRANCH_DELETE_FLAG, entry.branch],
@@ -408,6 +491,8 @@ def remove_worktree_gc(
                 branch_result.returncode,
                 branch_result.stderr.strip(),
             )
+        else:
+            _log.info("remove_worktree_gc: deleted branch %s", entry.branch)
 
 
 def run_worktree_gc(
@@ -416,6 +501,7 @@ def run_worktree_gc(
     apply: bool = False,
     timeout: int = 10,
     include_closed: bool = False,
+    worktree_base: Path | None = None,
 ) -> WorktreeGcReport:
     """GC worktrees for the repo at *git_cwd*.
 
@@ -427,12 +513,16 @@ def run_worktree_gc(
         apply: When True, remove worktrees with REMOVE_* verdicts. Dry-run by default.
         timeout: Seconds per ``gh`` CLI call.
         include_closed: When True, also remove worktrees for CLOSED (abandoned) PRs.
+        worktree_base: When given, restrict GC to worktrees under this path.
 
     Returns:
         WorktreeGcReport with classification results for all worktrees.
     """
     results = classify_worktrees(
-        git_cwd, timeout=timeout, include_closed=include_closed
+        git_cwd,
+        timeout=timeout,
+        include_closed=include_closed,
+        worktree_base=worktree_base,
     )
     report = WorktreeGcReport(results=results)
 

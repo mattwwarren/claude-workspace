@@ -7,7 +7,8 @@ import click
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
 from cw.exceptions import CwError
-from cw.worktree import _git_dir
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.worktree import _git_dir, resolve_worktree_base
 from cw.worktree_gc import (
     GC_REMOVE_VERDICTS,
     GcVerdict,
@@ -21,9 +22,11 @@ _GC_VERDICT_LABEL: dict[GcVerdict, str] = {
     GcVerdict.REMOVE_CLOSED: "REMOVE",
     GcVerdict.KEEP_OPEN_PR: "KEEP  ",
     GcVerdict.KEEP_NO_PR: "KEEP  ",
+    GcVerdict.KEEP_CLOSED_PR: "KEEP  ",
     GcVerdict.SKIP_LOCKED: "SKIP  ",
     GcVerdict.SKIP_GH_UNAVAILABLE: "SKIP  ",
     GcVerdict.SKIP_DETACHED: "SKIP  ",
+    GcVerdict.SKIP_BARE: "SKIP  ",
     GcVerdict.SKIP_DIRTY: "SKIP  ",
 }
 
@@ -32,9 +35,11 @@ _GC_VERDICT_REASON: dict[GcVerdict, str] = {
     GcVerdict.REMOVE_CLOSED: "CLOSED PR",
     GcVerdict.KEEP_OPEN_PR: "OPEN PR",
     GcVerdict.KEEP_NO_PR: "no PR",
+    GcVerdict.KEEP_CLOSED_PR: "CLOSED PR (kept; use --include-closed to remove)",
     GcVerdict.SKIP_LOCKED: "locked",
     GcVerdict.SKIP_GH_UNAVAILABLE: "gh unavailable",
     GcVerdict.SKIP_DETACHED: "detached HEAD",
+    GcVerdict.SKIP_BARE: "bare worktree",
     GcVerdict.SKIP_DIRTY: "dirty",
 }
 
@@ -120,28 +125,44 @@ def worktree_gc(
     worktrees where the PR is MERGED (or CLOSED with --include-closed).
     Dry-run by default; pass --apply to act.
     Locked and dirty worktrees are always skipped.
+    Runs against all configured GitHub-tracked clients by default.
     """
     clients = load_clients()
+
+    if not clients:
+        click.echo("No clients configured. Add one to ~/.config/cw/clients.yaml.")
+        return
 
     if client_name is not None:
         client = clients.get(client_name)
         if client is None:
             msg = f"Client {client_name!r} not found. Run 'cw config' to list clients."
             raise CwError(msg)
-    elif len(clients) == 1:
-        client = next(iter(clients.values()))
+        selected = {client_name: client}
     else:
-        if not clients:
-            msg = "No clients configured. Add one to ~/.config/cw/clients.yaml."
-            raise CwError(msg)
-        names = ", ".join(clients)
-        msg = (
-            f"Multiple clients configured ({names}). Specify one with --client <name>."
-        )
-        raise CwError(msg)
+        selected = dict(clients)
 
-    git_cwd = _git_dir(client)
-    report = run_worktree_gc(
-        git_cwd, apply=apply, timeout=timeout, include_closed=include_closed
-    )
-    click.echo(_format_gc_report(report, apply=apply))
+    any_output = False
+    for name, client in selected.items():
+        tracker_root = client.repo_path or client.workspace_path
+        if resolve_tracker(tracker_root) != TRACKER_GITHUB_ISSUES:
+            click.echo(f"[{name}] skipped — not a GitHub-tracked client")
+            continue
+
+        git_cwd = _git_dir(client)
+        wt_base = resolve_worktree_base(client)
+        report = run_worktree_gc(
+            git_cwd,
+            apply=apply,
+            timeout=timeout,
+            include_closed=include_closed,
+            worktree_base=wt_base,
+        )
+
+        if len(selected) > 1:
+            click.echo(f"[{name}]")
+        click.echo(_format_gc_report(report, apply=apply))
+        any_output = True
+
+    if not any_output:
+        click.echo("No GitHub-tracked clients found.")
