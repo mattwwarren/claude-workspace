@@ -129,6 +129,17 @@ SALVAGE_TERMINAL_STATUSES: frozenset[str] = (
     | PAUSED_FOR_USER_INPUT_STATUSES
 )
 
+# Stage-advance success statuses that are NOT terminal salvage targets — i.e.
+# they must advance the pipeline to the next stage rather than be dispositioned
+# as a terminal outcome. Today this is exactly {stage_complete}: the PR-less
+# intermediate stage-success status (#699). "shipped" is excluded because it is
+# in SALVAGE_TERMINAL_STATUSES (terminal-salvage already handles it). Used by the
+# reconcile phantom path to route an exited worker's emitted advance sentinel
+# through apply_staged_decision instead of reverting it as a crash (#716).
+INTERMEDIATE_ADVANCE_STATUSES: frozenset[str] = (
+    STAGE_SUCCESS_STATUSES - SALVAGE_TERMINAL_STATUSES
+)
+
 # BlockedResult reason codes produced by parse_stdout.  Exported so consumers
 # (e.g. cli.py) can reference them without duplicating the literal strings.
 BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS = "multiple_result_blocks"
