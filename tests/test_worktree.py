@@ -425,6 +425,8 @@ class TestCreateWorktree:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """A: new branch + origin/main resolvable → worktree add uses origin/main
+        as start-point, not operator HEAD (#710)."""
         client = ClientConfig(
             name="test",
             workspace_path=tmp_path / "ws",
@@ -438,9 +440,12 @@ class TestCreateWorktree:
             check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
-            result = MagicMock(stderr="")
-            if "rev-parse" in args:
-                result.returncode = 128  # branch doesn't exist
+            result = MagicMock(stderr="", stdout="")
+            if "rev-parse" in args and any("refs/heads/" in a for a in args):
+                result.returncode = 128  # branch doesn't exist locally
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 0  # origin/main resolves
+                result.stdout = "abc1234\n"
             else:
                 result.returncode = 0
             return result
@@ -448,11 +453,11 @@ class TestCreateWorktree:
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
         result = create_worktree(client, "feat/new")
         assert result == tmp_path / "wt" / "feat-new"
-        # Should have called worktree add -b (not necessarily the last call
-        # since _register_cw_exclude runs after and adds a rev-parse call)
         wt_add_calls = [c for c in git_calls if "worktree" in c and "add" in c]
         assert len(wt_add_calls) == 1
         assert "-b" in wt_add_calls[0]
+        # The fix: start-point must be origin/main, not absent or HEAD-based
+        assert "origin/main" in wt_add_calls[0]
 
     def test_uses_existing_branch(
         self,
@@ -481,6 +486,129 @@ class TestCreateWorktree:
         wt_add_calls = [c for c in git_calls if "worktree" in c and "add" in c]
         assert len(wt_add_calls) == 1
         assert "-b" not in wt_add_calls[0]
+        # E: existing-branch path — no origin/ start-point added (#710 regression guard)
+        assert not any("origin/" in a for a in wt_add_calls[0])
+
+    def test_new_branch_base_is_origin_main_not_operator_head(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """B (integration): new worktree starts from origin/main, not HEAD (#710).
+
+        Sets up a real bare remote at C1, advances the workspace checkout to C2
+        on a feature branch, then asserts the ticket worktree's HEAD == C1.
+        """
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+        def _git(*args: str, cwd: Path) -> str:
+            return subprocess.run(
+                ["git", *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=str(cwd),
+                env=clean_env,
+            ).stdout.strip()
+
+        workspace = make_git_repo("workspace")
+        c1 = _git("rev-parse", "HEAD", cwd=workspace)
+
+        # Set up bare origin at C1 and fetch it into workspace
+        origin = tmp_path / "origin.git"
+        origin.mkdir()
+        _git("init", "--bare", "-b", "main", cwd=origin)
+        _git("remote", "add", "origin", str(origin), cwd=workspace)
+        _git("push", "origin", "main", cwd=workspace)
+        _git("fetch", "origin", cwd=workspace)
+
+        # Advance workspace to C2 on an operator feature branch (simulating
+        # the operator having a non-main branch checked out — the bug scenario)
+        _git("checkout", "-b", "operator-feature", cwd=workspace)
+        _git("commit", "--allow-empty", "-m", "operator commit C2", cwd=workspace)
+        c2 = _git("rev-parse", "HEAD", cwd=workspace)
+        assert c1 != c2
+
+        client = ClientConfig(
+            name="test",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+        )
+        wt_path = create_worktree(client, "dev/710")
+
+        actual_head = _git("rev-parse", "HEAD", cwd=wt_path)
+        assert actual_head == c1, (
+            f"Worktree HEAD should be origin/main ({c1}), got {actual_head} "
+            f"(operator HEAD was {c2})"
+        )
+
+    def test_new_branch_falls_back_to_local_default_when_origin_absent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """C: origin/main absent (rc≠0), local main present (rc=0) → start-point is
+        the local default branch, not origin/ (#710 offline fallback)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        git_calls: list[tuple[str, ...]] = []
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            git_calls.append(args)
+            result = MagicMock(stderr="", stdout="")
+            if "rev-parse" in args and any("refs/heads/" in a for a in args):
+                result.returncode = 128  # ticket branch doesn't exist
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 128  # origin/main absent (offline)
+            elif "rev-parse" in args:
+                result.returncode = 0  # local main exists
+                result.stdout = "abc1234\n"
+            else:
+                result.returncode = 0
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        create_worktree(client, "feat/new")
+        wt_add_calls = [c for c in git_calls if "worktree" in c and "add" in c]
+        assert len(wt_add_calls) == 1
+        assert "-b" in wt_add_calls[0]
+        assert "main" in wt_add_calls[0]
+        assert not any("origin/" in a for a in wt_add_calls[0])
+
+    def test_new_branch_raises_when_no_base_resolvable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """D: both origin/main and local main absent → WorktreeError; no HEAD fallback
+        (#710 — an unresolvable base must hard-fail, never silently use HEAD)."""
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        git_calls: list[tuple[str, ...]] = []
+
+        def mock_run(
+            *args: str,
+            cwd: object,
+            check: bool = True,
+        ) -> MagicMock:
+            git_calls.append(args)
+            return MagicMock(stderr="", stdout="", returncode=128)
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        with pytest.raises(WorktreeError):
+            create_worktree(client, "feat/new")
+        # Critically: no worktree add was attempted — no HEAD fallback
+        assert not any("worktree" in c and "add" in c for c in git_calls)
 
     def test_create_worktree_rejects_path_equal_to_main_checkout(
         self,
@@ -709,9 +837,12 @@ class TestCreateWorktree:
             cwd: object,
             check: bool = True,
         ) -> MagicMock:
-            result = MagicMock(stderr="")
-            if "rev-parse" in args:
-                result.returncode = 128  # branch doesn't exist
+            result = MagicMock(stderr="", stdout="")
+            if "rev-parse" in args and any("refs/heads/" in a for a in args):
+                result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 0  # origin/main resolves (start-point ladder)
+                result.stdout = "abc1234\n"
             else:
                 result.returncode = 0
             return result
@@ -825,9 +956,12 @@ class TestSubmoduleInit:
             check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
-            result = MagicMock(stderr="")
-            if "rev-parse" in args:
-                result.returncode = 128  # branch doesn't exist
+            result = MagicMock(stderr="", stdout="")
+            if "rev-parse" in args and any("refs/heads/" in a for a in args):
+                result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 0  # origin/main resolves
+                result.stdout = "abc1234\n"
             else:
                 result.returncode = 0
             return result
@@ -864,9 +998,12 @@ class TestSubmoduleInit:
             check: bool = True,
         ) -> MagicMock:
             git_calls.append(args)
-            result = MagicMock(stderr="")
-            if "rev-parse" in args:
-                result.returncode = 128
+            result = MagicMock(stderr="", stdout="")
+            if "rev-parse" in args and any("refs/heads/" in a for a in args):
+                result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 0  # origin/main resolves
+                result.stdout = "abc1234\n"
             else:
                 result.returncode = 0
             return result
@@ -899,9 +1036,12 @@ class TestSubmoduleInit:
             check: bool = True,
         ) -> MagicMock:
             git_cwds.append(cwd)
-            result = MagicMock(stderr="")
-            if "rev-parse" in args:
-                result.returncode = 128
+            result = MagicMock(stderr="", stdout="")
+            if "rev-parse" in args and any("refs/heads/" in a for a in args):
+                result.returncode = 128  # ticket branch doesn't exist locally
+            elif "rev-parse" in args and any("origin/" in a for a in args):
+                result.returncode = 0  # origin/main resolves
+                result.stdout = "abc1234\n"
             else:
                 result.returncode = 0
             return result

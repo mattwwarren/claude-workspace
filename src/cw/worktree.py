@@ -230,6 +230,38 @@ def _register_cw_exclude(git_cwd: Path) -> None:
         _log.warning("_register_cw_exclude: failed for %s: %s", git_cwd, exc)
 
 
+def _resolve_branch_start_point(client: ClientConfig, git_cwd: Path) -> str:
+    """Resolve the start-point for a new branch in *client*'s repository.
+
+    Three-level fallback matching the convention in ``_has_unpushed_commits``:
+
+    1. ``origin/<default_branch>`` — authoritative remote ref; independent of
+       the operator's current checkout.
+    2. ``<default_branch>`` — local fallback for offline / bare-clone scenarios.
+    3. Raise :exc:`WorktreeError` — never fall back to HEAD, which is exactly
+       the bug this prevents (#710).
+    """
+    origin_ref = f"origin/{client.default_branch}"
+    result = _run_git("rev-parse", "--verify", origin_ref, cwd=git_cwd, check=False)
+    if result.returncode == 0:
+        # Why: origin/<default_branch> is already current because dispatch's freshness
+        # gate fetched it earlier this tick; interactive cw start accepts a
+        # possibly-one-fetch-stale origin ref — better than HEAD-based base.
+        return origin_ref
+
+    local_ref = client.default_branch
+    result = _run_git("rev-parse", "--verify", local_ref, cwd=git_cwd, check=False)
+    if result.returncode == 0:
+        return local_ref
+
+    msg = (
+        f"Cannot resolve a start-point for new branch in {client.name}: "
+        f"neither {origin_ref!r} nor {local_ref!r} exists. "
+        f"Ensure the repository has a remote or local {local_ref!r} branch."
+    )
+    raise WorktreeError(msg)
+
+
 def create_worktree(
     client: ClientConfig,
     branch: str,
@@ -297,8 +329,9 @@ def create_worktree(
         # Branch exists — create worktree from it
         args = ["worktree", "add", str(wt_path), branch]
     else:
-        # Branch doesn't exist — create new branch
-        args = ["worktree", "add", "-b", branch, str(wt_path)]
+        # Branch doesn't exist — create new branch from the client's default branch
+        start_point = _resolve_branch_start_point(client, git_cwd)
+        args = ["worktree", "add", "-b", branch, str(wt_path), start_point]
 
     if force:
         args.insert(2, "--force")
