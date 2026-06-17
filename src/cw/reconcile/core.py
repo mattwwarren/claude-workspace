@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.config import (
+    load_clients,
     load_orchestrator_config,
     load_state,
     save_state,
@@ -31,6 +32,7 @@ from cw.reconcile._shared import (
     _looks_like_daemon_outage,
     _SalvageCandidate,
     compute_drift,
+    feature_branch_key,
     ticket_id_for_session,
 )
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
@@ -126,6 +128,8 @@ def reconcile() -> ReconcileReport:
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
     # (liveness requirement, #485). Mirrors complete_timed_out_merged_tasks().
     pre_state = load_state()
+    # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
+    _clients = load_clients()
     _merged_tids: list[str] = []
     _gh_blocked_tids: list[str] = []
     _gh_available = True
@@ -140,9 +144,8 @@ def reconcile() -> ReconcileReport:
         if not _gh_available:
             _gh_blocked_tids.append(_ticket_id)
             continue
-        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
-            _ticket_id, branch="dev/" + _ticket_id
-        )
+        _branch = feature_branch_key(_session.client, _ticket_id, _clients)
+        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(_ticket_id, branch=_branch)
         if not _gh_avail:
             _gh_available = False
             _gh_blocked_tids.append(_ticket_id)
