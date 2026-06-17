@@ -233,6 +233,7 @@ class FakeNativeDaemonClient:
         self.stop_calls: list[str] = []
         self._live: set[str] = set()
         self.raise_usage_limit: bool = False
+        self.raise_unregistered: bool = False
 
     def spawn_bg(
         self,
@@ -246,6 +247,11 @@ class FakeNativeDaemonClient:
 
         When ``raise_usage_limit`` is True, raises :class:`UsageLimitError`
         before incrementing the counter — so no slot is consumed.
+
+        When ``raise_unregistered`` is True, returns the short id without
+        adding it to the live set — simulating the intermittent flake where
+        ``claude --bg`` returns a short id but the supervisor never registers
+        the worker in ``roster.json`` (see GitHub issue #520).
         """
         if self.raise_usage_limit:
             msg = "fake: usage limit"
@@ -255,7 +261,8 @@ class FakeNativeDaemonClient:
         self.spawn_calls.append((cwd, prompt))
         self.spawn_extra_args.append(extra_args)
         self.spawn_permission_modes.append(permission_mode)
-        self._live.add(short_id)
+        if not self.raise_unregistered:
+            self._live.add(short_id)
         return short_id
 
     def list_live_session_short_ids(self) -> set[str]:

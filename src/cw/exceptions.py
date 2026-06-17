@@ -108,3 +108,21 @@ class UsageLimitError(CwError):
     """
 
     __slots__ = ()
+
+
+class SpawnUnregisteredError(CwError):
+    """Raised when a spawned worker never appears in the daemon roster.
+
+    After ``claude --bg`` returns a short session id, cw polls the daemon
+    roster to verify the supervisor actually adopted the worker. When the id
+    is absent after the polling window elapses, this error is raised instead
+    of leaving a phantom RUNNING session that burns a 30-minute idle cycle
+    before the watchdog reaps it.
+
+    The caller (dispatch loop) handles it the same as any broad spawn
+    failure: revert the task to PENDING for retry. A distinct
+    ``SESSION_SPAWN_UNREGISTERED`` event is emitted before the raise so the
+    failure is diagnosable in the event inbox.
+    """
+
+    __slots__ = ()

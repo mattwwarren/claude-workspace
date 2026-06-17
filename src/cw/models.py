@@ -207,6 +207,7 @@ class OrchestratorEventType(StrEnum):
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
     SESSION_REAP_PROPOSED = "session.reap_proposed"
     SESSION_REAP_AUTHORIZED = "session.reap_authorized"
+    SESSION_SPAWN_UNREGISTERED = "session.spawn_unregistered"
     LANE_CREATED = "lane.created"
     LANE_PAUSED = "lane.paused"
     LANE_RESUMED = "lane.resumed"
