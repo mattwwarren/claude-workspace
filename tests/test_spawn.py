@@ -24,7 +24,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.spawn import _LINEAR_MCP_DISALLOW
+from cw.spawn import _LINEAR_MCP_DISALLOW, _LINEAR_MCP_DISALLOW_ARG
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2133,10 +2133,46 @@ class TestLinearMcpDisallow:
             native_daemon=daemon,
         )
 
-        assert daemon.spawn_extra_args[0] == [
-            "--disallowed-tools",
-            _LINEAR_MCP_DISALLOW,
-        ]
+        # Single `=`-joined token — NOT ["--disallowed-tools", pattern], whose
+        # variadic flag would swallow the positional prompt (#733).
+        assert daemon.spawn_extra_args[0] == [_LINEAR_MCP_DISALLOW_ARG]
+
+    def test_disallow_flag_is_single_token_not_prompt_eating(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#733 regression: flag is ONE `=`-joined token, not the variadic two-token
+        form that swallows the positional prompt.
+
+        ``claude --disallowed-tools <tools...>`` is variadic; the two-token form
+        ``["--disallowed-tools", pattern]`` immediately before the prompt makes
+        the flag consume the prompt, leaving the worker promptless (it idles and
+        emits no transcript — the live #722 stall).
+        """
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "gh-733-client"
+        workspace.mkdir(parents=True)
+        _write_project_config(workspace, "github-issues")
+        client = ClientConfig(name="gh-733-client", workspace_path=workspace)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-733")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-plan 722 --headless",
+            label="auto-dev-722",
+            native_daemon=daemon,
+        )
+
+        extra = daemon.spawn_extra_args[0] or []
+        assert _LINEAR_MCP_DISALLOW_ARG in extra
+        # The prompt-eating forms must NOT appear as standalone tokens.
+        assert "--disallowed-tools" not in extra
+        assert _LINEAR_MCP_DISALLOW not in extra
 
     def test_linear_tracker_does_not_inject_disallow_flag(
         self,
@@ -2218,8 +2254,7 @@ class TestLinearMcpDisallow:
         assert daemon.spawn_extra_args[0] == [
             "--model",
             "claude-sonnet-4-6-20251015",
-            "--disallowed-tools",
-            _LINEAR_MCP_DISALLOW,
+            _LINEAR_MCP_DISALLOW_ARG,
         ]
 
     def test_github_issues_with_extra_args_appended_after_disallow(
@@ -2248,8 +2283,7 @@ class TestLinearMcpDisallow:
         )
 
         assert daemon.spawn_extra_args[0] == [
-            "--disallowed-tools",
-            _LINEAR_MCP_DISALLOW,
+            _LINEAR_MCP_DISALLOW_ARG,
             "--resume",
             "abc12345",
         ]

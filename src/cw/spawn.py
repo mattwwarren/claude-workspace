@@ -32,6 +32,13 @@ CW_CONTEXT_SCHEMA_VERSION = 1
 # workers from attempting Linear OAuth (which stalls in a headless context).
 # See GitHub issue #726.
 _LINEAR_MCP_DISALLOW = "mcp__plugin_linear_linear__*"
+# Pass the flag as a SINGLE `=`-joined argv token, never as the two-token form
+# ``["--disallowed-tools", pattern]``. `claude`'s ``--disallowed-tools <tools...>``
+# is variadic: as two tokens it greedily consumes the following positional —
+# the worker prompt — leaving the worker promptless (it idles, emits no
+# transcript). The `=` form binds exactly one value and cannot reach the prompt.
+# See GitHub issue #733 (regression from #726).
+_LINEAR_MCP_DISALLOW_ARG = f"--disallowed-tools={_LINEAR_MCP_DISALLOW}"
 
 
 def _git_clean_env() -> dict[str, str]:
@@ -310,7 +317,7 @@ def spawn_create_impl(
         resolve_tracker(client.repo_path or client.workspace_path)
         == TRACKER_GITHUB_ISSUES
     ):
-        final_extra.extend(["--disallowed-tools", _LINEAR_MCP_DISALLOW])
+        final_extra.append(_LINEAR_MCP_DISALLOW_ARG)
     if extra_args:
         final_extra.extend(extra_args)
 
