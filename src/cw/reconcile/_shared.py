@@ -34,7 +34,7 @@ from cw.config import (
     save_state,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -376,6 +376,73 @@ def _backfill_claude_session_ids(
         _log.debug("Backfilled claude_session_id for %d session(s)", count)
         save_state(state)
     return count
+
+
+# Paused-status written to SESSION_NEEDS_ATTENTION events when reconcile
+# detects that Session.claude_session_id does not match the supervisor's
+# resumeSessionId from ~/.claude/jobs/<surface_ref>/state.json.
+# See GitHub issue #519.
+_CSID_MISMATCH_REASON = "csid_mismatch"
+
+
+def _verify_supervisor_session_id(state: CwState) -> int:
+    """Compare stored claude_session_id against the supervisor's resumeSessionId.
+
+    For each ACTIVE/IDLE DAEMON session whose ``surface_ref`` and
+    ``claude_session_id`` are both set, reads the supervisor per-session
+    ``~/.claude/jobs/<surface_ref>/state.json`` and checks whether its
+    ``resumeSessionId`` matches the stored ``claude_session_id``. On
+    mismatch: logs a warning, emits :attr:`SESSION_NEEDS_ATTENTION`, and
+    clears ``surface_ref`` so the next reconcile tick cannot rely on a
+    stale liveness handle.
+
+    A missing or unreadable ``state.json`` is treated as "no continuity
+    claim from the supervisor" and skipped (not an error). Returns the
+    number of sessions whose ``surface_ref`` was cleared; saves state
+    when non-zero. See RFC 0001 Row 8 and GitHub issue #519.
+    """
+    cleared = 0
+    for session in state.sessions:
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if session.surface_ref is None or session.claude_session_id is None:
+            continue
+        resume_id = _deps.read_supervisor_resume_session_id(session.surface_ref)
+        if resume_id is None:
+            continue
+        if resume_id == session.claude_session_id:
+            continue
+        _log.warning(
+            "csid_mismatch: session=%s surface_ref=%s"
+            " stored_csid=%s supervisor_resume_id=%s — clearing surface_ref",
+            session.id,
+            session.surface_ref,
+            session.claude_session_id,
+            resume_id,
+        )
+        ticket_id = ticket_id_for_session(session.name)
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "supervisor_resume_id": resume_id,
+                "surface_ref": session.surface_ref,
+                "paused_status": _CSID_MISMATCH_REASON,
+                "crashed": False,
+            },
+            correlation_id=ticket_id or session.id,
+        )
+        session.surface_ref = None
+        cleared += 1
+    if cleared:
+        save_state(state)
+    return cleared
 
 
 def resolve_headless_budget(

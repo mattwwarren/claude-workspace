@@ -47,6 +47,12 @@ _DEFAULT_PERMISSION_MODE = "auto"
 # spawns or stops, so it's a reliable liveness oracle.
 _ROSTER_PATH = Path.home() / ".claude" / "daemon" / "roster.json"
 
+# Base path for per-session supervisor state files. Each background session
+# has a ``<short_id>/state.json`` under this directory containing
+# ``resumeSessionId`` (the full UUID the supervisor associates with the
+# session). See RFC 0001 Row 8 and GitHub issue #519.
+_JOBS_PATH = Path.home() / ".claude" / "jobs"
+
 # Regex that matches the short session id Claude prints on a successful
 # ``claude --bg`` invocation: ``backgrounded · <8 hex chars>``.
 _BG_STDOUT_PATTERN = re.compile(
@@ -283,3 +289,30 @@ def get_native_daemon_client() -> NativeDaemonClient:
     spawn/reconcile entry points.
     """
     return RealNativeDaemonClient()
+
+
+def read_supervisor_resume_session_id(
+    short_id: str, *, jobs_path: Path | None = None
+) -> str | None:
+    """Return the supervisor's resumeSessionId for *short_id*, or None.
+
+    Reads ``~/.claude/jobs/<short_id>/state.json`` (or *jobs_path*) and
+    extracts the ``resumeSessionId`` field. Returns ``None`` when the file
+    is absent, unreadable, not valid JSON, or the key is missing — treat
+    any of these as "no continuity claim from the supervisor" rather than
+    an error. See RFC 0001 Row 8 and GitHub issue #519.
+    """
+    base = jobs_path if jobs_path is not None else _JOBS_PATH
+    state_path = base / short_id / "state.json"
+    try:
+        raw = state_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data: dict[str, Any] = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("resumeSessionId")
+    return value if isinstance(value, str) else None

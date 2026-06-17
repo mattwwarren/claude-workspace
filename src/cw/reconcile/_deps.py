@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from cw.config import load_effective_clients
 from cw.gh import pr_is_merged_for_ticket
-from cw.native_daemon import get_native_daemon_client
+from cw.native_daemon import get_native_daemon_client, read_supervisor_resume_session_id
 from cw.notify import fire_push_notification
 from cw.worktree import _checked_out_branch as checked_out_branch
 
@@ -29,4 +29,5 @@ __all__ = [
     "get_native_daemon_client",
     "load_effective_clients",
     "pr_is_merged_for_ticket",
+    "read_supervisor_resume_session_id",
 ]

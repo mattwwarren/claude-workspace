@@ -27,6 +27,7 @@ from cw.reconcile._shared import (
     _claude_agents_json,
     _looks_like_daemon_outage,
     _SalvageCandidate,
+    _verify_supervisor_session_id,
     compute_drift,
     ticket_id_for_session,
 )
@@ -200,6 +201,7 @@ def _reconcile_locked(
             completed_ticket_ids=merged_from_stalled,
         ), []
     _backfill_claude_session_ids(state, surface_to_full)
+    _verify_supervisor_session_id(state)
 
     # Snapshot sessions that are already TIMED_OUT before the watchdog sweep,
     # so we can detect which sessions were newly reaped by usage_limit_cutoff.
