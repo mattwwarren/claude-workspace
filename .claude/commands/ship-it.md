@@ -1,6 +1,6 @@
 ---
 description: "Ship the current branch as a PR with auto-merge enabled (claude-workspace project ship-it)"
-argument-hint: "[--base <branch>]"
+argument-hint: "[--base <branch>] [--title <value>]"
 allowed-tools: ["Bash", "Read"]
 ---
 
@@ -14,9 +14,16 @@ Quality gates (ruff/mypy/pytest) are handled by `/prep-pr` Step 7 — do not re-
 
 ---
 
-## Step 1: Parse base branch
+## Step 1: Parse arguments
 
-Default to `main`. Override with `--base <branch>` if provided in `$ARGUMENTS`.
+Default base to `main`. Override with `--base <branch>` if provided in `$ARGUMENTS`. Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
+
+```bash
+EXPLICIT_TITLE=""
+if printf '%s' "$ARGUMENTS" | grep -qE '(^| )--title '; then
+  EXPLICIT_TITLE=$(printf '%s' "$ARGUMENTS" | sed 's/.*--title //' | sed 's/ --.*//')
+fi
+```
 
 ## Step 2: Confirm branch is pushed
 
@@ -100,8 +107,8 @@ $RANGE_BODY
 - [ ] No regressions in dispatch, reconcile, or other affected modules
 
 ${CLOSES_TRAILER}
-
-${LAST_RESORT_TITLE:+> Title derived from HEAD commit — verify it is correct.
+${LAST_RESORT_TITLE:+
+> Title derived from HEAD commit — verify it is correct.
 }🤖 Shipped via /prep-pr + project /ship-it
 EOF
 )"
