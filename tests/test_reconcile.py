@@ -13035,3 +13035,35 @@ class TestVerifySupervisorSessionId:
         cleared = _verify_supervisor_session_id(load_state())
         assert cleared == 0
         assert called == []
+
+    def test_user_origin_session_is_skipped(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-DAEMON (USER) sessions are not checked."""
+        short_id = "b8c9d0e1"
+        stored_csid = "b8c9d0e1-0000-0000-0000-000000000001"
+        session = Session(
+            id="s8",
+            name="client-a/auto-dev/s8",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.USER,
+            status=SessionStatus.ACTIVE,
+            workspace_path=ClientConfig(
+                name="client-a", workspace_path=Path("/tmp/ws")
+            ).workspace_path,
+            surface_ref=short_id,
+            claude_session_id=stored_csid,
+            started_at=datetime(2026, 4, 19, tzinfo=UTC),
+        )
+        state = CwState(sessions=[session])
+        save_state(state)
+
+        called: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.read_supervisor_resume_session_id",
+            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+        )
+        cleared = _verify_supervisor_session_id(load_state())
+        assert cleared == 0
+        assert called == []
