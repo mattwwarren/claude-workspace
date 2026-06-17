@@ -14,7 +14,7 @@ import freezegun
 import pytest
 
 from cw._util import claude_project_dir
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, BlockedResult, parse_stdout
 from cw.config import load_state, save_state, sessions_lock
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -12791,6 +12791,46 @@ class TestApplySentinelToTaskStagedAdvance:
         )
         assert t.stage == Stage.IMPL, (
             f"expected stage=IMPL after PLAN→IMPL advance, got {t.stage!r}"
+        )
+
+    def test_status_unknown_blocked_does_not_complete_task(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """#750: an unknown-status sentinel must NOT be marked COMPLETED.
+
+        A worker that emitted status='proceed' (not a valid Status) parses to a
+        BlockedResult(status_unknown). The old `else → COMPLETED` fallback
+        silently marked the ticket shipped despite no branch/PR (the #728 loss).
+        It must route to FAILED — never claim false success.
+        """
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+        ticket_id = "GH-750"
+        session_id = "sess-750"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = parse_stdout(
+            "<<<AUTO_DEV_RESULT\n"
+            '{"schema_version": 4, "ticket_id": "GH-750", "status": "proceed"}\n'
+            "AUTO_DEV_RESULT>>>"
+        )
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "status_unknown"
+
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED, (
+            f"unknown-status sentinel must not COMPLETE (silent false-ship); "
+            f"got {t.status!r}"
         )
 
     def test_plan_pending_approval_null_tier_scope_hint_small_advances(

@@ -627,7 +627,12 @@ def _apply_sentinel_to_task(
             target.status = QueueItemStatus.PENDING
             target.session_id = None
         else:
-            target.status = QueueItemStatus.COMPLETED
+            # An unparseable/unknown-status sentinel (status_unknown,
+            # multiple_result_blocks, any unrecognized reason) carries NO success
+            # signal. Never mark it COMPLETED — that silently retires unshipped
+            # work as "shipped" (#750, the #728 loss). Surface as FAILED so the
+            # operator sees it instead of a phantom completion.
+            target.status = QueueItemStatus.FAILED
 
         save_dev_queue(store)
 

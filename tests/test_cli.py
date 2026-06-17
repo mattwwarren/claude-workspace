@@ -2369,17 +2369,19 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
 
-    def test_signal_stop_unknown_blocker_reason_marks_completed(
+    def test_signal_stop_unknown_blocker_reason_marks_failed(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
     ) -> None:
-        """Unknown blocker reason → task COMPLETED (conservative, don't re-burn cycles).
+        """Unknown blocker reason → task FAILED (terminal, but never false success).
 
-        Regression for GitHub issue #263 Bug A: unrecognised BlockedResult
-        reasons must not perpetually re-dispatch via PENDING.  COMPLETED is
-        the conservative terminal state for anything that doesn't match a
-        known deterministic or transient failure reason.
+        #263 Bug A: unrecognised BlockedResult reasons must not perpetually
+        re-dispatch via PENDING — they need a TERMINAL state. #750: that terminal
+        state must NOT be COMPLETED — a BlockedResult carries no success signal,
+        and COMPLETED silently retires unshipped work as "shipped" (the #728
+        loss). FAILED satisfies both: terminal (no re-burn) and honest
+        (operator-visible, not a phantom completion).
         """
         from cw.auto_dev_result import BlockedResult, Blocker
         from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -2413,7 +2415,7 @@ class TestSignalStop:
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
-        assert task.status == QueueItemStatus.COMPLETED
+        assert task.status == QueueItemStatus.FAILED
 
 
 class TestSentinelPresentInTranscript:
