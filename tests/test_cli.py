@@ -6342,10 +6342,9 @@ class TestDevQueueWaitSentinelAware:
 
         def _fake_load() -> DevQueueStore:
             call_count[0] += 1
-            status = (
-                QueueItemStatus.RUNNING if call_count[0] <= 1 else QueueItemStatus.PENDING
-            )
-            sid = session_id if call_count[0] <= 1 else None
+            first = call_count[0] <= 1
+            status = QueueItemStatus.RUNNING if first else QueueItemStatus.PENDING
+            sid = session_id if first else None
             return DevQueueStore(
                 tasks=[
                     TicketTask(
@@ -6377,9 +6376,13 @@ class TestDevQueueWaitSentinelAware:
         )
 
         monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
-        # First poll deadline check → 0.0 (no timeout); second → 9999 (would
-        # timeout if reap is not detected, asserting the fix is actually needed).
-        monotonic_calls = iter([0.0, 9999.0])
+        # Monotonic call sequence:
+        #   call 1 — deadline init (0.0 → deadline=300)
+        #   call 2 — first-poll _raise_if_deadline_exceeded (0.0 → not expired)
+        #   call 3 — second-poll spawn-window deadline check (9999 → expired,
+        #             only reached when the fix is NOT applied; with the fix
+        #             _handle_reaped_mid_wait raises before this is needed).
+        monotonic_calls = iter([0.0, 0.0, 9999.0])
         monkeypatch.setattr(
             "cw.cli.dev_queue.time.monotonic", lambda: next(monotonic_calls, 9999.0)
         )
