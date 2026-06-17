@@ -6,10 +6,7 @@ import json
 import os
 import subprocess
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
-
-import yaml
 
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
@@ -18,17 +15,17 @@ from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus, TicketTask
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import _csid_from_transcript
+from cw.tracker import resolve_tracker
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import ClientConfig
     from cw.native_daemon import NativeDaemonClient
 
 # Schema version for cw-context.json. Increment when the shape changes so
 # workers can detect whether they are reading a context written by an older cw.
 CW_CONTEXT_SCHEMA_VERSION = 1
-
-# Repo-relative path to the per-client tracker config the auto-dev skills read.
-_PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
 
 # --disallowed-tools pattern that blocks all Linear MCP tools. Injected into
 # headless worker spawns when the client tracker is github-issues, preventing
@@ -45,33 +42,6 @@ def _git_clean_env() -> dict[str, str]:
     subprocess.run git call operates on the path it is explicitly given via -C.
     """
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-
-
-def _read_tracker_system(client: ClientConfig) -> str | None:
-    """Return tracking.primary.system from the client's project-config.yaml, or None.
-
-    Reads <workspace_root>/.claude/project-config.yaml and extracts the tracker
-    system string. Returns None when the file is absent, unparseable, or the key
-    is missing — callers treat None as "unknown tracker, don't restrict."
-    """
-    root = client.repo_path or client.workspace_path
-    path = root / _PROJECT_CONFIG_RELPATH
-    if not path.exists():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    tracking = raw.get("tracking")
-    if not isinstance(tracking, dict):
-        return None
-    primary = tracking.get("primary")
-    if not isinstance(primary, dict):
-        return None
-    system = primary.get("system")
-    return system if isinstance(system, str) else None
 
 
 def _validate_worktree(path: Path) -> None:
@@ -336,7 +306,7 @@ def spawn_create_impl(
     final_extra: list[str] = []
     if client.worker_model:
         final_extra.extend(["--model", client.worker_model])
-    if _read_tracker_system(client) == "github-issues":
+    if resolve_tracker(client.repo_path or client.workspace_path) == "github-issues":
         final_extra.extend(["--disallowed-tools", _LINEAR_MCP_DISALLOW])
     if extra_args:
         final_extra.extend(extra_args)
