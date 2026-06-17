@@ -17,6 +17,7 @@ from cw.cli import (
     config_cmds,
     maintenance,
     queues,
+    worktree,
 )
 from cw.cli._base import (
     _complete_client,
@@ -81,4 +82,5 @@ __all__ = [
     "main",
     "maintenance",
     "queues",
+    "worktree",
 ]

@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from cw.worktree_gc import (
+    _GIT_BRANCH_DELETE_FLAG,
     GcVerdict,
     WorktreeEntry,
     WorktreeGcReport,
@@ -19,10 +19,6 @@ from cw.worktree_gc import (
     remove_worktree_gc,
     run_worktree_gc,
 )
-
-if TYPE_CHECKING:
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,6 +112,13 @@ class TestListRepoWorktrees:
 
         assert entries == []
 
+    def test_oserror_returns_empty(self, tmp_path: Path) -> None:
+        main = tmp_path / "repo"
+        with patch("cw.worktree_gc._sp.run", side_effect=OSError("git not found")):
+            entries = list_repo_worktrees(main)
+
+        assert entries == []
+
     def test_locked_with_reason(self, tmp_path: Path) -> None:
         """locked line may have optional reason after space."""
         main = tmp_path / "repo"
@@ -132,6 +135,22 @@ class TestListRepoWorktrees:
         assert len(entries) == 1
         assert entries[0].locked is True
 
+    def test_no_trailing_newline_parsed(self, tmp_path: Path) -> None:
+        """Porcelain output without trailing blank line still parses the last block."""
+        main = tmp_path / "repo"
+        wt1 = tmp_path / "wt" / "dev-630"
+        # No trailing \n after the last block
+        porcelain = (
+            f"worktree {main}\nHEAD abc\nbranch refs/heads/main\n\n"
+            f"worktree {wt1}\nHEAD def\nbranch refs/heads/dev/630"
+        )
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=porcelain, stderr="")
+            entries = list_repo_worktrees(main)
+
+        assert len(entries) == 1
+        assert entries[0].branch == "dev/630"
+
 
 # ---------------------------------------------------------------------------
 # check_pr_state
@@ -143,42 +162,47 @@ class TestCheckPrState:
         payload = json.dumps([{"state": "MERGED", "number": 735}])
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            state, gh_available = check_pr_state("dev/630")
+            state, pr_number, gh_available = check_pr_state("dev/630")
 
         assert state == "MERGED"
+        assert pr_number == 735
         assert gh_available is True
 
     def test_returns_open(self) -> None:
         payload = json.dumps([{"state": "OPEN", "number": 736}])
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            state, gh_available = check_pr_state("dev/631")
+            state, pr_number, gh_available = check_pr_state("dev/631")
 
         assert state == "OPEN"
+        assert pr_number == 736
         assert gh_available is True
 
     def test_returns_closed(self) -> None:
         payload = json.dumps([{"state": "CLOSED", "number": 734}])
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            state, gh_available = check_pr_state("dev/629")
+            state, pr_number, gh_available = check_pr_state("dev/629")
 
         assert state == "CLOSED"
+        assert pr_number == 734
         assert gh_available is True
 
     def test_no_prs_returns_empty_string(self) -> None:
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-            state, gh_available = check_pr_state("rfc/0006")
+            state, pr_number, gh_available = check_pr_state("rfc/0006")
 
         assert state == ""
+        assert pr_number is None
         assert gh_available is True
 
     def test_gh_not_found_returns_none_false(self) -> None:
         with patch("cw.worktree_gc._sp.run", side_effect=FileNotFoundError):
-            state, gh_available = check_pr_state("dev/630")
+            state, pr_number, gh_available = check_pr_state("dev/630")
 
         assert state is None
+        assert pr_number is None
         assert gh_available is False
 
     def test_timeout_returns_none_true(self) -> None:
@@ -186,17 +210,19 @@ class TestCheckPrState:
             "cw.worktree_gc._sp.run",
             side_effect=subprocess.TimeoutExpired("gh", 10),
         ):
-            state, gh_available = check_pr_state("dev/630")
+            state, pr_number, gh_available = check_pr_state("dev/630")
 
         assert state is None
+        assert pr_number is None
         assert gh_available is True
 
     def test_non_zero_exit_returns_none_true(self) -> None:
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
-            state, gh_available = check_pr_state("dev/630")
+            state, pr_number, gh_available = check_pr_state("dev/630")
 
         assert state is None
+        assert pr_number is None
         assert gh_available is True
 
     def test_bad_json_returns_none_true(self) -> None:
@@ -204,9 +230,10 @@ class TestCheckPrState:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="not json", stderr=""
             )
-            state, gh_available = check_pr_state("dev/630")
+            state, pr_number, gh_available = check_pr_state("dev/630")
 
         assert state is None
+        assert pr_number is None
         assert gh_available is True
 
     def test_passes_state_all_flag(self) -> None:
@@ -254,31 +281,67 @@ class TestClassifyWorktrees:
 
         assert results[0].verdict == GcVerdict.SKIP_DETACHED
 
-    def test_merged_pr_gets_remove_merged(self, tmp_path: Path) -> None:
+    def test_merged_pr_clean_gets_remove_merged(self, tmp_path: Path) -> None:
         entries = [self._make_entry(tmp_path, "wt1", branch="dev/630")]
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
-            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", True)),
+            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
         assert results[0].verdict == GcVerdict.REMOVE_MERGED
+        assert results[0].pr_number == 735
 
-    def test_closed_pr_gets_remove_closed(self, tmp_path: Path) -> None:
-        entries = [self._make_entry(tmp_path, "wt1", branch="dev/629")]
+    def test_merged_pr_dirty_gets_skip_dirty(self, tmp_path: Path) -> None:
+        entries = [self._make_entry(tmp_path, "wt1", branch="dev/630")]
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
-            patch("cw.worktree_gc.check_pr_state", return_value=("CLOSED", True)),
+            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
+            patch("cw.worktree_gc._is_dirty", return_value=True),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
+        assert results[0].verdict == GcVerdict.SKIP_DIRTY
+
+    def test_closed_pr_default_keeps(self, tmp_path: Path) -> None:
+        """CLOSED PRs are kept by default (include_closed=False)."""
+        entries = [self._make_entry(tmp_path, "wt1", branch="dev/629")]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", return_value=("CLOSED", 734, True)),
+        ):
+            results = classify_worktrees(tmp_path / "repo")
+
+        assert results[0].verdict == GcVerdict.KEEP_NO_PR
+
+    def test_closed_pr_include_closed_gets_remove(self, tmp_path: Path) -> None:
+        entries = [self._make_entry(tmp_path, "wt1", branch="dev/629")]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", return_value=("CLOSED", 734, True)),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
+        ):
+            results = classify_worktrees(tmp_path / "repo", include_closed=True)
+
         assert results[0].verdict == GcVerdict.REMOVE_CLOSED
+
+    def test_closed_pr_include_closed_dirty_keeps(self, tmp_path: Path) -> None:
+        entries = [self._make_entry(tmp_path, "wt1", branch="dev/629")]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", return_value=("CLOSED", 734, True)),
+            patch("cw.worktree_gc._is_dirty", return_value=True),
+        ):
+            results = classify_worktrees(tmp_path / "repo", include_closed=True)
+
+        assert results[0].verdict == GcVerdict.KEEP_NO_PR
 
     def test_open_pr_gets_keep_open_pr(self, tmp_path: Path) -> None:
         entries = [self._make_entry(tmp_path, "wt1", branch="dev/631")]
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
-            patch("cw.worktree_gc.check_pr_state", return_value=("OPEN", True)),
+            patch("cw.worktree_gc.check_pr_state", return_value=("OPEN", 736, True)),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
@@ -288,7 +351,7 @@ class TestClassifyWorktrees:
         entries = [self._make_entry(tmp_path, "wt1", branch="rfc/0006")]
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
-            patch("cw.worktree_gc.check_pr_state", return_value=("", True)),
+            patch("cw.worktree_gc.check_pr_state", return_value=("", None, True)),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
@@ -298,7 +361,7 @@ class TestClassifyWorktrees:
         entries = [self._make_entry(tmp_path, "wt1", branch="dev/630")]
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
-            patch("cw.worktree_gc.check_pr_state", return_value=(None, False)),
+            patch("cw.worktree_gc.check_pr_state", return_value=(None, None, False)),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
@@ -309,7 +372,7 @@ class TestClassifyWorktrees:
         entries = [self._make_entry(tmp_path, "wt1", branch="dev/630")]
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
-            patch("cw.worktree_gc.check_pr_state", return_value=(None, True)),
+            patch("cw.worktree_gc.check_pr_state", return_value=(None, None, True)),
         ):
             results = classify_worktrees(tmp_path / "repo")
 
@@ -317,15 +380,43 @@ class TestClassifyWorktrees:
 
     def test_pr_number_stored(self, tmp_path: Path) -> None:
         entries = [self._make_entry(tmp_path, "wt1", branch="dev/630")]
-        payload = json.dumps([{"state": "MERGED", "number": 735}])
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
-            patch("cw.worktree_gc._sp.run") as mock_run,
+            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
         ):
-            mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
             results = classify_worktrees(tmp_path / "repo")
 
         assert results[0].pr_number == 735
+
+
+# ---------------------------------------------------------------------------
+# _is_dirty
+# ---------------------------------------------------------------------------
+
+
+class TestIsDirty:
+    def test_clean_worktree_returns_false(self, tmp_path: Path) -> None:
+        from cw.worktree_gc import _is_dirty
+
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            assert _is_dirty(tmp_path) is False
+
+    def test_dirty_worktree_returns_true(self, tmp_path: Path) -> None:
+        from cw.worktree_gc import _is_dirty
+
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout=" M some/file.py\n", stderr=""
+            )
+            assert _is_dirty(tmp_path) is True
+
+    def test_oserror_returns_false(self, tmp_path: Path) -> None:
+        from cw.worktree_gc import _is_dirty
+
+        with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")):
+            assert _is_dirty(tmp_path) is False
 
 
 # ---------------------------------------------------------------------------
@@ -340,10 +431,9 @@ class TestRemoveWorktreeGc:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             remove_worktree_gc(entry, tmp_path / "repo")
 
-        calls = mock_run.call_args_list
-        cmds = [c[0][0] for c in calls]
+        cmds = [c[0][0] for c in mock_run.call_args_list]
         assert any("worktree" in cmd and "remove" in cmd for cmd in cmds)
-        assert any("branch" in cmd and "-d" in cmd for cmd in cmds)
+        assert any("branch" in cmd and _GIT_BRANCH_DELETE_FLAG in cmd for cmd in cmds)
 
     def test_branch_delete_failure_does_not_raise(self, tmp_path: Path) -> None:
         entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
@@ -365,6 +455,35 @@ class TestRemoveWorktreeGc:
 
         cmds = [c[0][0] for c in mock_run.call_args_list]
         assert not any("branch" in cmd for cmd in cmds)
+
+    def test_skip_branch_delete_kwarg(self, tmp_path: Path) -> None:
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            remove_worktree_gc(entry, tmp_path / "repo", delete_branch=False)
+
+        cmds = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("branch" in cmd for cmd in cmds)
+
+    def test_worktree_remove_failure_skips_branch_delete(self, tmp_path: Path) -> None:
+        """If worktree remove fails, branch delete is skipped to avoid inconsistency."""
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+
+        def _side_effect(cmd: list[str], **_kw: object) -> MagicMock:
+            if "worktree" in cmd and "remove" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="error")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("cw.worktree_gc._sp.run", side_effect=_side_effect) as mock_run:
+            remove_worktree_gc(entry, tmp_path / "repo")
+
+        cmds = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("branch" in cmd for cmd in cmds)
+
+    def test_branch_flag_is_force_delete(self, tmp_path: Path) -> None:
+        """Branch deletion uses -D (force) not -d (safe), since squash-merged
+        branches are never ancestors of main."""
+        assert _GIT_BRANCH_DELETE_FLAG == "-D"
 
 
 # ---------------------------------------------------------------------------
@@ -404,9 +523,10 @@ class TestWorktreeGcReport:
             self._make_result(tmp_path / "a", GcVerdict.SKIP_LOCKED),
             self._make_result(tmp_path / "b", GcVerdict.SKIP_DETACHED),
             self._make_result(tmp_path / "c", GcVerdict.SKIP_GH_UNAVAILABLE),
+            self._make_result(tmp_path / "d", GcVerdict.SKIP_DIRTY),
         ]
         report = WorktreeGcReport(results=results)
-        assert len(report.skipped) == 3
+        assert len(report.skipped) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -414,12 +534,14 @@ class TestWorktreeGcReport:
 # ---------------------------------------------------------------------------
 
 
-def _pr_state_side_effect(branch: str, timeout: int = 10) -> tuple[str | None, bool]:
+def _pr_state_side_effect(
+    branch: str, timeout: int = 10
+) -> tuple[str | None, int | None, bool]:
     if branch == "dev/630":
-        return "MERGED", True
+        return "MERGED", 735, True
     if branch == "dev/631":
-        return "OPEN", True
-    return "", True
+        return "OPEN", 736, True
+    return "", None, True
 
 
 class TestRunWorktreeGc:
@@ -438,6 +560,7 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=False)
@@ -447,7 +570,7 @@ class TestRunWorktreeGc:
         assert len(report.kept) == 1
         assert len(report.skipped) == 1
 
-    def test_apply_removes(self, tmp_path: Path) -> None:
+    def test_apply_removes_merged(self, tmp_path: Path) -> None:
         entries = self._make_entries(tmp_path)
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
@@ -455,11 +578,14 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=True)
 
         assert mock_remove.call_count == 1
+        removed_entry = mock_remove.call_args[0][0]
+        assert removed_entry.branch == "dev/630"
         assert len(report.to_remove) == 1
 
     def test_apply_skips_locked(self, tmp_path: Path) -> None:
@@ -470,6 +596,7 @@ class TestRunWorktreeGc:
                 "cw.worktree_gc.check_pr_state",
                 side_effect=_pr_state_side_effect,
             ),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             run_worktree_gc(tmp_path / "repo", apply=True)
@@ -477,6 +604,45 @@ class TestRunWorktreeGc:
         # Only the merged one should be removed, not the locked one
         removed_entries = [c[0][0] for c in mock_remove.call_args_list]
         assert all(e.branch == "dev/630" for e in removed_entries)
+
+    def test_include_closed_removes_closed(self, tmp_path: Path) -> None:
+        entries = [
+            WorktreeEntry(path=tmp_path / "wt-closed", branch="dev/629", locked=False),
+        ]
+
+        def _closed_state(
+            branch: str, timeout: int = 10
+        ) -> tuple[str | None, int | None, bool]:
+            return "CLOSED", 734, True
+
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", side_effect=_closed_state),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
+        ):
+            run_worktree_gc(tmp_path / "repo", apply=True, include_closed=True)
+
+        mock_remove.assert_called_once()
+
+    def test_closed_default_not_removed(self, tmp_path: Path) -> None:
+        entries = [
+            WorktreeEntry(path=tmp_path / "wt-closed", branch="dev/629", locked=False),
+        ]
+
+        def _closed_state(
+            branch: str, timeout: int = 10
+        ) -> tuple[str | None, int | None, bool]:
+            return "CLOSED", 734, True
+
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", side_effect=_closed_state),
+            patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
+        ):
+            run_worktree_gc(tmp_path / "repo", apply=True)
+
+        mock_remove.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -512,10 +678,10 @@ class TestWorktreeGcCli:
         runner = CliRunner()
         with (
             patch(
-                "cw.cli.maintenance.load_clients",
+                "cw.cli.worktree.load_clients",
                 return_value={"test-client": client},
             ),
-            patch("cw.cli.maintenance.run_worktree_gc", return_value=report),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report),
         ):
             result = runner.invoke(
                 cli_main, ["worktree", "gc", "--client", "test-client"]
@@ -541,10 +707,10 @@ class TestWorktreeGcCli:
         runner = CliRunner()
         with (
             patch(
-                "cw.cli.maintenance.load_clients",
+                "cw.cli.worktree.load_clients",
                 return_value={"test-client": client},
             ),
-            patch("cw.cli.maintenance.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
         ):
             runner.invoke(
                 cli_main, ["worktree", "gc", "--client", "test-client", "--apply"]
@@ -553,6 +719,71 @@ class TestWorktreeGcCli:
         mock_gc.assert_called_once()
         _, kwargs = mock_gc.call_args
         assert kwargs.get("apply") is True
+
+    def test_apply_output_shows_removed(self, tmp_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+        from cw.models import ClientConfig
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "repo",
+        )
+        entry = WorktreeEntry(
+            path=tmp_path / "wt-merged", branch="dev/630", locked=False
+        )
+        results = [
+            WorktreeGcResult(
+                entry=entry, verdict=GcVerdict.REMOVE_MERGED, pr_number=735
+            ),
+        ]
+        report = WorktreeGcReport(results=results)
+
+        runner = CliRunner()
+        with (
+            patch(
+                "cw.cli.worktree.load_clients",
+                return_value={"test-client": client},
+            ),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report),
+        ):
+            result = runner.invoke(
+                cli_main,
+                ["worktree", "gc", "--client", "test-client", "--apply"],
+            )
+
+        assert result.exit_code == 0
+        assert "applying" in result.output
+        assert "removed" in result.output
+
+    def test_include_closed_flag_passed(self, tmp_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+        from cw.models import ClientConfig
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "repo",
+        )
+        report = WorktreeGcReport(results=[])
+
+        runner = CliRunner()
+        with (
+            patch(
+                "cw.cli.worktree.load_clients",
+                return_value={"test-client": client},
+            ),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+        ):
+            runner.invoke(
+                cli_main,
+                ["worktree", "gc", "--client", "test-client", "--include-closed"],
+            )
+
+        _, kwargs = mock_gc.call_args
+        assert kwargs.get("include_closed") is True
 
     def test_no_client_multi_clients_errors(self, tmp_path: Path) -> None:
         from click.testing import CliRunner
@@ -566,7 +797,7 @@ class TestWorktreeGcCli:
         }
 
         runner = CliRunner()
-        with patch("cw.cli.maintenance.load_clients", return_value=clients):
+        with patch("cw.cli.worktree.load_clients", return_value=clients):
             result = runner.invoke(cli_main, ["worktree", "gc"])
 
         assert result.exit_code != 0
@@ -586,11 +817,43 @@ class TestWorktreeGcCli:
         runner = CliRunner()
         with (
             patch(
-                "cw.cli.maintenance.load_clients",
+                "cw.cli.worktree.load_clients",
                 return_value={"test-client": client},
             ),
-            patch("cw.cli.maintenance.run_worktree_gc", return_value=report),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report),
         ):
             result = runner.invoke(cli_main, ["worktree", "gc"])
 
         assert result.exit_code == 0
+
+    def test_no_clients_configured_errors(self, tmp_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+
+        runner = CliRunner()
+        with patch("cw.cli.worktree.load_clients", return_value={}):
+            result = runner.invoke(cli_main, ["worktree", "gc"])
+
+        assert result.exit_code != 0
+
+    def test_unknown_client_errors(self, tmp_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+        from cw.models import ClientConfig
+
+        client = ClientConfig(
+            name="real-client",
+            workspace_path=tmp_path / "repo",
+        )
+
+        runner = CliRunner()
+        with patch(
+            "cw.cli.worktree.load_clients", return_value={"real-client": client}
+        ):
+            result = runner.invoke(
+                cli_main, ["worktree", "gc", "--client", "nonexistent"]
+            )
+
+        assert result.exit_code != 0
