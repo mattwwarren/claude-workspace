@@ -24,6 +24,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.spawn import _LINEAR_MCP_DISALLOW
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2134,7 +2135,7 @@ class TestLinearMcpDisallow:
 
         assert daemon.spawn_extra_args[0] == [
             "--disallowed-tools",
-            "mcp__plugin_linear_linear__*",
+            _LINEAR_MCP_DISALLOW,
         ]
 
     def test_linear_tracker_does_not_inject_disallow_flag(
@@ -2218,7 +2219,7 @@ class TestLinearMcpDisallow:
             "--model",
             "claude-sonnet-4-6-20251015",
             "--disallowed-tools",
-            "mcp__plugin_linear_linear__*",
+            _LINEAR_MCP_DISALLOW,
         ]
 
     def test_github_issues_with_extra_args_appended_after_disallow(
@@ -2248,7 +2249,7 @@ class TestLinearMcpDisallow:
 
         assert daemon.spawn_extra_args[0] == [
             "--disallowed-tools",
-            "mcp__plugin_linear_linear__*",
+            _LINEAR_MCP_DISALLOW,
             "--resume",
             "abc12345",
         ]

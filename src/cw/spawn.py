@@ -15,7 +15,7 @@ from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus, TicketTask
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import _csid_from_transcript
-from cw.tracker import resolve_tracker
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -306,7 +306,10 @@ def spawn_create_impl(
     final_extra: list[str] = []
     if client.worker_model:
         final_extra.extend(["--model", client.worker_model])
-    if resolve_tracker(client.repo_path or client.workspace_path) == "github-issues":
+    if (
+        resolve_tracker(client.repo_path or client.workspace_path)
+        == TRACKER_GITHUB_ISSUES
+    ):
         final_extra.extend(["--disallowed-tools", _LINEAR_MCP_DISALLOW])
     if extra_args:
         final_extra.extend(extra_args)

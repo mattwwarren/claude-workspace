@@ -14,6 +14,10 @@ import yaml
 # Repo-relative path to the per-client tracker config the auto-dev skills read.
 PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
 
+# Canonical tracker-system identifier for GitHub Issues. Used at spawn/session
+# chokepoints to decide whether to withhold Linear MCP tools from headless workers.
+TRACKER_GITHUB_ISSUES = "github-issues"
+
 
 def resolve_tracker(root: Path) -> str | None:
     """Return tracking.primary.system from <root>/.claude/project-config.yaml, or None.

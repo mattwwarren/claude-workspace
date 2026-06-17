@@ -25,6 +25,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
+from cw.spawn import _LINEAR_MCP_DISALLOW
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -930,9 +931,7 @@ class TestResumeSession:
         resume_session("test-client/impl", native_daemon=mock_native_daemon)
 
         assert "--disallowed-tools" in (mock_native_daemon.spawn_extra_args[0] or [])
-        assert "mcp__plugin_linear_linear__*" in (
-            mock_native_daemon.spawn_extra_args[0] or []
-        )
+        assert _LINEAR_MCP_DISALLOW in (mock_native_daemon.spawn_extra_args[0] or [])
 
     def test_resume_user_session_does_not_inject_disallow_flag(
         self,
