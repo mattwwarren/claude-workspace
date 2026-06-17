@@ -102,6 +102,7 @@ class WorktreeGcReport:
     """Aggregated output from :func:`run_worktree_gc`."""
 
     results: list[WorktreeGcResult]
+    removal_failures: int = 0  # REMOVE_* worktrees where git worktree remove failed
 
     @property
     def to_remove(self) -> list[WorktreeGcResult]:
@@ -441,8 +442,12 @@ def remove_worktree_gc(
     git_cwd: Path,
     *,
     delete_branch: bool = True,
-) -> None:
+) -> bool:
     """Remove *entry*'s worktree and optionally delete its local branch.
+
+    Returns True when the worktree was successfully removed, False otherwise.
+    Branch deletion failure does not affect the return value — the worktree
+    is gone, only the local ref cleanup failed (logged as a warning).
 
     Uses ``git worktree remove --force`` then ``git branch -D`` (force-delete).
     Branch deletion is skipped when worktree removal fails to avoid leaving
@@ -469,7 +474,7 @@ def remove_worktree_gc(
             wt_result.returncode,
             wt_result.stderr.strip(),
         )
-        return
+        return False
 
     _log.info(
         "remove_worktree_gc: removed worktree %s (branch=%s)", entry.path, entry.branch
@@ -493,6 +498,8 @@ def remove_worktree_gc(
             )
         else:
             _log.info("remove_worktree_gc: deleted branch %s", entry.branch)
+
+    return True
 
 
 def run_worktree_gc(
@@ -528,6 +535,7 @@ def run_worktree_gc(
 
     if apply:
         for gc_result in report.to_remove:
-            remove_worktree_gc(gc_result.entry, git_cwd)
+            if not remove_worktree_gc(gc_result.entry, git_cwd):
+                report.removal_failures += 1
 
     return report

@@ -76,7 +76,15 @@ def _format_gc_report(report: WorktreeGcReport, *, apply: bool) -> str:
 
     lines.append("")
     if apply:
-        lines.append(f"{n_remove} removed, {n_keep} kept, {n_skip} skipped")
+        n_ok = n_remove - report.removal_failures
+        if report.removal_failures:
+            lines.append(
+                f"{n_ok} removed, {report.removal_failures} failed"
+                f", {n_keep} kept, {n_skip} skipped"
+                f" (check logs for removal errors)"
+            )
+        else:
+            lines.append(f"{n_remove} removed, {n_keep} kept, {n_skip} skipped")
     else:
         lines.append(f"{n_remove} to remove, {n_keep} to keep, {n_skip} skipped")
 

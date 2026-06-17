@@ -624,8 +624,9 @@ class TestRemoveWorktreeGc:
         entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            remove_worktree_gc(entry, tmp_path / "repo")
+            result = remove_worktree_gc(entry, tmp_path / "repo")
 
+        assert result is True
         cmds = [c[0][0] for c in mock_run.call_args_list]
         assert any("worktree" in cmd and "remove" in cmd for cmd in cmds)
         assert any("branch" in cmd and _GIT_BRANCH_DELETE_FLAG in cmd for cmd in cmds)
@@ -639,8 +640,9 @@ class TestRemoveWorktreeGc:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("cw.worktree_gc._sp.run", side_effect=_side_effect):
-            # Should not raise
-            remove_worktree_gc(entry, tmp_path / "repo")
+            # Branch delete failure does not affect return value (wt was removed)
+            result = remove_worktree_gc(entry, tmp_path / "repo")
+        assert result is True
 
     def test_skip_branch_delete_when_no_branch(self, tmp_path: Path) -> None:
         entry = WorktreeEntry(path=tmp_path / "wt1", branch=None, locked=False)
@@ -670,8 +672,9 @@ class TestRemoveWorktreeGc:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("cw.worktree_gc._sp.run", side_effect=_side_effect) as mock_run:
-            remove_worktree_gc(entry, tmp_path / "repo")
+            result = remove_worktree_gc(entry, tmp_path / "repo")
 
+        assert result is False
         cmds = [c[0][0] for c in mock_run.call_args_list]
         assert not any("branch" in cmd for cmd in cmds)
 
@@ -859,6 +862,48 @@ class TestRunWorktreeGc:
             run_worktree_gc(tmp_path / "repo", apply=True)
 
         mock_remove.assert_not_called()
+
+    def test_apply_tracks_removal_failures(self, tmp_path: Path) -> None:
+        """removal_failures counts worktrees where git worktree remove fails."""
+        entries = [
+            WorktreeEntry(path=tmp_path / "wt-merged", branch="dev/630", locked=False),
+            WorktreeEntry(path=tmp_path / "wt-merged2", branch="dev/631", locked=False),
+        ]
+
+        def _all_merged(
+            branch: str, timeout: int = 10, **_kw: object
+        ) -> tuple[str | None, int | None, bool]:
+            return "MERGED", 730, True
+
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", side_effect=_all_merged),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc.remove_worktree_gc", return_value=False),
+        ):
+            report = run_worktree_gc(tmp_path / "repo", apply=True)
+
+        assert len(report.to_remove) == 2
+        assert report.removal_failures == 2
+
+    def test_apply_no_failures_zero_removal_failures(self, tmp_path: Path) -> None:
+        """Successful removals leave removal_failures at 0."""
+        entries = [
+            WorktreeEntry(path=tmp_path / "wt-merged", branch="dev/630", locked=False),
+        ]
+
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch(
+                "cw.worktree_gc.check_pr_state",
+                side_effect=_pr_state_side_effect,
+            ),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc.remove_worktree_gc", return_value=True),
+        ):
+            report = run_worktree_gc(tmp_path / "repo", apply=True)
+
+        assert report.removal_failures == 0
 
 
 # ---------------------------------------------------------------------------
