@@ -7,6 +7,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -85,6 +86,32 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
 
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Stop tests from firing real desktop notifications.
+
+    ``cw.notify.fire_push_notification`` spawns a daemon thread that shells
+    out to ``notify-send`` and ``peon.sh``. On a machine with a window manager
+    that means every reconcile attention-path under test floods the desktop
+    with real notifications (and can wedge the WM). Every production call site
+    (``reconcile.idle``/``tasks``/``salvage``) reaches the helper through the
+    re-export at ``cw.reconcile._deps.fire_push_notification``, so patching that
+    one seam autouse guarantees no test fires for real — even ones that forget
+    to mock it themselves.
+
+    Tests that assert on the call (``test_reconcile.py``) re-patch the same name
+    inside the test; pytest patches stack and the test-level patch wins.
+    ``test_notify.py`` exercises the real helper via ``cw.notify`` directly and
+    is unaffected. Attribute name must match exactly; drift fails loudly.
+    """
+    notify_mock = MagicMock(name="fire_push_notification")
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        notify_mock,
+    )
+    return notify_mock
 
 
 @pytest.fixture
