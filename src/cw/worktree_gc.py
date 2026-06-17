@@ -55,6 +55,24 @@ class GcVerdict(enum.Enum):
     SKIP_DIRTY = "SKIP_DIRTY"
 
 
+# Canonical verdict partitions — single source of truth for all three report properties
+# and any formatter. Adding a new GcVerdict requires updating exactly one set here.
+GC_REMOVE_VERDICTS: frozenset[GcVerdict] = frozenset(
+    {GcVerdict.REMOVE_MERGED, GcVerdict.REMOVE_CLOSED}
+)
+GC_KEEP_VERDICTS: frozenset[GcVerdict] = frozenset(
+    {GcVerdict.KEEP_OPEN_PR, GcVerdict.KEEP_NO_PR}
+)
+GC_SKIP_VERDICTS: frozenset[GcVerdict] = frozenset(
+    {
+        GcVerdict.SKIP_LOCKED,
+        GcVerdict.SKIP_GH_UNAVAILABLE,
+        GcVerdict.SKIP_DETACHED,
+        GcVerdict.SKIP_DIRTY,
+    }
+)
+
+
 @dataclass(frozen=True)
 class WorktreeEntry:
     """A single git worktree parsed from porcelain output."""
@@ -82,35 +100,17 @@ class WorktreeGcReport:
     @property
     def to_remove(self) -> list[WorktreeGcResult]:
         """Results that should be (or were) removed."""
-        return [
-            r
-            for r in self.results
-            if r.verdict in (GcVerdict.REMOVE_MERGED, GcVerdict.REMOVE_CLOSED)
-        ]
+        return [r for r in self.results if r.verdict in GC_REMOVE_VERDICTS]
 
     @property
     def kept(self) -> list[WorktreeGcResult]:
         """Results that are kept (open PR or no PR)."""
-        return [
-            r
-            for r in self.results
-            if r.verdict in (GcVerdict.KEEP_OPEN_PR, GcVerdict.KEEP_NO_PR)
-        ]
+        return [r for r in self.results if r.verdict in GC_KEEP_VERDICTS]
 
     @property
     def skipped(self) -> list[WorktreeGcResult]:
         """Results that were skipped (locked, dirty, detached, or gh unavailable)."""
-        return [
-            r
-            for r in self.results
-            if r.verdict
-            in (
-                GcVerdict.SKIP_LOCKED,
-                GcVerdict.SKIP_GH_UNAVAILABLE,
-                GcVerdict.SKIP_DETACHED,
-                GcVerdict.SKIP_DIRTY,
-            )
-        ]
+        return [r for r in self.results if r.verdict in GC_SKIP_VERDICTS]
 
 
 def _parse_worktree_blocks(stdout: str) -> list[dict[str, str]]:
@@ -265,6 +265,7 @@ def _is_dirty(wt_path: Path) -> bool:
             capture_output=True,
             text=True,
             check=False,
+            env=_git_clean_env(),
         )
     except (OSError, FileNotFoundError):
         return False
@@ -305,7 +306,8 @@ def classify_worktrees(
     - PR MERGED, dirty → SKIP_DIRTY
     - PR MERGED, clean → REMOVE_MERGED
     - PR CLOSED, include_closed=True, clean → REMOVE_CLOSED
-    - PR CLOSED, include_closed=False or dirty → KEEP_NO_PR
+    - PR CLOSED, include_closed=True, dirty → SKIP_DIRTY
+    - PR CLOSED, include_closed=False → KEEP_NO_PR
     - PR OPEN → KEEP_OPEN_PR
     - No PR or transient error → KEEP_NO_PR (conservative)
     """

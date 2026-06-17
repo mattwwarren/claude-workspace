@@ -7,8 +7,13 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from cw.worktree_gc import (
     _GIT_BRANCH_DELETE_FLAG,
+    GC_KEEP_VERDICTS,
+    GC_REMOVE_VERDICTS,
+    GC_SKIP_VERDICTS,
     GcVerdict,
     WorktreeEntry,
     WorktreeGcReport,
@@ -247,6 +252,16 @@ class TestCheckPrState:
         state_idx = cmd.index("--state")
         assert cmd[state_idx + 1] == "all"
 
+    def test_passes_head_branch_arg(self) -> None:
+        payload = json.dumps([{"state": "MERGED", "number": 735}])
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
+            check_pr_state("dev/630")
+
+        cmd = mock_run.call_args[0][0]
+        head_idx = cmd.index("--head")
+        assert cmd[head_idx + 1] == "dev/630"
+
 
 # ---------------------------------------------------------------------------
 # classify_worktrees
@@ -425,6 +440,21 @@ class TestClassifyWorktrees:
         _, kwargs = mock_gh.call_args
         assert kwargs.get("cwd") == repo
 
+    def test_check_pr_state_receives_timeout(self, tmp_path: Path) -> None:
+        """classify_worktrees forwards timeout to check_pr_state."""
+        repo = tmp_path / "repo"
+        entries = [self._make_entry(tmp_path, "wt1", branch="dev/630")]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch(
+                "cw.worktree_gc.check_pr_state", return_value=("OPEN", 736, True)
+            ) as mock_gh,
+        ):
+            classify_worktrees(repo, timeout=30)
+
+        args, kwargs = mock_gh.call_args
+        assert kwargs.get("timeout") == 30 or (len(args) > 1 and args[1] == 30)
+
 
 # ---------------------------------------------------------------------------
 # _is_dirty
@@ -453,6 +483,28 @@ class TestIsDirty:
 
         with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")):
             assert _is_dirty(tmp_path) is False
+
+    def test_strips_git_dir_from_env(self, tmp_path: Path) -> None:
+        """GIT_DIR must be stripped so git uses the worktree, not the parent repo."""
+        import os
+
+        from cw.worktree_gc import _is_dirty
+
+        captured_env: dict[str, str] = {}
+
+        def _capture(cmd: list[str], **kwargs: object) -> MagicMock:
+            env = kwargs.get("env")
+            if isinstance(env, dict):
+                captured_env.update(env)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch.dict(os.environ, {"GIT_DIR": "/some/other/.git"}),
+            patch("cw.worktree_gc._sp.run", side_effect=_capture),
+        ):
+            _is_dirty(tmp_path)
+
+        assert "GIT_DIR" not in captured_env
 
 
 # ---------------------------------------------------------------------------
@@ -521,10 +573,29 @@ class TestRemoveWorktreeGc:
         branches are never ancestors of main."""
         assert _GIT_BRANCH_DELETE_FLAG == "-D"
 
+    def test_oserror_propagates(self, tmp_path: Path) -> None:
+        """OSError from subprocess propagates — CLI handle_errors catches it."""
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+        with (
+            patch("cw.worktree_gc._sp.run", side_effect=OSError("git not found")),
+            pytest.raises(OSError, match="git not found"),
+        ):
+            remove_worktree_gc(entry, tmp_path / "repo")
+
 
 # ---------------------------------------------------------------------------
 # WorktreeGcReport
 # ---------------------------------------------------------------------------
+
+
+def test_verdict_frozensets_are_complete_partition() -> None:
+    """GC_REMOVE/KEEP/SKIP_VERDICTS must cover all GcVerdict values exactly once."""
+    all_verdicts = frozenset(GcVerdict)
+    union = GC_REMOVE_VERDICTS | GC_KEEP_VERDICTS | GC_SKIP_VERDICTS
+    assert union == all_verdicts, f"Missing from partition: {all_verdicts - union}"
+    assert not (GC_REMOVE_VERDICTS & GC_KEEP_VERDICTS)
+    assert not (GC_REMOVE_VERDICTS & GC_SKIP_VERDICTS)
+    assert not (GC_KEEP_VERDICTS & GC_SKIP_VERDICTS)
 
 
 class TestWorktreeGcReport:
@@ -792,6 +863,34 @@ class TestWorktreeGcCli:
         assert result.exit_code == 0
         assert "applying" in result.output
         assert "removed" in result.output
+
+    def test_timeout_flag_passed(self, tmp_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+        from cw.models import ClientConfig
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path / "repo",
+        )
+        report = WorktreeGcReport(results=[])
+
+        runner = CliRunner()
+        with (
+            patch(
+                "cw.cli.worktree.load_clients",
+                return_value={"test-client": client},
+            ),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+        ):
+            runner.invoke(
+                cli_main,
+                ["worktree", "gc", "--client", "test-client", "--timeout", "30"],
+            )
+
+        _, kwargs = mock_gc.call_args
+        assert kwargs.get("timeout") == 30
 
     def test_include_closed_flag_passed(self, tmp_path: Path) -> None:
         from click.testing import CliRunner

@@ -9,6 +9,7 @@ from cw.config import load_clients
 from cw.exceptions import CwError
 from cw.worktree import _git_dir
 from cw.worktree_gc import (
+    GC_REMOVE_VERDICTS,
     GcVerdict,
     WorktreeGcReport,
     WorktreeGcResult,
@@ -47,7 +48,7 @@ def _format_gc_result(gc_result: WorktreeGcResult, *, applied: bool) -> str:
     if gc_result.pr_number is not None:
         reason = f"{reason} #{gc_result.pr_number}"
 
-    if applied and gc_result.verdict.name.startswith("REMOVE_"):
+    if applied and gc_result.verdict in GC_REMOVE_VERDICTS:
         return f"  removed {branch:<20}  ({reason})"
 
     return f"  {label}  {branch:<20}  [{reason}]"
@@ -116,10 +117,9 @@ def worktree_gc(
     """GC worktrees for squash-merged or closed branches.
 
     Checks each worktree branch's PR state via the gh CLI and removes
-    worktrees where the PR is MERGED. Dry-run by default; pass --apply to act.
+    worktrees where the PR is MERGED (or CLOSED with --include-closed).
+    Dry-run by default; pass --apply to act.
     Locked and dirty worktrees are always skipped.
-
-    CLOSED PR worktrees are kept by default (pass --include-closed to remove them).
     """
     clients = load_clients()
 
