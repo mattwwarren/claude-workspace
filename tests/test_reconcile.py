@@ -12276,7 +12276,7 @@ class TestWorldStateCheckBeforeRevert:
 
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",
-            lambda _tid: (True, True),
+            lambda _tid, **_kw: (True, True),
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
@@ -12324,7 +12324,7 @@ class TestWorldStateCheckBeforeRevert:
 
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",
-            lambda _tid: (None, False),
+            lambda _tid, **_kw: (None, False),
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient

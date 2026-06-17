@@ -124,7 +124,9 @@ def _filter_merged_candidates(
     """
     to_complete: list[tuple[Session, str]] = []
     for session, ticket_id in candidates:
-        merged, gh_available = _deps.pr_is_merged_for_ticket(ticket_id)
+        merged, gh_available = _deps.pr_is_merged_for_ticket(
+            ticket_id, branch="dev/" + ticket_id
+        )
         if not gh_available:
             # gh binary absent — skip all remaining candidates.
             break

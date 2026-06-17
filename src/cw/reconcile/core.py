@@ -87,7 +87,9 @@ def reconcile() -> ReconcileReport:
         if not _gh_available:
             _gh_blocked_tids.append(_ticket_id)
             continue
-        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(_ticket_id)
+        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
+            _ticket_id, branch="dev/" + _ticket_id
+        )
         if not _gh_avail:
             _gh_available = False
             _gh_blocked_tids.append(_ticket_id)
