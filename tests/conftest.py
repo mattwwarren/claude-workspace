@@ -89,7 +89,7 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stop tests from firing real desktop notifications.
 
     ``cw.notify.fire_push_notification`` spawns a daemon thread that shells
@@ -106,12 +106,10 @@ def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     ``test_notify.py`` exercises the real helper via ``cw.notify`` directly and
     is unaffected. Attribute name must match exactly; drift fails loudly.
     """
-    notify_mock = MagicMock(name="fire_push_notification")
     monkeypatch.setattr(
         "cw.reconcile._deps.fire_push_notification",
-        notify_mock,
+        MagicMock(name="fire_push_notification"),
     )
-    return notify_mock
 
 
 @pytest.fixture
