@@ -257,21 +257,20 @@ class TestPrIsMergedForTicket:
     def test_github_issue_link_primary_branch_not_called(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """(c) github: issue-link finds MERGED -> (True, True), branch path NOT called."""
+        """(c) issue-link finds MERGED -> (True, True), branch path NOT called."""
         calls: list[list[str]] = []
+        _branch_called_msg = "branch path must not be called when issue-link succeeds"
 
         def _fake_run(args: list[str], **_kw: object) -> Any:
             calls.append(list(args))
             if "issue" in args:
                 return _make_issue_result([42])
             if "list" in args:
-                raise AssertionError("branch path must not be called when issue-link succeeds")
+                raise AssertionError(_branch_called_msg)
             return _make_pr_result("MERGED")
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket(
-            "487", branch="auto-dev/487"
-        )
+        merged, gh_available = pr_is_merged_for_ticket("487", branch="auto-dev/487")
         assert merged is True
         assert gh_available is True
         # Verify no "pr list" call was made (only "issue" + "pr view")
@@ -283,7 +282,8 @@ class TestPrIsMergedForTicket:
         def _fake_run(args: list[str], **_kw: object) -> Any:
             if "issue" in args:
                 return _make_run_result(1, "")  # refs=None
-            raise FileNotFoundError("gh")
+            _msg = "gh"
+            raise FileNotFoundError(_msg)
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         merged, gh_available = pr_is_merged_for_ticket(
@@ -309,15 +309,49 @@ class TestPrIsMergedForTicket:
         assert merged is None
         assert gh_available is True
 
+    def test_linear_branch_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """refs is None, branch path TimeoutExpired -> (None, True)."""
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            if "issue" in args:
+                return _make_run_result(1, "")  # refs=None
+            raise subprocess.TimeoutExpired(["gh"], 10)
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        merged, gh_available = pr_is_merged_for_ticket(
+            "GEN-403", branch="auto-dev/GEN-403"
+        )
+        assert merged is None
+        assert gh_available is True
+
+    def test_linear_branch_malformed_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """refs is None, branch path returns malformed JSON -> (None, True)."""
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            if "issue" in args:
+                return _make_run_result(1, "")  # refs=None
+            return _make_run_result(0, "not json")  # branch path parse fail
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        merged, gh_available = pr_is_merged_for_ticket(
+            "GEN-403", branch="auto-dev/GEN-403"
+        )
+        assert merged is None
+        assert gh_available is True
+
     def test_no_branch_refs_none_returns_none_true(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """(f) refs is None, no branch arg -> (None, True) (regression guard)."""
 
+        _no_branch_msg = "branch path must not be called when branch=None"
+
         def _fake_run(args: list[str], **_kw: object) -> Any:
             if "issue" in args:
                 return _make_run_result(1, "")
-            raise AssertionError("branch path must not be called when branch=None")
+            raise AssertionError(_no_branch_msg)
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         merged, gh_available = pr_is_merged_for_ticket("GEN-403")
