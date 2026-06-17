@@ -48,7 +48,12 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
-from cw.reconcile import SPAWN_GRACE_SECONDS, reconcile, ticket_id_for_session
+from cw.reconcile import (
+    AUTO_DEV_LABEL_PREFIX,
+    SPAWN_GRACE_SECONDS,
+    reconcile,
+    ticket_id_for_session,
+)
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -783,7 +788,9 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
         if ticket_id is None:
             continue
 
-        merged, gh_available = pr_is_merged_for_ticket(ticket_id)
+        merged, gh_available = pr_is_merged_for_ticket(
+            ticket_id, branch=AUTO_DEV_LABEL_PREFIX + ticket_id
+        )
         if not gh_available and not gh_missing:
             results.append(
                 CheckResult(

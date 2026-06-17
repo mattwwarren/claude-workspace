@@ -24,6 +24,7 @@ from cw.models import (
 )
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
+    AUTO_DEV_LABEL_PREFIX,
     _DIRTY_WORKTREE_REASON,
     _TIMED_OUT_MERGED_REASON,
     ticket_id_for_session,
@@ -124,7 +125,9 @@ def _filter_merged_candidates(
     """
     to_complete: list[tuple[Session, str]] = []
     for session, ticket_id in candidates:
-        merged, gh_available = _deps.pr_is_merged_for_ticket(ticket_id)
+        merged, gh_available = _deps.pr_is_merged_for_ticket(
+            ticket_id, branch=AUTO_DEV_LABEL_PREFIX + ticket_id
+        )
         if not gh_available:
             # gh binary absent — skip all remaining candidates.
             break
