@@ -2317,3 +2317,198 @@ class TestLinearMcpDisallow:
         )
 
         assert daemon.spawn_extra_args[0] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests for #520: roster-registration verification after spawn_bg
+# ---------------------------------------------------------------------------
+
+
+class TestRosterRegistrationVerification:
+    """Tests for spawn_create_impl's post-spawn roster verification (#520).
+
+    After spawn_bg returns a short id, cw polls the daemon roster to confirm
+    the supervisor actually adopted the worker. Silent spawn flakes — where
+    the short id is returned but the worker never appears in roster.json —
+    are caught here rather than 30 min later via the idle watchdog.
+    """
+
+    def test_happy_path_session_saved_when_worker_registered(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Normal spawn: worker in roster → session saved, no error."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-520-happy")
+
+        session_id = spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 520 --headless",
+            label="auto-dev-520",
+            native_daemon=daemon,
+        )
+
+        state = load_state()
+        assert len(state.sessions) == 1
+        assert state.sessions[0].id == session_id
+
+    def test_unregistered_worker_raises_spawn_unregistered_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Worker never appears in roster → SpawnUnregisteredError raised."""
+        from cw.exceptions import SpawnUnregisteredError
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+        worktree = make_git_repo("wt-520-unregistered")
+
+        with pytest.raises(SpawnUnregisteredError, match="spawn_unregistered"):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev 520 --headless",
+                label="auto-dev-520",
+                native_daemon=daemon,
+                _roster_poll_timeout=0.0,
+            )
+
+    def test_unregistered_worker_does_not_save_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Worker never appears → session NOT saved to state (no phantom RUNNING)."""
+        from cw.exceptions import SpawnUnregisteredError
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+        worktree = make_git_repo("wt-520-no-phantom")
+
+        with pytest.raises(SpawnUnregisteredError):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev 520 --headless",
+                label="auto-dev-520",
+                native_daemon=daemon,
+                _roster_poll_timeout=0.0,
+            )
+
+        state = load_state()
+        assert state.sessions == []
+
+    def test_unregistered_worker_emits_spawn_unregistered_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Worker never appears → SESSION_SPAWN_UNREGISTERED event in inbox."""
+        from cw.events import read_events
+        from cw.exceptions import SpawnUnregisteredError
+        from cw.models import OrchestratorEventType
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+        worktree = make_git_repo("wt-520-event")
+
+        with pytest.raises(SpawnUnregisteredError):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev 520 --headless",
+                label="auto-dev-520",
+                native_daemon=daemon,
+                ticket_id="520",
+                _roster_poll_timeout=0.0,
+            )
+
+        events = read_events(
+            consumer="_test_520_event",
+            event_types=[OrchestratorEventType.SESSION_SPAWN_UNREGISTERED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["reason"] == "spawn_unregistered"
+        assert payload["ticket_id"] == "520"
+        assert "surface_ref" in payload
+
+    def test_event_payload_includes_surface_ref_and_timeout(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Unregistered event: surface_ref and poll_timeout_secs in payload."""
+        from cw.events import read_events
+        from cw.exceptions import SpawnUnregisteredError
+        from cw.models import OrchestratorEventType
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+        worktree = make_git_repo("wt-520-payload")
+
+        with pytest.raises(SpawnUnregisteredError):
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev 520 --headless",
+                label="auto-dev-520",
+                native_daemon=daemon,
+                ticket_id="520",
+                _roster_poll_timeout=0.0,
+                _roster_poll_interval=0.0,
+            )
+
+        events = read_events(
+            consumer="_test_520_payload",
+            event_types=[OrchestratorEventType.SESSION_SPAWN_UNREGISTERED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["surface_ref"] == "00000001"
+        assert payload["poll_timeout_secs"] == 0.0
+
+    def test_fake_daemon_raise_unregistered_flag(self) -> None:
+        """raise_unregistered=True: spawn_bg returns id absent from live set."""
+        from pathlib import Path as _Path
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+
+        short_id = daemon.spawn_bg(cwd=_Path("/tmp"), prompt="test")
+        assert short_id == "00000001"
+        assert short_id not in daemon.list_live_session_short_ids()
+
+    def test_fake_daemon_default_registers_normally(self) -> None:
+        """FakeNativeDaemonClient default: spawn_bg adds id to live set."""
+        from pathlib import Path as _Path
+
+        daemon = FakeNativeDaemonClient()
+
+        short_id = daemon.spawn_bg(cwd=_Path("/tmp"), prompt="test")
+        assert short_id in daemon.list_live_session_short_ids()
+
+    def test_spawn_unregistered_error_is_subclass_of_cw_error(self) -> None:
+        """SpawnUnregisteredError is a subclass of CwError (caught by dispatch loop)."""
+        from cw.exceptions import CwError, SpawnUnregisteredError
+
+        assert issubclass(SpawnUnregisteredError, CwError)
