@@ -1,6 +1,6 @@
 ---
 description: "Ship the current branch as a PR with auto-merge enabled (claude-workspace project ship-it)"
-argument-hint: "[--base <branch>]"
+argument-hint: "[--base <branch>] [--title <value>]"
 allowed-tools: ["Bash", "Read"]
 ---
 
@@ -14,9 +14,16 @@ Quality gates (ruff/mypy/pytest) are handled by `/prep-pr` Step 7 — do not re-
 
 ---
 
-## Step 1: Parse base branch
+## Step 1: Parse arguments
 
-Default to `main`. Override with `--base <branch>` if provided in `$ARGUMENTS`.
+Default base to `main`. Override with `--base <branch>` if provided in `$ARGUMENTS`. Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
+
+```bash
+EXPLICIT_TITLE=""
+if printf '%s' "$ARGUMENTS" | grep -qE '(^| )--title '; then
+  EXPLICIT_TITLE=$(printf '%s' "$ARGUMENTS" | sed 's/.*--title //' | sed 's/ --.*//')
+fi
+```
 
 ## Step 2: Confirm branch is pushed
 
@@ -32,8 +39,34 @@ If push fails (e.g., diverged), BLOCK — do not force-push without explicit use
 Read the latest commit message and recent commits to draft a PR title + body.
 
 ```bash
-TITLE=$(git log --format='%s' -1)
 RANGE_BODY=$(git log --format='- %s' "origin/main..HEAD")
+
+# Tier 1: Explicit --title override (passed from /prep-pr --title)
+LAST_RESORT_TITLE=""
+if [ -n "$EXPLICIT_TITLE" ]; then
+  TITLE="$EXPLICIT_TITLE"
+else
+  # Tier 2: First substantive conventional-commit (excludes chore/style/revert)
+  TITLE=$(git log --reverse --format='%s' origin/main..HEAD \
+    | grep -E '^(feat|fix|docs|refactor|test|build|perf|ci)(\(.*\))?:' \
+    | head -1)
+
+  if [ -z "$TITLE" ]; then
+    # Tier 3: Ticket title fallback (reuses existing CLOSES_TRAILER jq/cw-context pattern)
+    if [ -f .claude/cw-context.json ]; then
+      TICKET_ID=$(jq -r '.ticket_id // empty' .claude/cw-context.json 2>/dev/null)
+      if printf '%s' "$TICKET_ID" | grep -qE '^[0-9]+$'; then
+        TITLE=$(gh issue view "$TICKET_ID" --json title -q .title | cut -c1-72)
+      fi
+    fi
+  fi
+
+  if [ -z "$TITLE" ]; then
+    # Tier 4: Last resort — HEAD subject (pre-fix behavior)
+    TITLE=$(git log --format='%s' -1)
+    LAST_RESORT_TITLE=true
+  fi
+fi
 ```
 
 Build a `Closes #<n>` trailer when this is an orchestrated run (#491). `cw`
@@ -74,8 +107,9 @@ $RANGE_BODY
 - [ ] No regressions in dispatch, reconcile, or other affected modules
 
 ${CLOSES_TRAILER}
-
-🤖 Shipped via /prep-pr + project /ship-it
+${LAST_RESORT_TITLE:+
+> Title derived from HEAD commit — verify it is correct.
+}🤖 Shipped via /prep-pr + project /ship-it
 EOF
 )"
 ```
