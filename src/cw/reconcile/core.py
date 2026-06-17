@@ -22,7 +22,6 @@ from cw.models import SessionOrigin, SessionStatus
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
-    AUTO_DEV_LABEL_PREFIX,
     ReconcileReport,
     _backfill_claude_session_ids,
     _claude_agents_json,
@@ -89,7 +88,7 @@ def reconcile() -> ReconcileReport:
             _gh_blocked_tids.append(_ticket_id)
             continue
         _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
-            _ticket_id, branch=AUTO_DEV_LABEL_PREFIX + _ticket_id
+            _ticket_id, branch="dev/" + _ticket_id
         )
         if not _gh_avail:
             _gh_available = False

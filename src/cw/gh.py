@@ -139,9 +139,9 @@ def pr_is_merged_for_ticket(
     Args:
       ticket_id: GitHub issue number or Linear ticket id (e.g. "487" or "GEN-403").
       branch: Optional head branch to consult when issue-link is unsupported
-              (e.g. ``AUTO_DEV_LABEL_PREFIX + ticket_id``).  Callers are
-              responsible for building this value; gh.py does not import from
-              cw.reconcile to avoid a circular import.
+              (e.g. ``"dev/" + ticket_id``).  Callers are responsible for
+              building this value; gh.py does not import from cw.reconcile
+              to avoid a circular import.
       timeout: Subprocess timeout in seconds (applies to each gh call).
 
     merged:

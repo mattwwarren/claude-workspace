@@ -233,9 +233,7 @@ class TestPrIsMergedForTicket:
             return _make_run_result(0, json.dumps([{"number": 1}]))
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket(
-            "GEN-403", branch="auto-dev/GEN-403"
-        )
+        merged, gh_available = pr_is_merged_for_ticket("GEN-403", branch="dev/GEN-403")
         assert merged is True
         assert gh_available is True
 
@@ -248,9 +246,7 @@ class TestPrIsMergedForTicket:
             return _make_run_result(0, json.dumps([]))
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket(
-            "GEN-403", branch="auto-dev/GEN-403"
-        )
+        merged, gh_available = pr_is_merged_for_ticket("GEN-403", branch="dev/GEN-403")
         assert merged is False
         assert gh_available is True
 
@@ -270,7 +266,7 @@ class TestPrIsMergedForTicket:
             return _make_pr_result("MERGED")
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket("487", branch="auto-dev/487")
+        merged, gh_available = pr_is_merged_for_ticket("487", branch="dev/487")
         assert merged is True
         assert gh_available is True
         # Verify no "pr list" call was made (only "issue" + "pr view")
@@ -286,9 +282,7 @@ class TestPrIsMergedForTicket:
             raise FileNotFoundError(_msg)
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket(
-            "GEN-403", branch="auto-dev/GEN-403"
-        )
+        merged, gh_available = pr_is_merged_for_ticket("GEN-403", branch="dev/GEN-403")
         assert merged is None
         assert gh_available is False
 
@@ -303,9 +297,7 @@ class TestPrIsMergedForTicket:
             return _make_run_result(1, "")  # branch path transient error
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket(
-            "GEN-403", branch="auto-dev/GEN-403"
-        )
+        merged, gh_available = pr_is_merged_for_ticket("GEN-403", branch="dev/GEN-403")
         assert merged is None
         assert gh_available is True
 
@@ -318,9 +310,7 @@ class TestPrIsMergedForTicket:
             raise subprocess.TimeoutExpired(["gh"], 10)
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket(
-            "GEN-403", branch="auto-dev/GEN-403"
-        )
+        merged, gh_available = pr_is_merged_for_ticket("GEN-403", branch="dev/GEN-403")
         assert merged is None
         assert gh_available is True
 
@@ -335,9 +325,7 @@ class TestPrIsMergedForTicket:
             return _make_run_result(0, "not json")  # branch path parse fail
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-        merged, gh_available = pr_is_merged_for_ticket(
-            "GEN-403", branch="auto-dev/GEN-403"
-        )
+        merged, gh_available = pr_is_merged_for_ticket("GEN-403", branch="dev/GEN-403")
         assert merged is None
         assert gh_available is True
 

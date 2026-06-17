@@ -49,7 +49,6 @@ from cw.models import (
 )
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.reconcile import (
-    AUTO_DEV_LABEL_PREFIX,
     SPAWN_GRACE_SECONDS,
     reconcile,
     ticket_id_for_session,
@@ -789,7 +788,7 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
             continue
 
         merged, gh_available = pr_is_merged_for_ticket(
-            ticket_id, branch=AUTO_DEV_LABEL_PREFIX + ticket_id
+            ticket_id, branch="dev/" + ticket_id
         )
         if not gh_available and not gh_missing:
             results.append(
