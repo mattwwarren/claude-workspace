@@ -25,7 +25,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
-from cw.spawn import _LINEAR_MCP_DISALLOW
+from cw.spawn import _LINEAR_MCP_DISALLOW, _LINEAR_MCP_DISALLOW_ARG
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -930,8 +930,12 @@ class TestResumeSession:
 
         resume_session("test-client/impl", native_daemon=mock_native_daemon)
 
-        assert "--disallowed-tools" in (mock_native_daemon.spawn_extra_args[0] or [])
-        assert _LINEAR_MCP_DISALLOW in (mock_native_daemon.spawn_extra_args[0] or [])
+        extra = mock_native_daemon.spawn_extra_args[0] or []
+        # Single `=`-joined token; the bare two-token form would let the variadic
+        # flag swallow the resume's positional prompt (#733).
+        assert _LINEAR_MCP_DISALLOW_ARG in extra
+        assert "--disallowed-tools" not in extra
+        assert _LINEAR_MCP_DISALLOW not in extra
 
     def test_resume_user_session_does_not_inject_disallow_flag(
         self,
@@ -970,6 +974,7 @@ class TestResumeSession:
 
         extra = mock_native_daemon.spawn_extra_args[0] or []
         assert "--disallowed-tools" not in extra
+        assert _LINEAR_MCP_DISALLOW_ARG not in extra
 
 
 # ---------------------------------------------------------------------------

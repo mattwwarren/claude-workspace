@@ -26,7 +26,7 @@ from cw.models import (
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
-from cw.spawn import _LINEAR_MCP_DISALLOW, _write_hook_context
+from cw.spawn import _LINEAR_MCP_DISALLOW_ARG, _write_hook_context
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import check_not_main_checkout, create_worktree, remove_worktree
 
@@ -420,11 +420,7 @@ def resume_session(
             and resolve_tracker(client.repo_path or client.workspace_path)
             == TRACKER_GITHUB_ISSUES
         ):
-            extra_args = [
-                *extra_args,
-                "--disallowed-tools",
-                _LINEAR_MCP_DISALLOW,
-            ]
+            extra_args = [*extra_args, _LINEAR_MCP_DISALLOW_ARG]
 
         click.echo(
             f"Session {session.name} not live in daemon;"
