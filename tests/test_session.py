@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.config import load_state, save_state
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SpawnUnregisteredError
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -975,6 +975,79 @@ class TestResumeSession:
         extra = mock_native_daemon.spawn_extra_args[0] or []
         assert "--disallowed-tools" not in extra
         assert _LINEAR_MCP_DISALLOW_ARG not in extra
+
+    def test_dead_surface_unregistered_raises_spawn_unregistered_error(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dead-surface re-spawn: worker never registers → SpawnUnregisteredError."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rsr520a",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                )
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(SpawnUnregisteredError, match="spawn_unregistered"):
+            resume_session(
+                "test-client/impl",
+                native_daemon=daemon,
+                _roster_poll_timeout=0.0,
+            )
+
+    def test_dead_surface_unregistered_does_not_mark_active(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dead-surface re-spawn: worker never registers → session NOT marked ACTIVE."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rsr520b",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                )
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(SpawnUnregisteredError):
+            resume_session(
+                "test-client/impl",
+                native_daemon=daemon,
+                _roster_poll_timeout=0.0,
+            )
+
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.BACKGROUNDED
 
 
 # ---------------------------------------------------------------------------

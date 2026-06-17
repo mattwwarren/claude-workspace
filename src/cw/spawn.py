@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
     from cw.native_daemon import NativeDaemonClient
 
+_log = logging.getLogger(__name__)
+
 # Schema version for cw-context.json. Increment when the shape changes so
 # workers can detect whether they are reading a context written by an older cw.
 CW_CONTEXT_SCHEMA_VERSION = 1
@@ -57,8 +60,11 @@ _LINEAR_MCP_DISALLOW_ARG = f"--disallowed-tools={_LINEAR_MCP_DISALLOW}"
 # Roster-registration verification: after spawn_bg returns a short id, poll
 # roster.json until the id appears. Isolates the silent-spawn flake (#520)
 # where the supervisor accepts the short id without adopting the worker.
+# Sized to be well under SPAWN_GRACE_SECONDS (30s) so reconcile's grace gate
+# does not fire before this check can fail fast.
 _ROSTER_POLL_INTERVAL_SECS: float = 1.0
-_ROSTER_POLL_TIMEOUT_SECS: float = 30.0
+_ROSTER_POLL_TIMEOUT_SECS: float = 10.0
+_SPAWN_FAIL_REASON_UNREGISTERED = "spawn_unregistered"
 
 
 def _git_clean_env() -> dict[str, str]:
@@ -97,19 +103,26 @@ def _verify_roster_registration(
         if remaining <= 0:
             break
         time.sleep(min(interval, remaining))
+    _log.warning(
+        "spawn_unregistered: worker %r absent from roster after %.0fs poll; "
+        "treating spawn as failed (ticket=%s)",
+        short_id,
+        timeout,
+        ticket_id,
+    )
     record_event(
         OrchestratorEventType.SESSION_SPAWN_UNREGISTERED,
         {
             "surface_ref": short_id,
             "ticket_id": ticket_id,
-            "reason": "spawn_unregistered",
+            "reason": _SPAWN_FAIL_REASON_UNREGISTERED,
             "poll_timeout_secs": timeout,
         },
         correlation_id=ticket_id,
     )
     msg = (
         f"Spawned worker {short_id!r} never appeared in the daemon roster "
-        f"within {timeout:.0f}s (spawn_unregistered). "
+        f"within {timeout:.0f}s ({_SPAWN_FAIL_REASON_UNREGISTERED}). "
         "The supervisor likely did not adopt the worker; treat spawn as failed."
     )
     raise SpawnUnregisteredError(msg)
