@@ -1366,6 +1366,48 @@ def _no_op_salvage_payload() -> dict[str, Any]:
     }
 
 
+def _stage_complete_payload() -> dict[str, Any]:
+    """Minimal valid stage_complete payload (#699): PR-less intermediate success.
+
+    Models an IMPL worker that finished its stage and exited (the staged engine
+    spawns a fresh worker per stage). status=stage_complete is in
+    STAGE_SUCCESS_STATUSES but NOT in SALVAGE_TERMINAL_STATUSES, so terminal
+    salvage skips it — it must advance the stage, not be reverted as a crash
+    (#716).
+    """
+    return {
+        "schema_version": 4,
+        "ticket_id": "salv-stage",
+        "status": "stage_complete",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 60,
+            "lines_actual": 55,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": "dev/salv-stage",
+        "worktree_path": "/tmp/wt/salv-stage",
+        "fork_point_sha": "deadbeef",
+        "commits": ["sha-a", "sha-b"],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": [],
+    }
+
+
 def _write_salvage_transcript(
     home: Path,
     worktree: Path,
@@ -1658,6 +1700,199 @@ def test_reconcile_crashed_phantom_salvages_shipped_sentinel(
     assert reloaded.last_result["status"] == "shipped"
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-crash")
     assert task.status == QueueItemStatus.COMPLETED
+
+
+def test_reconcile_phantom_routes_stage_complete_advance_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom (surface gone) session that emitted stage_complete → advance, not revert.
+
+    GitHub #716/#724: a staged worker finishes a stage, emits stage_complete,
+    and exits (the staged engine spawns a fresh worker per stage). Because
+    stage_complete is NOT in SALVAGE_TERMINAL_STATUSES, terminal salvage skipped
+    it and the phantom path reverted RUNNING→PENDING with the stage UNCHANGED —
+    so the next dispatch re-ran the SAME stage (the ~21-26 min/stage timeout tax).
+    The fix routes the emitted advance sentinel through apply_staged_decision so
+    the stage advances (IMPL→REVIEW) instead of being reverted as a crash.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-stage"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # Past the spawn grace window but well under the headless budget, so the
+    # timeout sweep ignores it and the crashed-phantom sweep handles it.
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        "salv-stage", worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "salv-stage"
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-stage", payload, surface_ref="gone-ref"
+    )
+    # Keep the daemon roster non-empty so the transient-outage guard does not trip.
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    # apply_staged_decision needs a pipeline to advance IMPL→REVIEW.
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-stage",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-stage",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    # NOT reverted (the bug re-ran the same stage); session completed normally.
+    assert "salv-stage" not in report.reverted_ticket_ids
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-stage")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "stage_complete"
+    # The decisive assertion: the stage ADVANCED IMPL→REVIEW (was stuck at IMPL).
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-stage")
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.PENDING
+    assert task.session_id is None
+
+
+def test_reconcile_phantom_non_advance_sentinel_not_routed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom with a non-advance sentinel (blocked) must NOT be routed as advance.
+
+    Guards the #716 fix's status filter: only INTERMEDIATE_ADVANCE_STATUSES
+    (stage_complete) advance the stage. A `blocked` sentinel is neither terminal
+    salvage nor an advance, so it falls through to the crash path (BLOCKED_ON_USER
+    under the default signal_only policy) — it must never silently advance.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-blocked"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        "salv-blocked", worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _stage_complete_payload()
+    payload["status"] = "blocked"
+    payload["ticket_id"] = "salv-blocked"
+    payload["blocker"] = {
+        "stage": "stage2_impl",
+        "reason": "impl_failed",
+        "details": "tests failed twice",
+    }
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-blocked", payload, surface_ref="gone-ref"
+    )
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-blocked",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-blocked",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        reconcile()
+
+    # Stage NOT advanced (the routed path's status filter rejected `blocked`).
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-blocked")
+    assert task.stage == Stage.IMPL
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_idle_routes_stage_complete_advance_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alive-idle guard: ROUTE_EMITTED_SENTINEL already advances stage_complete.
+
+    Companion to the phantom case (#716): when the surface is still alive in the
+    roster and the emitted sentinel went unrouted past
+    sentinel_unrouted_check_seconds, the idle path's ROUTE_EMITTED_SENTINEL must
+    advance the stage (IMPL→REVIEW), not park or revert. This already worked;
+    the test locks it so the phantom fix and the alive path stay consistent.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-idle-stage"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # Past sentinel_unrouted_check_seconds (300) but under the idle budget (900).
+    now = started_at + timedelta(seconds=400)
+
+    sess = _mk_headless_daemon_session("idle-stage", worktree, started_at)
+    sess.last_result = None  # sentinel NOT yet consumed → ROUTE_EMITTED eligible
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "idle-stage"
+    _write_salvage_transcript(home, worktree, "claude-idle-stage", payload)
+    save_state(CwState(sessions=[sess]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-stage",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-stage",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon):
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"fake-short-id"}, config=_auto_config()
+        )
+
+    assert blocked == []
+    reloaded = next(s for s in load_state().sessions if s.id == "idle-stage")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-stage")
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.PENDING
 
 
 def test_reconcile_includes_stalled_reverts_in_report(

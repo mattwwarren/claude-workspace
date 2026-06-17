@@ -11,6 +11,7 @@ import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
@@ -33,15 +34,54 @@ from cw.reconcile._shared import (
     ReapCandidate,
     _apply_queue_mutations,
     _apply_salvaged_completion,
+    _apply_sentinel_to_task,
     _locate_session_transcript,
+    _parse_any_sentinel_from_transcript,
     _queue_status_for_salvaged,
     resolve_reap_policy,
     ticket_id_for_session,
 )
 
 if TYPE_CHECKING:
-    from cw.auto_dev_result import AutoDevResult
     from cw.models import CwState, Session, TicketTask
+
+
+def _phantom_advance_sentinel_candidate(
+    session: Session,
+    ticket_id: str | None,
+    lane: str,
+) -> ReapCandidate | None:
+    """Return a ROUTE_EMITTED_SENTINEL candidate for an exited stage-advance worker.
+
+    The staged engine spawns a fresh worker per stage; a worker that finishes its
+    stage emits ``stage_complete`` and exits, so its surface leaves the daemon
+    roster (it becomes a phantom). ``stage_complete`` is not in
+    ``SALVAGE_TERMINAL_STATUSES`` so terminal salvage skips it — without this it
+    would be reverted as a crash and the next dispatch would re-run the SAME stage
+    (the ~21-26 min/stage timeout tax, #716). Routing it here advances the stage
+    via the shared authority, mirroring the alive-session ROUTE_EMITTED_SENTINEL
+    path in ``idle.py``. Returns ``None`` when the transcript has no parseable
+    sentinel or the status is not a non-terminal advance.
+    """
+    parsed = _parse_any_sentinel_from_transcript(session)
+    if parsed is None:
+        return None
+    result, csid = parsed
+    if (
+        not isinstance(result, AutoDevResult)
+        or result.status not in INTERMEDIATE_ADVANCE_STATUSES
+    ):
+        return None
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+        ticket_id=ticket_id,
+        routed_sentinel=result,
+        salvage_csid=csid,
+        lane=lane,
+        client=session.client,
+        worktree_path=session.worktree_path,
+    )
 
 
 def _detect_phantom_candidates(
@@ -87,6 +127,14 @@ def _detect_phantom_candidates(
                 )
             )
             continue
+        # Non-terminal advance sentinel (stage_complete): the worker finished a
+        # stage and exited. Route it to advance the stage instead of reverting it
+        # as a crash (DAEMON only; USER sessions have no staged task). See #716.
+        if session.origin is SessionOrigin.DAEMON:
+            advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
+            if advance is not None:
+                candidates.append(advance)
+                continue
         # Dirty-check for DAEMON sessions only; USER sessions have no worktree.
         # Why: this check runs inside sessions_lock before the queue mutation, but
         # the orphaned claude --bg process may still be alive and could write to the
@@ -374,6 +422,71 @@ def _apply_phantom_queue_mutations(
             save_dev_queue(store)
 
 
+def _apply_phantom_routed_mutations(
+    session_by_id: dict[str, Session],
+    routed_candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+    phantom_names: list[str],
+) -> None:
+    """Apply ROUTE_EMITTED_SENTINEL mutations for exited stage-advance workers (#716).
+
+    Routes the emitted advance sentinel through the shared staged-advance
+    authority (``_apply_sentinel_to_task`` → ``apply_staged_decision``) so the
+    task advances to the next stage, then marks the session COMPLETED/NORMAL —
+    mirroring the alive-session path in ``idle.py``. ``_apply_sentinel_to_task``
+    acquires its own ``dev_queue_lock``; session state is flushed by the caller's
+    ``save_state``. Appends each routed session to ``phantom_names`` so the caller
+    stops the surface and emits its completion event.
+    """
+    for candidate in routed_candidates:
+        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
+            continue  # Invariant: ROUTE_EMITTED_SENTINEL has routed_sentinel + csid
+        if candidate.ticket_id:
+            _apply_sentinel_to_task(
+                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
+            )
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
+        session.claude_session_id = candidate.salvage_csid
+        phantom_names.append(session.name)
+
+
+def _emit_phantom_routed_events(
+    session_by_id: dict[str, Session],
+    routed_candidates: list[ReapCandidate],
+) -> None:
+    """Emit SESSION_COMPLETED + stop surface for routed advance sentinels (#716).
+
+    Mirrors ``idle._emit_idle_completion_events``' routed-sentinel loop: a
+    salvaged (constructive) completion, not a crash. Runs after ``save_state``.
+    """
+    for candidate in routed_candidates:
+        if candidate.routed_sentinel is None:
+            continue
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "crashed": False,
+                "salvaged": True,
+                "status": candidate.routed_sentinel.status,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
+
 def _act_on_phantom_candidates(
     state: CwState,
     candidates: list[ReapCandidate],
@@ -416,6 +529,11 @@ def _act_on_phantom_candidates(
     salvage_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_COMPLETION
     ]
+    routed_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    ]
     crash_candidates, merged_crash_candidates, gh_blocked_crash_candidates = (
         _split_crash_candidates(candidates, merged_ticket_ids, gh_blocked_ticket_ids)
     )
@@ -436,6 +554,17 @@ def _act_on_phantom_candidates(
         salvaged_ticket_ids=salvaged_ticket_ids,
         salvaged_result_by_ticket=salvaged_result_by_ticket,
         pending_events=pending_events,
+    )
+
+    # Route emitted stage-advance sentinels (stage_complete) from exited workers
+    # through the staged-advance authority instead of reverting them (#716). The
+    # queue mutation happens inside _apply_sentinel_to_task (its own lock), so the
+    # routed tickets are intentionally excluded from _apply_phantom_queue_mutations.
+    _apply_phantom_routed_mutations(
+        session_by_id,
+        routed_candidates,
+        now=now,
+        phantom_names=phantom_names,
     )
 
     # Merged-complete: PR already shipped; mark COMPLETED + NORMAL, not CRASHED.
@@ -487,6 +616,7 @@ def _act_on_phantom_candidates(
         merged_crash_candidates,
         gh_blocked_crash_candidates,
     )
+    _emit_phantom_routed_events(session_by_id, routed_candidates)
 
     # Queue mutations.
     _apply_phantom_queue_mutations(
