@@ -26,7 +26,8 @@ from cw.models import (
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
-from cw.spawn import _write_hook_context
+from cw.spawn import _LINEAR_MCP_DISALLOW, _write_hook_context
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import check_not_main_checkout, create_worktree, remove_worktree
 
 # Purposes that receive worktree cwd (impl works on the feature branch,
@@ -414,6 +415,16 @@ def resume_session(
         # operator's default model (issue #248).
         if session.origin == SessionOrigin.DAEMON and client.worker_model:
             extra_args = [*extra_args, "--model", client.worker_model]
+        if (
+            session.origin == SessionOrigin.DAEMON
+            and resolve_tracker(client.repo_path or client.workspace_path)
+            == TRACKER_GITHUB_ISSUES
+        ):
+            extra_args = [
+                *extra_args,
+                "--disallowed-tools",
+                _LINEAR_MCP_DISALLOW,
+            ]
 
         click.echo(
             f"Session {session.name} not live in daemon;"

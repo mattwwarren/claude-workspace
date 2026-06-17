@@ -53,6 +53,7 @@ from cw.reconcile import (
     reconcile,
     ticket_id_for_session,
 )
+from cw.tracker import PROJECT_CONFIG_RELPATH
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -132,9 +133,6 @@ _TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
 # built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
 _RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
 
-# Repo-relative path to the per-client tracker config the auto-dev skills read.
-_PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
-
 
 def _gh_on_path() -> bool:
     """True when the ``gh`` binary is resolvable on PATH (testable seam)."""
@@ -186,7 +184,7 @@ def _check_project_configs(clients: dict[str, ClientConfig]) -> list[CheckResult
     results: list[CheckResult] = []
     for client_name, client in clients.items():
         root = client.repo_path or client.workspace_path
-        path = root / _PROJECT_CONFIG_RELPATH
+        path = root / PROJECT_CONFIG_RELPATH
         name = f"project-config/{client_name}"
         if not path.exists():
             results.append(

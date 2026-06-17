@@ -25,6 +25,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
+from cw.spawn import _LINEAR_MCP_DISALLOW
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -893,6 +894,82 @@ class TestResumeSession:
         out = capsys.readouterr().out
         assert "Ctrl+Z" in out
         assert "Ctrl+D" in out
+
+    def test_resume_daemon_github_issues_injects_disallow_flag(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DAEMON resume with github-issues tracker injects --disallowed-tools."""
+        claude_dir = sample_client.workspace_path / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "project-config.yaml").write_text(
+            "tracking:\n  primary:\n    system: github-issues\n", encoding="utf-8"
+        )
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rgh726a",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440001",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert "--disallowed-tools" in (mock_native_daemon.spawn_extra_args[0] or [])
+        assert _LINEAR_MCP_DISALLOW in (mock_native_daemon.spawn_extra_args[0] or [])
+
+    def test_resume_user_session_does_not_inject_disallow_flag(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin resume never injects --disallowed-tools (#726)."""
+        claude_dir = sample_client.workspace_path / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "project-config.yaml").write_text(
+            "tracking:\n  primary:\n    system: github-issues\n", encoding="utf-8"
+        )
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rgh726b",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.USER,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440002",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        extra = mock_native_daemon.spawn_extra_args[0] or []
+        assert "--disallowed-tools" not in extra
 
 
 # ---------------------------------------------------------------------------

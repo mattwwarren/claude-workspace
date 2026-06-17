@@ -15,6 +15,7 @@ from cw.exceptions import CwError, HookContextConflictError, WorktreeError
 from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus, TicketTask
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import _csid_from_transcript
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +26,12 @@ if TYPE_CHECKING:
 # Schema version for cw-context.json. Increment when the shape changes so
 # workers can detect whether they are reading a context written by an older cw.
 CW_CONTEXT_SCHEMA_VERSION = 1
+
+# --disallowed-tools pattern that blocks all Linear MCP tools. Injected into
+# headless worker spawns when the client tracker is github-issues, preventing
+# workers from attempting Linear OAuth (which stalls in a headless context).
+# See GitHub issue #726.
+_LINEAR_MCP_DISALLOW = "mcp__plugin_linear_linear__*"
 
 
 def _git_clean_env() -> dict[str, str]:
@@ -299,6 +306,11 @@ def spawn_create_impl(
     final_extra: list[str] = []
     if client.worker_model:
         final_extra.extend(["--model", client.worker_model])
+    if (
+        resolve_tracker(client.repo_path or client.workspace_path)
+        == TRACKER_GITHUB_ISSUES
+    ):
+        final_extra.extend(["--disallowed-tools", _LINEAR_MCP_DISALLOW])
     if extra_args:
         final_extra.extend(extra_args)
 
