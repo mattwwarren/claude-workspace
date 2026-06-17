@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cw.tracker import TRACKER_GITHUB_ISSUES
 from cw.worktree_gc import (
     _GIT_BRANCH_DELETE_FLAG,
     GC_KEEP_VERDICTS,
@@ -18,6 +19,7 @@ from cw.worktree_gc import (
     WorktreeEntry,
     WorktreeGcReport,
     WorktreeGcResult,
+    _has_unpushed_commits,
     check_pr_state,
     classify_worktrees,
     list_repo_worktrees,
@@ -139,6 +141,21 @@ class TestListRepoWorktrees:
 
         assert len(entries) == 1
         assert entries[0].locked is True
+
+    def test_bare_flag_parsed(self, tmp_path: Path) -> None:
+        main = tmp_path / "repo"
+        wt1 = tmp_path / "wt" / "bare-clone"
+        porcelain = (
+            f"worktree {main}\nHEAD abc\nbranch refs/heads/main\n\n"
+            f"worktree {wt1}\nHEAD def\nbare\n\n"
+        )
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=porcelain, stderr="")
+            entries = list_repo_worktrees(main)
+
+        assert len(entries) == 1
+        assert entries[0].is_bare is True
+        assert entries[0].branch is None
 
     def test_no_trailing_newline_parsed(self, tmp_path: Path) -> None:
         """Porcelain output without trailing blank line still parses the last block."""
@@ -328,7 +345,7 @@ class TestClassifyWorktrees:
         ):
             results = classify_worktrees(tmp_path / "repo")
 
-        assert results[0].verdict == GcVerdict.KEEP_NO_PR
+        assert results[0].verdict == GcVerdict.KEEP_CLOSED_PR
 
     def test_closed_pr_include_closed_gets_remove(self, tmp_path: Path) -> None:
         entries = [self._make_entry(tmp_path, "wt1", branch="dev/629")]
@@ -404,6 +421,49 @@ class TestClassifyWorktrees:
 
         assert results[0].pr_number == 735
 
+    def test_bare_worktree_gets_skip_bare(self, tmp_path: Path) -> None:
+        entries = [
+            WorktreeEntry(
+                path=tmp_path / "wt1", branch="main", locked=False, is_bare=True
+            )
+        ]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state") as mock_gh,
+        ):
+            results = classify_worktrees(tmp_path / "repo")
+
+        assert results[0].verdict == GcVerdict.SKIP_BARE
+        mock_gh.assert_not_called()
+
+    def test_closed_pr_keeps_with_keep_closed_verdict(self, tmp_path: Path) -> None:
+        """CLOSED PR without --include-closed → KEEP_CLOSED_PR (not KEEP_NO_PR)."""
+        entries = [self._make_entry(tmp_path, "wt1", branch="dev/629")]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", return_value=("CLOSED", 734, True)),
+        ):
+            results = classify_worktrees(tmp_path / "repo")
+
+        assert results[0].verdict == GcVerdict.KEEP_CLOSED_PR
+        assert results[0].pr_number == 734
+
+    def test_worktree_base_filters_out_of_scope(self, tmp_path: Path) -> None:
+        """Worktrees outside worktree_base are silently skipped."""
+        in_scope = self._make_entry(tmp_path, "wt-base/dev-630", branch="dev/630")
+        out_of_scope = self._make_entry(tmp_path, "other/dev-631", branch="dev/631")
+        entries = [in_scope, out_of_scope]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", return_value=("OPEN", 736, True)),
+        ):
+            results = classify_worktrees(
+                tmp_path / "repo", worktree_base=tmp_path / "wt-base"
+            )
+
+        assert len(results) == 1
+        assert results[0].entry.branch == "dev/630"
+
     def test_gh_unavailable_short_circuits_subsequent_entries(
         self, tmp_path: Path
     ) -> None:
@@ -465,9 +525,12 @@ class TestIsDirty:
     def test_clean_worktree_returns_false(self, tmp_path: Path) -> None:
         from cw.worktree_gc import _is_dirty
 
-        with patch("cw.worktree_gc._sp.run") as mock_run:
+        with (
+            patch("cw.worktree_gc._sp.run") as mock_run,
+            patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            assert _is_dirty(tmp_path) is False
+            assert _is_dirty(tmp_path, "dev/630") is False
 
     def test_dirty_worktree_returns_true(self, tmp_path: Path) -> None:
         from cw.worktree_gc import _is_dirty
@@ -476,13 +539,24 @@ class TestIsDirty:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout=" M some/file.py\n", stderr=""
             )
-            assert _is_dirty(tmp_path) is True
+            assert _is_dirty(tmp_path, "dev/630") is True
 
-    def test_oserror_returns_false(self, tmp_path: Path) -> None:
+    def test_oserror_returns_true_conservative(self, tmp_path: Path) -> None:
         from cw.worktree_gc import _is_dirty
 
         with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")):
-            assert _is_dirty(tmp_path) is False
+            assert _is_dirty(tmp_path, "dev/630") is True
+
+    def test_unpushed_commits_returns_true(self, tmp_path: Path) -> None:
+        """Clean working tree with unpushed commits → dirty."""
+        from cw.worktree_gc import _is_dirty
+
+        with (
+            patch("cw.worktree_gc._sp.run") as mock_run,
+            patch("cw.worktree_gc._has_unpushed_commits", return_value=True),
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            assert _is_dirty(tmp_path, "dev/630") is True
 
     def test_strips_git_dir_from_env(self, tmp_path: Path) -> None:
         """GIT_DIR must be stripped so git uses the worktree, not the parent repo."""
@@ -501,10 +575,43 @@ class TestIsDirty:
         with (
             patch.dict(os.environ, {"GIT_DIR": "/some/other/.git"}),
             patch("cw.worktree_gc._sp.run", side_effect=_capture),
+            patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
         ):
-            _is_dirty(tmp_path)
+            _is_dirty(tmp_path, "dev/630")
 
         assert "GIT_DIR" not in captured_env
+
+
+class TestHasUnpushedCommits:
+    def test_no_unpushed_returns_false(self, tmp_path: Path) -> None:
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            assert _has_unpushed_commits(tmp_path, "dev/630") is False
+
+    def test_unpushed_commits_returns_true(self, tmp_path: Path) -> None:
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="abc123 fix something\n", stderr=""
+            )
+            assert _has_unpushed_commits(tmp_path, "dev/630") is True
+
+    def test_oserror_returns_true_conservative(self, tmp_path: Path) -> None:
+        with patch("cw.worktree_gc._sp.run", side_effect=OSError("no git")):
+            assert _has_unpushed_commits(tmp_path, "dev/630") is True
+
+    def test_nonzero_exit_returns_true_conservative(self, tmp_path: Path) -> None:
+        """Non-zero exit (e.g. remote ref absent) → conservative True."""
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="error")
+            assert _has_unpushed_commits(tmp_path, "dev/630") is True
+
+    def test_passes_branch_to_log_command(self, tmp_path: Path) -> None:
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            _has_unpushed_commits(tmp_path, "feature/xyz")
+
+        cmd = mock_run.call_args[0][0]
+        assert "origin/feature/xyz..HEAD" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -621,9 +728,10 @@ class TestWorktreeGcReport:
         results = [
             self._make_result(tmp_path / "a", GcVerdict.KEEP_OPEN_PR),
             self._make_result(tmp_path / "b", GcVerdict.KEEP_NO_PR),
+            self._make_result(tmp_path / "c", GcVerdict.KEEP_CLOSED_PR),
         ]
         report = WorktreeGcReport(results=results)
-        assert len(report.kept) == 2
+        assert len(report.kept) == 3
 
     def test_skipped(self, tmp_path: Path) -> None:
         results = [
@@ -631,9 +739,10 @@ class TestWorktreeGcReport:
             self._make_result(tmp_path / "b", GcVerdict.SKIP_DETACHED),
             self._make_result(tmp_path / "c", GcVerdict.SKIP_GH_UNAVAILABLE),
             self._make_result(tmp_path / "d", GcVerdict.SKIP_DIRTY),
+            self._make_result(tmp_path / "e", GcVerdict.SKIP_BARE),
         ]
         report = WorktreeGcReport(results=results)
-        assert len(report.skipped) == 4
+        assert len(report.skipped) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -756,18 +865,36 @@ class TestRunWorktreeGc:
 # CLI integration
 # ---------------------------------------------------------------------------
 
+_GITHUB_TRACKER = TRACKER_GITHUB_ISSUES
+
+
+def _cli_patches(
+    tmp_path: Path,
+    clients: dict[str, object],
+    report: WorktreeGcReport,
+) -> list[object]:
+    """Return common patch context managers for CLI tests."""
+    return [
+        patch("cw.cli.worktree.load_clients", return_value=clients),
+        patch("cw.cli.worktree.run_worktree_gc", return_value=report),
+        patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+        patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+        patch("cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"),
+    ]
+
 
 class TestWorktreeGcCli:
+    def _make_client(self, tmp_path: Path, name: str = "test-client") -> object:
+        from cw.models import ClientConfig
+
+        return ClientConfig(name=name, workspace_path=tmp_path / "repo")
+
     def test_dry_run_output(self, tmp_path: Path) -> None:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
-        client = ClientConfig(
-            name="test-client",
-            workspace_path=tmp_path / "repo",
-        )
+        client = self._make_client(tmp_path)
         entries = [
             WorktreeEntry(path=tmp_path / "wt-merged", branch="dev/630", locked=False),
             WorktreeEntry(path=tmp_path / "wt-open", branch="dev/631", locked=False),
@@ -784,11 +911,13 @@ class TestWorktreeGcCli:
 
         runner = CliRunner()
         with (
-            patch(
-                "cw.cli.worktree.load_clients",
-                return_value={"test-client": client},
-            ),
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report),
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
         ):
             result = runner.invoke(
                 cli_main, ["worktree", "gc", "--client", "test-client"]
@@ -803,21 +932,19 @@ class TestWorktreeGcCli:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
-        client = ClientConfig(
-            name="test-client",
-            workspace_path=tmp_path / "repo",
-        )
+        client = self._make_client(tmp_path)
         report = WorktreeGcReport(results=[])
 
         runner = CliRunner()
         with (
-            patch(
-                "cw.cli.worktree.load_clients",
-                return_value={"test-client": client},
-            ),
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
         ):
             runner.invoke(
                 cli_main, ["worktree", "gc", "--client", "test-client", "--apply"]
@@ -831,12 +958,8 @@ class TestWorktreeGcCli:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
-        client = ClientConfig(
-            name="test-client",
-            workspace_path=tmp_path / "repo",
-        )
+        client = self._make_client(tmp_path)
         entry = WorktreeEntry(
             path=tmp_path / "wt-merged", branch="dev/630", locked=False
         )
@@ -849,11 +972,13 @@ class TestWorktreeGcCli:
 
         runner = CliRunner()
         with (
-            patch(
-                "cw.cli.worktree.load_clients",
-                return_value={"test-client": client},
-            ),
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report),
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
         ):
             result = runner.invoke(
                 cli_main,
@@ -868,21 +993,19 @@ class TestWorktreeGcCli:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
-        client = ClientConfig(
-            name="test-client",
-            workspace_path=tmp_path / "repo",
-        )
+        client = self._make_client(tmp_path)
         report = WorktreeGcReport(results=[])
 
         runner = CliRunner()
         with (
-            patch(
-                "cw.cli.worktree.load_clients",
-                return_value={"test-client": client},
-            ),
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
         ):
             runner.invoke(
                 cli_main,
@@ -896,21 +1019,19 @@ class TestWorktreeGcCli:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
-        client = ClientConfig(
-            name="test-client",
-            workspace_path=tmp_path / "repo",
-        )
+        client = self._make_client(tmp_path)
         report = WorktreeGcReport(results=[])
 
         runner = CliRunner()
         with (
-            patch(
-                "cw.cli.worktree.load_clients",
-                return_value={"test-client": client},
-            ),
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
         ):
             runner.invoke(
                 cli_main,
@@ -920,48 +1041,81 @@ class TestWorktreeGcCli:
         _, kwargs = mock_gc.call_args
         assert kwargs.get("include_closed") is True
 
-    def test_no_client_multi_clients_errors(self, tmp_path: Path) -> None:
+    def test_multi_client_no_filter_iterates_all(self, tmp_path: Path) -> None:
+        """Without --client, all configured GitHub-tracked clients are processed."""
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
         clients = {
-            "client-a": ClientConfig(name="client-a", workspace_path=tmp_path / "a"),
-            "client-b": ClientConfig(name="client-b", workspace_path=tmp_path / "b"),
+            "client-a": self._make_client(tmp_path, "client-a"),
+            "client-b": self._make_client(tmp_path, "client-b"),
         }
+        report = WorktreeGcReport(results=[])
 
         runner = CliRunner()
-        with patch("cw.cli.worktree.load_clients", return_value=clients):
+        with (
+            patch("cw.cli.worktree.load_clients", return_value=clients),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
+        ):
             result = runner.invoke(cli_main, ["worktree", "gc"])
 
-        assert result.exit_code != 0
+        assert result.exit_code == 0
+        assert mock_gc.call_count == 2
+
+    def test_non_github_tracker_client_skipped(self, tmp_path: Path) -> None:
+        """Clients not tracked by GitHub Issues are skipped."""
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+
+        client = self._make_client(tmp_path)
+        report = WorktreeGcReport(results=[])
+
+        runner = CliRunner()
+        with (
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.resolve_tracker", return_value="linear"),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
+        ):
+            result = runner.invoke(cli_main, ["worktree", "gc"])
+
+        assert result.exit_code == 0
+        assert "skipped" in result.output
+        mock_gc.assert_not_called()
 
     def test_no_client_single_client_auto_selects(self, tmp_path: Path) -> None:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
-        client = ClientConfig(
-            name="test-client",
-            workspace_path=tmp_path / "repo",
-        )
+        client = self._make_client(tmp_path)
         report = WorktreeGcReport(results=[])
 
         runner = CliRunner()
         with (
-            patch(
-                "cw.cli.worktree.load_clients",
-                return_value={"test-client": client},
-            ),
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report),
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+            ),
         ):
             result = runner.invoke(cli_main, ["worktree", "gc"])
 
         assert result.exit_code == 0
 
-    def test_no_clients_configured_errors(self, tmp_path: Path) -> None:
+    def test_no_clients_configured_prints_message(self, tmp_path: Path) -> None:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
@@ -970,18 +1124,15 @@ class TestWorktreeGcCli:
         with patch("cw.cli.worktree.load_clients", return_value={}):
             result = runner.invoke(cli_main, ["worktree", "gc"])
 
-        assert result.exit_code != 0
+        assert result.exit_code == 0
+        assert "No clients configured" in result.output
 
     def test_unknown_client_errors(self, tmp_path: Path) -> None:
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
-        from cw.models import ClientConfig
 
-        client = ClientConfig(
-            name="real-client",
-            workspace_path=tmp_path / "repo",
-        )
+        client = self._make_client(tmp_path, "real-client")
 
         runner = CliRunner()
         with patch(
@@ -992,3 +1143,26 @@ class TestWorktreeGcCli:
             )
 
         assert result.exit_code != 0
+
+    def test_worktree_base_passed_to_run_gc(self, tmp_path: Path) -> None:
+        """resolve_worktree_base result is forwarded to run_worktree_gc."""
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+
+        client = self._make_client(tmp_path)
+        report = WorktreeGcReport(results=[])
+        wt_base = tmp_path / "custom-wt"
+
+        runner = CliRunner()
+        with (
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch("cw.cli.worktree.resolve_worktree_base", return_value=wt_base),
+        ):
+            runner.invoke(cli_main, ["worktree", "gc", "--client", "test-client"])
+
+        _, kwargs = mock_gc.call_args
+        assert kwargs.get("worktree_base") == wt_base
