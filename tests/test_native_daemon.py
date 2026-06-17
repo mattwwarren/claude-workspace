@@ -14,6 +14,7 @@ from cw.native_daemon import (
     FakeNativeDaemonClient,
     RealNativeDaemonClient,
     get_native_daemon_client,
+    read_supervisor_resume_session_id,
 )
 
 if TYPE_CHECKING:
@@ -349,3 +350,62 @@ class TestFakeNativeDaemonClient:
 
 def test_get_native_daemon_client_returns_real_instance() -> None:
     assert isinstance(get_native_daemon_client(), RealNativeDaemonClient)
+
+
+class TestReadSupervisorResumeSessionId:
+    """read_supervisor_resume_session_id reads ~/.claude/jobs/<id>/state.json."""
+
+    def test_returns_resume_session_id(self, tmp_path: Path) -> None:
+        short_id = "a1b2c3d4"
+        state_dir = tmp_path / short_id
+        state_dir.mkdir()
+        full_uuid = "a1b2c3d4-0000-0000-0000-000000000001"
+        (state_dir / "state.json").write_text(
+            json.dumps({"resumeSessionId": full_uuid, "sessionId": full_uuid}),
+            encoding="utf-8",
+        )
+        assert (
+            read_supervisor_resume_session_id(short_id, jobs_path=tmp_path) == full_uuid
+        )
+
+    def test_missing_directory_returns_none(self, tmp_path: Path) -> None:
+        assert read_supervisor_resume_session_id("deadbeef", jobs_path=tmp_path) is None
+
+    def test_missing_state_file_returns_none(self, tmp_path: Path) -> None:
+        short_id = "deadbeef"
+        (tmp_path / short_id).mkdir()
+        assert read_supervisor_resume_session_id(short_id, jobs_path=tmp_path) is None
+
+    def test_malformed_json_returns_none(self, tmp_path: Path) -> None:
+        short_id = "deadbeef"
+        state_dir = tmp_path / short_id
+        state_dir.mkdir()
+        (state_dir / "state.json").write_text("{not json", encoding="utf-8")
+        assert read_supervisor_resume_session_id(short_id, jobs_path=tmp_path) is None
+
+    def test_missing_key_returns_none(self, tmp_path: Path) -> None:
+        short_id = "deadbeef"
+        state_dir = tmp_path / short_id
+        state_dir.mkdir()
+        (state_dir / "state.json").write_text(
+            json.dumps({"sessionId": "abc"}), encoding="utf-8"
+        )
+        assert read_supervisor_resume_session_id(short_id, jobs_path=tmp_path) is None
+
+    def test_non_string_value_returns_none(self, tmp_path: Path) -> None:
+        short_id = "deadbeef"
+        state_dir = tmp_path / short_id
+        state_dir.mkdir()
+        (state_dir / "state.json").write_text(
+            json.dumps({"resumeSessionId": 42}), encoding="utf-8"
+        )
+        assert read_supervisor_resume_session_id(short_id, jobs_path=tmp_path) is None
+
+    def test_non_dict_json_returns_none(self, tmp_path: Path) -> None:
+        short_id = "deadbeef"
+        state_dir = tmp_path / short_id
+        state_dir.mkdir()
+        (state_dir / "state.json").write_text(
+            json.dumps(["not", "a", "dict"]), encoding="utf-8"
+        )
+        assert read_supervisor_resume_session_id(short_id, jobs_path=tmp_path) is None
