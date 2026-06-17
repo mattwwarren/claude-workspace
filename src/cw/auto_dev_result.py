@@ -191,6 +191,35 @@ _STAGE_REACHED_ALIASES: dict[str, str] = {
     "s5_ci_failed": "stage5_post_create",
     "merged": "stage5_post_create",
 }
+# Canonical StageReached values (mirrors the Literal above) — used to short-
+# circuit normalization so a valid value is never re-coerced.
+_STAGE_REACHED_CANONICAL: frozenset[str] = frozenset(
+    {
+        "stage1_pre_flight",
+        "stage1_plan",
+        "stage2_impl",
+        "stage3_review",
+        "stage4a_merge_gate",
+        "stage4b_pr_create",
+        "stage5_post_create",
+    }
+)
+# Tolerant fallback for a near-miss the producer emits WITHIN a known stage
+# number (e.g. ``stage4_pr_creation`` instead of ``stage4b_pr_create``).
+# stage_reached is informational (routing keys on ``status``), so a stray label
+# must not fail the whole sentinel and discard completed work (#748). A value
+# with a ``stage<1-5>`` prefix that is neither canonical nor a known alias is
+# coerced to that stage's canonical value with a WARNING. Values with no
+# ``stage<1-5>`` prefix (genuine garbage) still fall through and reject, to keep
+# catching malformed payloads. The stage4 prefix maps to ``stage4b_pr_create``
+# (the PR-creation substage) since that is where the observed drift occurs.
+_STAGE_NUMBER_FALLBACK: dict[str, str] = {
+    "stage1": "stage1_plan",
+    "stage2": "stage2_impl",
+    "stage3": "stage3_review",
+    "stage4": "stage4b_pr_create",
+    "stage5": "stage5_post_create",
+}
 ScopeTier = Literal["small", "large"]
 PlanSource = Literal[
     "linear_existing",
@@ -400,8 +429,26 @@ class AutoDevResult(BaseModel):
     @field_validator("stage_reached", mode="before")
     @classmethod
     def _normalize_stage_reached(cls, v: object) -> object:
-        if isinstance(v, str) and v in _STAGE_REACHED_ALIASES:
+        if not isinstance(v, str):
+            return v
+        if v in _STAGE_REACHED_ALIASES:
             return _STAGE_REACHED_ALIASES[v]
+        if v in _STAGE_REACHED_CANONICAL:
+            return v
+        # Tolerant coercion for a near-miss within a known stage number (#748):
+        # stage_reached is informational, so a stray label (e.g.
+        # "stage4_pr_creation") must not fail the whole sentinel and discard
+        # completed work. Genuine garbage (no stage<1-5> prefix) falls through
+        # and rejects, preserving malformed-payload detection.
+        for prefix, canonical in _STAGE_NUMBER_FALLBACK.items():
+            if v.startswith(prefix):
+                _log.warning(
+                    "stage_reached %r is not canonical; coerced to %r by "
+                    "stage-number prefix (#748)",
+                    v,
+                    canonical,
+                )
+                return canonical
         return v
 
     def _check_status_pairings(self) -> None:

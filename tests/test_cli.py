@@ -2369,17 +2369,19 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
 
-    def test_signal_stop_unknown_blocker_reason_marks_completed(
+    def test_signal_stop_unknown_blocker_reason_marks_failed(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
     ) -> None:
-        """Unknown blocker reason → task COMPLETED (conservative, don't re-burn cycles).
+        """Unknown blocker reason → task FAILED (terminal, but never false success).
 
-        Regression for GitHub issue #263 Bug A: unrecognised BlockedResult
-        reasons must not perpetually re-dispatch via PENDING.  COMPLETED is
-        the conservative terminal state for anything that doesn't match a
-        known deterministic or transient failure reason.
+        #263 Bug A: unrecognised BlockedResult reasons must not perpetually
+        re-dispatch via PENDING — they need a TERMINAL state. #750: that terminal
+        state must NOT be COMPLETED — a BlockedResult carries no success signal,
+        and COMPLETED silently retires unshipped work as "shipped" (the #728
+        loss). FAILED satisfies both: terminal (no re-burn) and honest
+        (operator-visible, not a phantom completion).
         """
         from cw.auto_dev_result import BlockedResult, Blocker
         from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -2413,7 +2415,7 @@ class TestSignalStop:
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
-        assert task.status == QueueItemStatus.COMPLETED
+        assert task.status == QueueItemStatus.FAILED
 
 
 class TestSentinelPresentInTranscript:
@@ -6303,6 +6305,103 @@ class TestDevQueueWaitSentinelAware:
         )
         # Should timeout (124), NOT attention (3) — spawn-window grace.
         assert result.exit_code == _WAIT_EXIT_TIMEOUT, result.output
+
+    def test_reaped_mid_wait_exit_attention(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Reap mid-wait: session_id transitions non-None→None → exit 3 (#542).
+
+        First poll sees RUNNING task with session_id set (spawn-window grace
+        does NOT apply — session is registered).  Between polls, reconcile
+        reverts the task to PENDING and clears session_id.  The wait must
+        detect the non-None→None transition and surface ATTENTION rather than
+        riding to the --timeout ceiling.
+        """
+        import json as _json
+
+        from cw.cli import _WAIT_EXIT_ATTENTION
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        ticket_id = "GEN-542"
+        session_id = "sess542-reap"
+        surface_ref = "abcd5420"
+
+        # Seed a running session in state so the first poll has somewhere to look.
+        worktree = tmp_path / "wt" / "auto-dev-542"
+        worktree.mkdir(parents=True)
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id="uuid-542", surface_ref=surface_ref
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        # load_dev_queue: first call → RUNNING+session_id; second → PENDING+None.
+        call_count = [0]
+
+        def _fake_load() -> DevQueueStore:
+            call_count[0] += 1
+            first = call_count[0] <= 1
+            status = QueueItemStatus.RUNNING if first else QueueItemStatus.PENDING
+            sid = session_id if first else None
+            return DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="genhealth",
+                        status=status,
+                        session_id=sid,
+                    )
+                ]
+            )
+
+        monkeypatch.setattr("cw.cli.dev_queue.load_dev_queue", _fake_load)
+
+        # No sentinel on the first poll (transcript hasn't finished writing yet).
+        monkeypatch.setattr(
+            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+        )
+        # Fresh transcript → not stale → normal ATTENTION predicate won't fire.
+        monkeypatch.setattr(
+            "cw.cli.dev_queue._transcript_age_seconds", lambda *_a, **_kw: 10.0
+        )
+        # Session in daemon roster → normal ATTENTION predicate won't fire.
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        fake_daemon = FakeNativeDaemonClient()
+        fake_daemon._live.add(surface_ref)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.get_native_daemon_client", lambda: fake_daemon
+        )
+
+        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        # Monotonic call sequence:
+        #   call 1 — deadline init (0.0 → deadline=300)
+        #   call 2 — first-poll _raise_if_deadline_exceeded (0.0 → not expired)
+        #   call 3 — second-poll spawn-window deadline check (9999 → expired,
+        #             only reached when the fix is NOT applied; with the fix
+        #             _handle_reaped_mid_wait raises before this is needed).
+        monotonic_calls = iter([0.0, 0.0, 9999.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.time.monotonic", lambda: next(monotonic_calls, 9999.0)
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", ticket_id, "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == _WAIT_EXIT_ATTENTION, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "attention"
+        assert payload["reason"] == "reaped_awaiting_redispatch"
+        assert payload["session_id"] == session_id
+        assert payload["status"] == "pending"
+        assert payload["elapsed_seconds"] is None
+        assert payload["transcript_age_seconds"] is None
 
     def test_wait_attention_exit_code_constant(self) -> None:
         """_WAIT_EXIT_ATTENTION constant equals 3."""

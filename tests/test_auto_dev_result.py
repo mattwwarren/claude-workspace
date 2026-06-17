@@ -1845,8 +1845,40 @@ class TestStageReachedAliases:
         result = AutoDevResult.model_validate(p)
         assert result.stage_reached == expected
 
+    @pytest.mark.parametrize(
+        ("near_miss", "expected"),
+        [
+            ("stage4_pr_creation", "stage4b_pr_create"),  # the #630/#748 case
+            ("stage4_creation", "stage4b_pr_create"),
+            ("stage5_done", "stage5_post_create"),
+            ("stage2_coding", "stage2_impl"),
+            ("stage3_reviewing", "stage3_review"),
+        ],
+    )
+    def test_near_miss_stage_coerces_by_prefix(
+        self, near_miss: str, expected: str
+    ) -> None:
+        """#748: a near-miss stage_reached within a known stage number coerces
+        to that stage's canonical value (informational field) instead of failing
+        the whole sentinel and discarding completed work.
+        """
+        p = _shipped_payload()
+        p["stage_reached"] = near_miss
+        result = AutoDevResult.model_validate(p)
+        assert result.stage_reached == expected
+
+    def test_non_string_stage_passes_through_to_reject(self) -> None:
+        # The normalizer leaves a non-str stage_reached untouched (no crash);
+        # the Literal check then rejects it.
+        p = _shipped_payload()
+        p["stage_reached"] = 4
+        with pytest.raises(ValidationError):
+            AutoDevResult.model_validate(p)
+
     @pytest.mark.parametrize("bad", ["stagee5", "", "stage_1", "s6_unknown", "MERGED"])
     def test_misspelled_stage_still_rejects(self, bad: str) -> None:
+        # Genuine garbage with no stage<1-5> prefix still rejects (#748 coerces
+        # only near-misses within a known stage number, not arbitrary strings).
         p = _shipped_payload()
         p["stage_reached"] = bad
         with pytest.raises(ValidationError):

@@ -29,6 +29,7 @@ from cw.events import record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -548,6 +549,87 @@ def _handle_attention(
     raise click.exceptions.Exit(_WAIT_EXIT_ATTENTION)
 
 
+def _check_stale_attention(
+    task: TicketTask,
+    session: Session,
+    sentinel: AutoDevResult | BlockedResult | None,
+    ticket_id: str,
+    resolved: str,
+    output_json: bool,
+    config: OrchestratorConfig,
+) -> None:
+    """Fire ATTENTION when the session is stale and absent from the daemon roster.
+
+    No-op when the transcript is fresh, the session is in roster, or a
+    BlockedResult sentinel is present (partial-write guard).  Raises
+    ``Exit(_WAIT_EXIT_ATTENTION)`` when the attention predicate holds.
+    """
+    now = datetime.now(UTC)
+    budget = resolve_idle_watchdog_budget(task, config)
+    transcript_age = _transcript_age_seconds(session, now)
+    is_stale = transcript_age is not None and transcript_age > budget
+    in_roster = False
+    surface_ref = session.surface_ref
+    if surface_ref is not None and _is_native_surface_ref(surface_ref):
+        daemon = get_native_daemon_client()
+        in_roster = surface_ref in daemon.list_live_session_short_ids()
+
+    # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
+    no_sentinel_at_all = sentinel is None
+    is_attention = (
+        is_stale
+        and no_sentinel_at_all
+        and surface_ref is not None
+        and _is_native_surface_ref(surface_ref)
+        and not in_roster
+    )
+    if is_attention:
+        _handle_attention(
+            task,
+            session,
+            ticket_id,
+            resolved,
+            output_json,
+            now=now,
+            transcript_age=transcript_age,
+        )
+
+
+def _handle_reaped_mid_wait(
+    task: TicketTask,
+    ticket_id: str,
+    resolved: str,
+    last_session_id: str | None,
+    output_json: bool,
+) -> None:
+    """Emit ATTENTION output when a session is reaped during the wait loop.
+
+    Called when session_id transitions from non-None to None mid-wait, which
+    means reconcile has reaped the owning session and reverted the task to
+    PENDING.  The operator must decide whether to re-dispatch (#542).
+    """
+    if output_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ticket_id": ticket_id,
+                    "client": resolved,
+                    "status": task.status.value,
+                    "session_id": last_session_id,
+                    "state": "attention",
+                    "reason": "reaped_awaiting_redispatch",
+                    "sentinel_status": None,
+                    "pr_url": None,
+                    "elapsed_seconds": None,
+                    "transcript_age_seconds": None,
+                }
+            )
+        )
+    else:
+        click.echo(f"ATTENTION: {ticket_id} reaped mid-wait (task reverted to PENDING)")
+    raise click.exceptions.Exit(_WAIT_EXIT_ATTENTION)
+
+
 def _emit_wait_timeout(
     ticket_id: str,
     resolved: str,
@@ -711,6 +793,10 @@ def dev_queue_wait(
     resolved = resolve_client(ticket_id, config, client)
 
     deadline = time.monotonic() + timeout_seconds
+    # Track the first non-None session_id seen so we can distinguish a
+    # legitimate spawn window (session_id never set yet) from a post-reap
+    # revert (session_id was set, then cleared by reconcile — #542).
+    observed_session_id: str | None = None
 
     while True:
         # --- Step 1: fast path — task already terminal in the queue ---
@@ -741,12 +827,21 @@ def dev_queue_wait(
         # --- Step 2: resolve the session ---
         session_id = task.session_id
         if session_id is None:
+            if observed_session_id is not None:
+                # session_id was non-None on a prior poll and is now None.
+                # Reconcile reaped the session and reverted the task to PENDING;
+                # spawn-window grace does not apply — surface ATTENTION (#542).
+                _handle_reaped_mid_wait(
+                    task, ticket_id, resolved, observed_session_id, output_json
+                )
             # Spawn-window grace: session hasn't registered yet — keep polling.
             _raise_if_deadline_exceeded(
                 deadline, ticket_id, resolved, timeout_seconds, output_json
             )
             time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
             continue
+
+        observed_session_id = session_id
 
         cw_state = load_state()
         session = next((s for s in cw_state.sessions if s.id == session_id), None)
@@ -773,39 +868,13 @@ def dev_queue_wait(
             _handle_sentinel_terminal(sentinel, task, ticket_id, resolved, output_json)
 
         # --- Step 5: HEARTBEAT / ATTENTION ---
-        now = datetime.now(UTC)
-        budget = resolve_idle_watchdog_budget(task, config)
-        transcript_age = _transcript_age_seconds(session, now)
-        is_stale = transcript_age is not None and transcript_age > budget
         # ATTENTION: stale AND worker not native OR not in daemon roster.
         # Must guard with _is_native_surface_ref to avoid false-attention on
         # non-daemon surface refs (e.g. tmux window names).
-        in_roster = False
-        surface_ref = session.surface_ref
-        if surface_ref is not None and _is_native_surface_ref(surface_ref):
-            daemon = get_native_daemon_client()
-            in_roster = surface_ref in daemon.list_live_session_short_ids()
-
         # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
-        no_sentinel_at_all = sentinel is None
-        is_attention = (
-            is_stale
-            and no_sentinel_at_all
-            and surface_ref is not None
-            and _is_native_surface_ref(surface_ref)
-            and not in_roster
+        _check_stale_attention(
+            task, session, sentinel, ticket_id, resolved, output_json, config
         )
-
-        if is_attention:
-            _handle_attention(
-                task,
-                session,
-                ticket_id,
-                resolved,
-                output_json,
-                now=now,
-                transcript_age=transcript_age,
-            )
 
         # HEARTBEAT: no terminal sentinel but transcript advancing (or session
         # hasn't hit the budget yet) — keep polling within the hard ceiling.
