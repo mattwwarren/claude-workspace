@@ -565,9 +565,7 @@ def _resolve_wedge_branch(
         session = session_by_id.get(task.session_id)
         if session is not None and session.branch:
             return session.branch
-    client = clients.get(task.client)
-    prefix = client.feature_branch_prefix if client is not None else "dev"
-    return f"{prefix}/{task.ticket_id}"
+    return feature_branch_key(task.client, task.ticket_id, clients)
 
 
 def _check_wedge_repo_ahead(

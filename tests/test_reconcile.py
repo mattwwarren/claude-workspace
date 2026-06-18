@@ -12802,6 +12802,51 @@ class TestWorldStateCheckBeforeRevert:
 
         assert captured_branch == [f"feat/{ticket_id}"]
 
+    def test_reconcile_prepass_default_prefix_fallback(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile() pre-pass: no clients.yaml → branch='dev/<ticket>' (default)."""
+        ticket_id = "reconcile-default-1"
+        worktree = tmp_path / "wt-reconcile-default"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        # No clients.yaml written — load_clients() returns {}
+
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=ticket_id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured_branch: list[str] = []
+
+        def _capture(tid: str, *, branch: str, **_kw: object) -> tuple[bool, bool]:
+            captured_branch.append(branch)
+            return False, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
+        )
+
+        with freezegun.freeze_time(now):
+            reconcile()
+
+        assert captured_branch == [f"dev/{ticket_id}"]
+
 
 # ---------------------------------------------------------------------------
 # _apply_sentinel_to_task — staged advance tests (GitHub issue #698)
