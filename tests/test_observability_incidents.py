@@ -302,7 +302,7 @@ def test_incident_315_timed_out_merged_warns(
         lambda *_args, **_kwargs: (True, True),
     )
 
-    results = _check_timed_out_merged(state)
+    results = _check_timed_out_merged(state, {})
 
     warn = [r for r in results if r.warn]
     assert len(warn) == 1, f"Expected 1 warn result, got {warn}"

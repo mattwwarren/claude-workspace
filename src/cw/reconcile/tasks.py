@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from cw.config import load_state, save_state
+from cw.config import load_clients, load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS
@@ -26,11 +26,12 @@ from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _DIRTY_WORKTREE_REASON,
     _TIMED_OUT_MERGED_REASON,
+    feature_branch_key,
     ticket_id_for_session,
 )
 
 if TYPE_CHECKING:
-    from cw.models import Session
+    from cw.models import ClientConfig, Session
 
 
 def _revert_running_tasks_for_sessions(
@@ -116,17 +117,21 @@ def _collect_timed_out_merged_candidates(
 
 def _filter_merged_candidates(
     candidates: list[tuple[Session, str]],
+    clients: dict[str, ClientConfig],
 ) -> list[tuple[Session, str]]:
     """One gh call per candidate to keep only merged-PR tickets (Phase 2).
 
     Runs outside any lock. Stops scanning if the gh binary is absent; skips
     candidates with transient gh errors or unmerged PRs.
+
+    *clients* is used to resolve each session's
+    :attr:`ClientConfig.feature_branch_prefix` so the branch key matches what
+    the staged pipeline provisions (GitHub #728).
     """
     to_complete: list[tuple[Session, str]] = []
     for session, ticket_id in candidates:
-        merged, gh_available = _deps.pr_is_merged_for_ticket(
-            ticket_id, branch="dev/" + ticket_id
-        )
+        branch = feature_branch_key(session.client, ticket_id, clients)
+        merged, gh_available = _deps.pr_is_merged_for_ticket(ticket_id, branch=branch)
         if not gh_available:
             # gh binary absent — skip all remaining candidates.
             break
@@ -170,8 +175,11 @@ def complete_timed_out_merged_tasks() -> list[str]:
     if not candidates:
         return []
 
+    # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
+    clients = load_clients()
+
     # Phase 2: One gh call per surviving candidate (outside any lock).
-    to_complete = _filter_merged_candidates(candidates)
+    to_complete = _filter_merged_candidates(candidates, clients)
     if not to_complete:
         return []
 

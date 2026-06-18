@@ -7064,6 +7064,71 @@ class TestCompleteTimedOutMergedTasks:
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.RUNNING
 
+    def test_custom_feature_branch_prefix_used(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """feature_branch_prefix='feat' → branch='feat/TKT-X' passed to gh check."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-X"
+        session = _mk_timed_out_daemon_session(
+            "sess-custom-prefix", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        # Write clients.yaml with custom feature_branch_prefix
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            "    workspace_path: /tmp/ws-feat\n"
+            "    default_branch: main\n"
+            "    feature_branch_prefix: feat\n"
+        )
+
+        captured_branch: list[str] = []
+
+        def _capture(tid: str, *, branch: str, **_kw: object) -> tuple[bool, bool]:
+            captured_branch.append(branch)
+            return True, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+
+        complete_timed_out_merged_tasks()
+
+        assert captured_branch == [f"feat/{ticket_id}"]
+
+    def test_default_feature_branch_prefix_fallback(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No clients.yaml → fallback branch='dev/TKT-Y' (default prefix)."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-Y"
+        session = _mk_timed_out_daemon_session(
+            "sess-default-prefix", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        # No clients.yaml written — load_clients() returns {}
+
+        captured_branch: list[str] = []
+
+        def _capture(tid: str, *, branch: str, **_kw: object) -> tuple[bool, bool]:
+            captured_branch.append(branch)
+            return True, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+
+        complete_timed_out_merged_tasks()
+
+        assert captured_branch == [f"dev/{ticket_id}"]
+
 
 # ---------------------------------------------------------------------------
 # TestSalvageCommittedNoPrSessions (GitHub issue #497)
@@ -12682,6 +12747,105 @@ class TestWorldStateCheckBeforeRevert:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "reconcile-ghblock-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_reconcile_prepass_custom_prefix(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile() pre-pass passes branch='feat/<ticket_id>' when prefix='feat'."""
+        ticket_id = "reconcile-feat-1"
+        worktree = tmp_path / "wt-reconcile-feat"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        # Write clients.yaml with feature_branch_prefix: feat
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            "    workspace_path: /tmp/ws-feat\n"
+            "    default_branch: main\n"
+            "    feature_branch_prefix: feat\n"
+        )
+
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=ticket_id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured_branch: list[str] = []
+
+        def _capture(tid: str, *, branch: str, **_kw: object) -> tuple[bool, bool]:
+            captured_branch.append(branch)
+            return False, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
+        )
+
+        with freezegun.freeze_time(now):
+            reconcile()
+
+        assert captured_branch == [f"feat/{ticket_id}"]
+
+    def test_reconcile_prepass_default_prefix_fallback(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile() pre-pass: no clients.yaml → branch='dev/<ticket>' (default)."""
+        ticket_id = "reconcile-default-1"
+        worktree = tmp_path / "wt-reconcile-default"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        # No clients.yaml written — load_clients() returns {}
+
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=ticket_id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured_branch: list[str] = []
+
+        def _capture(tid: str, *, branch: str, **_kw: object) -> tuple[bool, bool]:
+            captured_branch.append(branch)
+            return False, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
+        )
+
+        with freezegun.freeze_time(now):
+            reconcile()
+
+        assert captured_branch == [f"dev/{ticket_id}"]
 
 
 # ---------------------------------------------------------------------------

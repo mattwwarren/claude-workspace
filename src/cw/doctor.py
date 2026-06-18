@@ -50,6 +50,7 @@ from cw.models import (
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
+    feature_branch_key,
     reconcile,
     ticket_id_for_session,
 )
@@ -564,9 +565,7 @@ def _resolve_wedge_branch(
         session = session_by_id.get(task.session_id)
         if session is not None and session.branch:
             return session.branch
-    client = clients.get(task.client)
-    prefix = client.feature_branch_prefix if client is not None else "dev"
-    return f"{prefix}/{task.ticket_id}"
+    return feature_branch_key(task.client, task.ticket_id, clients)
 
 
 def _check_wedge_repo_ahead(
@@ -760,7 +759,10 @@ def _gh_pr_states(branch: str) -> tuple[list[dict[str, Any]], bool]:
         return prs, False
 
 
-def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
+def _check_timed_out_merged(
+    state: CwState,
+    clients: dict[str, ClientConfig],
+) -> list[CheckResult]:
     """Detect TIMED_OUT sessions whose linked PR has since merged.
 
     Scans TIMED_OUT DAEMON sessions whose completed_at falls within
@@ -768,6 +770,10 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
     session name, and uses ``gh issue view`` + ``gh pr view`` to
     determine whether a linked PR is MERGED. Emits a warn=True result
     per session when a merged PR is found.
+
+    *clients* is used to resolve each session's
+    :attr:`ClientConfig.feature_branch_prefix` (SSOT for the branch name the
+    staged pipeline provisions; GitHub #728).
     """
     cutoff = datetime.now(UTC) - timedelta(days=TIMED_OUT_MERGED_LOOKBACK_DAYS)
     results: list[CheckResult] = []
@@ -785,9 +791,8 @@ def _check_timed_out_merged(state: CwState) -> list[CheckResult]:
         if ticket_id is None:
             continue
 
-        merged, gh_available = pr_is_merged_for_ticket(
-            ticket_id, branch="dev/" + ticket_id
-        )
+        branch = feature_branch_key(session.client, ticket_id, clients)
+        merged, gh_available = pr_is_merged_for_ticket(ticket_id, branch=branch)
         if not gh_available and not gh_missing:
             results.append(
                 CheckResult(
@@ -940,7 +945,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:
-        report.checks.extend(_check_timed_out_merged(link_state))
+        report.checks.extend(_check_timed_out_merged(link_state, _clients))
         # Wedge checks: load queue once, run all three checks.
         queue = load_dev_queue()
         report.wedge_findings.extend(
