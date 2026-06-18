@@ -6,6 +6,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-06-18
+
+A **pipeline-reliability hardening** release. The v1.2.0 staged engine was
+dogfooded hard; this release fixes the silent-failure classes that surfaced —
+each of which could waste a worker, lose completed work, or mislabel a ticket —
+and adds `cw worktree gc` for squash-merge-aware worktree cleanup. Several of
+these fixes were found and shipped by the staged pipeline dogfooding itself.
+
+### Added
+
+- **`cw worktree gc`** (#630): prune cw-managed worktrees whose branch PR is
+  MERGED, determined via **PR state** (`gh pr list --state all`) rather than
+  `git branch --merged` — which misses every squash-merged branch and let
+  worktrees accumulate unbounded. Dry-run by default; `--apply` to act;
+  `--include-closed` opt-in. Skips locked/bare worktrees and never force-removes
+  a worktree with unsaved/unpushed work.
+
+### Fixed
+
+- **Stage-advance sentinels from exited workers were dropped** (#716): a staged
+  worker emits `stage_complete` and exits, so the phantom path handled it with
+  terminal-only salvage and never advanced the stage — every dispatch paid a
+  ~21–26 min/stage wall-clock-timeout tax. The phantom path now routes the
+  emitted advance sentinel through `apply_staged_decision`.
+- **Tool-emitted sentinels were invisible to the transcript scan** (#731): a
+  worker that emits the `AUTO_DEV_RESULT` block via a Bash `cat` lands it in a
+  `tool_result` block, which neither `signal_stop` nor reconcile scanned (both
+  read assistant-text only) → no routing → stall. Both paths now scan
+  `tool_result` content.
+- **`--disallowed-tools` swallowed the worker prompt** (#733): the variadic flag
+  was passed as two tokens immediately before the positional prompt, consuming
+  it — workers launched promptless and did nothing. Now passed as a single
+  `--disallowed-tools=<pattern>` token.
+- **A near-miss `stage_reached` failed the whole sentinel** (#748): an
+  off-contract stage label (e.g. `stage4_pr_creation`) hard-failed validation
+  and discarded completed work; it now coerces to the canonical stage by
+  stage-number prefix (informational field), while genuine garbage still rejects.
+- **An unknown-status sentinel was marked COMPLETED** (#750): an unparseable /
+  unknown-status `BlockedResult` fell through to `COMPLETED`, silently retiring
+  unshipped work as "shipped". It now routes to `FAILED` — terminal, but never
+  false success.
+- **Spawn flake went undetected for ~30 min** (#520): a `claude --bg` spawn that
+  returned a short id but never registered in the daemon roster was marked
+  RUNNING and only caught by the idle watchdog. Spawn now verifies roster
+  registration and fails fast.
+- **github-issues workers could stall on Linear OAuth** (#726): the Linear MCP
+  is withheld (`--disallowed-tools`) from headless workers when the tracker is
+  github-issues, so a Linear-flavored ticket can't trigger an unanswerable
+  headless OAuth prompt.
+- **`prep-pr` titled the PR from the trailing chore commit** (#722): on
+  squash-merge this became a misleading permanent `main` subject. Title now uses
+  tiered selection (first substantive commit / ticket title), skipping trailing
+  lockfile/chore commits.
+- **`dev-queue wait` rode to exit 124 on a mid-wait reap** (#542): a session
+  reaped mid-wait (task → PENDING, `session_id` cleared) was indistinguishable
+  from the spawn window and never surfaced; it now returns ATTENTION.
+- **Branch-key merged check hardcoded `dev/`** (#728): the merged-PR check used a
+  literal `dev/` prefix, breaking for any client with a custom
+  `feature_branch_prefix`; it now resolves the prefix per-session from the SSOT.
+- **Supervisor session continuity was never verified** (#519): reconcile now
+  compares `Session.claude_session_id` against the supervisor's
+  `resumeSessionId` and clears stale continuity on mismatch.
+
 ## [1.2.0] — 2026-06-16
 
 The RFC 0005 **staged pipeline engine** goes live (milestone #8, Phase 1). The
