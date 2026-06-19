@@ -53,7 +53,13 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def tmp_dev_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect dev queue file and lock to tmp_path."""
+    """Redirect dev queue file and lock to tmp_path.
+
+    Also writes a minimal clients.yaml so add_ticket's lane validation can
+    resolve 'genhealth' and 'other' (the client names used across these tests).
+    Both clients have no explicit lanes, so effective_lanes synthesises the
+    default 'default' lane, which is what every TicketTask defaults to.
+    """
     dev_queue_file = tmp_path / "dev_queue.json"
     dev_queue_lock = tmp_path / ".dev_queue.lock"
     dev_plan_file = tmp_path / "dev_plan.json"
@@ -63,6 +69,16 @@ def tmp_dev_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", dev_queue_lock)
     monkeypatch.setattr("cw.config.DEV_PLAN_FILE", dev_plan_file)
     monkeypatch.setattr("cw.config.DEV_PLAN_LOCK", dev_plan_lock)
+
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    import cw.config as _cw_config
+
+    _cw_config.clients_file().write_text(
+        f"clients:\n"
+        f"  genhealth:\n    workspace_path: {ws}\n"
+        f"  other:\n    workspace_path: {ws}\n"
+    )
 
     return tmp_path
 
@@ -672,6 +688,61 @@ class TestAddTicketDedupe:
         assert result is True
         store2 = load_dev_queue()
         assert len(store2.tasks) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestAddTicketLaneValidation
+# ---------------------------------------------------------------------------
+
+
+class TestAddTicketLaneValidation:
+    """add_ticket rejects tasks whose lane is not declared for the client."""
+
+    @pytest.fixture
+    def patched_queue(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Patch queue file paths to tmp_path."""
+        monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", tmp_path / "dev_queue.json")
+        monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", tmp_path / ".dev_queue.lock")
+        return tmp_path
+
+    def _setup_client_with_lanes(
+        self, tmp_config_dir: Path, tmp_path: Path, lanes: list[str]
+    ) -> None:
+        """Write clients.yaml with named lanes for 'genhealth'."""
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        lane_yaml = "".join(
+            f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
+        )
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
+        )
+
+    def test_undeclared_lane_raises_lane_not_found_error(
+        self, patched_queue: Path, tmp_config_dir: Path
+    ) -> None:
+        """add_ticket raises LaneNotFoundError for an undeclared lane."""
+        from cw.exceptions import LaneNotFoundError
+
+        self._setup_client_with_lanes(tmp_config_dir, patched_queue, ["default"])
+        task = TicketTask(ticket_id="GEN-10", client="genhealth", lane="fast")
+        with pytest.raises(LaneNotFoundError, match="Lane 'fast' is not declared"):
+            add_ticket(task)
+
+    def test_declared_lane_is_accepted(
+        self, patched_queue: Path, tmp_config_dir: Path
+    ) -> None:
+        """add_ticket accepts a task whose lane is declared for the client."""
+        self._setup_client_with_lanes(
+            tmp_config_dir, patched_queue, ["default", "fast"]
+        )
+        task = TicketTask(ticket_id="GEN-11", client="genhealth", lane="fast")
+        result = add_ticket(task)
+        assert result is True
+        store = load_dev_queue()
+        assert store.tasks[0].lane == "fast"
 
 
 # ---------------------------------------------------------------------------
