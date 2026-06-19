@@ -1426,6 +1426,52 @@ class TestIsMainBehindOrigin:
             assert cwd == expected_cwd
 
 
+class TestGetHeadBranch:
+    """Tests for get_head_branch."""
+
+    def test_returns_branch_name(
+        self,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """symbolic-ref succeeds → returns stripped branch name."""
+        from cw.worktree import get_head_branch
+
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            lambda *_a, **_kw: type("R", (), {"returncode": 0, "stdout": "main\n"})(),
+        )
+        assert get_head_branch(sample_client) == "main"
+
+    def test_returns_none_on_detached_head(
+        self,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """symbolic-ref exits non-zero (detached HEAD) → returns None."""
+        from cw.worktree import get_head_branch
+
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            lambda *_a, **_kw: type("R", (), {"returncode": 128, "stdout": ""})(),
+        )
+        assert get_head_branch(sample_client) is None
+
+    def test_returns_none_on_empty_stdout(
+        self,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """symbolic-ref exits 0 but stdout is empty → returns None."""
+        from cw.worktree import get_head_branch
+
+        monkeypatch.setattr(
+            "cw.worktree._run_git",
+            lambda *_a, **_kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+        )
+        assert get_head_branch(sample_client) is None
+
+
 class TestFastForwardMain:
     """Tests for fast_forward_main."""
 

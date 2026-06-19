@@ -3354,6 +3354,49 @@ class TestFreshnessGateAutoFF:
         )
         assert tick_events[0].payload["freshness_detail"] == "main_behind_origin"
 
+    def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """TOCTOU: get_head_branch returns None in _emit_stale_skip → "(detached)".
+
+        _resolve_freshness detects a non-default branch and returns
+        freshness_detail="non_main_head".  By the time _emit_stale_skip calls
+        get_head_branch a second time the HEAD has moved to detached; the WARN
+        message should fall back to "(detached)".
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-113", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+
+        call_count: list[int] = [0]
+
+        def _get_head_toctou(_client: object) -> str | None:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "feature/xyz"  # _resolve_freshness: non-default → bail
+            return None  # _emit_stale_skip: HEAD detached (TOCTOU)
+
+        monkeypatch.setattr("cw.dispatch.get_head_branch", _get_head_toctou)
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(
+            simple_config,
+            native_daemon=daemon,
+            emit=emitted.append,
+        )
+
+        assert any("(detached)" in m for m in emitted)
+
     def test_auto_ff_false_keeps_ticket_needs_sync(
         self,
         tmp_dispatch_dirs: Path,
