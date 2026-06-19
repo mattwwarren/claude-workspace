@@ -13,6 +13,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
     extract_block,
+    is_documented_example,
     parse_stdout,
 )
 
@@ -45,10 +46,14 @@ def _parse_sentinel_from_transcript(
     if not claude_session_id:
         return None
     transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
+    last_result: AutoDevResult | BlockedResult | None = None
     for text in _iter_sentinel_text_blocks(transcript_path):
         if extract_block(text) is not None:
-            return parse_stdout(text)
-    return None
+            result = parse_stdout(text)
+            if isinstance(result, AutoDevResult) and is_documented_example(result):
+                continue
+            last_result = result
+    return last_result
 
 
 def _sentinel_present_in_transcript(

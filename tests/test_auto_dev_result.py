@@ -17,6 +17,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
     extract_block,
+    is_documented_example,
     parse_stdout,
 )
 
@@ -2741,3 +2742,78 @@ class TestStageComplete:
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.status == "stage_complete"
+
+
+# ---------------------------------------------------------------------------
+# is_documented_example — placeholder detection (GitHub #591)
+# ---------------------------------------------------------------------------
+
+
+def _documented_example_payload() -> dict[str, Any]:
+    """Payload matching the illustrative example in the /auto-dev skill prompt."""
+    return {
+        "schema_version": 4,
+        "ticket_id": "PROJ-1234",
+        "status": "shipped",
+        "stage_reached": "stage5_post_create",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 42,
+            "lines_actual": 47,
+            "forbidden_touched": False,
+        },
+        "plan_source": "linear_existing",
+        "branch": "dev/proj-1234-fix-login",
+        "worktree_path": "~/.cw/wt/abc/auto-dev-proj-1234",
+        "fork_point_sha": "abc1234",
+        "commits": ["sha1", "sha2"],
+        "pr": {
+            "number": 42,
+            "url": "https://github.com/.../pull/42",
+            "auto_merge": True,
+            "base": "main",
+        },
+        "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "MEDIUM",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": ["wait_for_ci"],
+    }
+
+
+def test_is_documented_example_returns_true_for_placeholder() -> None:
+    """The documented example payload (pr=42, PROJ-1234, dev/proj-1234-...) → True."""
+    result = AutoDevResult.model_validate(_documented_example_payload())
+    assert is_documented_example(result)
+
+
+def test_is_documented_example_returns_false_for_real_result_with_pr42() -> None:
+    """Real result with pr=42 but different ticket_id/branch → False."""
+    # _shipped_payload: pr.number=42 but ticket_id="GEN-1234", branch="dev/gen-1234-..."
+    result = AutoDevResult.model_validate(_shipped_payload())
+    assert not is_documented_example(result)
+
+
+def test_is_documented_example_returns_false_for_non_example() -> None:
+    """A normal shipped result with unrelated ticket/branch/pr → False."""
+    p = {
+        **_documented_example_payload(),
+        "ticket_id": "MYPROJ-99",
+        "branch": "dev/myproj-99-some-feature",
+        "pr": {
+            "number": 99,
+            "url": "https://github.com/org/repo/pull/99",
+            "auto_merge": False,
+            "base": "main",
+        },
+    }
+    result = AutoDevResult.model_validate(p)
+    assert not is_documented_example(result)

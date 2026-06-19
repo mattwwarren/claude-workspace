@@ -659,6 +659,30 @@ class BlockedResult(BaseModel):
     blocker: Blocker
 
 
+# Placeholder field values from the documented illustrative example in the
+# /auto-dev skill prompt. A sentinel matching all three is the example block,
+# not a real result. Multiple fields required — never reject on pr.number==42
+# alone (a real first PR can legitimately be #42).
+_EXAMPLE_PR_NUMBER = 42
+_EXAMPLE_TICKET_ID = "PROJ-1234"
+_EXAMPLE_BRANCH_PREFIX = "dev/proj-1234"
+
+
+def is_documented_example(result: AutoDevResult) -> bool:
+    """Return True iff *result* matches the illustrative example in the skill prompt.
+
+    Used by transcript scanners to skip the example sentinel block when the
+    worker quotes it before emitting the real result (GitHub #591).
+    """
+    return (
+        result.pr is not None
+        and result.pr.number == _EXAMPLE_PR_NUMBER
+        and result.ticket_id == _EXAMPLE_TICKET_ID
+        and result.branch is not None
+        and result.branch.startswith(_EXAMPLE_BRANCH_PREFIX)
+    )
+
+
 def _tail(text: str, lines: int = _TAIL_LINES) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
