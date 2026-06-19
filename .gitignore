@@ -11,3 +11,9 @@ build/
 coverage.xml
 .handoffs/
 zellij-plugin/target/
+
+# Local-only artifacts — not for the index
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.claude/prep-pr-state.json
+docs/handoffs/
