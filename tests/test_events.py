@@ -663,6 +663,42 @@ def test_init_cursor_at_end_empty_inbox(tmp_events_dir: Path) -> None:
     assert not cursor_file.exists()
 
 
+def test_init_cursor_at_end_unparseable_inbox(tmp_events_dir: Path) -> None:
+    """init_cursor_at_end returns False when inbox has content that fails parsing."""
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_text("not-valid-json\n")
+
+    result = init_cursor_at_end("anyconsumer")
+
+    assert result is False
+    cursor_file = tmp_events_dir / "cursors" / "anyconsumer.json"
+    assert not cursor_file.exists()
+
+
+def test_cli_event_tail_invalid_since_value(tmp_events_dir: Path) -> None:
+    """cw event tail --since with an unparseable value exits non-zero."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--since", "2025-99-99T00:00:00"])
+    assert result.exit_code != 0
+    assert "Cannot parse --since value" in result.output
+
+
+def test_cli_event_tail_since_naive_timestamp(tmp_events_dir: Path) -> None:
+    """cw event tail --since with a tz-naive ISO timestamp is accepted (UTC assumed)."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--since", "2000-01-01T00:00:00"])
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_event_tail_invalid_type_filter(tmp_events_dir: Path) -> None:
+    """cw event tail --type with an unknown event type exits non-zero."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--type", "not.a.real.type"])
+    assert result.exit_code != 0
+    assert "Unknown event type" in result.output
+
+
 def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:
     """ticket.needs_sync OrchestratorEvent round-trips through JSON serialisation."""
     event = OrchestratorEvent(
