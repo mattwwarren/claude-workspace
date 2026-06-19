@@ -905,6 +905,49 @@ def _reap_session_by_selector(
     return True
 
 
+def _check_dispatch_repo_heads() -> list[CheckResult]:
+    """Check each client's workspace HEAD is on its default branch.
+
+    A workspace parked on a non-default branch silently blocks auto-ff
+    and halts all dispatch for that client (freshness_gate_blocked).
+    This check surfaces the problem with the git checkout remedy.
+    """
+    try:
+        clients = load_clients()
+    except Exception:  # noqa: BLE001
+        return []
+    results = []
+    for name, client in clients.items():
+        git_dir = _git_dir(client)
+        if not git_dir.exists():
+            continue  # _check_workspace_paths already surfaces this
+        try:
+            result = _sp.run(
+                ["git", "symbolic-ref", "--short", "HEAD"],
+                cwd=git_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            current = result.stdout.strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if current and current != client.default_branch:
+            results.append(
+                CheckResult(
+                    f"dispatch/repo-head/{name}",
+                    ok=False,
+                    warn=True,
+                    detail=(
+                        f"HEAD is on '{current}', expected '{client.default_branch}'. "
+                        f"Dispatch auto-ff is blocked for {name}. "
+                        f"Fix: git -C {git_dir} checkout {client.default_branch}"
+                    ),
+                )
+            )
+    return results
+
+
 def run_doctor(*, reap: bool = False) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
@@ -942,6 +985,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_workspace_paths())
+    report.checks.extend(_check_dispatch_repo_heads())
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:
