@@ -170,9 +170,25 @@ def add_ticket(task: TicketTask) -> bool:
 
     Returns True if the task was inserted, False if a task with the same
     (client, ticket_id) is already PENDING or RUNNING (deduplication guard).
+
+    Raises:
+        LaneNotFoundError: if task.lane is not declared for the client.
     """
     _active = {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
     with _lock():
+        try:
+            client_cfg = get_client(task.client)
+        except CwError:
+            pass  # Unknown client — lane validation deferred to dispatch
+        else:
+            declared_lane_names = [ln.name for ln in client_cfg.effective_lanes]
+            if task.lane not in declared_lane_names:
+                msg = (
+                    f"Lane '{task.lane}' is not declared for client '{task.client}'."
+                    f" Declared lanes: {', '.join(declared_lane_names)}."
+                    f" Run: cw lane add {task.client} {task.lane}"
+                )
+                raise LaneNotFoundError(msg)
         store = load_dev_queue()
         for existing in store.tasks:
             if (
