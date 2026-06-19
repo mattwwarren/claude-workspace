@@ -51,17 +51,6 @@ class StaleWorktreeError(WorktreeError):
     __slots__ = ()
 
 
-class HeadNotOnDefaultBranchError(WorktreeError):
-    """Raised when Guard 1 in fast_forward_main() detects HEAD != default_branch.
-
-    This is distinct from generic WorktreeError so dispatch can emit
-    FRESHNESS_GATE_BLOCKED (not FRESHNESS_GATE) and the doctor check can
-    surface the git checkout remedy to the operator.
-    """
-
-    __slots__ = ()
-
-
 class HookContextConflictError(CwError):
     """A user-owned ``.claude/settings.local.json`` already exists.
 

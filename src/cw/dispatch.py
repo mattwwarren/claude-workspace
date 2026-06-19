@@ -33,7 +33,6 @@ from cw.config import (
 from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
-    HeadNotOnDefaultBranchError,
     MissingWorkspaceError,
     StaleWorktreeError,
     UsageLimitError,
@@ -59,6 +58,7 @@ from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
     fast_forward_main,
+    get_head_branch,
     is_main_behind_origin,
     remove_worktree,
     worktree_has_unsaved_work,
@@ -267,8 +267,8 @@ def _resolve_freshness(
     *,
     auto_ff: bool,
     warned_fetch_fail: set[str] | None,
-) -> DispatchSkipReason:
-    """Run the freshness gate for a client, returning the skip reason.
+) -> tuple[bool, str | None]:
+    """Run the freshness gate for a client, returning (stale, freshness_detail).
 
     Checks whether the client's local default branch is behind origin.  When
     ``auto_ff`` is set and the branch is safely behind, attempts a
@@ -276,14 +276,12 @@ def _resolve_freshness(
     error, logs and treats the client as fresh so a transient network issue
     never blocks the whole loop.
 
-    Returns ``DispatchSkipReason.NONE`` when the client is fresh (or became
-    fresh after a successful auto-ff).  Returns
-    ``DispatchSkipReason.FRESHNESS_GATE_BLOCKED`` when fast_forward_main
-    raised :exc:`HeadNotOnDefaultBranchError` (HEAD parked on a feature
-    branch).  Returns ``DispatchSkipReason.FRESHNESS_GATE`` for all other
-    stale conditions.
+    Returns ``(False, None)`` when fresh (or successfully fast-forwarded).
+    Returns ``(True, "non_main_head")`` when the dispatch repo's HEAD is on a
+    non-default branch — ``fast_forward_main`` is skipped entirely to avoid a
+    spurious WorktreeError.  Returns ``(True, "main_behind_origin")`` for all
+    other stale conditions.
     """
-    _blocked: bool = False
     try:
         stale, local_sha, origin_sha, behind_count = is_main_behind_origin(
             client, warned_fetch_fail=warned_fetch_fail
@@ -297,7 +295,16 @@ def _resolve_freshness(
             "dispatch_tick: freshness check failed for %s; proceeding",
             client.name,
         )
-        return DispatchSkipReason.NONE
+        return (False, None)
+
+    if stale:
+        # Guard: detect non-default HEAD before attempting auto-ff.
+        # When HEAD != default_branch, fast_forward_main would raise WorktreeError
+        # and log a confusing message. Bail early with a distinct detail key so
+        # the operator WARN can surface the specific remedy.
+        head_branch = get_head_branch(client)
+        if head_branch is not None and head_branch != client.default_branch:
+            return (True, "non_main_head")
 
     if stale and auto_ff:
         ff_safety = check_main_ff_safety(client)
@@ -316,8 +323,6 @@ def _resolve_freshness(
                 )
                 stale = False
             except (WorktreeError, MissingWorkspaceError) as exc:
-                if isinstance(exc, HeadNotOnDefaultBranchError):
-                    _blocked = True
                 _log.warning(
                     "auto-ff: fast-forward failed for %s: %s",
                     client.name,
@@ -325,13 +330,7 @@ def _resolve_freshness(
                 )
             # Why: no git-level lock — concurrent dispatch loops are safe;
             # git pull --ff-only is idempotent when already current.
-    if stale:
-        return (
-            DispatchSkipReason.FRESHNESS_GATE_BLOCKED
-            if _blocked
-            else DispatchSkipReason.FRESHNESS_GATE
-        )
-    return DispatchSkipReason.NONE
+    return (stale, "main_behind_origin" if stale else None)
 
 
 def _emit_stale_skip(
@@ -343,15 +342,14 @@ def _emit_stale_skip(
     cap: int,
     emit: Callable[[str], None] | None,
     warned_stale: set[tuple[str, str]] | None,
-    skip_reason: DispatchSkipReason = DispatchSkipReason.FRESHNESS_GATE,
+    freshness_detail: str | None = None,
 ) -> None:
     """Emit TICKET_NEEDS_SYNC + dispatch.tick for a freshness-gated client.
 
     Records one TICKET_NEEDS_SYNC per pending task (de-duplicating the
     operator WARN via ``warned_stale``), then a single dispatch.tick with
-    ``skip_reason`` set to the provided value (defaults to FRESHNESS_GATE).
-    When ``skip_reason`` is FRESHNESS_GATE_BLOCKED, emits an additional
-    operator WARN indicating the HEAD is on a non-default branch.
+    ``skip_reason=FRESHNESS_GATE`` and ``freshness_detail`` set to the
+    provided value (``"non_main_head"`` or ``"main_behind_origin"``).
     """
     stale_tasks = [
         {"ticket_id": t.ticket_id, "client": client.name, "lane": t.lane}
@@ -363,17 +361,23 @@ def _emit_stale_skip(
         if emit is not None:
             ticket_key = (client.name, payload["ticket_id"])
             if warned_stale is None or ticket_key not in warned_stale:
-                emit(
-                    f"WARN {client.name}/{payload['ticket_id']}:"
-                    " main behind origin, ticket skipped"
-                )
+                if freshness_detail == "non_main_head":
+                    head_branch = get_head_branch(client)
+                    branch_str = head_branch or "(detached)"
+                    emit(
+                        f"WARN {client.name}/{payload['ticket_id']}:"
+                        f" repo HEAD is on '{branch_str}',"
+                        f" expected '{client.default_branch}'"
+                        f" — run: git -C {client.workspace_path}"
+                        f" checkout {client.default_branch}"
+                    )
+                else:
+                    emit(
+                        f"WARN {client.name}/{payload['ticket_id']}:"
+                        " main behind origin, ticket skipped"
+                    )
                 if warned_stale is not None:
                     warned_stale.add(ticket_key)
-    if skip_reason == DispatchSkipReason.FRESHNESS_GATE_BLOCKED and emit is not None:
-        emit(
-            f"WARN {client.name}: dispatch halted — repo HEAD not on default branch,"
-            " auto-ff blocked"
-        )
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
         {
@@ -382,7 +386,8 @@ def _emit_stale_skip(
             "pending": pending_count,
             "running": running_count,
             "cap": cap,
-            "skip_reason": skip_reason,
+            "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+            "freshness_detail": freshness_detail,
             "lanes": _lane_stats_for_client(client, queue_snapshot),
         },
     )
@@ -868,7 +873,7 @@ def dispatch_tick(
         # On any error, log and proceed so a transient network issue never
         # blocks the whole loop.  When auto_ff and safely behind, this also
         # fast-forwards local main and clears the stale flag on success.
-        skip_reason = _resolve_freshness(
+        stale, freshness_detail = _resolve_freshness(
             client, auto_ff=auto_ff, warned_fetch_fail=warned_fetch_fail
         )
 
@@ -901,7 +906,7 @@ def dispatch_tick(
             if t.client == client.name and t.status == QueueItemStatus.PENDING
         )
 
-        if skip_reason != DispatchSkipReason.NONE:
+        if stale:
             _emit_stale_skip(
                 client,
                 queue_snapshot,
@@ -910,7 +915,7 @@ def dispatch_tick(
                 cap=cap,
                 emit=emit,
                 warned_stale=warned_stale,
-                skip_reason=skip_reason,
+                freshness_detail=freshness_detail,
             )
             continue
 

@@ -33,7 +33,7 @@ from cw.dispatch import (
     run_dispatch_loop,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import HeadNotOnDefaultBranchError, StaleWorktreeError, WorktreeError
+from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
     ClientConfig,
@@ -3210,17 +3210,21 @@ class TestFreshnessGateAutoFF:
         )
         assert len(events) == 1
 
-    def test_auto_ff_ff_raises_worktree_error_emits_freshness_gate(
+    def test_auto_ff_non_main_head_skips_fast_forward_emits_non_main_head_detail(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Generic WorktreeError (not HeadNotOnDefaultBranchError) → FRESHNESS_GATE.
+        """get_head_branch returns non-default branch → dispatch bails before ff.
 
-        Verifies that a plain WorktreeError emits skip_reason=freshness_gate,
-        NOT freshness_gate_blocked.
+        When the dispatch repo's HEAD is on a non-default branch and the repo is
+        stale, dispatch must:
+        - emit skip_reason=freshness_gate with freshness_detail="non_main_head"
+        - still emit TICKET_NEEDS_SYNC for the blocked task
+        - NOT call fast_forward_main
+        - not spawn any sessions (spawned==0)
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(ticket_id="CW-110", client="test-client")
@@ -3231,42 +3235,52 @@ class TestFreshnessGateAutoFF:
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
-            lambda _client, **_kw: "behind",
+            "cw.dispatch.get_head_branch",
+            lambda _client: "feature/xyz",
         )
 
-        def _boom(_client: object, **_kwargs: object) -> tuple[str, str]:
-            msg = "git pull failed"
-            raise WorktreeError(msg)
+        ff_called = {"count": 0}
 
-        monkeypatch.setattr("cw.dispatch.fast_forward_main", _boom)
+        def _ff_spy(_client: object, **_kwargs: object) -> tuple[str, str]:
+            ff_called["count"] += 1
+            return ("aaa", "bbb")
+
+        monkeypatch.setattr("cw.dispatch.fast_forward_main", _ff_spy)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert result.spawned == 0
+        assert ff_called["count"] == 0
+
         tick_events = read_events(
-            consumer="test-auto-ff-worktree-error-tick",
+            consumer="test-auto-ff-non-main-head-tick",
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
         assert (
             tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
+        assert tick_events[0].payload["freshness_detail"] == "non_main_head"
 
-    def test_auto_ff_head_not_on_default_branch_emits_freshness_gate_blocked(
+        sync_events = read_events(
+            consumer="test-auto-ff-non-main-head-sync",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(sync_events) == 1
+        assert sync_events[0].payload["ticket_id"] == "CW-110"
+
+    def test_auto_ff_detached_head_uses_normal_path(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """HeadNotOnDefaultBranchError → skip_reason=freshness_gate_blocked.
+        """get_head_branch returns None (detached) → normal auto-ff path proceeds.
 
-        When fast_forward_main raises HeadNotOnDefaultBranchError, dispatch must:
-        - emit skip_reason=freshness_gate_blocked (not freshness_gate)
-        - still emit TICKET_NEEDS_SYNC for the blocked task
-        - not spawn any sessions (spawned==0)
+        A detached HEAD is not the non-main-HEAD case; fast_forward_main should
+        be attempted (check_main_ff_safety gates it appropriately).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(ticket_id="CW-111", client="test-client")
@@ -3277,37 +3291,68 @@ class TestFreshnessGateAutoFF:
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
+            "cw.dispatch.get_head_branch",
+            lambda _client: None,  # detached HEAD
+        )
+        monkeypatch.setattr(
             "cw.dispatch.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
 
-        def _boom_head(_client: object, **_kwargs: object) -> tuple[str, str]:
-            msg = "Refusing to fast-forward: HEAD is on 'feature/xyz', expected 'main'."
-            raise HeadNotOnDefaultBranchError(msg)
+        ff_called = {"count": 0}
 
-        monkeypatch.setattr("cw.dispatch.fast_forward_main", _boom_head)
+        def _ff_spy(_client: object, **_kwargs: object) -> tuple[str, str]:
+            ff_called["count"] += 1
+            return ("aaa", "bbb")
+
+        monkeypatch.setattr("cw.dispatch.fast_forward_main", _ff_spy)
 
         daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon)
+        dispatch_tick(simple_config, native_daemon=daemon)
 
-        assert result.spawned == 0
+        assert ff_called["count"] == 1
+
+    def test_auto_ff_on_default_branch_uses_normal_path(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """get_head_branch returns default_branch → normal path.
+
+        When HEAD == default_branch and the repo is stale, dispatch emits
+        freshness_detail="main_behind_origin" (not "non_main_head").
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-112", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.get_head_branch",
+            lambda _client: "main",  # on default branch
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "diverged",  # unsafe, so auto-ff skipped
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
 
         tick_events = read_events(
-            consumer="test-auto-ff-head-not-default-tick",
+            consumer="test-auto-ff-default-branch-tick",
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
         assert (
-            tick_events[0].payload["skip_reason"]
-            == DispatchSkipReason.FRESHNESS_GATE_BLOCKED
+            tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
-
-        sync_events = read_events(
-            consumer="test-auto-ff-head-not-default-sync",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(sync_events) == 1
-        assert sync_events[0].payload["ticket_id"] == "CW-111"
+        assert tick_events[0].payload["freshness_detail"] == "main_behind_origin"
 
     def test_auto_ff_false_keeps_ticket_needs_sync(
         self,

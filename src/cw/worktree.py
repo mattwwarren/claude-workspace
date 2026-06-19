@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from cw.exceptions import (
-    HeadNotOnDefaultBranchError,
     MissingWorkspaceError,
     StaleWorktreeError,
     WorktreeError,
@@ -668,6 +667,19 @@ def check_main_ff_safety(
     return "diverged"
 
 
+def get_head_branch(client: ClientConfig) -> str | None:
+    """Return the symbolic branch name of HEAD, or None if detached or on error.
+
+    Callers in dispatch.py import this as ``cw.dispatch.get_head_branch`` so
+    tests can patch it without reaching into worktree internals.
+    """
+    git_dir = _git_dir(client)
+    result = _run_git("symbolic-ref", "--short", "HEAD", cwd=git_dir, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def fast_forward_main(
     client: ClientConfig, *, ignore_untracked: bool = False
 ) -> tuple[str, str]:
@@ -699,7 +711,7 @@ def fast_forward_main(
             f"'{current_branch}', expected '{default_branch}'. "
             f"Switch to '{default_branch}' before refreshing."
         )
-        raise HeadNotOnDefaultBranchError(msg)
+        raise WorktreeError(msg)
 
     # Guard 2: ensure the working tree is clean (or only has untracked files).
     status_out = _run_git("status", "--porcelain", cwd=git_dir).stdout
