@@ -51,11 +51,17 @@ def _revert_running_tasks_for_sessions(
     set are routed to BLOCKED_ON_USER instead of PENDING to preserve in-flight
     worktree state for operator inspection (GitHub issue #421).
 
-    When *sessions_by_id* is provided, both ``record_event(SESSION_NEEDS_ATTENTION)``
-    and ``fire_push_notification`` are called for each task routed to BLOCKED_ON_USER.
-    Firing here (rather than in ``_build_dirty_session_ids_and_notify``) is the
+    When *sessions_by_id* is provided, ``record_event(SESSION_NEEDS_ATTENTION)``
+    and ``fire_push_notification`` are called **after** ``dev_queue_lock`` releases
+    for each task routed to BLOCKED_ON_USER.  Firing after the status write is the
     edge-trigger: subsequent ticks find the task already BLOCKED_ON_USER (not RUNNING),
     so they skip it and both calls fire exactly once per dirty episode (#763).
+
+    # Why: record_event and fire_push_notification are called outside dev_queue_lock
+    # to preserve the lock-order invariant (record_event acquires _inbox_lock;
+    # holding dev_queue_lock while acquiring _inbox_lock risks deadlock with any
+    # concurrent process that acquires _inbox_lock first — see #765).
+    # Sessions to notify are collected inside the lock, emitted after it releases.
 
     # Why: dirtiness is checked before dev_queue_lock is acquired (in the
     # callers revert_timed_out_tasks / revert_completed_silent_tasks), but the
@@ -69,6 +75,7 @@ def _revert_running_tasks_for_sessions(
     dirty = dirty_session_ids or set()
     reverted: list[str] = []
     changed = False
+    notify_sessions: list[Session] = []
     with dev_queue_lock():
         store = load_dev_queue()
         for task in store.tasks:
@@ -79,23 +86,7 @@ def _revert_running_tasks_for_sessions(
             if task.session_id in dirty:
                 task.status = QueueItemStatus.BLOCKED_ON_USER
                 if sessions_by_id and task.session_id in sessions_by_id:
-                    session = sessions_by_id[task.session_id]
-                    record_event(
-                        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-                        {
-                            "session_id": session.id,
-                            "session_name": session.name,
-                            "client": session.client,
-                            "ticket_id": ticket_id_for_session(session.name),
-                            "claude_session_id": session.claude_session_id,
-                            "paused_status": _DIRTY_WORKTREE_REASON,
-                            "breadcrumbs": str(session.worktree_path)
-                            if session.worktree_path
-                            else "",
-                            "crashed": False,
-                        },
-                    )
-                    _deps.fire_push_notification(session.name, session.client)
+                    notify_sessions.append(sessions_by_id[task.session_id])
             else:
                 task.status = QueueItemStatus.PENDING
                 reverted.append(task.ticket_id)
@@ -103,6 +94,24 @@ def _revert_running_tasks_for_sessions(
             changed = True
         if changed:
             save_dev_queue(store)
+    # Fire notifications after dev_queue_lock releases (lock-order invariant #765).
+    for session in notify_sessions:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id_for_session(session.name),
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _DIRTY_WORKTREE_REASON,
+                "breadcrumbs": str(session.worktree_path)
+                if session.worktree_path
+                else "",
+                "crashed": False,
+            },
+        )
+        _deps.fire_push_notification(session.name, session.client)
     return reverted
 
 

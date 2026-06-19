@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +15,7 @@ from cw.config import events_dir
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -79,8 +80,8 @@ def record_event(
     return event
 
 
-def _load_cursor(consumer: str) -> str | None:
-    """Load the last-consumed event ID for a consumer, or None if no cursor."""
+def load_cursor(consumer: str) -> str | None:
+    """Return the last-consumed event ID for *consumer*, or None if no cursor."""
     path = _cursor_path(consumer)
     if not path.exists():
         return None
@@ -120,6 +121,10 @@ def init_cursor_at_end(consumer: str) -> bool:
     inbox = _inbox_path()
     with _inbox_lock():
         raw_text = inbox.read_text() if inbox.exists() else ""
+    # Why: _inbox_lock is released before advance_cursor runs, so events appended
+    # in that window will appear to be "before" the cursor and be skipped on the
+    # first read.  The race is accepted: the consumer sees at-most-once semantics
+    # on startup; any missed events are benign (follow-mode replays on size change).
     if not raw_text:
         return False
     parsed = _parse_lines(raw_text.splitlines())
@@ -204,7 +209,7 @@ def read_events(
     # Resolve cursor: explicit arg beats consumer persisted cursor
     cursor = since_cursor
     if cursor is None and consumer is not None:
-        cursor = _load_cursor(consumer)
+        cursor = load_cursor(consumer)
 
     inbox = _inbox_path()
     with _inbox_lock():
@@ -247,3 +252,49 @@ def read_events(
         events = events[:limit]
 
     return events
+
+
+_FOLLOW_POLL_INTERVAL: float = 0.05  # 50ms — satisfies ≤100ms acceptance criterion
+
+
+def tail_events_follow(
+    *,
+    since_cursor: str | None,
+    since_ts: datetime | None,
+    event_types: list[OrchestratorEventType] | None,
+    poll_interval: float = _FOLLOW_POLL_INTERVAL,
+) -> Generator[OrchestratorEvent]:
+    """Yield new events as they arrive, polling the inbox for changes.
+
+    Polls ``_inbox_path().stat().st_size`` as a cheap change-detection guard;
+    calls ``read_events`` only when the size changes.  Does not hold the inbox
+    lock during sleep.  Does not advance any consumer cursor — that remains
+    one-shot only.
+
+    Exits when the caller sends a ``GeneratorExit`` (or raises
+    ``KeyboardInterrupt`` / ``BrokenPipeError`` in the iterating loop).
+    """
+    last_cursor = since_cursor
+    last_size: int | None = None
+
+    while True:
+        inbox = _inbox_path()
+        current_size: int = 0
+        if inbox.exists():
+            try:
+                current_size = inbox.stat().st_size
+            except OSError:
+                current_size = 0
+
+        if last_size is None or current_size != last_size:
+            last_size = current_size
+            new_events = read_events(
+                since_cursor=last_cursor,
+                since_ts=since_ts,
+                event_types=event_types,
+            )
+            for ev in new_events:
+                yield ev
+                last_cursor = ev.id
+
+        time.sleep(poll_interval)

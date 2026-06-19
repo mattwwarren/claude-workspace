@@ -358,6 +358,31 @@ cw event tail --type pr.ci_failed --type pr.review_received
 cw event tail --json
 ```
 
+### Follow mode
+
+Add `--follow` (or `-f`) to stream new events in real time instead of exiting
+after the first read.  Output is line-buffered — each event flushes immediately,
+so piping to `jq --unbuffered` or `grep` works without stalling.
+
+```bash
+# Stream all new events (blocks until SIGINT)
+cw event tail --follow
+
+# Combine with --since, --type, --json
+cw event tail --since now --type session.completed --json --follow
+cw event tail --since daemon --type pr.mergeable --follow
+```
+
+Behaviour notes:
+- Polls the inbox every 50 ms; events are visible within 100 ms of being written.
+- `--since <consumer>` in follow mode loads the consumer's saved cursor as the
+  starting position but does **not** advance it — cursor advance is one-shot only.
+- If the consumer cursor is not found (unknown consumer or rotated inbox), a
+  warning is printed to stderr and replay starts from the beginning of the inbox.
+- Exits with code 130 on SIGINT (`Ctrl-C`), 0 on broken pipe.
+- Out of scope: persistent cursor advance on `--follow`; `--since now` semantics
+  (treats `now` as a consumer name, unchanged).
+
 ## Python API
 
 ```python

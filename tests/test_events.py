@@ -17,6 +17,7 @@ from cw.events import record_event as events_record_event
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -697,6 +698,258 @@ def test_cli_event_tail_invalid_type_filter(tmp_events_dir: Path) -> None:
     result = runner.invoke(main, ["event", "tail", "--type", "not.a.real.type"])
     assert result.exit_code != 0
     assert "Unknown event type" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --follow streaming mode (issue #206)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_follow_exits_on_keyboard_interrupt(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow exits with code 130 on immediate KeyboardInterrupt."""
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 130
+
+
+def test_cli_event_tail_follow_emits_preexisting_event(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow emits pre-existing events, then exits."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    def raise_on_first_sleep(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_on_first_sleep)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 130
+    assert ev1.id in result.output
+
+
+def test_cli_event_tail_follow_streams_new_events(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow streams events written after the command starts."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2_holder: list[OrchestratorEvent] = []
+
+    call_count = 0
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+            ev2_holder.append(ev2)
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 130
+    assert ev1.id in result.output
+    assert len(ev2_holder) == 1
+    assert ev2_holder[0].id in result.output
+
+
+def test_cli_event_tail_follow_with_type_filter(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow --type filters events in the stream."""
+    ev_reg = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev_ci = events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 2})
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--follow", "--type", "pr.ci_failed"]
+    )
+    assert result.exit_code == 130
+    assert ev_ci.id in result.output
+    assert ev_reg.id not in result.output
+
+
+def test_cli_event_tail_follow_with_json_flag(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow --json outputs valid JSON per line."""
+    events_record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "T-1"})
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow", "--json"])
+    assert result.exit_code == 130
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines, "expected at least one output line"
+    data = json.loads(lines[0])
+    assert data["type"] == "ticket.enqueued"
+    assert data["payload"]["ticket_id"] == "T-1"
+
+
+def test_cli_event_tail_follow_with_since_ts(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow --since <timestamp> skips events before the cutoff."""
+    base = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
+    with freeze_time(base):
+        ev_old = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    with freeze_time(base + timedelta(hours=2)):
+        ev_new = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    cutoff = base + timedelta(hours=1)
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--follow", "--since", cutoff.isoformat()]
+    )
+    assert result.exit_code == 130
+    assert ev_new.id in result.output
+    assert ev_old.id not in result.output
+
+
+def test_cli_event_tail_follow_does_not_advance_consumer_cursor(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow --since <consumer> does not advance the cursor."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+    advance_cursor("followconsumer", ev1.id)
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--follow", "--since", "followconsumer"]
+    )
+    assert result.exit_code == 130
+    assert ev2.id in result.output
+
+    # Cursor must still point at ev1
+    cursor_file = tmp_events_dir / "cursors" / "followconsumer.json"
+    data = json.loads(cursor_file.read_text())
+    assert data["cursor"] == ev1.id
+
+
+def test_cli_event_tail_follow_combined_since_consumer(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """follow + --since <consumer> respects cursor AND type filter on initial drain."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+    # ev3 is after the cursor but has a non-matching type — must be suppressed
+    ev3 = events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 3})
+    advance_cursor("combinedconsumer", ev1.id)
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "event",
+            "tail",
+            "--follow",
+            "--since",
+            "combinedconsumer",
+            "--type",
+            "pr.merged",
+        ],
+    )
+    assert result.exit_code == 130
+    assert ev1.id not in result.output  # before cursor
+    assert ev2.id in result.output  # after cursor, matching type
+    assert ev3.id not in result.output  # after cursor, non-matching type — SUPPRESSED
+
+    # Cursor must NOT be advanced
+    cursor_file = tmp_events_dir / "cursors" / "combinedconsumer.json"
+    data = json.loads(cursor_file.read_text())
+    assert data["cursor"] == ev1.id
+
+
+def test_cli_event_tail_follow_consumer_cursor_miss_warns_and_replays(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """follow + --since <unknown-consumer> warns on stderr and replays from start."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--follow", "--since", "unknownconsumer"]
+    )
+    assert result.exit_code == 130
+    expected_warning = (
+        "Warning: consumer cursor 'unknownconsumer' not found; replaying from start"
+    )
+    assert expected_warning in result.output
+    assert ev1.id in result.output
+
+
+def test_cli_event_tail_follow_exits_on_broken_pipe(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow exits cleanly (code 0) on BrokenPipeError."""
+
+    def broken_pipe_gen(**kwargs: object) -> Generator[OrchestratorEvent]:
+        raise BrokenPipeError
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("cw.cli.queues.tail_events_follow", broken_pipe_gen)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 0
+
+
+def test_cli_event_tail_follow_returns_on_exhausted_stream(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow exits cleanly when the stream generator is exhausted."""
+
+    def empty_gen(**kwargs: object) -> Generator[OrchestratorEvent]:
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("cw.cli.queues.tail_events_follow", empty_gen)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 0
 
 
 def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:
