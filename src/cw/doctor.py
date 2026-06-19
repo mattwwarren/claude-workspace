@@ -134,6 +134,9 @@ _TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
 # built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
 _RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
 
+# Wedge class for BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
+_WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
+
 
 def _gh_on_path() -> bool:
     """True when the ``gh`` binary is resolvable on PATH (testable seam)."""
@@ -648,23 +651,130 @@ def _check_wedge_repo_ahead(
     return findings
 
 
+def _is_dead_session_task(
+    task: TicketTask,
+    session_by_id: dict[str, Session],
+    live_short_ids: set[str],
+) -> bool:
+    """Return True when a BLOCKED_ON_USER task's session is dead.
+
+    Dead = session_id is None (dirty-worktree / gh-blocked phantom paths),
+    OR session not in state, OR surface_ref is None or absent from the live
+    daemon roster. Covers all three BLOCKED_ON_USER creation paths (see #590).
+    """
+    if task.session_id is None:
+        return True
+    session = session_by_id.get(task.session_id)
+    if session is None:
+        return True
+    if session.surface_ref is None:
+        return True
+    return session.surface_ref not in live_short_ids
+
+
+def _check_wedge_dead_session_blocked_on_user(
+    state: CwState,
+    queue: DevQueueStore,
+) -> list[WedgeFinding]:
+    """Detect BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
+
+    Guards daemon I/O: list_live_session_short_ids() is only called when at
+    least one BLOCKED_ON_USER task exists in the queue.
+    """
+    candidates = [t for t in queue.tasks if t.status == QueueItemStatus.BLOCKED_ON_USER]
+    if not candidates:
+        return []
+
+    session_by_id = {s.id: s for s in state.sessions}
+    live_short_ids = get_native_daemon_client().list_live_session_short_ids()
+
+    findings: list[WedgeFinding] = []
+    for task in candidates:
+        if not _is_dead_session_task(task, session_by_id, live_short_ids):
+            continue
+        findings.append(
+            WedgeFinding(
+                wedge_class=_WEDGE_BLOCKED_DEAD_SESSION,
+                session_id=task.session_id,
+                ticket_id=task.ticket_id,
+                recipe=(
+                    "BLOCKED_ON_USER task with dead session holds lane slot. "
+                    "Run: cw doctor --reap to revert task to PENDING."
+                ),
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
+def _collapse_blocked_on_user_tasks(
+    queue: DevQueueStore,
+    blocked_ticket_ids: set[str],
+) -> bool:
+    """Revert oldest BLOCKED_ON_USER task to PENDING; cancel duplicates.
+
+    For each ticket_id in blocked_ticket_ids, sorts BLOCKED_ON_USER tasks by
+    created_at (ascending), reverts the first (oldest) to PENDING with
+    session_id cleared, and cancels the rest.
+
+    Returns True when any mutation was applied.
+    """
+    changed = False
+    for ticket_id in blocked_ticket_ids:
+        tasks_for_ticket = [
+            t
+            for t in queue.tasks
+            if t.ticket_id == ticket_id and t.status == QueueItemStatus.BLOCKED_ON_USER
+        ]
+        if not tasks_for_ticket:
+            continue
+        # Stable sort preserves insertion order for equal created_at values.
+        tasks_for_ticket.sort(key=lambda t: t.created_at)
+        oldest = tasks_for_ticket[0]
+        oldest.status = QueueItemStatus.PENDING
+        oldest.session_id = None
+        changed = True
+        for dup in tasks_for_ticket[1:]:
+            dup.status = QueueItemStatus.CANCELLED
+            record_event(
+                OrchestratorEventType.SESSION_REAP_AUTHORIZED,
+                payload={
+                    "ticket_id": ticket_id,
+                    "client": dup.client,
+                    "mutations": ["task_cancelled"],
+                    "authority": "doctor",
+                },
+            )
+            changed = True
+    return changed
+
+
 def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     """Apply mutations for actionable wedge classes.
 
     Class-2 (task-running-no-session): revert queue task to PENDING.
     Class-3 (task-running-completed-session): revert queue task to PENDING.
     Class-4 (repo-ahead-of-queue): advisory only — no mutations.
+    Class-5 (blocked-on-user-dead-session): revert oldest to PENDING, cancel
+        duplicates via _collapse_blocked_on_user_tasks.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
     inspect for an idle shell (see #504).
     """
-    revert_ticket_ids: set[str] = {
+    running_ticket_ids: set[str] = {
         f.ticket_id
         for f in findings
-        if f.ticket_id and f.wedge_class != "wedge/repo-ahead-of-queue"
+        if f.ticket_id
+        and f.wedge_class
+        not in {"wedge/repo-ahead-of-queue", _WEDGE_BLOCKED_DEAD_SESSION}
     }
-    if not revert_ticket_ids:
+    blocked_ticket_ids: set[str] = {
+        f.ticket_id
+        for f in findings
+        if f.ticket_id and f.wedge_class == _WEDGE_BLOCKED_DEAD_SESSION
+    }
+    if not running_ticket_ids and not blocked_ticket_ids:
         return
 
     with dev_queue_lock():
@@ -672,12 +782,15 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         changed = False
         for task in queue.tasks:
             if (
-                task.ticket_id in revert_ticket_ids
+                task.ticket_id in running_ticket_ids
                 and task.status == QueueItemStatus.RUNNING
             ):
                 task.status = QueueItemStatus.PENDING
                 task.session_id = None
                 changed = True
+        if blocked_ticket_ids:
+            blocked_changed = _collapse_blocked_on_user_tasks(queue, blocked_ticket_ids)
+            changed = changed or blocked_changed
         if changed:
             save_dev_queue(queue)
 
@@ -867,10 +980,13 @@ def _reap_session_by_selector(
             get_native_daemon_client().stop(target.surface_ref)
 
     # Revert owning TicketTask to PENDING — separate lock per established pattern.
+    # When no RUNNING task exists, also try to collapse BLOCKED_ON_USER duplicates.
     ticket_id = ticket_id_for_session(target.name)
+    mutations: list[str] = ["session_status_completed", "daemon_stopped"]
     if ticket_id:
         with dev_queue_lock():
             store = load_dev_queue()
+            running_reverted = False
             for task in store.tasks:
                 if (
                     task.ticket_id == ticket_id
@@ -878,8 +994,17 @@ def _reap_session_by_selector(
                 ):
                     task.status = QueueItemStatus.PENDING
                     task.session_id = None
-                    save_dev_queue(store)
+                    running_reverted = True
                     break
+            if running_reverted:
+                mutations.append("task_reverted_to_pending")
+                save_dev_queue(store)
+            else:
+                # No RUNNING task — try to collapse dead-session BLOCKED_ON_USER rows.
+                blocked_changed = _collapse_blocked_on_user_tasks(store, {ticket_id})
+                if blocked_changed:
+                    mutations.append("blocked_task_reverted_to_pending")
+                    save_dev_queue(store)
 
     # Emit audit event after all locks released. record_event uses _inbox_lock
     # (separate file lock — no deadlock risk). Covers both automated 4c consumer
@@ -894,11 +1019,7 @@ def _reap_session_by_selector(
             "lane": lane,
             "authority": authority,
             "proposed_action": proposed_action,
-            "mutations": [
-                "session_status_completed",
-                "daemon_stopped",
-                "task_reverted_to_pending",
-            ],
+            "mutations": mutations,
         },
         correlation_id=correlation_id,
     )
@@ -955,6 +1076,9 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
             _check_wedge_task_running_completed_session(link_state, queue)
         )
         report.wedge_findings.extend(_check_wedge_repo_ahead(link_state, queue))
+        report.wedge_findings.extend(
+            _check_wedge_dead_session_blocked_on_user(link_state, queue)
+        )
         if reap and report.wedge_findings:
             _reap_wedge_findings(report.wedge_findings)
 
