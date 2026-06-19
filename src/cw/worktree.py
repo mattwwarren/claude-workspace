@@ -10,7 +10,12 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from cw.exceptions import MissingWorkspaceError, StaleWorktreeError, WorktreeError
+from cw.exceptions import (
+    HeadNotOnDefaultBranchError,
+    MissingWorkspaceError,
+    StaleWorktreeError,
+    WorktreeError,
+)
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
@@ -694,7 +699,7 @@ def fast_forward_main(
             f"'{current_branch}', expected '{default_branch}'. "
             f"Switch to '{default_branch}' before refreshing."
         )
-        raise WorktreeError(msg)
+        raise HeadNotOnDefaultBranchError(msg)
 
     # Guard 2: ensure the working tree is clean (or only has untracked files).
     status_out = _run_git("status", "--porcelain", cwd=git_dir).stdout
