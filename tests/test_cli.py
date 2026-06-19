@@ -2958,6 +2958,7 @@ class TestParseSentinelFromTranscript:
         claude_session_id: str,
         assistant_text: str,
         home: Path,
+        extra_records: list[dict[str, object]] | None = None,
     ) -> None:
         encoded = str(worktree).replace("/", "-").replace(".", "-")
         project_dir = home / ".claude" / "projects" / encoded
@@ -2969,8 +2970,11 @@ class TestParseSentinelFromTranscript:
                 "content": [{"type": "text", "text": assistant_text}],
             },
         }
+        prefix = ""
+        if extra_records:
+            prefix = "\n".join(json.dumps(r) for r in extra_records) + "\n"
         (project_dir / f"{claude_session_id}.jsonl").write_text(
-            json.dumps(record) + "\n"
+            prefix + json.dumps(record) + "\n"
         )
 
     def test_returns_auto_dev_result_on_clean_sentinel(
@@ -3124,6 +3128,143 @@ class TestParseSentinelFromTranscript:
         )
 
         assert _parse_sentinel_from_transcript(str(worktree), "uuid-userblock") is None
+
+    def test_last_match_skips_documented_example(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Documented example first, real sentinel last → real result returned.
+
+        Regression for GitHub #591: the live-guard monitor latched onto the
+        illustrative pr=42/PROJ-1234 block instead of the real result.
+        """
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-591a"
+        worktree.mkdir(parents=True)
+
+        example_payload = {
+            "schema_version": 4,
+            "ticket_id": "PROJ-1234",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 3,
+                "lines_estimate": 42,
+                "lines_actual": 47,
+                "forbidden_touched": False,
+            },
+            "plan_source": "linear_existing",
+            "branch": "dev/proj-1234-fix-login",
+            "worktree_path": "~/.cw/wt/abc/auto-dev-proj-1234",
+            "fork_point_sha": "abc1234",
+            "commits": ["sha1", "sha2"],
+            "pr": {
+                "number": 42,
+                "url": "https://github.com/.../pull/42",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "MEDIUM",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+        example_frame = (
+            f"<<<AUTO_DEV_RESULT\n{json.dumps(example_payload)}\nAUTO_DEV_RESULT>>>"
+        )
+        example_record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": example_frame}],
+            },
+        }
+        self._write_transcript(
+            worktree,
+            "uuid-591a",
+            _SENTINEL_215_PLAN_PENDING,
+            fake_home,
+            extra_records=[example_record],
+        )
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-591a")
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "215"
+        assert parsed.status == "plan_pending_approval"
+
+    def test_example_only_returns_none(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the documented example block present → None (no real sentinel).
+
+        Regression for GitHub #591: a freshly-spawned session that only has
+        the prompt's illustrative block must not report as shipped.
+        """
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / "auto-dev-591b"
+        worktree.mkdir(parents=True)
+
+        example_payload = {
+            "schema_version": 4,
+            "ticket_id": "PROJ-1234",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 3,
+                "lines_estimate": 42,
+                "lines_actual": 47,
+                "forbidden_touched": False,
+            },
+            "plan_source": "linear_existing",
+            "branch": "dev/proj-1234-fix-login",
+            "worktree_path": "~/.cw/wt/abc/auto-dev-proj-1234",
+            "fork_point_sha": "abc1234",
+            "commits": ["sha1", "sha2"],
+            "pr": {
+                "number": 42,
+                "url": "https://github.com/.../pull/42",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "MEDIUM",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+        example_sentinel = (
+            f"<<<AUTO_DEV_RESULT\n{json.dumps(example_payload)}\nAUTO_DEV_RESULT>>>"
+        )
+        self._write_transcript(worktree, "uuid-591b", example_sentinel, fake_home)
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-591b") is None
 
 
 class TestCompletion:

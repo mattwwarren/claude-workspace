@@ -1417,6 +1417,7 @@ def _write_salvage_transcript(
     *,
     surface_ref: str = "fake-short-id",
     emit_via: str = "text",
+    extra_records: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Write a transcript jsonl under ``home`` carrying a wrapped sentinel.
 
@@ -1435,6 +1436,10 @@ def _write_salvage_transcript(
       when a worker emits the sentinel via ``cat <<EOF`` (#731). The assistant
       record carries only narrative + the tool_use command echo, so the frame
       is reachable ONLY by scanning tool_result blocks.
+
+    ``extra_records``: optional JSONL records written before the main sentinel
+    record. Use this to produce multi-sentinel transcripts (e.g. an illustrative
+    example block followed by the real sentinel) for last-match tests (#591).
     """
     encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
@@ -1443,6 +1448,9 @@ def _write_salvage_transcript(
     frame = f"<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
     stem = f"{surface_ref}-{claude_session_id}"
     path = project_dir / f"{stem}.jsonl"
+    prefix = ""
+    if extra_records:
+        prefix = "\n".join(json.dumps(r) for r in extra_records) + "\n"
     if emit_via == "tool_result":
         records = [
             {
@@ -1467,7 +1475,7 @@ def _write_salvage_transcript(
                 },
             },
         ]
-        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        path.write_text(prefix + "\n".join(json.dumps(r) for r in records) + "\n")
         return path
     record = {
         "type": "assistant",
@@ -1476,7 +1484,7 @@ def _write_salvage_transcript(
             "content": [{"type": "text", "text": f"narrative\n{frame}"}],
         },
     }
-    path.write_text(json.dumps(record) + "\n")
+    path.write_text(prefix + json.dumps(record) + "\n")
     return path
 
 
@@ -13475,3 +13483,129 @@ class TestVerifySupervisorSessionId:
         cleared = _verify_supervisor_session_id(load_state())
         assert cleared == 0
         assert called == []
+
+
+# ---------------------------------------------------------------------------
+# _parse_sentinel_from_blocks — last-match + documented-example skip (#591)
+# ---------------------------------------------------------------------------
+
+
+def _documented_example_salvage_payload() -> dict[str, Any]:
+    """Payload matching the illustrative example in the /auto-dev skill prompt."""
+    return {
+        "schema_version": 4,
+        "ticket_id": "PROJ-1234",
+        "status": "shipped",
+        "stage_reached": "stage5_post_create",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 42,
+            "lines_actual": 47,
+            "forbidden_touched": False,
+        },
+        "plan_source": "linear_existing",
+        "branch": "dev/proj-1234-fix-login",
+        "worktree_path": "~/.cw/wt/abc/auto-dev-proj-1234",
+        "fork_point_sha": "abc1234",
+        "commits": ["sha1", "sha2"],
+        "pr": {
+            "number": 42,
+            "url": "https://github.com/.../pull/42",
+            "auto_merge": True,
+            "base": "main",
+        },
+        "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "MEDIUM",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": ["wait_for_ci"],
+    }
+
+
+def _make_sentinel_record(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build an assistant record wrapping *payload* as a sentinel text block."""
+    body = json.dumps(payload)
+    frame = f"<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": f"narrative\n{frame}"}],
+        },
+    }
+
+
+def test_parse_sentinel_from_blocks_last_match_skips_documented_example(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-block: documented example first, real sentinel second → real one returned.
+
+    Regression for GitHub #591: the live-guard monitor latched onto the
+    illustrative pr=42/PROJ-1234 example block instead of the real result.
+    last-match + is_documented_example skip must return the real sentinel.
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-591"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    example_record = _make_sentinel_record(_documented_example_salvage_payload())
+    path = _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-591",
+        _shipped_salvage_payload(),
+        extra_records=[example_record],
+    )
+    sess = _mk_headless_daemon_session("591", worktree, started_at)
+    save_state(CwState(sessions=[sess]))
+
+    result = _parse_sentinel_from_blocks(path)
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "salv-1"
+    assert result.pr is not None
+    assert result.pr.number == 99
+
+
+def test_parse_sentinel_from_blocks_example_only_returns_none(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the documented example block present → treated as no sentinel (None).
+
+    Regression for GitHub #591: a freshly-spawned session with only the
+    prompt's illustrative block should not report as shipped.
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-591b"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    path = _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-591b",
+        _documented_example_salvage_payload(),
+    )
+    sess = _mk_headless_daemon_session("591b", worktree, started_at)
+    save_state(CwState(sessions=[sess]))
+
+    result = _parse_sentinel_from_blocks(path)
+    assert result is None

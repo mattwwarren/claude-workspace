@@ -27,6 +27,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
     extract_block,
+    is_documented_example,
     parse_stdout,
 )
 from cw.config import (
@@ -505,21 +506,28 @@ def _detect_usage_limit(session: Session) -> bool:
 
 
 def _parse_sentinel_from_blocks(path: Path) -> AutoDevResult | BlockedResult | None:
-    """Parse the first transcript block carrying a complete sentinel frame.
+    """Parse the LAST transcript block carrying a complete sentinel frame.
 
     Scans candidate blocks via :func:`_iter_sentinel_text_blocks` — assistant
     text AND ``tool_result`` (Bash stdout) blocks — returning the parse of the
-    first block whose framing is complete. A worker may emit the sentinel via
-    ``cat <<EOF`` rather than as assistant text, landing the frame in a
-    tool_result block; scanning only assistant text misses it and the stage
-    stalls (GitHub #731). Mirrors the per-block scan in signal_stop's
-    ``_parse_sentinel_from_transcript`` so both paths agree. Returns ``None``
-    when no block carries a complete frame.
+    last block whose framing is complete. Last-match mirrors ``extract_block``'s
+    §3.1 "LAST occurrence wins" rule (GitHub #591). Documented-example blocks
+    (the illustrative ``pr=42 / PROJ-1234`` placeholder in the skill prompt)
+    are skipped; if only an example block is present, returns None.
+
+    A worker may emit the sentinel via ``cat <<EOF`` rather than as assistant
+    text, landing the frame in a tool_result block; scanning only assistant
+    text misses it and the stage stalls (GitHub #731). Returns ``None`` when no
+    non-example block carries a complete frame.
     """
+    last_result: AutoDevResult | BlockedResult | None = None
     for text in _iter_sentinel_text_blocks(path):
         if extract_block(text) is not None:
-            return parse_stdout(text)
-    return None
+            result = parse_stdout(text)
+            if isinstance(result, AutoDevResult) and is_documented_example(result):
+                continue
+            last_result = result
+    return last_result
 
 
 def _salvage_terminal_result(
