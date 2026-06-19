@@ -121,6 +121,10 @@ def init_cursor_at_end(consumer: str) -> bool:
     inbox = _inbox_path()
     with _inbox_lock():
         raw_text = inbox.read_text() if inbox.exists() else ""
+    # Why: _inbox_lock is released before advance_cursor runs, so events appended
+    # in that window will appear to be "before" the cursor and be skipped on the
+    # first read.  The race is accepted: the consumer sees at-most-once semantics
+    # on startup; any missed events are benign (follow-mode replays on size change).
     if not raw_text:
         return False
     parsed = _parse_lines(raw_text.splitlines())
