@@ -9,7 +9,7 @@ import click
 
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
-from cw.events import advance_cursor, read_events, record_event
+from cw.events import advance_cursor, init_cursor_at_end, read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
     WORKER_PURPOSES,
@@ -353,6 +353,10 @@ def event_tail(
             raise CwError(msg)
         etype_filter = [OrchestratorEventType(t) for t in type_filter]
 
+    # Initialize fresh cursor to "now" so first-use consumers don't replay history.
+    if consumer is not None:
+        init_cursor_at_end(consumer)
+
     events = read_events(
         consumer=consumer,
         since_ts=since_ts,
@@ -360,7 +364,10 @@ def event_tail(
     )
 
     if not events:
-        click.echo("No events.")
+        if as_json:
+            click.echo("[]")
+        else:
+            click.echo("No events.")
         return
 
     for ev in events:
