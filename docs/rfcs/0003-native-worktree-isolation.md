@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — ready for review |
+| Status | **Accepted — `worktree.py` retained as thin policy layer; native primitives used inside it** |
 | Owner | @mattwwarren |
 | Spike ticket | #107 |
 | CLI version under test | Claude Code 2.1.148 |

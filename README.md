@@ -1,8 +1,13 @@
 # claude-workspace (`cw`)
 
-Multi-session workspace orchestrator for Claude Code.
+Multi-session workspace orchestrator for Claude Code. `cw` lets you drive parallel autonomous Claude workers across your repos — enqueue tickets, dispatch workers, monitor progress, and handle gates — while staying the coordinator rather than the implementer.
 
-Manage multiple Claude Code sessions across projects and purposes (implementation, ideation, debt paydown) with the ability to background, switch, and resume without losing context.
+The core loop: **harden a ticket → dispatch it → workers implement, review, and ship → you triage gates and clean up.**
+
+## Prerequisites
+
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — AI coding assistant (required)
+- [uv](https://docs.astral.sh/uv/) — Python package manager (required)
 
 ## Installation
 
@@ -10,114 +15,282 @@ Manage multiple Claude Code sessions across projects and purposes (implementatio
 # Install from GitHub
 uv tool install git+https://github.com/mattwwarren/claude-workspace.git
 
-# Or pin to a specific release
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.4.0
+# Pin to a specific release
+uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v1.3.0
 
-# Or install from local clone
+# Install from local clone (development)
 git clone https://github.com/mattwwarren/claude-workspace.git
 cd claude-workspace
-./scripts/install.sh
+uv tool install --editable .
 ```
 
-See [docs/INSTALL.md](docs/INSTALL.md) for full installation guide.
+> **Stale binary warning:** `uv tool install --force` caches by version string. After pulling new code,
+> use `--reinstall --no-cache` and verify with a subcommand `--help`, not `cw --version`.
 
 ## Getting Started
 
 ```bash
-# Add your first project
+# Register a project
 cw init my-project --path /path/to/repo
 
-# Start working (spawns Claude background daemon sessions)
-cw start my-project
+# Orient: verify queue and health
+cw dev-queue status
+cw doctor
 
-# Background current session (auto-generates handoff context)
-cw bg
+# Harden a ticket (sweep for ambiguities before dispatch)
+# In a Claude Code session: /harden-ticket PROJ-123
 
-# Resume later with handoff context injected
-cw resume my-project/impl
+# Dispatch
+cw dev-queue add PROJ-123 --client my-project --scope large
+cw dev-queue run --once
 
-# Check what's running
-cw status
+# Monitor
+cw watch                                    # live TUI work board
+cw dev-queue wait PROJ-123 -c my-project   # block until terminal, JSON exit codes
+
+# Clean up after terminal
+cw done <session-name>
+cw spawn close <session-id>
+cw dev-queue remove PROJ-123 -c my-project --all
 ```
 
-## Prerequisites
+## The Daily Workflow
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) - AI coding assistant
-- [uv](https://docs.astral.sh/uv/) - Python package manager
-- [peon-ping](https://github.com/PeonPing/peon-ping) - Sound notifications when Claude needs attention (optional)
+### Sprint recipe (operator perspective)
 
-## Commands
+1. **Orient** — `cw dev-queue status` (expect empty/known), `cw doctor` (expect healthy)
+2. **Scope** — take the epic; split into sub-tickets if large; note sequential deps
+3. **Harden** — run `/harden-ticket` on each ticket to resolve technical ambiguities upfront
+4. **Dispatch** — `cw dev-queue add <id> -c <client> -s large` → `cw dev-queue run --once`
+5. **Watch** — `cw watch` or `cw dev-queue wait`; monitor for transcript silence >25 min
+6. **Triage gates** — respond to `plan_pending_approval`, `ambiguities_pending_resolution`, `review_pending_approval`, `blocked` as they surface
+7. **Verify** — read the worker's sentinel, run the gate, check the PR
+8. **Clean up** — `cw done` → `cw spawn close` → `cw dev-queue remove`
+
+### Information flow
+
+```
+You (coordinator)
+    │
+    ├─ /harden-ticket <id>          ← pre-flight: resolve ambiguities before dispatch
+    │
+    ├─ cw dev-queue add <id>        ← enqueue
+    │
+    ├─ cw dev-queue run [--once]    ← dispatch: spawns claude --bg worker per ticket
+    │         │
+    │         ▼
+    │   Worker runs /auto-dev --headless
+    │         │
+    │         ├── Stage 1: Plan     → posts plan to Linear / GitHub Issue
+    │         ├── Stage 2: Impl     → pushes branch to origin
+    │         ├── Stage 3: Review   → runs reviewers, fix loop
+    │         ├── Stage 4: PR       → opens PR, enables auto-merge
+    │         └── emits AUTO_DEV_RESULT sentinel (JSON)
+    │                 │
+    │                 ▼
+    │   reconcile() reads sentinel → updates queue task status
+    │
+    ├─ cw watch / cw dev-queue wait ← monitor terminal status
+    │
+    └─ triage gates, clean up
+```
+
+### Gate handling (by sentinel status)
+
+| Status | Action |
+|---|---|
+| `shipped` | Done. PR is live with auto-merge. |
+| `no_op` | Ticket already satisfied. Close as completed. |
+| `ambiguities_pending_resolution` | Answer questions on the issue, re-dispatch. |
+| `premises_pending_verification` | Verify flagged premises on the issue, re-dispatch. |
+| `plan_pending_approval` | Read the plan comment, post `<!-- auto-dev-plan-approved -->`, re-dispatch. |
+| `review_pending_approval` | Review the diff yourself, ship (`gh pr create` + `gh pr merge --squash --auto`). |
+| `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, re-dispatch. |
+| `blocked` | Triage `blocker.reason` and `blocker.retry_eligible`. Re-dispatch if eligible. |
+
+## CLI Reference
+
+### Session lifecycle
 
 | Command | Description |
 |---------|-------------|
-| `cw init <name> --path <path>` | Add a new project |
-| `cw start <client>` | Start or resume sessions as background daemon workers |
-| `cw bg` | Background current session (triggers handoff) |
-| `cw resume <session>` | Resume a backgrounded session |
-| `cw done <session>` | Mark a session as completed |
-| `cw list` | List all sessions |
+| `cw start <client>` | Start or resume a Claude Code session for a client |
+| `cw bg [session]` | Background the current session (injects `/session-done`, generates handoff) |
+| `cw resume <session>` | Resume a backgrounded session with handoff context injected |
+| `cw done [session]` | Mark a session as completed (not resumable) |
+| `cw list` | List all sessions across clients |
 | `cw status` | Show session health dashboard |
-| `cw queue add <client> "task"` | Queue work for later |
-| `cw queue list <client>` | View queued items |
-| `cw queue next <client>` | Claim next queued item |
-| `cw config` | Show configuration |
-| `cw completion <shell>` | Show shell completion snippet |
+| `cw watch` | Live TUI work board (sessions + dev-queue tickets) |
+| `cw guide` | Print the operator guide (`cw/data/GUIDE.md`) |
 
-## Workflow
+### Dispatch queue
 
-### For Humans
+| Command | Description |
+|---------|-------------|
+| `cw dev-queue add <ticket> -c <client>` | Enqueue a ticket for dispatch |
+| `cw dev-queue run [--once]` | Dispatch pending tasks (up to concurrency cap) |
+| `cw dev-queue status` | Show queue state and last tick summary |
+| `cw dev-queue wait <ticket>` | Block until terminal; structured JSON exit codes |
+| `cw dev-queue move <ticket> --to-lane <lane>` | Re-lane a ticket |
+| `cw dev-queue cancel <ticket>` | Cancel a pending ticket |
+| `cw dev-queue remove <ticket> --all` | Remove a ticket from the queue |
+| `cw dev-queue clear -c <client>` | Clear completed/cancelled tickets |
+| `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
 
-The core workflow is: **init** → **start** → **work** → **bg/resume** → **done**.
+`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript) · `124`=timeout
+
+### Orchestrator
+
+| Command | Description |
+|---------|-------------|
+| `cw orchestrate status` | Snapshot of orchestrator pipeline state |
+| `cw orchestrate watch` | Live orchestrator dashboard |
+| `cw orchestrate workers` | List active worker sessions |
+| `cw orchestrate run --lane <name>` | Run the reap-authority loop for a lane |
+| `cw orchestrate start --lane <name>` | Bind lane reap authority |
+
+### Spawn (low-level worker management)
+
+| Command | Description |
+|---------|-------------|
+| `cw spawn -c <client>` | Spawn a daemon worker directly |
+| `cw spawn close <session-id>` | Stop a live daemon worker |
+| `cw spawn complete <session-id>` | Mark a worker session complete with result |
+
+### Lanes
+
+| Command | Description |
+|---------|-------------|
+| `cw lane list` | List configured lanes |
+| `cw lane declare <name>` | Declare a named dispatch lane |
+
+### Maintenance
+
+| Command | Description |
+|---------|-------------|
+| `cw init <name> --path <path>` | Register a new project |
+| `cw doctor [--reap]` | Health check; `--reap` repairs common wedge conditions |
+| `cw upgrade-workers` | Upgrade all daemon workers to the latest model |
+| `cw board` | Open the orchestrator board |
+| `cw schema` | Print JSON schema for internal models |
+
+### Simple task queue (inter-session messaging)
+
+| Command | Description |
+|---------|-------------|
+| `cw queue add <client> "task"` | Queue a task for a session |
+| `cw queue list [client]` | View queued items |
+| `cw queue next <client>` | Claim the next queued item |
+| `cw queue remove <client> <id>` | Remove a queued item |
+| `cw queue clear <client>` | Clear the queue |
+
+### Worktree management
+
+| Command | Description |
+|---------|-------------|
+| `cw worktree list` | List managed worktrees |
+| `cw worktree gc` | Prune squash-merged worktrees (checks PR state) |
+
+### Other
+
+| Command | Description |
+|---------|-------------|
+| `cw config` | Show or manage configuration |
+| `cw completion <shell>` | Print shell completion snippet |
+| `cw result validate -` | Validate an AUTO_DEV_RESULT sentinel JSON payload |
+| `cw event record <type>` | Record an event on the orchestrator bus |
+
+## Slash Commands (Claude Code Skills)
+
+These are invoked inside a Claude Code session and form the daily operational toolkit.
+
+### Core pipeline
+
+| Command | When to use |
+|---------|-------------|
+| `/auto-dev <ticket-id>` | Full automated pipeline: intake → plan → impl → review → PR. Main driver for individual tickets in interactive mode. |
+| `/auto-dev --headless` | Same pipeline, no interactive prompts. This is what `cw dev-queue run` dispatches workers to run. |
+| `/harden-ticket <id>` | Pre-flight sweep: resolves technical ambiguities, escalates product forks, posts **Pre-flight Resolutions** comment. Run before every non-trivial dispatch. |
+
+### Planning and queuing
+
+| Command | When to use |
+|---------|-------------|
+| `/auto-dev-plan` | Stage 1 only: draft plan, run spec + soundness reviewers, post to issue tracker. |
+| `/queue-plan` | Queue an approved plan for async dispatch. |
+| `/queue-debt` | Queue a tech debt item for later cleanup. |
+| `/queue-issues` | Queue multiple issues for dispatch. |
+| `/auto-debt <ticket-id>` | Constrained auto-dev for small-scope tech debt tickets. |
+
+### Review and shipping
+
+| Command | When to use |
+|---------|-------------|
+| `/review` | Run the review suite on the current branch. |
+| `/review-sweep` | Sweep all open PRs for feedback and CI status. |
+| `/review-monitor` | Watch a PR and respond to review events. |
+| `/prep-pr` | Prepare a PR: format title/body, wire auto-merge, post to tracker. |
+| `/ship-it` | Final gate check + merge. |
+| `/post-review` | Post-merge cleanup and debt filing. |
+
+### Session management
+
+| Command | When to use |
+|---------|-------------|
+| `/session-done` | End-of-session cleanup: generate handoff, background session. |
+| `/handoff` | Generate a handoff document for resume or context transfer. |
+| `/setup` | Onboard a new project into `cw` (config, hooks, MCP servers). |
+| `/install-cw` | Install `cw` and configure Claude Code integration on a fresh machine. |
+
+### Orchestration (advanced)
+
+| Command | When to use |
+|---------|-------------|
+| `/pull-and-execute` | Pull next queued item → spawn agents → review → mark complete. |
+| `/orchestrate-phase` | Run a single pipeline phase in an orchestrated multi-session setup. |
+| `/graduate-plan` | Promote a plan from draft to approved state. |
+
+## The `/auto-dev` Pipeline
+
+`/auto-dev` is the core automated pipeline. In headless mode (what `cw` dispatches), it runs without interactive prompts and emits a structured `AUTO_DEV_RESULT` sentinel at the end.
 
 ```
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│ cw init  │───>│ cw start │───>│  (work)  │───>│  cw bg   │
-└──────────┘    └──────────┘    └──────────┘    └──────────┘
-                     ▲                               │
-                     │          ┌──────────┐         │
-                     └──────────│cw resume │<────────┘
-                                └──────────┘
+Stage 0: Intake          ← fetch ticket, resolve tracker, origin sync check
+Stage 1: Plan            ← draft or validate plan, ambiguity scan, spec+soundness review
+Stage 2: Implement       ← spawn impl agent in worktree, push branch
+Stage 3: Review          ← spawn review agents, adjudicate findings, fix loop (≤5 cycles)
+Stage 4: PR Creation     ← merge gate check, create PR, enable auto-merge
+Stage 5: CI Wait         ← skipped headless (orchestrator concern)
 ```
 
-1. **`cw init`** registers a project (workspace path, branch, purposes)
-2. **`cw start`** spawns Claude background daemon workers — one per purpose (impl, idea, debt) — using `claude --bg` with purpose-specific prompts.
-3. **Work** happens inside each daemon worker — implementation, brainstorming, or debt cleanup.
-4. **`cw bg`** backgrounds all workers: injects `/session-done` into each Claude instance, waits for handoff files, then marks sessions as backgrounded.
-5. **`cw resume`** restarts a session with its handoff context auto-injected, so Claude picks up where it left off.
-6. **`cw done`** marks a session as completed when the work is finished.
+**Scope tiers** control approval automation:
+- **Small** (≤10 files, ≤500 lines, no forbidden areas): most gates auto-skip
+- **Large** (>10 files or >500 lines or forbidden areas): plan and review require human approval
 
-### For Agents (Claude Code Slash Commands)
+**Sentinel output** (headless only):
 
-Agents interact with `cw` through Claude Code slash commands that queue and execute work:
-
-1. **`/queue-plan`** — Queue an approved plan for implementation. Adds it to the client's task queue with context files and success criteria.
-2. **`/queue-debt`** — Queue a tech debt item for later cleanup.
-3. **`/pull-and-execute`** — Pull the next queued item, spawn agent teams to implement it, review the results, and mark it complete.
-
-This creates an async pipeline: humans (or planning sessions) populate the queue, and execution sessions drain it.
-
-```
-Planning Session          Queue              Execution Session
-┌─────────────┐    ┌──────────────┐    ┌───────────────────┐
-│ /queue-plan │───>│ cw queue add │───>│ /pull-and-execute │
-│ /queue-debt │    │              │    │                   │
-└─────────────┘    └──────────────┘    └───────────────────┘
+```json
+<<<AUTO_DEV_RESULT
+{
+  "schema_version": 4,
+  "ticket_id": "PROJ-123",
+  "status": "shipped",
+  "stage_reached": "stage5_post_create",
+  "scope": {"tier": "small", "files": 3, "lines_actual": 47},
+  "branch": "dev/proj-123-fix-login",
+  "pr": {"number": 42, "url": "...", "auto_merge": true},
+  "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+  "blocker": null,
+  "next_actions": []
+}
+AUTO_DEV_RESULT>>>
 ```
 
-### Multi-Client Workflow
-
-```bash
-# Start sessions for different projects
-cw start client-a
-cw start client-b
-
-# List all active sessions across clients
-cw list
-```
+`cw` parses this sentinel via `reconcile()` to route tasks to terminal queue states. See [`docs/headless-contract.md`](docs/headless-contract.md) for the full schema.
 
 ## Configuration
 
-Config lives at `~/.config/cw/clients.yaml` (or `$XDG_CONFIG_HOME/cw/clients.yaml`).
+Config lives at `~/.config/cw/clients.yaml`.
 
 ```yaml
 clients:
@@ -125,21 +298,54 @@ clients:
     workspace_path: /path/to/repo
     default_branch: main
     auto_purposes: [impl, idea, debt]
+    worker_model: claude-sonnet-4-6   # pin model for autonomous workers
+    lanes:
+      - name: default
+        max_parallel: 2
+        reap_policy: signal_only      # signal_only (default) or auto
     purpose_prompts:
       impl: |
         Focus on implementation. Follow existing patterns.
 ```
 
-See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options.
+Key fields:
 
-## How It Works
+| Field | Description |
+|-------|-------------|
+| `workspace_path` | Absolute path to the project repo (or use `repo_path` + `branch` for worktree mode) |
+| `worker_model` | Model for DAEMON-origin workers (`claude --bg`). USER-origin sessions inherit the operator's default. |
+| `lanes` | Named dispatch lanes with `max_parallel`, `reap_policy`, and `priority` |
+| `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt`, `explore` |
 
-`cw` manages two things:
+See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and worktree-mode configuration.
 
-1. **Daemon worker lifecycle** - spawn, background, and resume `claude --bg` workers per purpose (impl, idea, debt)
-2. **Session state** - persist context, track liveness via the daemon roster, and inject handoff context on resume
+## Architecture
 
-`cw` shells out to `claude --bg` to spawn workers and polls `claude agents --json` to track liveness.
+- **Daemon workers** — `cw` spawns workers via `claude --bg`, tracked by short hex session ID in `~/.claude/daemon/roster.json`. No multiplexer required.
+- **Reconcile** — `cw status`, `cw list`, `cw start`, and each dispatch tick call `reconcile()` to detect phantom sessions (in state but absent from the daemon roster). Default `reap_policy: signal_only` emits `SESSION_REAP_PROPOSED` and routes to `BLOCKED_ON_USER` without destructive mutation. `reap_policy: auto` or `cw doctor --reap` performs actual cleanup.
+- **Sentinel parsing** — the `/auto-dev --headless` worker emits a structured `AUTO_DEV_RESULT` JSON block at session end. `reconcile()` reads this from the transcript to advance the queue task.
+- **File-based locking** — prevents concurrent state corruption from parallel session operations.
+- **Event bus** — `~/.local/share/cw/events.jsonl` provides an audit trail; MCP servers (`cw pr-channel`, `cw queue-channel`) expose events to Claude Code sessions.
+- **Worktrees** — impl agents work in isolated git worktrees; `cw worktree gc` prunes merged ones.
+
+### Key files
+
+| Path | Purpose |
+|------|---------|
+| `~/.config/cw/clients.yaml` | Client configuration |
+| `~/.local/share/cw/sessions.json` | Session state |
+| `~/.local/share/cw/dev_queue.json` | Dispatch queue |
+| `~/.local/share/cw/events.jsonl` | Event history |
+| `~/.claude/daemon/roster.json` | Native daemon session roster |
+
+### Architecture decisions
+
+See [`docs/adr/`](docs/adr/) for formal ADRs. Key decisions:
+
+- **Keystroke injection** — `cw bg` injects `/session-done` into active Claude sessions via the daemon API.
+- **On-demand reconciliation** — no background daemon; `reconcile()` runs on every read path.
+- **Sentinel as state** — pipeline state lives in Linear comments, git commit trailers, and GitHub PR fields. No `.auto-dev-state.json` files. Resume detection is pure derivation from these durable signals.
+- **Fact gates advancement** — orchestrator completion gates (diff non-empty, tests pass, branch pushed) are deterministic; agent self-assessment is advisory only.
 
 ## Shell Completion
 
@@ -149,7 +355,19 @@ eval "$(_CW_COMPLETE=bash_source cw)"
 
 # Zsh (~/.zshrc)
 eval "$(_CW_COMPLETE=zsh_source cw)"
+
+# Fish (~/.config/fish/config.fish)
+_CW_COMPLETE=fish_source cw | source
 ```
+
+## Further Reading
+
+- [`cw guide`](src/cw/data/GUIDE.md) — operator how-to, always matches your installed version
+- [`docs/dispatch-runbook.md`](docs/dispatch-runbook.md) — end-to-end `cw dev-queue` dispatch procedure
+- [`docs/session-disposition.md`](docs/session-disposition.md) — reading a session's outcome from transcript sentinels
+- [`docs/headless-contract.md`](docs/headless-contract.md) — `AUTO_DEV_RESULT` schema and event taxonomy
+- [`docs/events.md`](docs/events.md) — event bus reference
+- [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md) — full configuration reference
 
 ## License
 

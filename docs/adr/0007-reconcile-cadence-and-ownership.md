@@ -1,6 +1,6 @@
 # Reconcile cadence and ownership: on-demand, ticker, or daemon primary runner
 
-**Status:** Proposed
+**Status:** Deferred
 **Driven by:** #639 (stale session state between cw commands — hours-long gaps with long-running DAEMON workers)
 **Builds on:** [ADR-0005](0005-single-state-lock.md) (single state lock), [ADR-0006](0006-reaping-is-gated-by-an-authority.md) (reaping is gated by an authority)
 
