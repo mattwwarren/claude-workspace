@@ -12,7 +12,7 @@ from click.testing import CliRunner
 from freezegun import freeze_time
 
 from cw.cli import main
-from cw.events import advance_cursor, read_events
+from cw.events import advance_cursor, init_cursor_at_end, read_events
 from cw.events import record_event as events_record_event
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
@@ -363,18 +363,18 @@ def test_cli_event_tail_empty(tmp_events_dir: Path) -> None:
 
 
 def test_cli_event_tail_since_consumer_advances_cursor(tmp_events_dir: Path) -> None:
-    """cw event tail --since <consumer> reads new events and advances cursor."""
+    """Fresh --since <consumer> starts at now (no history replay); subsequent calls see only new events."""
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
 
-    # First tail: reads both events, advances cursor
+    # First tail with fresh cursor: history should NOT be replayed
     runner = CliRunner()
     result = runner.invoke(main, ["event", "tail", "--since", "daemon"])
     assert result.exit_code == 0, result.output
-    assert ev1.id in result.output
-    assert ev2.id in result.output
+    assert ev1.id not in result.output
+    assert ev2.id not in result.output
 
-    # New event added
+    # New event added after cursor initialized
     ev3 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 3})
 
     # Second tail: cursor was at ev2, should only get ev3
@@ -571,6 +571,96 @@ def test_read_events_normal_cursor_semantics_unchanged(tmp_events_dir: Path) -> 
     ids = {e.id for e in result}
     assert ev_a.id not in ids
     assert ev_b.id not in ids
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: --json empty output + fresh --since cursor (issue #738)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_empty_json(tmp_events_dir: Path) -> None:
+    """cw event tail --json with no events emits '[]', not 'No events.'"""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--json"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "[]"
+    assert "No events." not in result.output
+
+
+def test_cli_event_tail_since_fresh_cursor_starts_at_now(tmp_events_dir: Path) -> None:
+    """Fresh --since <consumer>: pre-seeded history is NOT replayed; only new events appear."""
+    # Pre-seed history before consumer ever runs
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+
+    runner = CliRunner()
+    # First call: fresh cursor — should return 0 events (no history replay)
+    result = runner.invoke(main, ["event", "tail", "--since", "freshconsumer"])
+    assert result.exit_code == 0, result.output
+    assert ev1.id not in result.output
+    assert ev2.id not in result.output
+
+    # New event recorded after cursor initialized
+    ev3 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 3})
+
+    # Second call: only new event should appear
+    result2 = runner.invoke(main, ["event", "tail", "--since", "freshconsumer"])
+    assert result2.exit_code == 0, result2.output
+    assert ev3.id in result2.output
+    assert ev1.id not in result2.output
+    assert ev2.id not in result2.output
+
+
+def test_cli_event_tail_since_fresh_cursor_empty_inbox(tmp_events_dir: Path) -> None:
+    """Fresh --since cursor on empty inbox returns 'No events.' (not JSON)."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--since", "emptyconsumer"])
+    assert result.exit_code == 0, result.output
+    assert "No events." in result.output
+
+
+def test_init_cursor_at_end_fresh_consumer(tmp_events_dir: Path) -> None:
+    """init_cursor_at_end returns True and sets cursor to last event id."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+    ev3 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 3})
+
+    result = init_cursor_at_end("freshconsumer")
+
+    assert result is True
+    cursor_file = tmp_events_dir / "cursors" / "freshconsumer.json"
+    assert cursor_file.exists()
+    data = json.loads(cursor_file.read_text())
+    assert data["cursor"] == ev3.id
+    # ev1, ev2 ids should not match the cursor
+    assert data["cursor"] != ev1.id
+    assert data["cursor"] != ev2.id
+
+
+def test_init_cursor_at_end_existing_consumer_no_op(tmp_events_dir: Path) -> None:
+    """init_cursor_at_end returns False and leaves cursor unchanged when cursor exists."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+
+    # Pre-create cursor at ev1 (not the latest event)
+    advance_cursor("existingconsumer", ev1.id)
+
+    result = init_cursor_at_end("existingconsumer")
+
+    assert result is False
+    cursor_file = tmp_events_dir / "cursors" / "existingconsumer.json"
+    data = json.loads(cursor_file.read_text())
+    # Cursor must still point at ev1, not advanced to ev2
+    assert data["cursor"] == ev1.id
+
+
+def test_init_cursor_at_end_empty_inbox(tmp_events_dir: Path) -> None:
+    """init_cursor_at_end returns False and creates no cursor when inbox is empty."""
+    result = init_cursor_at_end("noconsumer")
+
+    assert result is False
+    cursor_file = tmp_events_dir / "cursors" / "noconsumer.json"
+    assert not cursor_file.exists()
 
 
 def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:
