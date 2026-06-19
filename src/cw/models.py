@@ -218,13 +218,14 @@ class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
     Precedence (highest first):
-    FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > SPAWN_ERROR > NO_PENDING > NONE.
+    FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > SPAWN_ERROR > LANE_CAP_BLOCKED > NO_PENDING > NONE.
     """
 
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
     CAP_FULL = "cap_full"
     SPAWN_ERROR = "spawn_error"
+    LANE_CAP_BLOCKED = "lane_cap_blocked"
     NO_PENDING = "no_pending"
     NONE = "none"
 
