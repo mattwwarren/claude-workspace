@@ -17,6 +17,7 @@ from cw.events import record_event as events_record_event
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -722,7 +723,7 @@ def test_cli_event_tail_follow_exits_on_keyboard_interrupt(
 def test_cli_event_tail_follow_emits_preexisting_event(
     tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """cw event tail --follow emits events written before the command starts, then exits."""
+    """cw event tail --follow emits pre-existing events, then exits."""
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
 
     def raise_on_first_sleep(*args: object, **kwargs: object) -> None:
@@ -741,7 +742,7 @@ def test_cli_event_tail_follow_streams_new_events(
 ) -> None:
     """cw event tail --follow streams events written after the command starts."""
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
-    ev2_holder: list[object] = []
+    ev2_holder: list[OrchestratorEvent] = []
 
     call_count = 0
 
@@ -761,9 +762,7 @@ def test_cli_event_tail_follow_streams_new_events(
     assert result.exit_code == 130
     assert ev1.id in result.output
     assert len(ev2_holder) == 1
-    ev2 = ev2_holder[0]
-    assert hasattr(ev2, "id")
-    assert ev2.id in result.output  # type: ignore[union-attr]
+    assert ev2_holder[0].id in result.output
 
 
 def test_cli_event_tail_follow_with_type_filter(
@@ -914,8 +913,43 @@ def test_cli_event_tail_follow_consumer_cursor_miss_warns_and_replays(
         main, ["event", "tail", "--follow", "--since", "unknownconsumer"]
     )
     assert result.exit_code == 130
-    assert "Warning: consumer cursor 'unknownconsumer' not found; replaying from start" in result.output
+    expected_warning = (
+        "Warning: consumer cursor 'unknownconsumer' not found; replaying from start"
+    )
+    assert expected_warning in result.output
     assert ev1.id in result.output
+
+
+def test_cli_event_tail_follow_exits_on_broken_pipe(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow exits cleanly (code 0) on BrokenPipeError."""
+
+    def broken_pipe_gen(**kwargs: object) -> Generator[OrchestratorEvent]:
+        raise BrokenPipeError
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("cw.cli.queues.tail_events_follow", broken_pipe_gen)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 0
+
+
+def test_cli_event_tail_follow_returns_on_exhausted_stream(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event tail --follow exits cleanly when the stream generator is exhausted."""
+
+    def empty_gen(**kwargs: object) -> Generator[OrchestratorEvent]:
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("cw.cli.queues.tail_events_follow", empty_gen)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 0
 
 
 def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:

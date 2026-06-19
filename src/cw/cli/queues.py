@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, datetime
 
 import click
 
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
-from cw.events import advance_cursor, init_cursor_at_end, read_events, record_event
+from cw.events import (
+    advance_cursor,
+    init_cursor_at_end,
+    load_cursor,
+    read_events,
+    record_event,
+    tail_events_follow,
+)
 from cw.exceptions import CwError
 from cw.models import (
     WORKER_PURPOSES,
+    OrchestratorEvent,
     OrchestratorEventType,
     QueueItem,
     QueueItemStatus,
@@ -327,6 +336,38 @@ def _resolve_event_types(
     return [OrchestratorEventType(t) for t in type_filter]
 
 
+def _print_event(ev: OrchestratorEvent, *, as_json: bool) -> None:
+    """Print a single event to stdout and flush immediately (line-buffered output)."""
+    if as_json:
+        click.echo(ev.model_dump_json())
+    else:
+        ts = ev.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        corr = f" corr={ev.correlation_id}" if ev.correlation_id else ""
+        click.echo(f"{ts}  {ev.id}  {ev.type}{corr}  {ev.payload}")
+    sys.stdout.flush()
+
+
+def _follow_loop(
+    since_cursor: str | None,
+    since_ts: datetime | None,
+    etype_filter: list[OrchestratorEventType] | None,
+    *,
+    as_json: bool,
+) -> None:
+    """Stream events from the inbox until SIGINT or broken pipe."""
+    try:
+        for ev in tail_events_follow(
+            since_cursor=since_cursor,
+            since_ts=since_ts,
+            event_types=etype_filter,
+        ):
+            _print_event(ev, as_json=as_json)
+    except KeyboardInterrupt:
+        raise click.exceptions.Exit(130) from None
+    except BrokenPipeError:
+        raise click.exceptions.Exit(0) from None
+
+
 @event.command(name="tail")
 @click.option(
     "--since",
@@ -340,11 +381,13 @@ def _resolve_event_types(
     help="Filter by event type (repeatable).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output full event JSON.")
+@click.option("--follow", "-f", is_flag=True, help="Stream new events as they arrive.")
 @handle_errors
 def event_tail(
     since: str | None,
     type_filter: tuple[str, ...],
     as_json: bool,
+    follow: bool,
 ) -> None:
     """Read events from the inbox.
 
@@ -353,7 +396,7 @@ def event_tail(
     timestamp to filter by creation time.
 
     When a consumer name is given, the cursor advances automatically
-    after reading.
+    after reading (one-shot mode only; --follow never advances the cursor).
     """
     consumer: str | None = None
     since_ts: datetime | None = None
@@ -362,7 +405,21 @@ def event_tail(
 
     etype_filter = _resolve_event_types(type_filter)
 
-    # Initialize fresh cursor to "now" so first-use consumers don't replay history.
+    if follow:
+        since_cursor: str | None = None
+        if consumer is not None:
+            since_cursor = load_cursor(consumer)
+            if since_cursor is None:
+                click.echo(
+                    f"Warning: consumer cursor '{consumer}' not found;"
+                    " replaying from start",
+                    err=True,
+                )
+        _follow_loop(since_cursor, since_ts, etype_filter, as_json=as_json)
+        return
+
+    # One-shot mode: initialize fresh cursor to "now" so first-use consumers
+    # don't replay history.
     if consumer is not None:
         init_cursor_at_end(consumer)
 
