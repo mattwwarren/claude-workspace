@@ -930,7 +930,7 @@ def _check_dispatch_repo_heads() -> list[CheckResult]:
                 check=False,
             )
             current = result.stdout.strip()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S112
             continue
         if current and current != client.default_branch:
             results.append(

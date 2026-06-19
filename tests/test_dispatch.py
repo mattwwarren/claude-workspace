@@ -33,7 +33,7 @@ from cw.dispatch import (
     run_dispatch_loop,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import StaleWorktreeError, WorktreeError
+from cw.exceptions import HeadNotOnDefaultBranchError, StaleWorktreeError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
     ClientConfig,
@@ -3209,6 +3209,105 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
         assert len(events) == 1
+
+    def test_auto_ff_ff_raises_worktree_error_emits_freshness_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Generic WorktreeError (not HeadNotOnDefaultBranchError) → FRESHNESS_GATE.
+
+        Verifies that a plain WorktreeError emits skip_reason=freshness_gate,
+        NOT freshness_gate_blocked.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-110", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+
+        def _boom(_client: object, **_kwargs: object) -> tuple[str, str]:
+            msg = "git pull failed"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.fast_forward_main", _boom)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-worktree-error-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert (
+            tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
+        )
+
+    def test_auto_ff_head_not_on_default_branch_emits_freshness_gate_blocked(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HeadNotOnDefaultBranchError → skip_reason=freshness_gate_blocked.
+
+        When fast_forward_main raises HeadNotOnDefaultBranchError, dispatch must:
+        - emit skip_reason=freshness_gate_blocked (not freshness_gate)
+        - still emit TICKET_NEEDS_SYNC for the blocked task
+        - not spawn any sessions (spawned==0)
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-111", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+
+        def _boom_head(_client: object, **_kwargs: object) -> tuple[str, str]:
+            msg = "Refusing to fast-forward: HEAD is on 'feature/xyz', expected 'main'."
+            raise HeadNotOnDefaultBranchError(msg)
+
+        monkeypatch.setattr("cw.dispatch.fast_forward_main", _boom_head)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+
+        tick_events = read_events(
+            consumer="test-auto-ff-head-not-default-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert (
+            tick_events[0].payload["skip_reason"]
+            == DispatchSkipReason.FRESHNESS_GATE_BLOCKED
+        )
+
+        sync_events = read_events(
+            consumer="test-auto-ff-head-not-default-sync",
+            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
+        )
+        assert len(sync_events) == 1
+        assert sync_events[0].payload["ticket_id"] == "CW-111"
 
     def test_auto_ff_false_keeps_ticket_needs_sync(
         self,

@@ -1316,6 +1316,148 @@ class TestCheckWorkspacePaths:
 
 
 # ---------------------------------------------------------------------------
+# TestCheckDispatchRepoHeads
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDispatchRepoHeads:
+    """Tests for _check_dispatch_repo_heads doctor check."""
+
+    def test_head_on_default_branch_returns_no_results(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Client HEAD on default branch → no CheckResult (happy path)."""
+        from cw.doctor import _check_dispatch_repo_heads
+
+        git_dir = tmp_path / "ws"
+        git_dir.mkdir()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  ok-client:\n    workspace_path: {git_dir}\n"
+            f"    default_branch: main\n"
+        )
+
+        monkeypatch.setattr(
+            "cw.doctor._sp.run",
+            lambda *_args, **_kwargs: type(
+                "R", (), {"stdout": "main\n", "returncode": 0}
+            )(),
+        )
+
+        results = _check_dispatch_repo_heads()
+        assert results == []
+
+    def test_head_on_feature_branch_returns_warn_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Client HEAD on feature branch → warn=True CheckResult with remedy."""
+        from cw.doctor import _check_dispatch_repo_heads
+
+        git_dir = tmp_path / "ws"
+        git_dir.mkdir()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  my-client:\n    workspace_path: {git_dir}\n"
+            f"    default_branch: main\n"
+        )
+
+        monkeypatch.setattr(
+            "cw.doctor._sp.run",
+            lambda *_args, **_kwargs: type(
+                "R", (), {"stdout": "feature/xyz\n", "returncode": 0}
+            )(),
+        )
+
+        results = _check_dispatch_repo_heads()
+        assert len(results) == 1
+        result = results[0]
+        assert result.ok is False
+        assert result.warn is True
+        assert "feature/xyz" in result.detail
+        assert "main" in result.detail
+        assert f"git -C {git_dir} checkout main" in result.detail
+
+    def test_missing_clients_yaml_returns_empty(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """No clients.yaml → _check_dispatch_repo_heads returns [] (no crash)."""
+        from cw.doctor import _check_dispatch_repo_heads
+
+        results = _check_dispatch_repo_heads()
+        assert results == []
+
+    def test_git_command_fails_skips_client_silently(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """git symbolic-ref raising an exception → client skipped silently."""
+        from cw.doctor import _check_dispatch_repo_heads
+
+        git_dir = tmp_path / "ws"
+        git_dir.mkdir()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  err-client:\n    workspace_path: {git_dir}\n"
+            f"    default_branch: main\n"
+        )
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            msg = "git not found"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.doctor._sp.run", _boom)
+
+        results = _check_dispatch_repo_heads()
+        assert results == []
+
+    def test_run_doctor_includes_dispatch_repo_heads(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_doctor surfaces dispatch_repo_heads failures in the report."""
+        _stub_claude_version_ok(monkeypatch)
+
+        git_dir = tmp_path / "ws"
+        git_dir.mkdir()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  my-client:\n    workspace_path: {git_dir}\n"
+            f"    default_branch: main\n"
+        )
+
+        monkeypatch.setattr(
+            "cw.doctor._sp.run",
+            lambda *_args, **_kwargs: type(
+                "R", (), {"stdout": "feature/branch\n", "returncode": 0}
+            )(),
+        )
+
+        report = run_doctor()
+
+        repo_head_checks = [
+            c for c in report.checks if c.name.startswith("dispatch/repo-head/")
+        ]
+        assert len(repo_head_checks) == 1
+        assert repo_head_checks[0].ok is False
+        assert repo_head_checks[0].warn is True
+
+
+# ---------------------------------------------------------------------------
 # Wedge detection tests
 # ---------------------------------------------------------------------------
 
