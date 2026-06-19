@@ -104,6 +104,31 @@ def advance_cursor(consumer: str, event_id: str) -> None:
     atomic_write_text(path, json.dumps(data))
 
 
+def init_cursor_at_end(consumer: str) -> bool:
+    """Initialize a fresh consumer cursor to the current end of the inbox.
+
+    If the consumer already has a persisted cursor, this function is a no-op
+    and returns False.  If the inbox is empty, no cursor is written and False
+    is returned.  Otherwise, advances the cursor to the last event in the inbox
+    and returns True.
+
+    Use this before the first ``read_events(consumer=...)`` call when you want
+    "new events only" semantics rather than replaying history.
+    """
+    if _cursor_path(consumer).exists():
+        return False
+    inbox = _inbox_path()
+    with _inbox_lock():
+        raw_text = inbox.read_text() if inbox.exists() else ""
+    if not raw_text:
+        return False
+    parsed = _parse_lines(raw_text.splitlines())
+    if not parsed:
+        return False
+    advance_cursor(consumer, parsed[-1].id)
+    return True
+
+
 def _event_matches(
     event: OrchestratorEvent,
     *,
