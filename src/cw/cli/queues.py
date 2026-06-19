@@ -294,6 +294,42 @@ def event_record(
     click.echo(f"Recorded event: {recorded.id} ({recorded.type})")
 
 
+def _parse_since(since: str) -> tuple[str | None, datetime | None]:
+    """Parse the --since value into (consumer, since_ts).
+
+    Consumer names are simple alphanumeric+underscore identifiers.  Everything
+    else is treated as an ISO 8601 timestamp.  Raises CwError on parse failure.
+    """
+    if since.replace("_", "").isalnum():
+        return since, None
+    try:
+        since_ts = datetime.fromisoformat(since)
+    except ValueError as exc:
+        msg = (
+            f"Cannot parse --since value '{since}'"
+            " as consumer name or ISO timestamp."
+        )
+        raise CwError(msg) from exc
+    else:
+        if since_ts.tzinfo is None:
+            since_ts = since_ts.replace(tzinfo=UTC)
+        return None, since_ts
+
+
+def _resolve_event_types(
+    type_filter: tuple[str, ...],
+) -> list[OrchestratorEventType] | None:
+    """Validate and convert type_filter strings to OrchestratorEventType list."""
+    if not type_filter:
+        return None
+    invalid = [t for t in type_filter if t not in _VALID_EVENT_TYPES]
+    if invalid:
+        valid = ", ".join(sorted(_VALID_EVENT_TYPES))
+        msg = f"Unknown event type(s): {', '.join(invalid)}. Valid: {valid}"
+        raise CwError(msg)
+    return [OrchestratorEventType(t) for t in type_filter]
+
+
 @event.command(name="tail")
 @click.option(
     "--since",
@@ -322,36 +358,12 @@ def event_tail(
     When a consumer name is given, the cursor advances automatically
     after reading.
     """
-    # Determine if `since` is a consumer name or a timestamp.
-    # Consumer names: alphanumeric + underscores (no colons, no dashes, no dots).
     consumer: str | None = None
     since_ts: datetime | None = None
-
     if since is not None:
-        # Heuristic: consumer names are simple identifiers (no colons or dashes)
-        if since.replace("_", "").isalnum():
-            consumer = since
-        else:
-            try:
-                since_ts = datetime.fromisoformat(since)
-                if since_ts.tzinfo is None:
-                    since_ts = since_ts.replace(tzinfo=UTC)
-            except ValueError as exc:
-                msg = (
-                    f"Cannot parse --since value '{since}'"
-                    " as consumer name or ISO timestamp."
-                )
-                raise CwError(msg) from exc
+        consumer, since_ts = _parse_since(since)
 
-    # Resolve event type filters
-    etype_filter: list[OrchestratorEventType] | None = None
-    if type_filter:
-        invalid = [t for t in type_filter if t not in _VALID_EVENT_TYPES]
-        if invalid:
-            valid = ", ".join(sorted(_VALID_EVENT_TYPES))
-            msg = f"Unknown event type(s): {', '.join(invalid)}. Valid: {valid}"
-            raise CwError(msg)
-        etype_filter = [OrchestratorEventType(t) for t in type_filter]
+    etype_filter = _resolve_event_types(type_filter)
 
     # Initialize fresh cursor to "now" so first-use consumers don't replay history.
     if consumer is not None:

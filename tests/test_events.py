@@ -363,7 +363,7 @@ def test_cli_event_tail_empty(tmp_events_dir: Path) -> None:
 
 
 def test_cli_event_tail_since_consumer_advances_cursor(tmp_events_dir: Path) -> None:
-    """Fresh --since <consumer> starts at now (no history replay); subsequent calls see only new events."""
+    """Fresh --since <consumer> starts at now; subsequent calls see only new events."""
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
 
@@ -588,7 +588,7 @@ def test_cli_event_tail_empty_json(tmp_events_dir: Path) -> None:
 
 
 def test_cli_event_tail_since_fresh_cursor_starts_at_now(tmp_events_dir: Path) -> None:
-    """Fresh --since <consumer>: pre-seeded history is NOT replayed; only new events appear."""
+    """Fresh --since <consumer>: pre-seeded history is NOT replayed."""
     # Pre-seed history before consumer ever runs
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
@@ -638,7 +638,7 @@ def test_init_cursor_at_end_fresh_consumer(tmp_events_dir: Path) -> None:
 
 
 def test_init_cursor_at_end_existing_consumer_no_op(tmp_events_dir: Path) -> None:
-    """init_cursor_at_end returns False and leaves cursor unchanged when cursor exists."""
+    """init_cursor_at_end is a no-op (returns False) when cursor file already exists."""
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
 
