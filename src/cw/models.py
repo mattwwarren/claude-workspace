@@ -192,6 +192,9 @@ class OrchestratorEventType(StrEnum):
     TICKET_ENQUEUED = "ticket.enqueued"
     SESSION_SPAWNED = "session.spawned"
     SESSION_COMPLETED = "session.completed"
+    # Emitted instead of SESSION_TIMED_OUT when the session missed its sentinel
+    # but world-state evidence (merged PR) confirms the work shipped. See #315.
+    SESSION_COMPLETED_INFERRED = "session.completed_inferred"
     SESSION_TIMED_OUT = "session.timed_out"
     SESSION_NEEDS_ATTENTION = "session.needs_attention"
     TICKET_NEEDS_SYNC = "ticket.needs_sync"
