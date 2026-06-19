@@ -430,6 +430,22 @@ class TestCLIDevQueueAdd:
         store = load_dev_queue()
         assert store.tasks[0].priority == 3
 
+    def test_add_undeclared_lane_exits_nonzero(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """cw dev-queue add with undeclared --lane exits non-zero."""
+        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "ABC-5", "--client", "genhealth", "--lane", "fast"],
+        )
+        assert result.exit_code != 0
+        assert "fast" in result.output
+
 
 # ---------------------------------------------------------------------------
 # TestCLIDevQueueStatus
@@ -691,6 +707,27 @@ class TestAddTicketDedupe:
 
 
 # ---------------------------------------------------------------------------
+# Shared helper: lane-aware client setup
+# ---------------------------------------------------------------------------
+
+
+def _setup_client_with_lanes(
+    tmp_config_dir: Path, tmp_path: Path, lanes: list[str]
+) -> None:
+    """Write clients.yaml with named lanes for 'genhealth'."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    lane_yaml = "".join(
+        f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
+    )
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # TestAddTicketLaneValidation
 # ---------------------------------------------------------------------------
 
@@ -705,28 +742,13 @@ class TestAddTicketLaneValidation:
         monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", tmp_path / ".dev_queue.lock")
         return tmp_path
 
-    def _setup_client_with_lanes(
-        self, tmp_config_dir: Path, tmp_path: Path, lanes: list[str]
-    ) -> None:
-        """Write clients.yaml with named lanes for 'genhealth'."""
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        lane_yaml = "".join(
-            f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
-        )
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
-        )
-
     def test_undeclared_lane_raises_lane_not_found_error(
         self, patched_queue: Path, tmp_config_dir: Path
     ) -> None:
         """add_ticket raises LaneNotFoundError for an undeclared lane."""
         from cw.exceptions import LaneNotFoundError
 
-        self._setup_client_with_lanes(tmp_config_dir, patched_queue, ["default"])
+        _setup_client_with_lanes(tmp_config_dir, patched_queue, ["default"])
         task = TicketTask(ticket_id="GEN-10", client="genhealth", lane="fast")
         with pytest.raises(LaneNotFoundError, match="Lane 'fast' is not declared"):
             add_ticket(task)
@@ -735,10 +757,16 @@ class TestAddTicketLaneValidation:
         self, patched_queue: Path, tmp_config_dir: Path
     ) -> None:
         """add_ticket accepts a task whose lane is declared for the client."""
-        self._setup_client_with_lanes(
-            tmp_config_dir, patched_queue, ["default", "fast"]
-        )
+        _setup_client_with_lanes(tmp_config_dir, patched_queue, ["default", "fast"])
         task = TicketTask(ticket_id="GEN-11", client="genhealth", lane="fast")
+        result = add_ticket(task)
+        assert result is True
+        store = load_dev_queue()
+        assert store.tasks[0].lane == "fast"
+
+    def test_unknown_client_skips_lane_validation(self, patched_queue: Path) -> None:
+        """add_ticket skips lane validation when the client is not in clients.yaml."""
+        task = TicketTask(ticket_id="GEN-12", client="unknown-client", lane="fast")
         result = add_ticket(task)
         assert result is True
         store = load_dev_queue()
@@ -1773,28 +1801,13 @@ class TestFindTicket:
 class TestMoveTicket:
     """Tests for move_ticket()."""
 
-    def _setup_client_with_lanes(
-        self, tmp_config_dir: Path, tmp_path: Path, lanes: list[str]
-    ) -> None:
-        """Write clients.yaml with named lanes for 'genhealth'."""
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        lane_yaml = "".join(
-            f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
-        )
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
-        )
-
     def test_move_ticket_pending_success(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """PENDING ticket moves to target lane; returns old from_lane."""
         from cw.dev_queue import move_ticket
 
-        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
         task = TicketTask(
             ticket_id="GEN-200",
             client="genhealth",
@@ -1817,7 +1830,7 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
         task = TicketTask(
             ticket_id="GEN-201",
             client="genhealth",
@@ -1836,7 +1849,7 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
         task = TicketTask(
             ticket_id="GEN-202",
             client="genhealth",
@@ -1855,7 +1868,7 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneNotFoundError
 
-        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
         task = TicketTask(
             ticket_id="GEN-203",
             client="genhealth",
@@ -1873,7 +1886,7 @@ class TestMoveTicket:
         """Non-existent ticket raises CwError."""
         from cw.dev_queue import move_ticket
 
-        self._setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
         save_dev_queue(DevQueueStore(tasks=[]))
 
         with pytest.raises(CwError, match="No dev-queue task found"):
