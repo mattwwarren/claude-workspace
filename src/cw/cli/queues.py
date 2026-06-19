@@ -305,10 +305,7 @@ def _parse_since(since: str) -> tuple[str | None, datetime | None]:
     try:
         since_ts = datetime.fromisoformat(since)
     except ValueError as exc:
-        msg = (
-            f"Cannot parse --since value '{since}'"
-            " as consumer name or ISO timestamp."
-        )
+        msg = f"Cannot parse --since value '{since}' as consumer name or ISO timestamp."
         raise CwError(msg) from exc
     else:
         if since_ts.tzinfo is None:
