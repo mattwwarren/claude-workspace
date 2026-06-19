@@ -736,15 +736,6 @@ def _collapse_blocked_on_user_tasks(
         changed = True
         for dup in tasks_for_ticket[1:]:
             dup.status = QueueItemStatus.CANCELLED
-            record_event(
-                OrchestratorEventType.SESSION_REAP_AUTHORIZED,
-                payload={
-                    "ticket_id": ticket_id,
-                    "client": dup.client,
-                    "mutations": ["task_cancelled"],
-                    "authority": "doctor",
-                },
-            )
             changed = True
     return changed
 
@@ -1001,6 +992,11 @@ def _reap_session_by_selector(
                 save_dev_queue(store)
             else:
                 # No RUNNING task — try to collapse dead-session BLOCKED_ON_USER rows.
+                # Why: liveness is not re-checked here because _reap_session_by_selector
+                # targets a specific session; BLOCKED_ON_USER tasks for the same ticket
+                # are crash artifacts of that session. A live BLOCKED_ON_USER from a
+                # concurrent session is an unusual race; _reap_wedge_findings checks
+                # liveness before routing ticket_ids to this helper.
                 blocked_changed = _collapse_blocked_on_user_tasks(store, {ticket_id})
                 if blocked_changed:
                     mutations.append("blocked_task_reverted_to_pending")
