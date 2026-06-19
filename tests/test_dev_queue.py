@@ -10,7 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.config import load_orchestrator_config
+from cw.config import clients_file, load_orchestrator_config
 from cw.dev_queue import (
     _find_ticket,
     _lock,
@@ -72,9 +72,7 @@ def tmp_dev_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     ws = tmp_path / "ws"
     ws.mkdir(parents=True, exist_ok=True)
-    import cw.config as _cw_config
-
-    _cw_config.clients_file().write_text(
+    clients_file().write_text(
         f"clients:\n"
         f"  genhealth:\n    workspace_path: {ws}\n"
         f"  other:\n    workspace_path: {ws}\n"
