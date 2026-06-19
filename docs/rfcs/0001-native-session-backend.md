@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — ready for review |
+| Status | **Accepted — decision implemented; native `claude --bg` backend in production (see ADR-0000)** |
 | Owner | @mattwwarren |
 | Spike ticket | #105 |
 | CLI version under test | Claude Code 2.1.148 |

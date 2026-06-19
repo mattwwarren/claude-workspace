@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — ready for review |
+| Status | **Partially Accepted — Phase 3 (channels) shipped (`cw_pr_events_channel.py`, `cw_queue_events_channel.py`); Phase 4 (Agent SDK dispatch) not adopted** |
 | Owner | @mattwwarren |
 | Spike ticket | #106 |
 | CLI version under test | Claude Code 2.1.148 |
@@ -16,10 +16,14 @@ cw's 0.8.x orchestrator substrate (`dispatch.py`, `daemon.py`, `events.py`, `pr_
 
 ## TL;DR
 
-**Decisions:**
+**Decisions (spike):**
 - ✅ **Green-light Phase 4** (rewrite dispatch on Agent SDK). Smoke test 1 passed. SDK signature fits cw's needs and is strictly cleaner than the cmux + sentinel approach.
 - ⚠️ **Conditional green-light Phase 3** (channels for PR events). Architecture verified; flag exists; SDK types support the receive-side. A 50-line channel-server prototype was descoped from this spike — Phase 3 must build one before commit.
 - 🎁 **Bonus:** `ClaudeAgentOptions.env: dict[str, str]` resolves RFC 0001's Row 10 env-injection gap. cw can pass `CW_CLIENT`/`CW_PURPOSE`/`CW_SESSION_ID` directly through the SDK without per-cwd `.claude/settings.json` hacks. Update RFC 0001's Phase 1 design accordingly.
+
+**Outcome (post-spike):**
+- ✅ **Phase 3 (channels) shipped.** `cw_pr_events_channel.py` and `cw_queue_events_channel.py` implement the MCP push channel servers.
+- ❌ **Phase 4 (Agent SDK dispatch) not adopted.** The green-light was not taken due to uncertainty around SDK pricing model and the fact that `claude --bg` + `native_daemon.py` proved sufficient for cw's dispatch needs without the added SDK dependency. The env-var injection concern (Row 10, RFC 0001) was addressed via `--add-dir` + per-worktree settings instead.
 
 ## Smoke test 1 — three concurrent `ClaudeSDKClient` workers
 
