@@ -25,6 +25,8 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
+    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
     consume_completed_sessions,
@@ -3261,7 +3263,7 @@ class TestFreshnessGateAutoFF:
         assert (
             tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
-        assert tick_events[0].payload["freshness_detail"] == "non_main_head"
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_NON_MAIN_HEAD
 
         sync_events = read_events(
             consumer="test-auto-ff-non-main-head-sync",
@@ -3352,7 +3354,7 @@ class TestFreshnessGateAutoFF:
         assert (
             tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
-        assert tick_events[0].payload["freshness_detail"] == "main_behind_origin"
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_BEHIND
 
     def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
         self,

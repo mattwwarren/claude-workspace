@@ -262,8 +262,8 @@ def _emit_usage_limit_skip_events(
         )
 
 
-_FRESHNESS_NON_MAIN_HEAD = "non_main_head"
-_FRESHNESS_MAIN_BEHIND = "main_behind_origin"
+FRESHNESS_NON_MAIN_HEAD = "non_main_head"
+FRESHNESS_MAIN_BEHIND = "main_behind_origin"
 
 
 def _resolve_freshness(
@@ -308,7 +308,7 @@ def _resolve_freshness(
         # the operator WARN can surface the specific remedy.
         head_branch = get_head_branch(client)
         if head_branch is not None and head_branch != client.default_branch:
-            return (True, _FRESHNESS_NON_MAIN_HEAD)
+            return (True, FRESHNESS_NON_MAIN_HEAD)
 
     if stale and auto_ff:
         ff_safety = check_main_ff_safety(client)
@@ -334,7 +334,7 @@ def _resolve_freshness(
                 )
             # Why: no git-level lock — concurrent dispatch loops are safe;
             # git pull --ff-only is idempotent when already current.
-    return (stale, _FRESHNESS_MAIN_BEHIND if stale else None)
+    return (stale, FRESHNESS_MAIN_BEHIND if stale else None)
 
 
 def _emit_stale_skip(
@@ -362,14 +362,14 @@ def _emit_stale_skip(
     ]
     # Fetch branch name once for the non-main-head WARN (not per ticket).
     non_main_branch: str | None = None
-    if freshness_detail == _FRESHNESS_NON_MAIN_HEAD:
+    if freshness_detail == FRESHNESS_NON_MAIN_HEAD:
         non_main_branch = get_head_branch(client)
     for payload in stale_tasks:
         record_event(OrchestratorEventType.TICKET_NEEDS_SYNC, payload)
         if emit is not None:
             ticket_key = (client.name, payload["ticket_id"])
             if warned_stale is None or ticket_key not in warned_stale:
-                if freshness_detail == _FRESHNESS_NON_MAIN_HEAD:
+                if freshness_detail == FRESHNESS_NON_MAIN_HEAD:
                     branch_str = non_main_branch or "(detached)"
                     emit(
                         f"WARN {client.name}/{payload['ticket_id']}:"
