@@ -10,7 +10,11 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from cw.exceptions import MissingWorkspaceError, StaleWorktreeError, WorktreeError
+from cw.exceptions import (
+    MissingWorkspaceError,
+    StaleWorktreeError,
+    WorktreeError,
+)
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
@@ -661,6 +665,19 @@ def check_main_ff_safety(
     if is_origin_ancestor:
         return "ahead"
     return "diverged"
+
+
+def get_head_branch(client: ClientConfig) -> str | None:
+    """Return the symbolic branch name of HEAD, or None if detached or on error.
+
+    Callers in dispatch.py import this as ``cw.dispatch.get_head_branch`` so
+    tests can patch it without reaching into worktree internals.
+    """
+    git_dir = _git_dir(client)
+    result = _run_git("symbolic-ref", "--short", "HEAD", cwd=git_dir, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 def fast_forward_main(
