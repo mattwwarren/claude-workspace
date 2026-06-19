@@ -6559,6 +6559,210 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
 
 
 # ---------------------------------------------------------------------------
+# dirty-worktree push-notification storm regression tests (GitHub #763)
+# ---------------------------------------------------------------------------
+
+
+def test_dirty_worktree_push_fires_once_not_per_tick_timed_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUT session with dirty worktree: push fires exactly once, not per tick.
+
+    The first call routes the RUNNING task to BLOCKED_ON_USER and fires the
+    push.  The second call finds the task already BLOCKED_ON_USER (not RUNNING)
+    and must not fire again (#763).
+    """
+    wt_path = tmp_path / "wt-storm-to"
+    sess = _mk_daemon_session_with_worktree(
+        "storm-to", SessionStatus.TIMED_OUT, wt_path
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="storm-to",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="storm-to",
+                )
+            ]
+        )
+    )
+
+    push_calls: list[tuple[str, str]] = []
+
+    def _capture_push(name: str, client: str, **_kw: object) -> None:
+        push_calls.append((name, client))
+
+    monkeypatch.setattr("cw.reconcile._deps.fire_push_notification", _capture_push)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-to"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
+
+    revert_timed_out_tasks()  # tick 1 — routes to BLOCKED_ON_USER, fires push
+    revert_timed_out_tasks()  # tick 2 — task is BLOCKED_ON_USER, must not re-fire
+    revert_timed_out_tasks()  # tick 3 — still BLOCKED_ON_USER, must not re-fire
+
+    assert len(push_calls) == 1, (
+        f"fire_push_notification must fire exactly once, fired {len(push_calls)} times"
+    )
+
+
+def test_dirty_worktree_push_silent_for_already_blocked_task(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal session with task already BLOCKED_ON_USER never fires push (#763)."""
+    wt_path = tmp_path / "wt-storm-ab"
+    sess = _mk_daemon_session_with_worktree(
+        "storm-ab", SessionStatus.TIMED_OUT, wt_path
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="storm-ab",
+                    client="client-a",
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    session_id=None,  # already reverted
+                )
+            ]
+        )
+    )
+
+    push_calls: list[tuple[str, str]] = []
+
+    def _capture_push(name: str, client: str, **_kw: object) -> None:
+        push_calls.append((name, client))
+
+    monkeypatch.setattr("cw.reconcile._deps.fire_push_notification", _capture_push)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-ab"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
+
+    for _ in range(3):
+        revert_timed_out_tasks()
+
+    assert push_calls == [], (
+        f"fire_push_notification must not fire for already-BLOCKED_ON_USER task, "
+        f"fired {len(push_calls)} times"
+    )
+
+
+def test_dirty_worktree_push_silent_for_no_task_terminal_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal session with dirty worktree, no task: push never fires (#763)."""
+    wt_path = tmp_path / "wt-storm-nt"
+    sess = _mk_daemon_session_with_worktree(
+        "storm-nt", SessionStatus.TIMED_OUT, wt_path
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(DevQueueStore(tasks=[]))  # no task at all
+
+    push_calls: list[tuple[str, str]] = []
+
+    def _capture_push(name: str, client: str, **_kw: object) -> None:
+        push_calls.append((name, client))
+
+    monkeypatch.setattr("cw.reconcile._deps.fire_push_notification", _capture_push)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-nt"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
+
+    for _ in range(3):
+        revert_timed_out_tasks()
+
+    assert push_calls == [], (
+        f"fire_push_notification must not fire for zombie session with no queue task, "
+        f"fired {len(push_calls)} times"
+    )
+
+
+def test_dirty_worktree_push_fires_once_not_per_tick_completed_silent(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """COMPLETED session with dirty worktree: push fires exactly once, not per tick.
+
+    Mirrors test_dirty_worktree_push_fires_once_not_per_tick_timed_out but
+    exercises the revert_completed_silent_tasks() code path (#763).
+    """
+    wt_path = tmp_path / "wt-storm-cs"
+    sess = _mk_daemon_session_with_worktree(
+        "storm-cs", SessionStatus.COMPLETED, wt_path
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="storm-cs",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="storm-cs",
+                )
+            ]
+        )
+    )
+
+    push_calls: list[tuple[str, str]] = []
+
+    def _capture_push(name: str, client: str, **_kw: object) -> None:
+        push_calls.append((name, client))
+
+    monkeypatch.setattr("cw.reconcile._deps.fire_push_notification", _capture_push)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-cs"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
+
+    revert_completed_silent_tasks()  # tick 1 — routes to BLOCKED_ON_USER, fires push
+    revert_completed_silent_tasks()  # tick 2 — already BLOCKED_ON_USER, no re-fire
+    revert_completed_silent_tasks()  # tick 3 — still BLOCKED_ON_USER, no re-fire
+
+    assert len(push_calls) == 1, (
+        f"fire_push_notification must fire exactly once on completed-silent path, "
+        f"fired {len(push_calls)} times"
+    )
+
+
+# ---------------------------------------------------------------------------
 # session.salvage_skipped event tests (GitHub issue #459)
 # ---------------------------------------------------------------------------
 
