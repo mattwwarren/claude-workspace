@@ -3813,3 +3813,339 @@ class TestCheckProjectConfigs:
         report = run_doctor()
         names = [c.name for c in report.checks]
         assert not any(n.startswith("project-config/") for n in names)
+
+
+class TestWedgeDeadSessionBlockedOnUser:
+    """Dead-session BLOCKED_ON_USER tasks are detected and reaped by doctor."""
+
+    def _make_session(
+        self,
+        sid: str,
+        surface_ref: str | None = "s:dead.1",
+    ) -> Session:
+        from cw.models import Session, SessionPurpose, SessionStatus
+
+        return Session(
+            id=sid,
+            name=f"client-a/auto-dev/{sid}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=surface_ref,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    def _make_blocked_task(
+        self,
+        ticket_id: str,
+        session_id: str | None = "dead-sess-1",
+        created_at: datetime | None = None,
+    ) -> TicketTask:
+        from cw.models import QueueItemStatus, TicketTask
+
+        if created_at is not None:
+            return TicketTask(
+                ticket_id=ticket_id,
+                client="client-a",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                session_id=session_id,
+                created_at=created_at,
+            )
+        return TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=session_id,
+        )
+
+    def test_blocked_on_user_dead_surface_detected_and_reverted(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """session_id set, surface_ref absent from live ids → detected + reverted."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        # surface_ref NOT added to live — it's dead
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("dead-sess-1", surface_ref="s:dead.1")
+        save_state(CwState(sessions=[sess]))
+        task = self._make_blocked_task("TST-590-A", session_id="dead-sess-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-590-A")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        # finding should have been generated
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/blocked-on-user-dead-session" in classes
+
+    def test_blocked_on_user_none_session_id_detected_and_reverted(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """session_id is None → detected as dead and reverted to PENDING."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        save_state(CwState(sessions=[]))
+        task = self._make_blocked_task("TST-590-B", session_id=None)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-590-B")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/blocked-on-user-dead-session" in classes
+
+    def test_blocked_on_user_duplicate_ticket_collapse(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """3 tasks same ticket; oldest → PENDING, newer duplicates → CANCELLED."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        save_state(CwState(sessions=[]))
+        t1 = self._make_blocked_task(
+            "TST-590-C",
+            session_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        t2 = self._make_blocked_task(
+            "TST-590-C",
+            session_id=None,
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        t3 = self._make_blocked_task(
+            "TST-590-C",
+            session_id=None,
+            created_at=datetime(2026, 1, 3, tzinfo=UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[t1, t2, t3]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        tasks = [t for t in store.tasks if t.ticket_id == "TST-590-C"]
+        pending = [t for t in tasks if t.status == QueueItemStatus.PENDING]
+        cancelled = [t for t in tasks if t.status == QueueItemStatus.CANCELLED]
+        assert len(pending) == 1
+        assert len(cancelled) == 2
+        # The oldest (t1) becomes PENDING
+        assert pending[0].created_at == datetime(2026, 1, 1, tzinfo=UTC)
+
+    def test_blocked_on_user_live_session_not_reaped(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """surface_ref present in live ids → NOT reaped."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        live_ref = "s:live.1"
+        daemon._live.add(live_ref)  # surface IS in the live roster
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("live-sess-d", surface_ref=live_ref)
+        save_state(CwState(sessions=[sess]))
+        task = self._make_blocked_task("TST-590-D", session_id="live-sess-d")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-590-D")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_blocked_on_user_reap_session_by_selector_extends_to_blocked(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_reap_session_by_selector reverts BLOCKED_ON_USER when no RUNNING task."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CompletionReason,
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            Session,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        # session name must encode ticket_id via client-a/auto-dev/<ticket_id>
+        sess = Session(
+            id="sel-sess-1",
+            name="client-a/auto-dev/sel-ticket-1",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        save_state(CwState(sessions=[sess]))
+        task = self._make_blocked_task("sel-ticket-1", session_id="sel-sess-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = _reap_session_by_selector("sel-sess-1")
+
+        assert result is True
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "sel-sess-1")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.USER
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "sel-ticket-1")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_blocked_on_user_duplicate_via_reap_session_collapse(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_reap_session_by_selector collapses duplicate BLOCKED_ON_USER tasks."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import _reap_session_by_selector
+        from cw.models import (
+            CwState,
+            DevQueueStore,
+            QueueItemStatus,
+            Session,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        monkeypatch.setattr(
+            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        # session name encodes ticket_id "dup-ticket-1"
+        sess = Session(
+            id="dup-sess-1",
+            name="client-a/auto-dev/dup-ticket-1",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        save_state(CwState(sessions=[sess]))
+        t1 = self._make_blocked_task(
+            "dup-ticket-1",
+            session_id="dup-sess-1",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        t2 = self._make_blocked_task(
+            "dup-ticket-1",
+            session_id=None,
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[t1, t2]))
+
+        result = _reap_session_by_selector("dup-sess-1")
+
+        assert result is True
+        store = load_dev_queue()
+        tasks = [t for t in store.tasks if t.ticket_id == "dup-ticket-1"]
+        pending = [t for t in tasks if t.status == QueueItemStatus.PENDING]
+        cancelled = [t for t in tasks if t.status == QueueItemStatus.CANCELLED]
+        assert len(pending) == 1
+        assert len(cancelled) == 1
+        assert pending[0].created_at == datetime(2026, 1, 1, tzinfo=UTC)
+
+    def test_blocked_on_user_dead_session_via_run_doctor_reap(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Integration: state + queue + daemon → run_doctor(reap=True) → PENDING."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        # surface NOT in live
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+        _stub_claude_version_ok(monkeypatch)
+
+        sess = self._make_session("integ-sess", surface_ref="s:gone.1")
+        save_state(CwState(sessions=[sess]))
+        task = self._make_blocked_task("integ-ticket", session_id="integ-sess")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "integ-ticket")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/blocked-on-user-dead-session" in classes
+
+    def test_blocked_on_user_no_surface_ref_treated_as_dead(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """session_id set but session.surface_ref=None → treated as dead."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("no-ref-sess", surface_ref=None)
+        save_state(CwState(sessions=[sess]))
+        task = self._make_blocked_task("TST-590-H", session_id="no-ref-sess")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-590-H")
+        assert t.status == QueueItemStatus.PENDING
