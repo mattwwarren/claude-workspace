@@ -11,8 +11,10 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
 
+import pytest
+
 if TYPE_CHECKING:
-    import pytest
+    pass
 
 _RUNTIME_PATHS = (
     Path(__file__).resolve().parents[1]
@@ -34,28 +36,35 @@ def _load() -> ModuleType:
     return mod
 
 
-class TestClaudeDir:
-    def test_claude_dir_exists(self) -> None:
+class TestRepoRoot:
+    def test_repo_root_exists(self) -> None:
         mod = _load()
-        assert hasattr(mod, "claude_dir"), (
-            "claude_dir() must exist (renamed from repo_root)"
+        assert hasattr(mod, "repo_root"), "repo_root() must exist"
+
+    def test_claude_dir_removed(self) -> None:
+        mod = _load()
+        assert not hasattr(mod, "claude_dir"), (
+            "claude_dir() must not exist; repo_root() is the correct name"
         )
 
-    def test_repo_root_removed(self) -> None:
+    def test_repo_root_contains_pyproject_toml(self) -> None:
         mod = _load()
-        assert not hasattr(mod, "repo_root"), "repo_root() was renamed to claude_dir()"
-
-    def test_claude_dir_ends_in_dotclaude(self) -> None:
-        mod = _load()
-        result: Path = mod.claude_dir()
+        result: Path = mod.repo_root()
         assert isinstance(result, Path)
-        assert result.name == ".claude", (
-            f"claude_dir() should end in '.claude', got {result.name!r}"
+        assert (result / "pyproject.toml").exists(), (
+            f"repo_root() must return a dir with pyproject.toml, got {result}"
         )
 
-    def test_claude_dir_is_directory(self) -> None:
+    def test_repo_root_is_directory(self) -> None:
         mod = _load()
-        assert mod.claude_dir().is_dir()
+        assert mod.repo_root().is_dir()
+
+    def test_repo_root_raises_when_no_pyproject(self, tmp_path: Path) -> None:
+        mod = _load()
+        # Patch module __file__ to a path with no pyproject.toml ancestor
+        mod.__file__ = str(tmp_path / "fake_scripts" / "utils" / "runtime_paths.py")
+        with pytest.raises(RuntimeError, match=r"pyproject\.toml"):
+            mod.repo_root()
 
 
 class TestReviewMonitorScriptPath:
@@ -81,7 +90,7 @@ class TestReviewMonitorScriptPath:
     ) -> None:
         monkeypatch.delenv("GLOBAL_CLAUDE_REVIEW_MONITOR_SCRIPT", raising=False)
         mod = _load()
-        expected = mod.claude_dir() / "scripts" / "review_monitor.py"
+        expected = mod.repo_root() / ".claude" / "scripts" / "review_monitor.py"
         assert expected.exists(), (
             "Test precondition: review_monitor.py must exist in .claude/scripts/"
         )
@@ -89,10 +98,10 @@ class TestReviewMonitorScriptPath:
 
 
 class TestUtilsInit:
-    def test_claude_dir_exported(self) -> None:
+    def test_repo_root_exported(self) -> None:
         content = (_RUNTIME_PATHS.parent / "__init__.py").read_text(encoding="utf-8")
-        assert "claude_dir" in content, "__init__.py must export claude_dir"
+        assert "repo_root" in content, "__init__.py must export repo_root"
 
-    def test_repo_root_not_exported(self) -> None:
+    def test_claude_dir_not_exported(self) -> None:
         content = (_RUNTIME_PATHS.parent / "__init__.py").read_text(encoding="utf-8")
-        assert "repo_root" not in content, "__init__.py must not export repo_root"
+        assert "claude_dir" not in content, "__init__.py must not export claude_dir"
