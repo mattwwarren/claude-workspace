@@ -3615,6 +3615,7 @@ class TestTier2LaneAllocation:
             name="test-client",
             workspace_path=sample_client_config.workspace_path,
             default_branch="main",
+            worktree_base=sample_client_config.worktree_base,
             lanes=lanes,
         )
         _make_clients_yaml(tmp_dispatch_dirs, client)
@@ -3642,6 +3643,7 @@ class TestTier2LaneAllocation:
             name="test-client",
             workspace_path=sample_client_config.workspace_path,
             default_branch="main",
+            worktree_base=sample_client_config.worktree_base,
             lanes=lanes,
         )
         _make_clients_yaml(tmp_dispatch_dirs, client)
@@ -3702,6 +3704,7 @@ class TestTier2LaneAllocation:
             name="test-client",
             workspace_path=sample_client_config.workspace_path,
             default_branch="main",
+            worktree_base=sample_client_config.worktree_base,
             lanes=lanes,
         )
         _make_clients_yaml(tmp_dispatch_dirs, client)
