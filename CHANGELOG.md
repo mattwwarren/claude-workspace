@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-06-20
+
+A **hotfix** release closing the root cause of the dispatch worktree-leak
+class of bugs (#766) that the v1.3.1 round only mitigated downstream.
+
+### Fixed
+
+- **GIT_* env leak into spawned workers** (#766, #790): `RealNativeDaemonClient`
+  spawned `claude --bg` workers with no `env=`, so workers inherited the
+  orchestrator's `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE`. Git honors
+  those over `cwd`, redirecting every worker git operation to the
+  orchestrator's `.git` / index — producing both a FILE leak (worker edits
+  appearing uncommitted in the main checkout) and a COMMIT leak (worker
+  commits landing on local `main`, diverging it from `origin` and wedging the
+  dispatch loop's `--ff-only` auto-fast-forward). Workers now spawn with a
+  GIT_*-stripped environment via a new `_spawn_clean_env()` helper.
+
+### Documentation
+
+- **#766 leak-recovery + #774 manual-finalize runbook procedures** (#788):
+  added operator procedures to `docs/dispatch-runbook.md` for recovering from
+  a leak and manually finalizing a stuck session.
+
 ## [1.3.1] — 2026-06-20
 
 A **dispatch-reliability + observability/inspection CLI** release. This patch
