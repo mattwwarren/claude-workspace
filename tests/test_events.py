@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -12,7 +14,7 @@ from click.testing import CliRunner
 from freezegun import freeze_time
 
 from cw.cli import main
-from cw.events import advance_cursor, init_cursor_at_end, read_events
+from cw.events import advance_cursor, init_cursor_at_end, read_events, wait_for_event
 from cw.events import record_event as events_record_event
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
@@ -963,3 +965,309 @@ def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:
     assert restored.type == OrchestratorEventType.TICKET_NEEDS_SYNC
     assert restored.payload["ticket_id"] == "CW-99"
     assert restored.payload["client"] == "test-client"
+
+
+# ---------------------------------------------------------------------------
+# wait_for_event — unit tests (issue #275)
+# ---------------------------------------------------------------------------
+
+
+def test_wait_for_event_matches_preexisting_event(tmp_events_dir: Path) -> None:
+    """wait_for_event yields an event already in the inbox before it is called."""
+    ev = events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
+    gen = wait_for_event(
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        timeout=5.0,
+    )
+    result = next(gen)
+    assert result.id == ev.id
+
+
+def test_wait_for_event_blocks_then_matches(tmp_events_dir: Path) -> None:
+    """wait_for_event blocks until a matching event is written by another thread."""
+    matched: list[OrchestratorEvent] = []
+
+    def writer() -> None:
+        time.sleep(0.05)
+        events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+
+    for ev in wait_for_event(
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        timeout=5.0,
+    ):
+        matched.append(ev)
+        break
+
+    t.join(timeout=2.0)
+    assert len(matched) == 1
+    assert matched[0].type == OrchestratorEventType.SESSION_COMPLETED
+
+
+def test_wait_for_event_timeout_raises(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """wait_for_event raises TimeoutError when no matching event arrives."""
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    with pytest.raises(TimeoutError, match="No matching event"):
+        for _ in wait_for_event(
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+            timeout=0.01,
+        ):
+            pass
+
+
+def test_wait_for_event_type_filter(tmp_events_dir: Path) -> None:
+    """wait_for_event skips events that don't match event_types."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev_match = events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 2})
+
+    gen = wait_for_event(
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        timeout=1.0,
+    )
+    result = next(gen)
+    assert result.id == ev_match.id
+
+
+def test_wait_for_event_correlation_id_filter(tmp_events_dir: Path) -> None:
+    """wait_for_event filters by correlation_id."""
+    events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED, {}, correlation_id="other"
+    )
+    ev_match = events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED, {}, correlation_id="target-123"
+    )
+
+    gen = wait_for_event(
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        correlation_id="target-123",
+        timeout=1.0,
+    )
+    result = next(gen)
+    assert result.id == ev_match.id
+
+
+def test_wait_for_event_session_id_filter(tmp_events_dir: Path) -> None:
+    """wait_for_event filters by payload session_id."""
+    events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED, {"session_id": "other-sess"}
+    )
+    ev_match = events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED, {"session_id": "target-sess"}
+    )
+
+    gen = wait_for_event(
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        session_id="target-sess",
+        timeout=1.0,
+    )
+    result = next(gen)
+    assert result.id == ev_match.id
+
+
+def test_wait_for_event_follow_yields_multiple(tmp_events_dir: Path) -> None:
+    """wait_for_event follow=True yields all pre-existing matches then returns."""
+    ev1 = events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 2})
+
+    results = list(
+        wait_for_event(
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+            timeout=0.01,
+            poll_interval=0.001,
+            follow=True,
+        )
+    )
+    assert len(results) == 2
+    assert results[0].id == ev1.id
+    assert results[1].id == ev2.id
+
+
+def test_wait_for_event_follow_timeout_after_match_returns(
+    tmp_events_dir: Path,
+) -> None:
+    """follow=True: expiring timeout after a match returns cleanly (no TimeoutError)."""
+    events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
+
+    results = list(
+        wait_for_event(
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+            timeout=0.01,
+            poll_interval=0.001,
+            follow=True,
+        )
+    )
+    assert len(results) == 1
+
+
+def test_wait_for_event_no_filter_matches_all_types(tmp_events_dir: Path) -> None:
+    """wait_for_event with no event_types filter matches any event type."""
+    ev = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    result = next(wait_for_event(timeout=1.0))
+    assert result.id == ev.id
+
+
+# ---------------------------------------------------------------------------
+# CLI: cw event wait (issue #275)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_wait_exits_on_match(tmp_events_dir: Path) -> None:
+    """cw event wait exits 0 when a matching event is found."""
+    events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "wait", "--type", "session.completed", "--timeout", "5"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["type"] == "session.completed"
+
+
+def test_cli_event_wait_timeout_exits_nonzero(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event wait exits non-zero when timeout expires with no match."""
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "wait", "--type", "session.completed", "--timeout", "0.01"],
+    )
+    assert result.exit_code != 0
+    assert "No matching event" in result.output
+
+
+def test_cli_event_wait_type_filter(tmp_events_dir: Path) -> None:
+    """cw event wait respects --type filter."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {})
+    ev_match = events_record_event(OrchestratorEventType.SESSION_COMPLETED, {})
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "wait", "--type", "session.completed", "--timeout", "5"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["id"] == ev_match.id
+
+
+def test_cli_event_wait_ticket_filter(tmp_events_dir: Path) -> None:
+    """cw event wait --ticket filters by correlation_id."""
+    events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED, {}, correlation_id="other"
+    )
+    ev_match = events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED, {}, correlation_id="ticket-99"
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "event",
+            "wait",
+            "--type",
+            "session.completed",
+            "--ticket",
+            "ticket-99",
+            "--timeout",
+            "5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["id"] == ev_match.id
+
+
+def test_cli_event_wait_session_filter(tmp_events_dir: Path) -> None:
+    """cw event wait --session filters by payload session_id."""
+    events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"session_id": "other-sess"},
+    )
+    ev_match = events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"session_id": "target-sess"},
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "event",
+            "wait",
+            "--type",
+            "session.completed",
+            "--session",
+            "target-sess",
+            "--timeout",
+            "5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["id"] == ev_match.id
+
+
+def test_cli_event_wait_follow_exits_on_keyboard_interrupt(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event wait --follow exits 130 on KeyboardInterrupt."""
+    events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
+
+    def raise_interrupt(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_interrupt)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "wait", "--type", "session.completed", "--follow"],
+    )
+    assert result.exit_code == 130
+
+
+def test_cli_event_wait_invalid_type(tmp_events_dir: Path) -> None:
+    """cw event wait with unknown --type exits non-zero."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "wait", "--type", "not.a.real.type"],
+    )
+    assert result.exit_code != 0
+    assert "Unknown event type" in result.output
+
+
+def test_cli_event_wait_outputs_json(tmp_events_dir: Path) -> None:
+    """cw event wait outputs valid JSON per match."""
+    events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"session_id": "abc", "result": "done"},
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "wait", "--type", "session.completed", "--timeout", "5"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["type"] == "session.completed"
+    assert data["payload"]["result"] == "done"
+
+
+def test_cli_event_wait_exits_cleanly_on_broken_pipe(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cw event wait exits 0 on BrokenPipeError (downstream reader closed pipe)."""
+
+    def broken_pipe_gen(**kwargs: object) -> Generator[OrchestratorEvent]:
+        raise BrokenPipeError
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("cw.cli.queues.wait_for_event", broken_pipe_gen)
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "wait"])
+    assert result.exit_code == 0
