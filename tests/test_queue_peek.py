@@ -736,3 +736,240 @@ class TestBuildPeekRows:
         ):
             queue_peek.build_peek_rows("my-client", _NOW)
         mock_load.assert_called_once_with("my-client")
+
+
+# ---------------------------------------------------------------------------
+# load_running_tasks
+# ---------------------------------------------------------------------------
+
+
+class TestLoadRunningTasks:
+    def test_filters_out_non_running_tasks(self) -> None:
+        pending = TicketTask(
+            ticket_id="T-1",
+            client="c",
+            status=QueueItemStatus.PENDING,
+            session_id=None,
+            attempts=0,
+        )
+        running = TicketTask(
+            ticket_id="T-2",
+            client="c",
+            status=QueueItemStatus.RUNNING,
+            session_id="abc",
+            attempts=1,
+        )
+        with patch("cw.queue_peek.list_tickets", return_value=[pending, running]):
+            result = queue_peek.load_running_tasks(None)
+        assert len(result) == 1
+        assert result[0].ticket_id == "T-2"
+
+
+# ---------------------------------------------------------------------------
+# gh_pr_state
+# ---------------------------------------------------------------------------
+
+
+class TestGhPrState:
+    def test_returns_unknown_when_fetch_returns_none(self) -> None:
+        with patch("cw.queue_peek._fetch_pr_state", return_value=None):
+            assert queue_peek.gh_pr_state(42) == "UNKNOWN"
+
+    def test_returns_unknown_when_gh_not_on_path(self) -> None:
+        with patch(
+            "cw.queue_peek._fetch_pr_state", side_effect=FileNotFoundError("gh")
+        ):
+            assert queue_peek.gh_pr_state(42) == "UNKNOWN"
+
+    def test_returns_state_string_when_available(self) -> None:
+        with patch("cw.queue_peek._fetch_pr_state", return_value="MERGED"):
+            assert queue_peek.gh_pr_state(42) == "MERGED"
+
+
+# ---------------------------------------------------------------------------
+# _find_transcript_heuristic — missing branches
+# ---------------------------------------------------------------------------
+
+
+class TestFindTranscriptHeuristic:
+    def test_skips_corrupt_json_lines(self, patched_peek: None, tmp_path: Path) -> None:
+        """json.JSONDecodeError lines in the jsonl are skipped, not raised."""
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-cw-auto-dev-100"
+        proj.mkdir(parents=True)
+        jsonl = proj / "aaa.jsonl"
+        jsonl.write_text("not json\n")
+        # No valid user line → scores as 1, but still returned as only candidate.
+        result = queue_peek.find_transcript_for_ticket("100")
+        assert result == jsonl
+
+    def test_list_content_in_first_user_message(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """List-typed content is handled and text extracted for scoring."""
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-cw-auto-dev-101"
+        proj.mkdir(parents=True)
+        jsonl = proj / "bbb.jsonl"
+        record = json.dumps(
+            {
+                "type": "user",
+                "timestamp": "2026-06-01T10:00:00Z",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "/auto-dev 101 --headless"},
+                        {"type": "other", "data": "ignored"},
+                    ]
+                },
+            }
+        )
+        jsonl.write_text(record + "\n")
+        result = queue_peek.find_transcript_for_ticket("101")
+        assert result == jsonl
+
+
+# ---------------------------------------------------------------------------
+# parse_transcript — defensive branches
+# ---------------------------------------------------------------------------
+
+
+class TestParseTranscriptDefensiveBranches:
+    def test_non_list_content_is_skipped(self, tmp_path: Path) -> None:
+        """assistant message with content as a string (not list) is not parsed."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {"content": "plain string"},
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_sentinel_status"] is None
+
+    def test_non_text_block_type_is_skipped(self, tmp_path: Path) -> None:
+        """Block with type != 'text' is skipped."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {
+                        "content": [{"type": "tool_use", "id": "tu1", "input": {}}]
+                    },
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_sentinel_status"] is None
+
+    def test_text_without_sentinel_block_is_skipped(self, tmp_path: Path) -> None:
+        """Text block that doesn't contain a sentinel marker is skipped cleanly."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {
+                        "content": [{"type": "text", "text": "just some commentary"}]
+                    },
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_sentinel_status"] is None
+
+    def test_non_auto_dev_result_parse_is_skipped(self, tmp_path: Path) -> None:
+        """Text with a sentinel marker that parses to a non-AutoDevResult is skipped."""
+        # BlockedResult also has <<<...>>> markers but is not AutoDevResult
+        blocked = (
+            "<<<BLOCKED_RESULT\n"
+            '{"schema_version": 1, "reason": "test"}\n'
+            "BLOCKED_RESULT>>>"
+        )
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {"content": [{"type": "text", "text": blocked}]},
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["last_sentinel_status"] is None
+
+
+# ---------------------------------------------------------------------------
+# print_table
+# ---------------------------------------------------------------------------
+
+_WAIT_ROW = {
+    "ticket": "T-1",
+    "session": "abc123456789",
+    "client": "c",
+    "attempts": 1,
+    "age_min": 10.0,
+    "idle_min": 2.0,
+    "stage": None,
+    "status": None,
+    "pr": None,
+    "pr_state": None,
+    "recommend": "WAIT",
+    "reason": "age 10min — early/healthy",
+}
+
+_STOP_ROW = {
+    **_WAIT_ROW,
+    "recommend": "STOP",
+    "reason": "PR merged + worker idle 10min — stuck",
+    "session": "stopabc123456",
+    "ticket": "T-2",
+}
+
+
+class TestPrintTable:
+    def test_empty_rows_prints_no_running(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        queue_peek.print_table([])
+        captured = capsys.readouterr()
+        assert "No RUNNING tasks found." in captured.out
+
+    def test_wait_row_printed_without_reason_line(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        queue_peek.print_table([_WAIT_ROW])
+        captured = capsys.readouterr()
+        assert "T-1" in captured.out
+        assert "└─" not in captured.out
+
+    def test_non_wait_row_prints_reason_line(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        queue_peek.print_table([_STOP_ROW])
+        captured = capsys.readouterr()
+        assert "└─" in captured.out
+        assert "stuck" in captured.out
+
+    def test_stop_row_prints_suggested_stops_footer(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        queue_peek.print_table([_STOP_ROW])
+        captured = capsys.readouterr()
+        assert "Suggested stops:" in captured.out
+        assert "cw spawn close" in captured.out
+
+    def test_wait_row_no_suggested_stops_footer(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        queue_peek.print_table([_WAIT_ROW])
+        captured = capsys.readouterr()
+        assert "Suggested stops:" not in captured.out
