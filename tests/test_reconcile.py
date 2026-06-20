@@ -1225,6 +1225,172 @@ def test_revert_stalled_headless_sessions_transient_gh_error_times_out(
     assert any(e.payload.get("session_id") == sess.id for e in timed_out_events)
 
 
+def test_revert_stalled_gh_prepass_skips_none_ticket_id_and_none_client(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315 pre-pass guard branches: ticket_id=None and client=None are skipped.
+
+    Covers lines 512 (continue when ticket_id is None) and 514 (continue when
+    client is None).  Neither candidate should reach pr_is_merged_for_ticket.
+
+    - Session A: name "client-a/impl" → ticket_id_for_session returns None
+      → candidate.ticket_id is None → line 512 continue.
+    - Session B: normal auto-dev name with valid ticket, but _detect_stalled_candidates
+      is patched to also emit a REVERT_TASK candidate with client=None to hit line 514.
+    """
+    from cw.reconcile import ProposedAction, ReapCandidate
+    from cw.reconcile.stalled import _detect_stalled_candidates as _real_detect
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    # Session A — non-auto-dev name → ticket_id will be None in the real candidate.
+    worktree_a = tmp_path / "wt-none-tid"
+    worktree_a.mkdir(parents=True, exist_ok=True)
+    (worktree_a / ".claude").mkdir(parents=True, exist_ok=True)
+    (worktree_a / ".claude" / "cw-context.json").write_text(
+        '{"headless": true, "session_id": "none-tid"}'
+    )
+    sess_a = Session(
+        id="none-tid",
+        name="client-a/impl",  # No "auto-dev/" prefix → ticket_id=None
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree_a,
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess_a])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    # Wrap real detect to also inject a candidate with client=None (covers line 514).
+    def _patched_detect(
+        s: object,
+        *,
+        now: datetime,
+        config: object,
+        task_by_ticket: object,
+    ) -> list[ReapCandidate]:
+        real_candidates: list[ReapCandidate] = _real_detect(
+            s,  # type: ignore[arg-type]
+            now=now,
+            config=config,  # type: ignore[arg-type]
+            task_by_ticket=task_by_ticket,  # type: ignore[arg-type]
+        )
+        # Inject a REVERT_TASK candidate with a valid ticket_id but client=None.
+        # Re-use sess_a's session_id so the act phase can resolve the session.
+        # The candidate is skipped in the gh pre-pass (line 514: client is None),
+        # then falls through to the normal TIMED_OUT revert path (no queue task
+        # to update, so the queue remains unchanged).
+        injected = ReapCandidate(
+            session_id="none-tid",  # matches sess_a.id so act phase succeeds
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="TKT-NONE-CLIENT",
+            client=None,  # Line 514: continue (skipped in gh pre-pass)
+        )
+        return [*real_candidates, injected]
+
+    monkeypatch.setattr(
+        "cw.reconcile.stalled._detect_stalled_candidates",
+        _patched_detect,
+    )
+
+    # pr_is_merged_for_ticket must NOT be called for either skipped candidate.
+    call_count = 0
+
+    def _should_not_be_called(_tid: str, **_kw: object) -> tuple[bool, bool]:
+        nonlocal call_count
+        call_count += 1
+        return (False, True)
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        _should_not_be_called,
+    )
+
+    # Act — neither skipped candidate should trigger a gh call.
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    # Assert — gh was never called (both candidates were skipped before the call).
+    assert call_count == 0
+
+
+def test_revert_stalled_gh_prepass_second_candidate_skips_when_gh_gone(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315 pre-pass: gh goes unavailable on first candidate → second short-circuits.
+
+    Covers lines 523-525 (gh becomes unavailable for the first REVERT_TASK
+    candidate: _merged, False return → set _gh_available=False, append to
+    gh_blocked, continue) and lines 516-517 (second candidate sees
+    _gh_available=False → append to gh_blocked, continue without calling gh).
+
+    Both sessions end up in BLOCKED_ON_USER state via the gh_blocked routing.
+    """
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    worktree_b = tmp_path / "wt-gh-gone-b"
+    worktree_c = tmp_path / "wt-gh-gone-c"
+    sess_b = _mk_headless_daemon_session("315-gh-gone-b", worktree_b, started_at)
+    sess_c = _mk_headless_daemon_session("315-gh-gone-c", worktree_c, started_at)
+    state = CwState(sessions=[sess_b, sess_c])
+    save_state(state)
+
+    task_b = TicketTask(
+        ticket_id="315-gh-gone-b",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-gh-gone-b",
+    )
+    task_c = TicketTask(
+        ticket_id="315-gh-gone-c",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-gh-gone-c",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task_b, task_c]))
+
+    # First call → gh unavailable (None, False); second call must not happen.
+    gh_call_count = 0
+
+    def _first_call_unavailable(_tid: str, **_kw: object) -> tuple[None, bool]:
+        nonlocal gh_call_count
+        gh_call_count += 1
+        return (None, False)  # _gh_avail=False → triggers lines 522-525
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        _first_call_unavailable,
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    # gh was called exactly once — second candidate hit the short-circuit (516-517).
+    assert gh_call_count == 1
+    # Neither session was reverted (both blocked on gh unavailability).
+    assert "315-gh-gone-b" not in reverted
+    assert "315-gh-gone-c" not in reverted
+    # Both tasks remain BLOCKED_ON_USER (gh routing).
+    store = load_dev_queue()
+    task_b_after = next(t for t in store.tasks if t.ticket_id == "315-gh-gone-b")
+    task_c_after = next(t for t in store.tasks if t.ticket_id == "315-gh-gone-c")
+    assert task_b_after.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task_c_after.status == QueueItemStatus.BLOCKED_ON_USER
+
+
 # ---------------------------------------------------------------------------
 # Stale-worktree cleanup on timeout (GitHub issue #404): a timed-out session's
 # task is reverted to PENDING, so its worktree must be removed or the retry
