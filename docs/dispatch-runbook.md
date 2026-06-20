@@ -230,3 +230,157 @@ tickets that require human judgment at the planning stage.
 - [`docs/session-disposition.md`](session-disposition.md) — how to read a session's outcome from the transcript sentinel.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` bus event.
 - [`docs/events.md`](events.md) — event bus reference.
+
+---
+
+## 9. Recovery: worktree leaks (#766) and false-failed runs (#774)
+
+### 9.1 Symptom checklist
+
+`cw dev-queue status` shows `pending > 0` but `claimed = 0` across multiple
+ticks. The per-client footer reads something like:
+
+```
+skip_reason=freshness_gate  claimed=0  running=0
+```
+
+This means `dispatch_tick` is refusing to claim tickets because the local
+`main` branch of the client repo is not clean/current relative to
+`origin/main`. Two root causes — check in order.
+
+---
+
+### 9.2 Dirty-main-checkout variant (#766)
+
+**What happened.** A `cw dev-queue run` worker wrote files into the main
+checkout instead of (or in addition to) its assigned worktree. `git status`
+inside the client repo shows modified or staged tracked files whose paths
+match an in-flight ticket's scope.
+
+**Diagnose.**
+
+```bash
+# 1. Confirm the main checkout is dirty
+git -C <client-repo> status
+
+# 2. Identify the in-flight ticket branch that owns those files
+git -C <client-repo> diff HEAD origin/dev/<ticket> -- <paths>
+```
+
+If step 2 produces **empty diff**, the leaked content is a byte-identical
+duplicate of what is already on `origin/dev/<ticket>`. The worker's real
+work is safe on the remote branch; the main-checkout copy is droppable.
+
+**Fix.**
+
+```bash
+# Stash the leaked files (label for traceability)
+git -C <client-repo> stash push -m "#766 leak" -- <paths>
+
+# Verify clean
+git -C <client-repo> status
+# → nothing to commit, working tree clean
+
+# Verify not diverged
+git -C <client-repo> rev-list --left-right --count HEAD...origin/main
+# → 0    0   (ahead=0, behind=0)
+```
+
+Once main is clean the freshness gate clears on the next tick. Resume the
+dispatch loop normally (`cw dev-queue run`).
+
+> **If the diff is non-empty** (leaked files differ from the branch), do NOT
+> stash. Surface the discrepancy to the operator before dropping any content
+> — the branch may have been overwritten or the wrong ticket branch identified.
+
+---
+
+### 9.3 Clean-but-diverged-main variant (#766)
+
+**What happened.** The worker committed directly onto local `main` instead of
+its worktree branch. `git status` is clean but `rev-list` shows local-only
+commits:
+
+```bash
+git -C <client-repo> rev-list --left-right --count HEAD...origin/main
+# → 3    0   (3 ahead, 0 behind — local commits exist that origin/main lacks)
+```
+
+**Diagnose.** Confirm the local commits are byte-identical to the ticket
+branch — they should not introduce any net-new content:
+
+```bash
+git -C <client-repo> diff origin/dev/<ticket> HEAD
+# → empty (no diff means local commits are a safe duplicate)
+```
+
+**Fix.** This is a destructive reset. It requires explicit operator
+approval — do not run it from an automated agent or in auto-mode without
+a human sign-off:
+
+```bash
+# Explicit approval required before this step
+git -C <client-repo> reset --hard origin/main
+```
+
+Verify afterwards:
+
+```bash
+git -C <client-repo> status
+# → nothing to commit, working tree clean
+
+git -C <client-repo> rev-list --left-right --count HEAD...origin/main
+# → 0    0
+```
+
+The worker's real work is safe on `origin/dev/<ticket>`. Resume the dispatch
+loop after the reset.
+
+Related issues: #766 (root cause), #786 (usage-limit re-spawn churn that
+amplifies leak frequency), #787 (diff-cover skipped pre-PR).
+
+---
+
+### 9.4 Manual-finalize for false-failed runs (#774)
+
+**Symptom.** A task is marked `failed` or `no_sentinel` in the queue, but
+inspection of the transcript shows the review actually passed. Look for a
+`tool_result` block containing:
+
+```json
+{
+  "status": "review_pending_approval",
+  "health": { "recommendation": "PROCEED" },
+  "next_actions": ["create_pr"]
+}
+```
+
+And `origin/dev/<ticket>` has pushed commits (the work is complete).
+
+**Why it happens.** The session was reaped or interrupted after the review
+sentinel fired but before the orchestrator processed it. The queue recorded
+`failed`/`no_sentinel` from the reap, losing the sentinel result.
+
+**Recovery.**
+
+```bash
+# 1. Create the PR manually (the branch already exists on origin)
+gh pr create \
+  --base main \
+  --head dev/<ticket> \
+  --title "<ticket title>" \
+  --body "Manual finalize — sentinel showed PROCEED (#774)"
+
+# 2. Enable squash auto-merge
+gh pr merge <PR-number> --squash --auto
+
+# 3. Once the PR merges, reap the stale queue task
+cw dev-queue cancel <ticket> --client <client>
+```
+
+Do **not** re-dispatch the ticket. Re-dispatching risks a second worker
+picking up an already-complete ticket and hitting the same drift that caused
+the false-failure in the first place.
+
+Related issues: #774 (false-failed sentinel), #766 (worktree leak that can
+co-occur), #786 (re-spawn churn), #787 (diff-cover skipped pre-PR).
