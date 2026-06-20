@@ -5883,8 +5883,8 @@ class TestFormatStatusHuman:
             last_tick_by_client={"lane-client": tick},
         )
         output = _format_status_human(status)
-        assert "    fast: claimed=1 running=1 pending=0" in output
-        assert "    slow: claimed=0 running=0 pending=2" in output
+        assert "    fast: claimed=1 running=1 blocked=0 pending=0" in output
+        assert "    slow: claimed=0 running=0 blocked=0 pending=2" in output
 
     def test_format_status_human_single_default_lane_no_indented_lines(self) -> None:
         """Single 'default' lane tick does not render indented lane lines."""

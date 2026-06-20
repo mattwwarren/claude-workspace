@@ -154,13 +154,14 @@ def _claim_next_pending(
 def _lane_stats_for_client(
     client: ClientConfig, queue_snapshot: DevQueueStore
 ) -> dict[str, dict[str, int]]:
-    """Per-lane ``{claimed: 0, running, pending}`` counts for event payloads.
+    """Per-lane ``{claimed, running, blocked, pending}`` counts for event payloads.
 
     Why task-based running: RUNNING/BLOCKED_ON_USER tasks carry ``lane``;
     sessions carry ``lane`` as of #594, but occupancy counting stays task-join
     based per ADR-0006 / Phase 4a scope (stamped-but-not-read by the
-    scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so it
-    counts as running here.
+    scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
+    ``running + blocked`` is the total occupied count. ``blocked`` is split out
+    so operators can see at a glance why claimed=0 when pending>0 (#588).
     """
     stats: dict[str, dict[str, int]] = {}
     for lane_cfg in client.effective_lanes:
@@ -169,7 +170,14 @@ def _lane_stats_for_client(
             for t in queue_snapshot.tasks
             if t.client == client.name
             and t.lane == lane_cfg.name
-            and t.status in (QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER)
+            and t.status == QueueItemStatus.RUNNING
+        )
+        blocked = sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client.name
+            and t.lane == lane_cfg.name
+            and t.status == QueueItemStatus.BLOCKED_ON_USER
         )
         pending = sum(
             1
@@ -178,7 +186,12 @@ def _lane_stats_for_client(
             and t.lane == lane_cfg.name
             and t.status == QueueItemStatus.PENDING
         )
-        stats[lane_cfg.name] = {"claimed": 0, "running": running, "pending": pending}
+        stats[lane_cfg.name] = {
+            "claimed": 0,
+            "running": running,
+            "blocked": blocked,
+            "pending": pending,
+        }
     return stats
 
 
@@ -627,6 +640,10 @@ def _dispatch_client_lanes(
     client_spawned = 0
     spawn_error = False
     usage_limit_detected = False
+    # True when any lane has pending>0 but grant<=0 due to occupied slots
+    # (RUNNING + BLOCKED_ON_USER >= max_parallel). Distinguishes the
+    # previously misleading skip_reason=no_pending case (#588).
+    lane_cap_blocked = False
 
     # Tier-1 client slot budget: use the session-based running_count (not
     # the task-based total_running) so pre-existing DAEMON sessions without
@@ -640,7 +657,16 @@ def _dispatch_client_lanes(
             break
         if lane_cfg.paused:
             continue
+        # running_in_lane = RUNNING + BLOCKED_ON_USER (total occupied slots).
         running_in_lane = running_by_lane.get(lane_cfg.name, 0)
+        # blocked_in_lane = BLOCKED_ON_USER only (for per-lane breakdown).
+        blocked_in_lane = sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client.name
+            and t.lane == lane_cfg.name
+            and t.status == QueueItemStatus.BLOCKED_ON_USER
+        )
         pending_in_lane = sum(
             1
             for t in queue_snapshot.tasks
@@ -653,6 +679,11 @@ def _dispatch_client_lanes(
             pending_in_lane,
             available_client_slots,
         )
+        # Detect: pending work exists but the lane cap is full of occupied
+        # slots (RUNNING + BLOCKED_ON_USER >= max_parallel). Raises the
+        # skip_reason to LANE_CAP_BLOCKED instead of the misleading NO_PENDING.
+        if grant <= 0 and pending_in_lane > 0:
+            lane_cap_blocked = True
         lane_claimed = 0
         for _ in range(max(0, grant)):
             task: TicketTask | None = _claim_next_pending(
@@ -686,7 +717,8 @@ def _dispatch_client_lanes(
 
         lane_stats[lane_cfg.name] = {
             "claimed": lane_claimed,
-            "running": running_in_lane,
+            "running": running_in_lane - blocked_in_lane,
+            "blocked": blocked_in_lane,
             "pending": pending_in_lane,
         }
 
@@ -694,12 +726,17 @@ def _dispatch_client_lanes(
             break
 
     if emit is not None:
-        emit(f"{client.name}: spawned={client_spawned} cap_full={int(cap_full)}")
+        emit(
+            f"{client.name}: spawned={client_spawned}"
+            f" cap_full={int(cap_full)}"
+            f" lane_cap_blocked={int(lane_cap_blocked)}"
+        )
 
     skip_reason = _resolve_dispatch_skip_reason(
         usage_limit_detected=usage_limit_detected,
         cap_full=cap_full,
         spawn_error=spawn_error,
+        lane_cap_blocked=lane_cap_blocked,
         client_spawned=client_spawned,
     )
 
@@ -725,22 +762,27 @@ def _resolve_dispatch_skip_reason(
     usage_limit_detected: bool,
     cap_full: bool,
     spawn_error: bool,
+    lane_cap_blocked: bool,
     client_spawned: int,
 ) -> DispatchSkipReason:
     """Resolve the dispatch.tick skip_reason via first-match precedence.
 
-    Mirrors the operator resolution order (issue #459):
+    Mirrors the operator resolution order (issue #459, #588):
     1. freshness_gate — handled by early-continue before this is called
     2. usage_limited — usage limit detected this tick for this client
     3. cap_full — running_count >= cap before loop entered
-    4. spawn_error — exception broke the loop (regardless of client_spawned)
-    5. no_pending — loop exited with zero claims and no spawn error
-    6. none — at least one session spawned
+    4. lane_cap_blocked — pending>0 but every lane slot is occupied by
+       RUNNING or BLOCKED_ON_USER tasks; grant<=0 for all lanes
+    5. spawn_error — exception broke the loop (regardless of client_spawned)
+    6. no_pending — loop exited with zero claims and no spawn error
+    7. none — at least one session spawned
     """
     if usage_limit_detected:
         return DispatchSkipReason.USAGE_LIMITED
     if cap_full:
         return DispatchSkipReason.CAP_FULL
+    if lane_cap_blocked:
+        return DispatchSkipReason.LANE_CAP_BLOCKED
     if spawn_error:
         return DispatchSkipReason.SPAWN_ERROR
     if client_spawned == 0:

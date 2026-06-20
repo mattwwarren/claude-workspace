@@ -2711,7 +2711,9 @@ class TestDispatchTickEvents:
         assert p["pending"] == 2  # both tasks were pending pre-claim
         # Payload shape is consistent across all emit sites (#558 PM review):
         # the freshness-gate event carries the per-lane breakdown too.
-        assert p["lanes"] == {"default": {"claimed": 0, "running": 0, "pending": 2}}
+        assert p["lanes"] == {
+            "default": {"claimed": 0, "running": 0, "blocked": 0, "pending": 2}
+        }
 
     def test_skip_reason_spawn_error_on_spawn_failure(
         self,
@@ -3791,6 +3793,143 @@ class TestLaneCapCountingWithBlockedOnUser:
 
         # Lane is full (BLOCKED_ON_USER counts) — should NOT spawn
         assert result.spawned == 0
+
+        # running_count=1 >= ceiling=1 → cap_full=True → CAP_FULL (not LANE_CAP_BLOCKED)
+        events = read_events(
+            consumer="test-blocked-counts-lane-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.CAP_FULL
+
+
+# ---------------------------------------------------------------------------
+# TestLaneCapBlockedSkipReason (#588)
+# ---------------------------------------------------------------------------
+
+
+class TestLaneCapBlockedSkipReason:
+    """BLOCKED_ON_USER exhausts lane → skip_reason=lane_cap_blocked, not no_pending."""
+
+    def _setup_blocked_lane(
+        self,
+        tmp_dispatch_dirs: Path,
+        workspace_path: Path,
+    ) -> None:
+        """Create a client with one impl lane (max_parallel=1), one BLOCKED_ON_USER
+        task filling it, and one PENDING task waiting."""
+        lanes = [LaneConfig(name="impl", max_parallel=1)]
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=workspace_path,
+            default_branch="main",
+            lanes=lanes,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+
+        blocked_task = TicketTask(
+            ticket_id="LCAP-BLOCKED",
+            client="test-client",
+            lane="impl",
+        )
+        blocked_task.status = QueueItemStatus.BLOCKED_ON_USER
+        blocked_task.session_id = "sess-lcap-1"
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(blocked_task)
+            save_dev_queue(store)
+
+        # No active daemon session — the blocked slot is purely task-based
+        # (cap_full based on session-count is False; lane grant is <=0).
+        add_ticket(
+            TicketTask(ticket_id="LCAP-PENDING", client="test-client", lane="impl")
+        )
+
+    def test_skip_reason_is_lane_cap_blocked(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """BLOCKED_ON_USER fills lane cap; pending>0 → skip_reason=lane_cap_blocked."""
+        self._setup_blocked_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+
+        daemon = FakeNativeDaemonClient()
+        config = OrchestratorConfig(default_ceiling=2)
+        result = dispatch_tick(config, native_daemon=daemon)
+
+        assert result.spawned == 0
+
+        events = read_events(
+            consumer="test-lcap-skip-reason",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == DispatchSkipReason.LANE_CAP_BLOCKED
+        assert p["claimed"] == 0
+        assert p["pending"] == 1
+
+    def test_lane_stats_show_blocked_count(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """dispatch.tick lane stats split running vs blocked for operator visibility."""
+        self._setup_blocked_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+
+        daemon = FakeNativeDaemonClient()
+        config = OrchestratorConfig(default_ceiling=2)
+        dispatch_tick(config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-lcap-lane-stats",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        lane = events[0].payload["lanes"]["impl"]
+        # Slot is occupied by BLOCKED_ON_USER, not a session-running task
+        assert lane["running"] == 0
+        assert lane["blocked"] == 1
+        assert lane["pending"] == 1
+        assert lane["claimed"] == 0
+
+    def test_no_pending_still_used_when_truly_empty(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """When lane is blocked but no pending tasks exist → skip_reason=no_pending."""
+        lanes = [LaneConfig(name="impl", max_parallel=1)]
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=sample_client_config.workspace_path,
+            default_branch="main",
+            lanes=lanes,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+
+        # Only a BLOCKED_ON_USER task — no pending work at all
+        blocked_task = TicketTask(
+            ticket_id="LCAP-ONLY-BLOCKED",
+            client="test-client",
+            lane="impl",
+        )
+        blocked_task.status = QueueItemStatus.BLOCKED_ON_USER
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(blocked_task)
+            save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-lcap-no-pending",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.NO_PENDING
 
 
 # ---------------------------------------------------------------------------
