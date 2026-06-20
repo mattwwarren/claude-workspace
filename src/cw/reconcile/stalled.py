@@ -37,6 +37,7 @@ from cw.reconcile._shared import (
     _cleanup_timed_out_worktree,
     _is_headless,
     _queue_status_for_salvaged,
+    feature_branch_key,
     resolve_headless_budget,
     resolve_reap_policy,
     ticket_id_for_session,
@@ -494,10 +495,49 @@ def revert_stalled_headless_sessions(
     candidates = _detect_stalled_candidates(
         state, now=now, config=config, task_by_ticket=task_by_ticket
     )
-    # Discard merged_completed_ids — this public wrapper's callers expect list[str]
-    # (reverted ticket IDs only). merged completions are surfaced through the
-    # ReconcileReport.completed_ticket_ids path inside _reconcile_locked (GitHub #637).
+    # Lockless gh pre-pass — mirrors reconcile() in core.py.
+    # gh subprocess must NOT run under sessions_lock (liveness, #485); this
+    # wrapper is called outside sessions_lock so the constraint is satisfied.
+    # Fail-open: only (True, True) suppresses timeout. (None, True) transient
+    # error falls through to TIMED_OUT; (None, False) gh-absent routes to
+    # BLOCKED_ON_USER (matching core.py's established contract). See #315.
+    _clients = _deps.load_effective_clients()
+    _merged_tids: list[str] = []
+    _gh_blocked_tids: list[str] = []
+    _gh_available = True
+    for candidate in candidates:
+        if candidate.proposed_action is not ProposedAction.REVERT_TASK:
+            continue
+        if candidate.ticket_id is None:
+            continue
+        if candidate.client is None:
+            continue
+        if not _gh_available:
+            _gh_blocked_tids.append(candidate.ticket_id)
+            continue
+        _branch = feature_branch_key(candidate.client, candidate.ticket_id, _clients)
+        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
+            candidate.ticket_id, branch=_branch
+        )
+        if not _gh_avail:
+            _gh_available = False
+            _gh_blocked_tids.append(candidate.ticket_id)
+            continue
+        if _merged is None:
+            continue
+        if _merged:
+            _merged_tids.append(candidate.ticket_id)
+    merged_ticket_ids = frozenset(_merged_tids)
+    gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
+    # Discard merged_completed_ids — callers expect list[str] (reverted only).
+    # merged completions surface through ReconcileReport.completed_ticket_ids
+    # inside _reconcile_locked (GitHub #637).
     reverted, _merged_completed = _act_on_stalled_candidates(
-        state, candidates, now=now, config=config
+        state,
+        candidates,
+        now=now,
+        config=config,
+        merged_ticket_ids=merged_ticket_ids,
+        gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
     return reverted
