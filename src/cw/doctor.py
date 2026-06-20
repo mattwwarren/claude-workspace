@@ -36,6 +36,7 @@ from cw.config import (
     state_file,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dispatch import TICK_STALE_SECONDS
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
@@ -48,6 +49,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
+from cw.orchestrate import TickSummary, latest_tick_summary_by_client
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     feature_branch_key,
@@ -837,6 +839,38 @@ def _check_loop_health() -> list[CheckResult]:
     return results
 
 
+def _check_loop_liveness() -> list[CheckResult]:
+    """Warn when any client's last dispatch tick is stale and has pending tickets."""
+    tick_data: dict[str, TickSummary] = latest_tick_summary_by_client()
+    if not tick_data:
+        return [
+            CheckResult("loop-liveness", ok=True, warn=False, detail="no tick history")
+        ]
+
+    now = datetime.now(UTC)
+    results: list[CheckResult] = []
+    for client, tick in tick_data.items():
+        age = (now - tick.tick_at).total_seconds()
+        if age > TICK_STALE_SECONDS and tick.pending > 0:
+            results.append(
+                CheckResult(
+                    f"loop-liveness/{client}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"no dispatch tick for {client} in {int(age)}s"
+                        f" ({tick.pending} pending) — loop may have exited."
+                        " Run `cw dev-queue run`."
+                    ),
+                )
+            )
+    if not results:
+        results.append(
+            CheckResult("loop-liveness", ok=True, warn=False, detail="tick fresh")
+        )
+    return results
+
+
 def _gh_pr_states(branch: str) -> tuple[list[dict[str, Any]], bool]:
     """Return (pr_list, gh_missing) for the given branch.
 
@@ -1058,6 +1092,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_cw_version())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())
+    report.checks.extend(_check_loop_liveness())
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 

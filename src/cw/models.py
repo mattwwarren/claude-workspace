@@ -203,6 +203,7 @@ class OrchestratorEventType(StrEnum):
     PR_MERGEABLE = "pr.mergeable"
     PR_MERGED = "pr.merged"
     DISPATCH_TICK = "dispatch.tick"
+    DISPATCH_LOOP_EXITED = "dispatch.loop_exited"
     SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
     SESSION_REAP_PROPOSED = "session.reap_proposed"
