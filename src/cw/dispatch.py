@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1315,6 +1316,9 @@ def persist_last_result(session_id: str, stdout: str) -> bool:
     return True
 
 
+TICK_STALE_SECONDS = 90  # 3x default tick_interval_seconds=30
+
+
 def run_dispatch_loop(
     *,
     max_parallel: int | None = None,
@@ -1362,40 +1366,54 @@ def run_dispatch_loop(
     # Subsequent ticks skip all spawns until this window elapses.
     usage_limited_until: datetime | None = None
 
-    while True:
-        try:
-            config = load_effective_config()
-            if max_parallel is not None:
-                clients = load_clients()
-                overridden = dict.fromkeys(clients, max_parallel)
-                config = config.model_copy(update={"per_client_ceiling": overridden})
-        except (yaml.YAMLError, pydantic.ValidationError):
-            _log.warning("dispatch: config reload failed; using last-good config")
+    try:
+        while True:
+            try:
+                config = load_effective_config()
+                if max_parallel is not None:
+                    clients = load_clients()
+                    overridden = dict.fromkeys(clients, max_parallel)
+                    config = config.model_copy(
+                        update={"per_client_ceiling": overridden}
+                    )
+            except (yaml.YAMLError, pydantic.ValidationError):
+                _log.warning("dispatch: config reload failed; using last-good config")
 
-        consume_completed_sessions()
-        result = dispatch_tick(
-            config,
-            use_plan=use_plan,
-            parent=parent,
-            native_daemon=resolved_native_daemon,
-            emit=emit,
-            warned_stale=warned_stale,
-            warned_fetch_fail=warned_fetch_fail,
-            usage_limited_until=usage_limited_until,
-            auto_ff=auto_ff,
-            client_filter=client,
-        )
-
-        if result.usage_limit_detected and not once:
-            usage_limited_until = datetime.now(UTC) + timedelta(
-                seconds=config.usage_limit_backoff_seconds
-            )
-            _log.warning(
-                "dispatch: usage limit detected; backing off until %s",
-                usage_limited_until,
+            consume_completed_sessions()
+            result = dispatch_tick(
+                config,
+                use_plan=use_plan,
+                parent=parent,
+                native_daemon=resolved_native_daemon,
+                emit=emit,
+                warned_stale=warned_stale,
+                warned_fetch_fail=warned_fetch_fail,
+                usage_limited_until=usage_limited_until,
+                auto_ff=auto_ff,
+                client_filter=client,
             )
 
-        if once:
-            return
+            if result.usage_limit_detected and not once:
+                usage_limited_until = datetime.now(UTC) + timedelta(
+                    seconds=config.usage_limit_backoff_seconds
+                )
+                _log.warning(
+                    "dispatch: usage limit detected; backing off until %s",
+                    usage_limited_until,
+                )
 
-        time.sleep(config.tick_interval_seconds)
+            if once:
+                return
+
+            time.sleep(config.tick_interval_seconds)
+    finally:
+        _exc = sys.exc_info()[1]
+        _normal = _exc is None or isinstance(_exc, KeyboardInterrupt)
+        with contextlib.suppress(Exception):
+            record_event(
+                OrchestratorEventType.DISPATCH_LOOP_EXITED,
+                payload={
+                    "normal": _normal,
+                    "exception_type": None if _normal else type(_exc).__name__,
+                },
+            )

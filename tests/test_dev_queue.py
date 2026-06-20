@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -501,6 +502,56 @@ class TestCLIDevQueueStatus:
         assert result.exit_code == 0, result.output
         assert "genhealth" in result.output
         assert "other" not in result.output
+
+    def test_status_stale_tick_shows_marker(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stale tick_at → [STALE — no tick in Ns] appended to the tick line."""
+        from datetime import timedelta
+
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-200", client="genhealth"))
+        stale_at = datetime.now(UTC) - timedelta(seconds=150)
+        tick = TickSummary(
+            claimed=0, pending=1, running=0, cap=3, skip_reason="none", tick_at=stale_at
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"genhealth": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[STALE — no tick in " in result.output
+
+    def test_status_fresh_tick_no_marker(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fresh tick_at → no [STALE] marker."""
+        from datetime import timedelta
+
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-201", client="genhealth"))
+        fresh_at = datetime.now(UTC) - timedelta(seconds=10)
+        tick = TickSummary(
+            claimed=0, pending=1, running=0, cap=3, skip_reason="none", tick_at=fresh_at
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"genhealth": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[STALE" not in result.output
 
 
 # ---------------------------------------------------------------------------

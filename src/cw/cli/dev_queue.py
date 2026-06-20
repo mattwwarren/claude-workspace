@@ -24,7 +24,7 @@ from cw.dev_queue import (
     resolve_client,
     wait_for_terminal,
 )
-from cw.dispatch import run_dispatch_loop
+from cw.dispatch import TICK_STALE_SECONDS, run_dispatch_loop
 from cw.events import record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
@@ -282,14 +282,20 @@ def dev_queue_status(client: str | None) -> None:
             "  (snapshot from the most recent dispatch tick"
             " — not live queue state; see the table above)"
         )
+        now = datetime.now(UTC)
         for client_name in clients_seen:
             if client_name in tick_data:
                 tick = tick_data[client_name]
-                click.echo(
+                tick_line = (
                     f"  {client_name}: claimed={tick.claimed}  pending={tick.pending}"
                     f"  running={tick.running}/{tick.cap}"
                     f"  skip={tick.skip_reason}"
                 )
+                age_secs = (now - tick.tick_at).total_seconds()
+                age = int(age_secs)
+                if age_secs > TICK_STALE_SECONDS:
+                    tick_line += f" [STALE — no tick in {age}s]"
+                click.echo(tick_line)
                 _emit_dev_queue_lane_breakdown(by_client[client_name])
 
 
