@@ -4182,7 +4182,9 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.latest_tick_summary_by_client",
-            lambda: {"test-client": self._make_tick_summary(pending=2, tick_at=stale_at)},
+            lambda: {
+                "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
+            },
         )
         results = _check_loop_liveness()
         warn_results = [r for r in results if r.warn]
@@ -4201,7 +4203,9 @@ class TestCheckLoopLiveness:
         fresh_at = datetime.now(UTC) - timedelta(seconds=10)
         monkeypatch.setattr(
             "cw.doctor.latest_tick_summary_by_client",
-            lambda: {"test-client": self._make_tick_summary(pending=2, tick_at=fresh_at)},
+            lambda: {
+                "test-client": self._make_tick_summary(pending=2, tick_at=fresh_at)
+            },
         )
         results = _check_loop_liveness()
         assert not any(r.warn for r in results)
@@ -4214,7 +4218,7 @@ class TestCheckLoopLiveness:
 
         monkeypatch.setattr(
             "cw.doctor.latest_tick_summary_by_client",
-            lambda: {},
+            dict,
         )
         results = _check_loop_liveness()
         assert len(results) == 1
@@ -4232,7 +4236,9 @@ class TestCheckLoopLiveness:
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
             "cw.doctor.latest_tick_summary_by_client",
-            lambda: {"test-client": self._make_tick_summary(pending=0, tick_at=stale_at)},
+            lambda: {
+                "test-client": self._make_tick_summary(pending=0, tick_at=stale_at)
+            },
         )
         results = _check_loop_liveness()
         assert not any(r.warn for r in results)
@@ -4246,7 +4252,7 @@ class TestCheckLoopLiveness:
         _stub_claude_version_ok(monkeypatch)
         monkeypatch.setattr(
             "cw.doctor.latest_tick_summary_by_client",
-            lambda: {},
+            dict,
         )
         report = run_doctor()
         liveness_checks = [c for c in report.checks if "loop-liveness" in c.name]

@@ -27,7 +27,6 @@ from cw.dev_queue import (
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
     FRESHNESS_NON_MAIN_HEAD,
-    TICK_STALE_SECONDS,
     DispatchTickResult,
     _accumulate_task_cost,
     consume_completed_sessions,
@@ -4185,7 +4184,8 @@ class TestDispatchLoopExitedEvent:
             **_kwargs: object,
         ) -> object:
             if event_type == OrchestratorEventType.DISPATCH_LOOP_EXITED:
-                raise Exception("emit failed")
+                msg = "emit failed"
+                raise RuntimeError(msg)
             return None
 
         monkeypatch.setattr("cw.dispatch.record_event", raising_on_loop_exited)
