@@ -139,11 +139,17 @@ def _event_matches(
     *,
     since_ts: datetime | None,
     event_types: list[OrchestratorEventType] | None,
+    client_names: frozenset[str] | None = None,
 ) -> bool:
-    """Return True if *event* passes the timestamp and type filters."""
+    """Return True if *event* passes the timestamp, type, and client filters."""
     if since_ts is not None and event.created_at < since_ts:
         return False
-    return event_types is None or event.type in event_types
+    if event_types is not None and event.type not in event_types:
+        return False
+    return not (
+        client_names is not None
+        and event.payload.get("client") not in client_names
+    )
 
 
 def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
@@ -181,6 +187,7 @@ def read_events(
     since_cursor: str | None = None,
     since_ts: datetime | None = None,
     event_types: list[OrchestratorEventType] | None = None,
+    client_names: frozenset[str] | None = None,
     limit: int | None = None,
 ) -> list[OrchestratorEvent]:
     """Read events from the inbox, optionally filtered.
@@ -201,6 +208,7 @@ def read_events(
         since_cursor: Skip events up to and including this event ID.
         since_ts: Skip events with created_at before this timestamp.
         event_types: If set, only return events of these types.
+        client_names: If set, only return events whose payload.client is in this set.
         limit: Maximum number of events to return.
 
     Returns:
@@ -231,7 +239,12 @@ def read_events(
                 past_cursor = True
             continue
 
-        if not _event_matches(event, since_ts=since_ts, event_types=event_types):
+        if not _event_matches(
+            event,
+            since_ts=since_ts,
+            event_types=event_types,
+            client_names=client_names,
+        ):
             continue
 
         events.append(event)
@@ -245,7 +258,12 @@ def read_events(
         events = [
             event
             for event in parsed
-            if _event_matches(event, since_ts=since_ts, event_types=event_types)
+            if _event_matches(
+                event,
+                since_ts=since_ts,
+                event_types=event_types,
+                client_names=client_names,
+            )
         ]
 
     if limit is not None:
@@ -352,6 +370,7 @@ def tail_events_follow(
     since_cursor: str | None,
     since_ts: datetime | None,
     event_types: list[OrchestratorEventType] | None,
+    client_names: frozenset[str] | None = None,
     poll_interval: float = _FOLLOW_POLL_INTERVAL,
 ) -> Generator[OrchestratorEvent]:
     """Yield new events as they arrive, polling the inbox for changes.
@@ -382,6 +401,7 @@ def tail_events_follow(
                 since_cursor=last_cursor,
                 since_ts=since_ts,
                 event_types=event_types,
+                client_names=client_names,
             )
             for ev in new_events:
                 yield ev

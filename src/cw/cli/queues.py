@@ -376,20 +376,67 @@ def _print_event(ev: OrchestratorEvent, *, as_json: bool) -> None:
     sys.stdout.flush()
 
 
+_TERMINAL_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
+    {
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        OrchestratorEventType.SESSION_REAP_PROPOSED,
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+    }
+)
+
+
+def _terminal_dedup_key(
+    ev: OrchestratorEvent,
+) -> tuple[str, str | None, str | None, str | None] | None:
+    """Return dedup key for terminal events, or None if not a terminal event."""
+    if ev.type not in _TERMINAL_EVENT_TYPES:
+        return None
+    return (
+        str(ev.type),
+        ev.correlation_id,
+        ev.payload.get("session_id"),
+        ev.payload.get("condition"),
+    )
+
+
+def _dedup_terminal(events: list[OrchestratorEvent]) -> list[OrchestratorEvent]:
+    """Filter out repeated terminal events with same (type, session, condition) key."""
+    seen: set[tuple[str, str | None, str | None, str | None]] = set()
+    result: list[OrchestratorEvent] = []
+    for ev in events:
+        key = _terminal_dedup_key(ev)
+        if key is None:
+            result.append(ev)
+        elif key not in seen:
+            seen.add(key)
+            result.append(ev)
+    return result
+
+
 def _follow_loop(
     since_cursor: str | None,
     since_ts: datetime | None,
     etype_filter: list[OrchestratorEventType] | None,
     *,
     as_json: bool,
+    client_names: frozenset[str] | None = None,
+    dedup_terminal: bool = False,
 ) -> None:
     """Stream events from the inbox until SIGINT or broken pipe."""
+    seen_terminal: set[tuple[str, str | None, str | None, str | None]] = set()
     try:
         for ev in tail_events_follow(
             since_cursor=since_cursor,
             since_ts=since_ts,
             event_types=etype_filter,
+            client_names=client_names,
         ):
+            if dedup_terminal:
+                key = _terminal_dedup_key(ev)
+                if key is not None and key in seen_terminal:
+                    continue
+                if key is not None:
+                    seen_terminal.add(key)
             _print_event(ev, as_json=as_json)
     except KeyboardInterrupt:
         raise click.exceptions.Exit(130) from None
@@ -409,14 +456,30 @@ def _follow_loop(
     multiple=True,
     help="Filter by event type (repeatable).",
 )
+@click.option(
+    "--client",
+    "client_filter",
+    multiple=True,
+    help="Filter by payload.client field (repeatable).",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output full event JSON.")
 @click.option("--follow", "-f", is_flag=True, help="Stream new events as they arrive.")
+@click.option(
+    "--dedup-terminal",
+    is_flag=True,
+    help=(
+        "Collapse repeated terminal re-fires (timed_out, reap_proposed, "
+        "needs_attention) for the same session to a single emission."
+    ),
+)
 @handle_errors
 def event_tail(
     since: str | None,
     type_filter: tuple[str, ...],
+    client_filter: tuple[str, ...],
     as_json: bool,
     follow: bool,
+    dedup_terminal: bool,
 ) -> None:
     """Read events from the inbox.
 
@@ -433,6 +496,7 @@ def event_tail(
         consumer, since_ts = _parse_since(since)
 
     etype_filter = _resolve_event_types(type_filter)
+    client_names = frozenset(client_filter) if client_filter else None
 
     if follow:
         since_cursor: str | None = None
@@ -444,7 +508,14 @@ def event_tail(
                     " replaying from start",
                     err=True,
                 )
-        _follow_loop(since_cursor, since_ts, etype_filter, as_json=as_json)
+        _follow_loop(
+            since_cursor,
+            since_ts,
+            etype_filter,
+            as_json=as_json,
+            client_names=client_names,
+            dedup_terminal=dedup_terminal,
+        )
         return
 
     # One-shot mode: initialize fresh cursor to "now" so first-use consumers
@@ -456,7 +527,11 @@ def event_tail(
         consumer=consumer,
         since_ts=since_ts,
         event_types=etype_filter,
+        client_names=client_names,
     )
+
+    if dedup_terminal:
+        events = _dedup_terminal(events)
 
     if not events:
         if as_json:
@@ -466,12 +541,7 @@ def event_tail(
         return
 
     for ev in events:
-        if as_json:
-            click.echo(ev.model_dump_json())
-        else:
-            ts = ev.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-            corr = f" corr={ev.correlation_id}" if ev.correlation_id else ""
-            click.echo(f"{ts}  {ev.id}  {ev.type}{corr}  {ev.payload}")
+        _print_event(ev, as_json=as_json)
 
     # Advance consumer cursor to last event seen
     if consumer is not None and events:
