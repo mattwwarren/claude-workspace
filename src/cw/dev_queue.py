@@ -507,8 +507,8 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     idx = stages.index(task.stage)
     task.stage = stages[idx + 1]
     task.status = QueueItemStatus.PENDING
-    task.session_id = None
-    task.stage_base_ref = None
+    task.session_id = None  # R6: clear session_id on advance
+    task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
 
 
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
@@ -670,7 +670,7 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
     from cw.config import load_state, save_state, sessions_lock
     from cw.models import ReapReason
 
-    # First pass: find the ticket and its session_id (read-only, no lock needed).
+    # Fast-fail pre-check outside any lock; re-validated under sessions_lock below.
     store = load_dev_queue()
     task = _find_ticket(store, ticket_id, client_name)
 
@@ -683,7 +683,9 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
 
     session_id = task.session_id
 
-    # Step 1: Under sessions lock — clear session park markers.
+    # Why: sessions_lock outer, dev_queue_lock inner — canonical dual-lock ordering.
+    # Both saves happen under the outer lock so sessions.json is never written unless
+    # dev_queue.json succeeds first (safe-fail direction for partial-commit scenarios).
     with sessions_lock():
         state = load_state()
         session = None
@@ -705,17 +707,22 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                 )
             raise UnblockStateError(msg)
 
+        with _lock():
+            store = load_dev_queue()
+            task = _find_ticket(store, ticket_id, client_name)
+            if task.status != QueueItemStatus.BLOCKED_ON_USER:
+                msg = (
+                    f"Cannot unblock ticket '{ticket_id}': status changed to"
+                    f" {task.status.value!r} concurrently. Re-check and retry."
+                )
+                raise UnblockStateError(msg)
+            task.status = QueueItemStatus.PENDING
+            task.session_id = None
+            task.stage_base_ref = None
+            save_dev_queue(store)
+
         session.last_result = None
         session.reap_reason = None
         save_state(state)
-
-    # Step 2: Under dev-queue lock — set task to PENDING.
-    with _lock():
-        store = load_dev_queue()
-        task = _find_ticket(store, ticket_id, client_name)
-        task.status = QueueItemStatus.PENDING
-        task.session_id = None
-        task.stage_base_ref = None
-        save_dev_queue(store)
 
     return {"ticket_id": ticket_id, "client": client_name}

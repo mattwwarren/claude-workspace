@@ -2224,6 +2224,45 @@ class TestApproveTicket:
         with pytest.raises(ApproveGateError, match="expected BLOCKED_ON_USER"):
             approve_ticket("GEN-500", "genhealth")
 
+    def test_approve_null_last_result_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Session exists but last_result=None raises ApproveGateError."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0004")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(session_id="sess0004", last_result=None)
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        with pytest.raises(ApproveGateError, match="not at an approval gate"):
+            approve_ticket("GEN-500", "genhealth")
+
+    def test_approve_terminal_stage_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Task at terminal pipeline stage raises ApproveGateError."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.FINALIZE, session_id="sess0005")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0005",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        with pytest.raises(ApproveGateError, match="terminal stage"):
+            approve_ticket("GEN-500", "genhealth")
+
 
 # ---------------------------------------------------------------------------
 # TestRequeueTicket — requeue_ticket() mutation function
@@ -2299,6 +2338,25 @@ class TestRequeueTicket:
             client="genhealth",
             status=QueueItemStatus.PENDING,
             stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER"):
+            requeue_ticket("GEN-500", "genhealth")
+
+    def test_requeue_running_task_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """RUNNING task raises RequeueStateError."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="GEN-500",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.IMPL,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
