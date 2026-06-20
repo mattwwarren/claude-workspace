@@ -57,7 +57,7 @@ from cw.reconcile import (
     ticket_id_for_session,
 )
 from cw.tracker import PROJECT_CONFIG_RELPATH
-from cw.worktree import _git_dir
+from cw.worktree import _git_dir, get_head_branch
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, DevQueueStore, Session, TicketTask
@@ -415,6 +415,55 @@ def _check_workspace_paths() -> list[CheckResult]:
                     f"workspace/{name}",
                     ok=False,
                     detail=f"path does not exist: {git_dir}",
+                )
+            )
+    return results
+
+
+def _check_dispatch_repo_head(
+    clients: dict[str, ClientConfig],
+) -> list[CheckResult]:
+    """Check each client's dispatch repo HEAD is on its default branch."""
+    results: list[CheckResult] = []
+    for name, client in clients.items():
+        try:
+            branch = get_head_branch(client)
+        except OSError as exc:
+            results.append(
+                CheckResult(
+                    f"dispatch-repo-head/{name}",
+                    ok=True,
+                    warn=True,
+                    detail=f"could not read HEAD: {exc}",
+                )
+            )
+            continue
+        if branch is None:
+            git_dir = _git_dir(client)
+            default = client.default_branch
+            results.append(
+                CheckResult(
+                    f"dispatch-repo-head/{name}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"repo HEAD is detached, expected '{default}'"
+                        f" — run: git -C {git_dir} checkout {default}"
+                    ),
+                )
+            )
+        elif branch != client.default_branch:
+            git_dir = _git_dir(client)
+            default = client.default_branch
+            results.append(
+                CheckResult(
+                    f"dispatch-repo-head/{name}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"repo HEAD is on '{branch}', expected '{default}'"
+                        f" — run: git -C {git_dir} checkout {default}"
+                    ),
                 )
             )
     return results
@@ -1099,6 +1148,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
     report.checks.extend(_check_workspace_paths())
+    report.checks.extend(_check_dispatch_repo_head(_clients))
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:
