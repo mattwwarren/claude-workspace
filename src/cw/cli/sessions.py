@@ -45,18 +45,15 @@ from cw.models import (
     QueueItemStatus,
     Session,
     SessionOrigin,
-    SessionPurpose,
     SessionStatus,
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
-    feature_branch_key,
     reconcile,
     resolve_headless_budget,
 )
-from cw.reconcile import _deps as _reconcile_deps
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -347,73 +344,6 @@ def _resolve_signal_stop_context() -> (
     return hook_payload, context, cwd_value, cw_session_id
 
 
-def _detect_world_state_completion(session: Session, ticket_id: str) -> bool:
-    """Return True if the session's PR has merged (world-state evidence).
-
-    Only fires for IMPL sessions — the only purpose that opens PRs (#315).
-    Conservatively returns False on any gh error or non-impl purpose so the
-    caller falls through to the normal timed_out path.
-    """
-    if session.purpose is not SessionPurpose.IMPL:
-        return False
-    clients = load_clients()
-    branch = feature_branch_key(session.client, ticket_id, clients)
-    merged, gh_available = _reconcile_deps.pr_is_merged_for_ticket(
-        ticket_id, branch=branch
-    )
-    if not gh_available:
-        return False
-    return merged is True
-
-
-def _record_world_state_completion(
-    state: CwState,
-    session: Session,
-    *,
-    now: datetime,
-    ticket_id: str,
-) -> None:
-    """Mark session COMPLETED via world-state inference and update the queue.
-
-    Transitions *session* to COMPLETED, persists state, emits
-    ``SESSION_COMPLETED_INFERRED``, marks the owning RUNNING TicketTask to
-    COMPLETED, and best-effort stops the daemon worker. See #315.
-    """
-    session.status = SessionStatus.COMPLETED
-    session.completed_at = now
-    session.completed_reason = CompletionReason.NORMAL
-    # Synthesized sentinel: no auto-dev result body, but carries the source
-    # marker so downstream consumers (cost accounting, retry cap) can exclude
-    # this from "failed attempt" counts.
-    session.last_result = {"completion_source": "world_state_inference"}
-    save_state(state)
-    record_event(
-        OrchestratorEventType.SESSION_COMPLETED_INFERRED,
-        {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": ticket_id,
-            "completion_source": "world_state_inference",
-            "crashed": False,
-        },
-        correlation_id=ticket_id,
-    )
-    with dev_queue_lock():
-        store = load_dev_queue()
-        for task in store.tasks:
-            if (
-                task.ticket_id == ticket_id
-                and task.status == QueueItemStatus.RUNNING
-            ):
-                task.status = QueueItemStatus.COMPLETED
-                task.session_id = None
-                break
-        save_dev_queue(store)
-    if session.surface_ref is not None:
-        get_native_daemon_client().stop(session.surface_ref)
-
-
 def _handle_headless_no_sentinel(
     state: CwState,
     session: Session,
@@ -428,9 +358,7 @@ def _handle_headless_no_sentinel(
 
     Under the resolved headless budget the call defers (returns True without
     mutating state) so a later Stop hook or reconcile can retry. Over budget
-    it first checks world state (merged PR) before declaring TIMED_OUT: if the
-    PR shipped, records a world-state inferred completion; otherwise records a
-    TIMED_OUT transition via :func:`_record_headless_timeout`.
+    it records a TIMED_OUT transition via :func:`_record_headless_timeout`.
     Returns True in both cases — the caller must stop processing.
     """
     elapsed = (now - session.started_at).total_seconds()
@@ -447,17 +375,7 @@ def _handle_headless_no_sentinel(
         # Under budget — defer. Another Stop hook turn will fire, or
         # reconcile will eventually catch a phantom and CRASH it.
         return True
-    # Budget exceeded without sentinel — check world state before declaring
-    # timed_out. A merged PR means the work shipped despite the missing
-    # sentinel. IMPL sessions only; non-IMPL fall through unchanged. (#315)
-    if isinstance(ticket_id_value, str) and _detect_world_state_completion(
-        session, ticket_id_value
-    ):
-        _record_world_state_completion(
-            state, session, now=now, ticket_id=ticket_id_value
-        )
-        return True
-    # No world-state evidence → TIMED_OUT (loud, retry-eligible).
+    # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
     _record_headless_timeout(
         state,
         session,

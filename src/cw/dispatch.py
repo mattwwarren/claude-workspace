@@ -1164,7 +1164,7 @@ def _apply_events_to_store(
     events: list[OrchestratorEvent],
     clients: dict[str, ClientConfig],
 ) -> int:
-    """Apply SESSION_COMPLETED / SESSION_COMPLETED_INFERRED events to a store.
+    """Apply SESSION_COMPLETED events to an already-loaded DevQueueStore.
 
     Caller must hold ``dev_queue_lock``. Saves the store when tasks were
     transitioned; does NOT advance the event cursor — cursor advancement
@@ -1217,15 +1217,6 @@ def _apply_events_to_store(
                 and task.session_id != event_session_id
             ):
                 continue
-            # SESSION_COMPLETED_INFERRED: world-state inferred completion (#315).
-            # The signal_stop code already set task→COMPLETED directly, so this
-            # path is a belt-and-suspenders fallback for tasks still RUNNING.
-            # Bypass apply_staged_decision — no sentinel status to route.
-            if event.payload.get("completion_source") == "world_state_inference":
-                task.status = QueueItemStatus.COMPLETED
-                task.session_id = None
-                completed += 1
-                break
             state = load_state()
             session = next(
                 (s for s in state.sessions if s.id == event_session_id),
@@ -1249,14 +1240,12 @@ def _apply_events_to_store(
 
 
 def consume_completed_sessions() -> int:
-    """Process session.completed / session.completed_inferred events.
+    """Process session.completed events from the dispatch inbox.
 
-    Reads new SESSION_COMPLETED and SESSION_COMPLETED_INFERRED events from
-    the inbox since the last cursor position for the "dispatch" consumer.
-    For each event that carries a ``ticket_id`` in its payload, the
-    corresponding TicketTask (if found in RUNNING state) is marked COMPLETED.
-    SESSION_COMPLETED_INFERRED events bypass apply_staged_decision — the task
-    already shipped; there is no sentinel status to route (#315).
+    Reads new SESSION_COMPLETED events from the inbox since the last cursor
+    position for the "dispatch" consumer. For each event that carries a
+    ``ticket_id`` in its payload, the corresponding TicketTask (if found in
+    RUNNING state) is marked COMPLETED.
 
     Advances the cursor after processing.
 
@@ -1265,10 +1254,7 @@ def consume_completed_sessions() -> int:
     """
     events = read_events(
         consumer=_DISPATCH_CONSUMER,
-        event_types=[
-            OrchestratorEventType.SESSION_COMPLETED,
-            OrchestratorEventType.SESSION_COMPLETED_INFERRED,
-        ],
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
     if not events:
         return 0
