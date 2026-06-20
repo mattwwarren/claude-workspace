@@ -2051,3 +2051,614 @@ class TestDevQueueTasks:
         result = runner.invoke(main, ["dev-queue", "tasks"])
         assert result.exit_code == 0
         assert "No tasks found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Helpers for approve/requeue/unblock tests
+# ---------------------------------------------------------------------------
+
+
+def _write_client_yaml(tmp_config_dir: Path, tmp_path: Path) -> None:
+    """Write a minimal clients.yaml for 'genhealth' with default workspace."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
+    )
+
+
+def _make_blocked_task(
+    ticket_id: str = "GEN-500",
+    client: str = "genhealth",
+    stage: Stage = Stage.PLAN,
+    session_id: str | None = "sess1234",
+) -> TicketTask:
+    return TicketTask(
+        ticket_id=ticket_id,
+        client=client,
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        stage=stage,
+        session_id=session_id,
+    )
+
+
+def _make_session(
+    session_id: str = "sess1234",
+    last_result: dict[str, object] | None = None,
+    reap_reason: object = None,
+    workspace_path: object = None,
+) -> object:
+    """Build a Session with minimal required fields."""
+    from pathlib import Path
+
+    from cw.models import Session, SessionPurpose
+
+    return Session(
+        id=session_id,
+        name=f"genhealth/impl-{session_id}",
+        client="genhealth",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=workspace_path or Path("/tmp/ws"),
+        last_result=last_result,
+        reap_reason=reap_reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TestApproveTicket — approve_ticket() mutation function
+# ---------------------------------------------------------------------------
+
+
+class TestApproveTicket:
+    """Tests for approve_ticket()."""
+
+    def test_approve_plan_pending_advances_to_impl(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """plan_pending_approval BLOCKED task advances to impl PENDING."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0001",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "plan"
+        assert result["to_stage"] == "impl"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        assert t.stage_base_ref is None
+
+    def test_approve_review_pending_advances_to_finalize(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """review_pending_approval BLOCKED task advances to finalize PENDING."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess0002")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0002",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+
+    def test_approve_wrong_last_result_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Non-approval last_result status raises ApproveGateError."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0003")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0003",
+            last_result={"status": "ambiguities_pending_resolution"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        with pytest.raises(ApproveGateError, match="not at an approval gate"):
+            approve_ticket("GEN-500", "genhealth")
+
+    def test_approve_missing_session_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Task with unknown session_id raises ApproveGateError."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="no-such-session")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        with pytest.raises(ApproveGateError, match="session not found"):
+            approve_ticket("GEN-500", "genhealth")
+
+    def test_approve_non_blocked_task_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """PENDING task raises ApproveGateError (wrong status)."""
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="GEN-500",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(ApproveGateError, match="expected BLOCKED_ON_USER"):
+            approve_ticket("GEN-500", "genhealth")
+
+    def test_approve_null_last_result_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Session exists but last_result=None raises ApproveGateError."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0004")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(session_id="sess0004", last_result=None)
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        with pytest.raises(ApproveGateError, match="not at an approval gate"):
+            approve_ticket("GEN-500", "genhealth")
+
+    def test_approve_terminal_stage_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Task at terminal pipeline stage raises ApproveGateError."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.FINALIZE, session_id="sess0005")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0005",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        with pytest.raises(ApproveGateError, match="terminal stage"):
+            approve_ticket("GEN-500", "genhealth")
+
+
+# ---------------------------------------------------------------------------
+# TestRequeueTicket — requeue_ticket() mutation function
+# ---------------------------------------------------------------------------
+
+
+class TestRequeueTicket:
+    """Tests for requeue_ticket()."""
+
+    def test_requeue_at_current_stage(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """BLOCKED_ON_USER → PENDING at same stage (no --stage)."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9001")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "plan"
+        assert result["to_stage"] == "plan"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.PLAN
+        assert t.session_id is None
+
+    def test_requeue_with_forward_stage_override(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--stage that is forward in pipeline moves task forward."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9002")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        assert result["from_stage"] == "plan"
+        assert result["to_stage"] == "impl"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_backward_stage_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Backward --stage raises RequeueStageError."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess9003")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError, match="regress"):
+            requeue_ticket("GEN-500", "genhealth", stage_override="plan")
+
+    def test_requeue_non_blocked_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """PENDING task raises RequeueStateError."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="GEN-500",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER"):
+            requeue_ticket("GEN-500", "genhealth")
+
+    def test_requeue_running_task_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """RUNNING task raises RequeueStateError."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="GEN-500",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER"):
+            requeue_ticket("GEN-500", "genhealth")
+
+
+# ---------------------------------------------------------------------------
+# TestUnblockTicket — unblock_ticket() mutation function
+# ---------------------------------------------------------------------------
+
+
+class TestUnblockTicket:
+    """Tests for unblock_ticket()."""
+
+    def test_unblock_park_marked_session(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """SALVAGE_PARKED session → last_result/reap_reason cleared, task PENDING."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import unblock_ticket
+        from cw.models import CwState, ReapReason
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess8001")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess8001",
+            last_result={"status": "salvage_parked"},
+            reap_reason=ReapReason.SALVAGE_PARKED,
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        unblock_ticket("GEN-500", "genhealth")
+
+        # Session mutations
+        state = load_state()
+        s = state.find_by_name_or_id("sess8001")
+        assert s is not None
+        assert s.last_result is None
+        assert s.reap_reason is None
+
+        # Queue mutations
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        assert t.stage_base_ref is None
+
+    def test_unblock_not_park_marked_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Session without SALVAGE_PARKED reap_reason raises UnblockStateError."""
+        from cw.config import save_state
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess8002")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess8002",
+            last_result=None,
+            reap_reason=None,
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        with pytest.raises(UnblockStateError, match="not park-marked"):
+            unblock_ticket("GEN-500", "genhealth")
+
+    def test_unblock_missing_session_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """task.session_id not in sessions raises UnblockStateError."""
+        from cw.config import save_state
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="no-such-session")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        with pytest.raises(UnblockStateError, match="session not found"):
+            unblock_ticket("GEN-500", "genhealth")
+
+    def test_unblock_non_blocked_task_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """PENDING task raises UnblockStateError before checking sessions."""
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="GEN-500",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(UnblockStateError, match="expected BLOCKED_ON_USER"):
+            unblock_ticket("GEN-500", "genhealth")
+
+
+# ---------------------------------------------------------------------------
+# TestCLIApprove — cw dev-queue approve
+# ---------------------------------------------------------------------------
+
+
+class TestCLIApprove:
+    """CLI tests for `cw dev-queue approve`."""
+
+    def test_approve_happy_path(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        """CLI approve advances stage and prints confirmation."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess7001")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess7001",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "approve", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "plan -> impl" in result.output
+
+    def test_approve_not_at_gate_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Ticket not at approval gate exits 1."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess7002")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess7002",
+            last_result={"status": "ambiguities_pending_resolution"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "approve", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# TestCLIRequeue — cw dev-queue requeue
+# ---------------------------------------------------------------------------
+
+
+class TestCLIRequeue:
+    """CLI tests for `cw dev-queue requeue`."""
+
+    def test_requeue_same_stage(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        """Requeue without --stage re-runs current stage."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess6001")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "impl -> impl" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_with_forward_stage(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--stage impl from plan advances forward."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess6002")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--stage",
+                "impl",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "plan -> impl" in result.output
+
+    def test_requeue_backward_stage_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Backward --stage exits 1."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess6003")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--stage",
+                "plan",
+            ],
+        )
+        assert result.exit_code != 0
+
+    def test_requeue_non_blocked_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """PENDING ticket exits 1."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = TicketTask(
+            ticket_id="GEN-500",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# TestCLIUnblock — cw dev-queue unblock
+# ---------------------------------------------------------------------------
+
+
+class TestCLIUnblock:
+    """CLI tests for `cw dev-queue unblock`."""
+
+    def test_unblock_happy_path(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        """CLI unblock clears park markers and prints confirmation."""
+        from cw.config import save_state
+        from cw.models import CwState, ReapReason
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess5001")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess5001",
+            last_result={"status": "salvage_parked"},
+            reap_reason=ReapReason.SALVAGE_PARKED,
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "unblock", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Unblocked GEN-500" in result.output
+
+    def test_unblock_not_park_marked_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Non-park-marked session exits 1."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess5002")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(session_id="sess5002", reap_reason=None)
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "unblock", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code != 0
