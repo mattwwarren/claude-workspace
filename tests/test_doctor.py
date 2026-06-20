@@ -4149,3 +4149,105 @@ class TestWedgeDeadSessionBlockedOnUser:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "TST-590-H")
         assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# TestCheckLoopLiveness
+# ---------------------------------------------------------------------------
+
+
+class TestCheckLoopLiveness:
+    """Tests for _check_loop_liveness."""
+
+    def _make_tick_summary(self, *, pending: int, tick_at: datetime) -> object:
+        from cw.orchestrate import TickSummary
+
+        return TickSummary(
+            claimed=0,
+            pending=pending,
+            running=0,
+            cap=3,
+            skip_reason="none",
+            tick_at=tick_at,
+        )
+
+    def test_stale_tick_with_pending_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Stale tick_at + pending>0 → warn=True."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        stale_at = datetime.now(UTC) - timedelta(seconds=200)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {"test-client": self._make_tick_summary(pending=2, tick_at=stale_at)},
+        )
+        results = _check_loop_liveness()
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "loop-liveness" in warn_results[0].name
+        assert "test-client" in warn_results[0].name
+
+    def test_fresh_tick_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Fresh tick_at → no warn."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        fresh_at = datetime.now(UTC) - timedelta(seconds=10)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {"test-client": self._make_tick_summary(pending=2, tick_at=fresh_at)},
+        )
+        results = _check_loop_liveness()
+        assert not any(r.warn for r in results)
+
+    def test_empty_tick_data_returns_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Empty tick_data (no-tick-ever) → ok, no warn."""
+        from cw.doctor import _check_loop_liveness
+
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {},
+        )
+        results = _check_loop_liveness()
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].warn is False
+
+    def test_stale_tick_without_pending_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Stale tick but pending=0 → no warn."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        stale_at = datetime.now(UTC) - timedelta(seconds=200)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {"test-client": self._make_tick_summary(pending=0, tick_at=stale_at)},
+        )
+        results = _check_loop_liveness()
+        assert not any(r.warn for r in results)
+
+    def test_run_doctor_includes_liveness_check(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """run_doctor() includes at least one loop-liveness CheckResult."""
+        _stub_claude_version_ok(monkeypatch)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {},
+        )
+        report = run_doctor()
+        liveness_checks = [c for c in report.checks if "loop-liveness" in c.name]
+        assert liveness_checks, "expected at least one loop-liveness check in report"

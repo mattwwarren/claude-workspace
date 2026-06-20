@@ -27,6 +27,7 @@ from cw.dev_queue import (
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
     FRESHNESS_NON_MAIN_HEAD,
+    TICK_STALE_SECONDS,
     DispatchTickResult,
     _accumulate_task_cost,
     consume_completed_sessions,
@@ -4094,3 +4095,101 @@ class TestClientFilter:
         result = dispatch_tick(config, native_daemon=daemon)
 
         assert result.spawned == 2
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchLoopExitedEvent
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchLoopExitedEvent:
+    """DISPATCH_LOOP_EXITED event emitted on clean exit and on crash."""
+
+    def test_loop_exited_event_on_clean_exit(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop(once=True) emits DISPATCH_LOOP_EXITED with normal=True."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.DISPATCH_LOOP_EXITED:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        daemon = FakeNativeDaemonClient()
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert len(captured) == 1
+        _, evt_payload = captured[0]
+        assert evt_payload["normal"] is True
+        assert evt_payload["exception_type"] is None
+
+    def test_loop_exited_event_on_crash(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A crash in dispatch_tick emits DISPATCH_LOOP_EXITED with normal=False."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.DISPATCH_LOOP_EXITED:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr(
+            "cw.dispatch.dispatch_tick",
+            lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        with pytest.raises(RuntimeError, match="boom"):
+            run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert len(captured) == 1
+        _, evt_payload = captured[0]
+        assert evt_payload["normal"] is False
+        assert evt_payload["exception_type"] == "RuntimeError"
+
+    def test_loop_exited_suppress_covers_record_event_failure(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """record_event failure in finally is suppressed — loop completes normally."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        def raising_on_loop_exited(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.DISPATCH_LOOP_EXITED:
+                raise Exception("emit failed")
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", raising_on_loop_exited)
+
+        daemon = FakeNativeDaemonClient()
+        # Should complete without raising despite DISPATCH_LOOP_EXITED emit failing
+        run_dispatch_loop(once=True, native_daemon=daemon)
