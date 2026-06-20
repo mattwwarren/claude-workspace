@@ -126,3 +126,27 @@ class SpawnUnregisteredError(CwError):
     """
 
     __slots__ = ()
+
+
+class ApproveGateError(CwError):
+    """Raised when a ticket cannot be approved because it is not at an approval gate."""
+
+    __slots__ = ()
+
+
+class RequeueStateError(CwError):
+    """Raised when a ticket cannot be requeued because it is not BLOCKED_ON_USER."""
+
+    __slots__ = ()
+
+
+class RequeueStageError(CwError):
+    """Raised when requeue would regress a ticket to an earlier stage."""
+
+    __slots__ = ()
+
+
+class UnblockStateError(CwError):
+    """Raised when a ticket cannot be unblocked because it is not park-marked."""
+
+    __slots__ = ()

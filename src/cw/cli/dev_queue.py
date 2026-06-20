@@ -15,13 +15,16 @@ from cw.config import get_client, load_clients, load_orchestrator_config, load_s
 from cw.dev_queue import (
     _find_ticket,
     add_ticket,
+    approve_ticket,
     cancel_ticket,
     clear_tickets,
     list_tickets,
     load_dev_queue,
     move_ticket,
     remove_ticket,
+    requeue_ticket,
     resolve_client,
+    unblock_ticket,
     wait_for_terminal,
 )
 from cw.dispatch import TICK_STALE_SECONDS, run_dispatch_loop
@@ -141,6 +144,92 @@ def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
         },
     )
     click.echo(f"Moved {ticket_id} ({client}): {from_lane} -> {to_lane}")
+
+
+@dev_queue.command(name="approve")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@handle_errors
+def dev_queue_approve(ticket_id: str, client: str | None) -> None:
+    """Approve a plan or review gate and advance to the next stage.
+
+    The ticket must be BLOCKED_ON_USER with last_result status of
+    plan_pending_approval or review_pending_approval.
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    result = approve_ticket(ticket_id, resolved)
+    record_event(
+        OrchestratorEventType.TICKET_APPROVED,
+        {
+            "ticket_id": ticket_id,
+            "client": resolved,
+            "from_stage": result["from_stage"],
+            "to_stage": result["to_stage"],
+        },
+    )
+    click.echo(
+        f"Approved {ticket_id} ({resolved}):"
+        f" {result['from_stage']} -> {result['to_stage']}"
+    )
+
+
+@dev_queue.command(name="requeue")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@click.option(
+    "--stage",
+    "stage_override",
+    type=click.Choice(["plan", "impl", "review", "finalize"]),
+    default=None,
+    help="Stage to requeue at (default: current stage). Forward-only.",
+)
+@handle_errors
+def dev_queue_requeue(
+    ticket_id: str, client: str | None, stage_override: str | None
+) -> None:
+    """Requeue a BLOCKED_ON_USER ticket back to PENDING.
+
+    Defaults to re-running the current stage. Use --stage to advance forward
+    (never backward — forward-only guard enforced).
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    result = requeue_ticket(ticket_id, resolved, stage_override)
+    record_event(
+        OrchestratorEventType.TICKET_REQUEUED,
+        {
+            "ticket_id": ticket_id,
+            "client": resolved,
+            "from_stage": result["from_stage"],
+            "to_stage": result["to_stage"],
+        },
+    )
+    click.echo(
+        f"Requeued {ticket_id} ({resolved}):"
+        f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
+    )
+
+
+@dev_queue.command(name="unblock")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@handle_errors
+def dev_queue_unblock(ticket_id: str, client: str | None) -> None:
+    """Clear salvage/park markers and requeue a SALVAGE_PARKED ticket.
+
+    The ticket must be BLOCKED_ON_USER with a SALVAGE_PARKED session.
+    Clears both last_result and reap_reason on the session, then
+    sets the task back to PENDING.
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    unblock_ticket(ticket_id, resolved)
+    record_event(
+        OrchestratorEventType.TICKET_UNBLOCKED,
+        {"ticket_id": ticket_id, "client": resolved},
+    )
+    click.echo(f"Unblocked {ticket_id} ({resolved}): cleared park markers, PENDING")
 
 
 @dev_queue.command(name="remove")

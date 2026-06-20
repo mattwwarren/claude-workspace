@@ -31,7 +31,13 @@ from cw.config import (
     save_state,
     sessions_lock,
 )
-from cw.dev_queue import dev_queue_lock, load_dev_queue, load_plan, save_dev_queue
+from cw.dev_queue import (
+    _advance_task_pointer,
+    dev_queue_lock,
+    load_dev_queue,
+    load_plan,
+    save_dev_queue,
+)
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     MissingWorkspaceError,
@@ -1107,11 +1113,7 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
     if task.stage == stages[-1]:
         task.status = QueueItemStatus.COMPLETED
     else:
-        idx = stages.index(task.stage)
-        task.stage = stages[idx + 1]
-        task.status = QueueItemStatus.PENDING
-        task.session_id = None  # R6: clear session_id on advance
-        task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
+        _advance_task_pointer(task, stages)
 
 
 def apply_staged_decision(

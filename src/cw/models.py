@@ -213,6 +213,9 @@ class OrchestratorEventType(StrEnum):
     LANE_PAUSED = "lane.paused"
     LANE_RESUMED = "lane.resumed"
     TICKET_MOVED = "ticket.moved"
+    TICKET_APPROVED = "ticket.approved"
+    TICKET_REQUEUED = "ticket.requeued"
+    TICKET_UNBLOCKED = "ticket.unblocked"
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
 
 
