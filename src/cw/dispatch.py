@@ -771,9 +771,9 @@ def _resolve_dispatch_skip_reason(
     1. freshness_gate — handled by early-continue before this is called
     2. usage_limited — usage limit detected this tick for this client
     3. cap_full — running_count >= cap before loop entered
-    4. spawn_error — exception broke the loop (regardless of client_spawned)
-    5. lane_cap_blocked — pending>0 but every lane slot is occupied by
+    4. lane_cap_blocked — pending>0 but every lane slot is occupied by
        RUNNING or BLOCKED_ON_USER tasks; grant<=0 for all lanes
+    5. spawn_error — exception broke the loop (regardless of client_spawned)
     6. no_pending — loop exited with zero claims and no spawn error
     7. none — at least one session spawned
     """
@@ -781,10 +781,10 @@ def _resolve_dispatch_skip_reason(
         return DispatchSkipReason.USAGE_LIMITED
     if cap_full:
         return DispatchSkipReason.CAP_FULL
-    if spawn_error:
-        return DispatchSkipReason.SPAWN_ERROR
     if lane_cap_blocked:
         return DispatchSkipReason.LANE_CAP_BLOCKED
+    if spawn_error:
+        return DispatchSkipReason.SPAWN_ERROR
     if client_spawned == 0:
         return DispatchSkipReason.NO_PENDING
     return DispatchSkipReason.NONE

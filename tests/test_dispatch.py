@@ -3794,6 +3794,14 @@ class TestLaneCapCountingWithBlockedOnUser:
         # Lane is full (BLOCKED_ON_USER counts) — should NOT spawn
         assert result.spawned == 0
 
+        # running_count=1 >= ceiling=1 → cap_full=True → CAP_FULL (not LANE_CAP_BLOCKED)
+        events = read_events(
+            consumer="test-blocked-counts-lane-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.CAP_FULL
+
 
 # ---------------------------------------------------------------------------
 # TestLaneCapBlockedSkipReason (#588)
@@ -3807,8 +3815,6 @@ class TestLaneCapBlockedSkipReason:
         self,
         tmp_dispatch_dirs: Path,
         workspace_path: Path,
-        *,
-        ceiling: int = 2,
     ) -> None:
         """Create a client with one impl lane (max_parallel=1), one BLOCKED_ON_USER
         task filling it, and one PENDING task waiting."""
