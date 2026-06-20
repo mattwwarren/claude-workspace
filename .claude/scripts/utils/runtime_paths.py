@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 
 
-def repo_root() -> Path:
-    """Return the tracked global-claude repo root."""
+def claude_dir() -> Path:
+    """Return the .claude directory that contains these scripts."""
     return Path(__file__).resolve().parents[2]
 
 
@@ -82,7 +82,7 @@ def review_monitor_script_path() -> Path:
     if override:
         return Path(override).expanduser()
 
-    repo_script = repo_root() / "scripts" / "review_monitor.py"
+    repo_script = claude_dir() / "scripts" / "review_monitor.py"
     if repo_script.exists():
         return repo_script
 

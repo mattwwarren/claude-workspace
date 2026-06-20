@@ -10,10 +10,10 @@ them directly: ``from utils.frontmatter import extract_frontmatter``.
 from __future__ import annotations
 
 from utils.runtime_paths import (
+    claude_dir,
     claude_home,
     codex_home,
     desktop_queue_dir,
-    repo_root,
     review_monitor_dir,
     review_monitor_script_path,
     settings_json_path,
@@ -21,10 +21,10 @@ from utils.runtime_paths import (
 )
 
 __all__ = [
+    "claude_dir",
     "claude_home",
     "codex_home",
     "desktop_queue_dir",
-    "repo_root",
     "review_monitor_dir",
     "review_monitor_script_path",
     "settings_json_path",
