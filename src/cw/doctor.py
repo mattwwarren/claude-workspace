@@ -866,7 +866,12 @@ def _check_loop_liveness() -> list[CheckResult]:
             )
     if not results:
         results.append(
-            CheckResult("loop-liveness", ok=True, warn=False, detail="tick fresh")
+            CheckResult(
+                "loop-liveness",
+                ok=True,
+                warn=False,
+                detail="no stale+pending condition",
+            )
         )
     return results
 

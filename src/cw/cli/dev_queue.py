@@ -291,8 +291,9 @@ def dev_queue_status(client: str | None) -> None:
                     f"  running={tick.running}/{tick.cap}"
                     f"  skip={tick.skip_reason}"
                 )
-                age = int((now - tick.tick_at).total_seconds())
-                if (now - tick.tick_at).total_seconds() > TICK_STALE_SECONDS:
+                age_secs = (now - tick.tick_at).total_seconds()
+                age = int(age_secs)
+                if age_secs > TICK_STALE_SECONDS:
                     tick_line += f" [STALE — no tick in {age}s]"
                 click.echo(tick_line)
                 _emit_dev_queue_lane_breakdown(by_client[client_name])
