@@ -255,7 +255,6 @@ def read_events(
 
 
 _FOLLOW_POLL_INTERVAL: float = 0.05  # 50ms — satisfies ≤100ms acceptance criterion
-_WAIT_POLL_INTERVAL: float = 0.05
 
 
 def _event_matches_wait(
@@ -263,11 +262,14 @@ def _event_matches_wait(
     *,
     correlation_id: str | None,
     session_id: str | None,
+    client: str | None,
 ) -> bool:
-    """Return True if event passes correlation_id and session_id filters."""
+    """Return True if event passes correlation_id, session_id, and client filters."""
     if correlation_id is not None and event.correlation_id != correlation_id:
         return False
-    return session_id is None or event.payload.get("session_id") == session_id
+    if session_id is not None and event.payload.get("session_id") != session_id:
+        return False
+    return client is None or event.payload.get("client") == client
 
 
 def wait_for_event(
@@ -275,9 +277,10 @@ def wait_for_event(
     event_types: list[OrchestratorEventType] | None = None,
     correlation_id: str | None = None,
     session_id: str | None = None,
+    client: str | None = None,
     timeout: float = 3600.0,
     follow: bool = False,
-    poll_interval: float = _WAIT_POLL_INTERVAL,
+    poll_interval: float = _FOLLOW_POLL_INTERVAL,
 ) -> Generator[OrchestratorEvent]:
     """Yield matching events from the inbox, blocking until they arrive.
 
@@ -292,6 +295,7 @@ def wait_for_event(
         event_types: Filter by event type(s).
         correlation_id: Filter by event.correlation_id.
         session_id: Filter by payload["session_id"].
+        client: Filter by payload["client"].
         timeout: Seconds before raising TimeoutError.
         follow: If True, keep streaming after first match.
         poll_interval: Seconds between inbox polls.
@@ -320,11 +324,14 @@ def wait_for_event(
                 event_types=event_types,
             )
             for ev in new_events:
+                # Advance cursor past all type-matched events, not just
+                # correlation/session/client matches, so they are not re-scanned.
                 last_cursor = ev.id
                 if _event_matches_wait(
                     ev,
                     correlation_id=correlation_id,
                     session_id=session_id,
+                    client=client,
                 ):
                     matched = True
                     yield ev

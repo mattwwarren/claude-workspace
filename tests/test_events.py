@@ -1271,3 +1271,68 @@ def test_cli_event_wait_exits_cleanly_on_broken_pipe(
     runner = CliRunner()
     result = runner.invoke(main, ["event", "wait"])
     assert result.exit_code == 0
+
+
+def test_cli_event_wait_client_filter(tmp_events_dir: Path) -> None:
+    """cw event wait --client filters by payload client field."""
+    events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"client": "other-client"},
+    )
+    ev_match = events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"client": "claude-workspace"},
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "event",
+            "wait",
+            "--type",
+            "session.completed",
+            "--client",
+            "claude-workspace",
+            "--timeout",
+            "5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["id"] == ev_match.id
+
+
+def test_wait_for_event_client_filter(tmp_events_dir: Path) -> None:
+    """wait_for_event filters by payload client field."""
+    events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"client": "other"})
+    ev_match = events_record_event(
+        OrchestratorEventType.SESSION_COMPLETED, {"client": "claude-workspace"}
+    )
+
+    gen = wait_for_event(
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        client="claude-workspace",
+        timeout=1.0,
+    )
+    result = next(gen)
+    assert result.id == ev_match.id
+
+
+def test_cli_event_wait_type_comma_separated(tmp_events_dir: Path) -> None:
+    """cw event wait --type accepts comma-separated values (ticket AC1 syntax)."""
+    ev = events_record_event(OrchestratorEventType.SESSION_COMPLETED, {})
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "event",
+            "wait",
+            "--type",
+            "session.completed,session.timed_out",
+            "--timeout",
+            "5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["id"] == ev.id

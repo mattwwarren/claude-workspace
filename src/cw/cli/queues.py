@@ -326,15 +326,20 @@ def _parse_since(since: str) -> tuple[str | None, datetime | None]:
 def _resolve_event_types(
     type_filter: tuple[str, ...],
 ) -> list[OrchestratorEventType] | None:
-    """Validate and convert type_filter strings to OrchestratorEventType list."""
+    """Validate and convert type_filter strings to OrchestratorEventType list.
+
+    Accepts both repeated flags (``--type a --type b``) and comma-separated
+    values (``--type a,b``) so the ticket's documented UX examples work verbatim.
+    """
     if not type_filter:
         return None
-    invalid = [t for t in type_filter if t not in _VALID_EVENT_TYPES]
+    expanded = tuple(t for raw in type_filter for t in raw.split(",") if t)
+    invalid = [t for t in expanded if t not in _VALID_EVENT_TYPES]
     if invalid:
         valid = ", ".join(sorted(_VALID_EVENT_TYPES))
         msg = f"Unknown event type(s): {', '.join(invalid)}. Valid: {valid}"
         raise CwError(msg)
-    return [OrchestratorEventType(t) for t in type_filter]
+    return [OrchestratorEventType(t) for t in expanded]
 
 
 def _print_event(ev: OrchestratorEvent, *, as_json: bool) -> None:
@@ -460,10 +465,16 @@ def event_tail(
     help="Filter by payload session_id.",
 )
 @click.option(
+    "--client",
+    "client",
+    default=None,
+    help="Filter by payload client field.",
+)
+@click.option(
     "--type",
     "type_filter",
     multiple=True,
-    help="Filter by event type (repeatable).",
+    help="Filter by event type (repeatable; comma-separated values also accepted).",
 )
 @click.option(
     "--timeout",
@@ -482,6 +493,7 @@ def event_tail(
 def event_wait(
     ticket: str | None,
     session_id: str | None,
+    client: str | None,
     type_filter: tuple[str, ...],
     timeout: float,
     follow: bool,
@@ -498,11 +510,11 @@ def event_wait(
             event_types=etype_filter,
             correlation_id=ticket,
             session_id=session_id,
+            client=client,
             timeout=timeout,
             follow=follow,
         ):
-            click.echo(ev.model_dump_json())
-            sys.stdout.flush()
+            _print_event(ev, as_json=True)
     except TimeoutError as exc:
         raise click.ClickException(str(exc)) from exc
     except KeyboardInterrupt:
