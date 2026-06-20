@@ -1076,6 +1076,155 @@ def test_revert_stalled_headless_sessions_stops_daemon_surface(
     assert short_id in daemon.stop_calls
 
 
+def test_revert_stalled_headless_sessions_merged_pr_completes_not_times_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315: stalled session whose PR is merged → COMPLETED, not TIMED_OUT."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-315-merged"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("315-merged", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="315-merged",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-merged",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (True, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "315-merged" not in reverted
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.completed_reason == CompletionReason.NORMAL
+    assert sess.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+
+    store = load_dev_queue()
+    task_after = next(t for t in store.tasks if t.ticket_id == "315-merged")
+    assert task_after.status == QueueItemStatus.COMPLETED
+    assert task_after.session_id is None
+
+    completed_events = read_events(
+        consumer="test-315-merged-completed",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert any(e.payload.get("session_id") == sess.id for e in completed_events)
+
+    timed_out_events = read_events(
+        consumer="test-315-merged-no-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert not any(e.payload.get("session_id") == sess.id for e in timed_out_events)
+
+
+def test_revert_stalled_headless_sessions_not_merged_times_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315: stalled session whose PR is not merged → TIMED_OUT unchanged."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-315-notmerged"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("315-notmerged", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="315-notmerged",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-notmerged",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "315-notmerged" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+
+    store = load_dev_queue()
+    task_after = next(t for t in store.tasks if t.ticket_id == "315-notmerged")
+    assert task_after.status == QueueItemStatus.PENDING
+
+    timed_out_events = read_events(
+        consumer="test-315-notmerged-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert any(e.payload.get("session_id") == sess.id for e in timed_out_events)
+
+    completed_events = read_events(
+        consumer="test-315-notmerged-no-completed",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert not any(e.payload.get("session_id") == sess.id for e in completed_events)
+
+
+def test_revert_stalled_headless_sessions_transient_gh_error_times_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315: transient gh error (None, True) → TIMED_OUT — fail-open behavior."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-315-gherror"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("315-gherror", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="315-gherror",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-gherror",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (None, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "315-gherror" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+
+    timed_out_events = read_events(
+        consumer="test-315-gherror-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert any(e.payload.get("session_id") == sess.id for e in timed_out_events)
+
+
 # ---------------------------------------------------------------------------
 # Stale-worktree cleanup on timeout (GitHub issue #404): a timed-out session's
 # task is reverted to PENDING, so its worktree must be removed or the retry
