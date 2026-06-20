@@ -612,7 +612,7 @@ def _handle_action_key(
         if shutil.which("cw") is not None:
             subprocess.run(["cw", "queue", "peek"], check=False)
         else:
-            notice_queue.put("queue-peek not available")
+            notice_queue.put("cw not on PATH")
         return
 
     if key == "c":

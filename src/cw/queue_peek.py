@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import click
 
 from cw.auto_dev_result import (
     AutoDevResult,
@@ -29,6 +30,7 @@ from cw.auto_dev_result import (
     parse_stdout,
 )
 from cw.dev_queue import list_tickets
+from cw.gh import _fetch_pr_state
 from cw.models import QueueItemStatus, TicketTask
 
 if TYPE_CHECKING:
@@ -196,18 +198,8 @@ def parse_transcript(path: Path) -> dict[str, Any]:
 def gh_pr_state(pr_number: int) -> str:
     """Return OPEN | MERGED | CLOSED | UNKNOWN for the given PR number."""
     try:
-        result = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", "state"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
-            return "UNKNOWN"
-        data = json.loads(result.stdout)
-        return str(data.get("state", "UNKNOWN"))
-    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return _fetch_pr_state(pr_number, timeout=10) or "UNKNOWN"
+    except FileNotFoundError:
         return "UNKNOWN"
 
 
@@ -330,7 +322,7 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
     """Print rows as a formatted text table with a suggested-stops footer."""
     rows = list(rows)
     if not rows:
-        print("No RUNNING tasks found.")
+        click.echo("No RUNNING tasks found.")
         return
     cols = [
         ("ticket", 7),
@@ -345,8 +337,8 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
         ("recommend", 14),
     ]
     header = "  ".join(f"{name:<{w}}" for name, w in cols)
-    print(header)
-    print("-" * len(header))
+    click.echo(header)
+    click.echo("-" * len(header))
     for r in rows:
         cells = []
         for name, w in cols:
@@ -357,12 +349,14 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
                 else r.get(name, "-") or "-"
             )
             cells.append(f"{val!s:<{w}}")
-        print("  ".join(cells))
+        click.echo("  ".join(cells))
         if r.get("recommend") != "WAIT":
-            print(f"    └─ {r.get('reason')}")
+            click.echo(f"    └─ {r.get('reason')}")
     actionable = [r for r in rows if r["recommend"].startswith("STOP")]
     if actionable:
-        print()
-        print("Suggested stops:")
+        click.echo()
+        click.echo("Suggested stops:")
         for r in actionable:
-            print(f"  cw spawn close {r['session']}  # #{r['ticket']} — {r['reason']}")
+            click.echo(
+                f"  cw spawn close {r['session']}  # #{r['ticket']} — {r['reason']}"
+            )
