@@ -42,7 +42,8 @@ _log = logging.getLogger(__name__)
 
 # Schema version for cw-context.json. Increment when the shape changes so
 # workers can detect whether they are reading a context written by an older cw.
-CW_CONTEXT_SCHEMA_VERSION = 1
+# v2: added `workspace_path` (#766 — forbidden main-checkout path for git guard).
+CW_CONTEXT_SCHEMA_VERSION = 2
 
 # --disallowed-tools pattern that blocks all Linear MCP tools. Injected into
 # headless worker spawns when the client tracker is github-issues, preventing
@@ -185,6 +186,7 @@ def _write_hook_context(
     task: TicketTask | None = None,
     wall_clock_budget_seconds: int | None = None,
     default_branch: str = "main",
+    workspace_path: Path | None = None,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -274,6 +276,14 @@ def _write_hook_context(
         # to a git op against the operator's shared checkout (#402). Resolved
         # to canonicalize symlinks, matching check_not_main_checkout's compare.
         "worktree_path": str(worktree.resolve()),
+        # Why (#766): the operator's main checkout — the FORBIDDEN path for any
+        # git mutation from a dispatch worker. A PreToolUse hook or guard script
+        # reads this to block git commit/push when the resolved repo root matches
+        # this path, preventing the isolation breach proven in the #766 transcript.
+        # Absent (null) for USER-origin sessions that lack a client workspace.
+        "workspace_path": str(workspace_path.resolve())
+        if workspace_path is not None
+        else None,
     }
     if task is not None:
         try:
@@ -392,6 +402,7 @@ def spawn_create_impl(
         task=task,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         default_branch=client.default_branch,
+        workspace_path=client.workspace_path,
     )
 
     final_extra: list[str] = []
