@@ -1416,15 +1416,32 @@ def test_cli_event_tail_client_filter_events_without_client_field(
     assert "pr.registered" not in result.output
 
 
+def test_cli_event_tail_client_filter_comma_separated(tmp_events_dir: Path) -> None:
+    """--client a,b is equivalent to --client a --client b."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "gamma", "session_id": "ccc"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", "alpha,beta"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "bbb" in result.output
+    assert "ccc" not in result.output
+
+
 # ---------------------------------------------------------------------------
 # --dedup-terminal (issue #783)
 # ---------------------------------------------------------------------------
-
-_TERMINAL_TYPES = [
-    "session.timed_out",
-    "session.reap_proposed",
-    "session.needs_attention",
-]
 
 
 def test_cli_event_tail_dedup_terminal_collapses_same_session(
@@ -1478,23 +1495,23 @@ def test_cli_event_tail_dedup_terminal_non_terminal_events_not_deduped(
     assert result.output.count("dispatch.tick") == 3
 
 
-def test_cli_event_tail_dedup_terminal_condition_field_in_key(
+def test_cli_event_tail_dedup_terminal_paused_status_field_in_key(
     tmp_events_dir: Path,
 ) -> None:
-    """--dedup-terminal uses condition field: different conditions are kept separate."""
+    """--dedup-terminal uses paused_status: different conditions kept separate."""
     events_record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {"session_id": "s1", "condition": "dirty_worktree"},
+        {"session_id": "s1", "paused_status": "dirty_worktree"},
         correlation_id="T-1",
     )
     events_record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {"session_id": "s1", "condition": "dirty_worktree"},
+        {"session_id": "s1", "paused_status": "dirty_worktree"},
         correlation_id="T-1",
     )
     events_record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {"session_id": "s1", "condition": "other"},
+        {"session_id": "s1", "paused_status": "silently_idle"},
         correlation_id="T-1",
     )
 
@@ -1553,3 +1570,27 @@ def test_cli_event_tail_follow_client_filter(
     assert result.exit_code == 130
     assert "aaa" in result.output
     assert "bbb" not in result.output
+
+
+def test_cli_event_tail_client_and_dedup_terminal_compose(
+    tmp_events_dir: Path,
+) -> None:
+    """--client and --dedup-terminal compose: client filter applied before dedup."""
+    # alpha has repeated terminal events; beta has one
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {"session_id": "s1", "client": "alpha"},
+        )
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"session_id": "s2", "client": "beta"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--client", "alpha", "--dedup-terminal"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.timed_out") == 1
+    assert "s2" not in result.output

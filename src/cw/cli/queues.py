@@ -381,27 +381,27 @@ _TERMINAL_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         OrchestratorEventType.SESSION_TIMED_OUT,
         OrchestratorEventType.SESSION_REAP_PROPOSED,
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED,
     }
 )
 
 
 def _terminal_dedup_key(
     ev: OrchestratorEvent,
-) -> tuple[str, str | None, str | None, str | None] | None:
+) -> tuple[str, str | None, str | None] | None:
     """Return dedup key for terminal events, or None if not a terminal event."""
     if ev.type not in _TERMINAL_EVENT_TYPES:
         return None
     return (
         str(ev.type),
-        ev.correlation_id,
         ev.payload.get("session_id"),
-        ev.payload.get("condition"),
+        ev.payload.get("paused_status"),
     )
 
 
 def _dedup_terminal(events: list[OrchestratorEvent]) -> list[OrchestratorEvent]:
-    """Filter out repeated terminal events with same (type, session, condition) key."""
-    seen: set[tuple[str, str | None, str | None, str | None]] = set()
+    """Filter repeated terminal events with same (type, session, paused_status) key."""
+    seen: set[tuple[str, str | None, str | None]] = set()
     result: list[OrchestratorEvent] = []
     for ev in events:
         key = _terminal_dedup_key(ev)
@@ -423,7 +423,7 @@ def _follow_loop(
     dedup_terminal: bool = False,
 ) -> None:
     """Stream events from the inbox until SIGINT or broken pipe."""
-    seen_terminal: set[tuple[str, str | None, str | None, str | None]] = set()
+    seen_terminal: set[tuple[str, str | None, str | None]] = set()
     try:
         for ev in tail_events_follow(
             since_cursor=since_cursor,
@@ -496,7 +496,11 @@ def event_tail(
         consumer, since_ts = _parse_since(since)
 
     etype_filter = _resolve_event_types(type_filter)
-    client_names = frozenset(client_filter) if client_filter else None
+    client_names = (
+        frozenset(c for raw in client_filter for c in raw.split(",") if c)
+        if client_filter
+        else None
+    )
 
     if follow:
         since_cursor: str | None = None
