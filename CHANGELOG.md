@@ -6,6 +6,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-06-20
+
+A **dispatch-reliability + observability/inspection CLI** release. This patch
+round closes the remaining rough edges from the v1.3.0 reliability sprint and
+ships the first wave of operator-facing inspection commands (`cw event
+tail/wait`, `cw session show/list/wait/result`, `cw queue peek`) that make
+it possible to observe a running dispatch loop without reaching into state
+files by hand.
+
+### Added
+
+- **`cw event tail`** (#769): stream events from the history log; supports
+  `--follow` for live streaming, `--since`, `--json`, and `init_cursor_at_end`
+  for efficient tailing without replaying history.
+- **`cw event wait`** (#275, #773): block until a matching event arrives,
+  enabling scripted polling for CI integration and operator runbooks.
+- **`cw session show / list / wait / result`** (#779): four inspection
+  subcommands for a running or completed session — show full session detail,
+  list all sessions with filter/sort, wait until a session reaches a terminal
+  state, and print the final result sentinel.
+- **`cw queue peek`** (#778): promote the ad-hoc `cw_queue_peek.py` script to
+  a proper `cw queue peek` subcommand for inspecting the dispatch queue.
+- **`LANE_CAP_BLOCKED` skip reason** (#588, #775): dispatch now records a
+  dedicated `LANE_CAP_BLOCKED` skip reason when a lane is full but not
+  otherwise blocked, giving operators a precise signal vs. the generic skip.
+- **`SESSION_STAGE_TIMED_OUT_RETRIED` event** (#724, #785): reconcile emits
+  this event before applying route policy on a genuine stage timeout, providing
+  an auditable record of every retry decision.
+- **`HeadNotOnDefaultBranchError`** (#761): new `WorktreeError` subclass for
+  the "HEAD not on default branch" condition, enabling callers to handle it
+  specifically without string-matching the exception message.
+- **`is_documented_example` sentinel field** (#771): `auto_dev_result` parser
+  rejects placeholder sentinels that set `is_documented_example: true`,
+  preventing no-op completions from being accepted as real results.
+
+### Fixed
+
+- **Dirty-worktree push notification storm** (#763, #767): edge-trigger the
+  dirty-worktree notification instead of level-triggering it — the notification
+  is now emitted once on transition to dirty, not on every reconcile tick while
+  the worktree stays dirty.
+- **`dev_queue_lock` deadlock on `record_event`** (#765): `record_event` was
+  called inside `dev_queue_lock` in `_collapse_blocked_on_user_tasks`, creating
+  a potential deadlock when the event writer also acquires the lock; the call is
+  now outside the lock.
+- **Lane validation in `add_ticket`** (#760): `add_ticket` now validates the
+  lane name and raises a clear error on unknown lanes, preventing silent ticket
+  starvation when a caller supplies a misspelled lane.
+- **World-state timeout check** (#315, #776): the session-timed-out check now
+  consults the world state (last-seen timestamp) before declaring a timeout,
+  reducing false positives for sessions that are alive but quiet.
+
+### Chore / Docs
+
+- Gitignore local artifacts: `.claude/worktrees/`, `scheduled_tasks.lock`,
+  `prep-pr-state.json`, `docs/handoffs/` (#759).
+- README and RFC/ADR status fields updated to reflect current reality (#755).
+
 ## [1.3.0] — 2026-06-18
 
 A **pipeline-reliability hardening** release. The v1.2.0 staged engine was
