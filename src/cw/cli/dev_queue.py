@@ -870,6 +870,83 @@ def dev_queue_wait(
         time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
 
 
+def _task_to_dict(task: TicketTask) -> dict[str, object]:
+    return {
+        "ticket_id": task.ticket_id,
+        "client": task.client,
+        "status": task.status.value,
+        "session_id": task.session_id,
+        "attempts": task.attempts,
+        "priority": task.priority,
+        "lane": task.lane,
+        "created_at": task.created_at.isoformat(),
+        "total_cost_usd": task.total_cost_usd,
+        "worktree_path": str(task.worktree_path) if task.worktree_path else None,
+    }
+
+
+def _print_tasks_human(tasks: list[TicketTask]) -> None:
+    if not tasks:
+        click.echo("No tasks found.")
+        return
+    headers = ["TICKET_ID", "CLIENT", "STATUS", "SESSION_ID", "ATTEMPTS", "LANE"]
+    col_widths = [12, 16, 16, 12, 8, 12]
+    header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
+    click.echo(header)
+    click.echo("-" * len(header))
+    for t in tasks:
+        row = [
+            t.ticket_id[:12],
+            t.client[:16],
+            t.status.value[:16],
+            (t.session_id or "-")[:12],
+            str(t.attempts)[:8],
+            t.lane[:12],
+        ]
+        click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
+
+
+@dev_queue.command(name="tasks")
+@click.option("--ticket", "-t", default=None, help="Filter by ticket id.")
+@click.option(
+    "--status",
+    "-s",
+    default=None,
+    type=click.Choice([s.value for s in QueueItemStatus]),
+    help="Filter by task status.",
+)
+@click.option("--client", "-c", default=None, help="Filter by client name.")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON array.")
+@handle_errors
+def dev_queue_tasks(
+    ticket: str | None,
+    status: str | None,
+    client: str | None,
+    output_json: bool,
+) -> None:
+    """List dev-queue tasks with typed field output.
+
+    Programmatic inspection view. For the human aggregate summary use dev-queue status.
+    """
+    queue = load_dev_queue()
+    tasks: list[TicketTask] = queue.tasks
+
+    if ticket is not None:
+        tasks = [t for t in tasks if t.ticket_id == ticket]
+
+    if status is not None:
+        target_status = QueueItemStatus(status)
+        tasks = [t for t in tasks if t.status == target_status]
+
+    if client is not None:
+        tasks = [t for t in tasks if t.client == client]
+
+    if output_json:
+        click.echo(json.dumps([_task_to_dict(t) for t in tasks]))
+    else:
+        _print_tasks_human(tasks)
+
+
 @dev_queue.command(name="refresh-all")
 @handle_errors
 def dev_queue_refresh_all() -> None:
