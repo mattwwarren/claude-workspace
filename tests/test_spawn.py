@@ -2021,6 +2021,167 @@ def test_spawn_create_impl_default_purpose(
     assert context["purpose"] == "impl"
 
 
+# ---------------------------------------------------------------------------
+# Tests for #766 — workspace_path in cw-context.json (forbidden main-checkout)
+# ---------------------------------------------------------------------------
+
+
+class TestCwContextWorkspacePath:
+    """Tests for the workspace_path field added to cw-context.json (#766).
+
+    The field carries the operator's main checkout path — the FORBIDDEN
+    destination for any git mutation from a dispatch worker.  A guard script
+    or PreToolUse hook reads it to block git commit/push when the resolved
+    repo root matches this path.
+    """
+
+    def test_workspace_path_written_from_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """workspace_path written == client.workspace_path (resolved)."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="ws-client")
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-766-workspace-path")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-766 --headless",
+            label="auto-dev/GEN-766",
+            native_daemon=daemon,
+            ticket_id="GEN-766",
+            headless=True,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert "workspace_path" in context
+        assert context["workspace_path"] == str(client.workspace_path.resolve())
+
+    def test_workspace_path_differs_from_worktree_path(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """workspace_path and worktree_path are distinct paths.
+
+        This is the invariant the guard relies on: the worktree (allowed) is
+        not the same directory as the workspace (forbidden).
+        """
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="guard-client")
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-766-distinct-paths")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-766 --headless",
+            label="auto-dev/GEN-766",
+            native_daemon=daemon,
+            ticket_id="GEN-766",
+            headless=True,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["workspace_path"] != context["worktree_path"]
+
+    def test_workspace_path_resolves_symlinks(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """workspace_path is resolved (symlinks canonicalized) for guard comparison."""
+        from cw.models import SessionOrigin
+        from cw.spawn import _write_hook_context
+
+        real_ws = tmp_path / "real-workspace"
+        real_ws.mkdir()
+        link_ws = tmp_path / "link-workspace"
+        link_ws.symlink_to(real_ws)
+
+        worktree = make_git_repo("wt-766-symlink")
+
+        _write_hook_context(
+            worktree,
+            session_id="abc",
+            session_name="cli/sym",
+            client="cli",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=link_ws,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        # Must resolve to the real path, not the symlink.
+        assert context["workspace_path"] == str(real_ws.resolve())
+
+    def test_workspace_path_null_when_not_provided(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """workspace_path is null when not passed to _write_hook_context.
+
+        Backward-compat: USER-origin sessions that predate #766 may not carry
+        this field.  The guard must handle null gracefully (skip the check).
+        """
+        from cw.models import SessionOrigin
+        from cw.spawn import _write_hook_context
+
+        worktree = make_git_repo("wt-766-null-ws")
+
+        _write_hook_context(
+            worktree,
+            session_id="xyz",
+            session_name="cli/noworkspace",
+            client="cli",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.DAEMON,
+            # workspace_path intentionally omitted
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert "workspace_path" in context
+        assert context["workspace_path"] is None
+
+    def test_schema_version_incremented_to_2(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """cw-context.json schema_version is 2 after the #766 addition."""
+        from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
+
+        assert CW_CONTEXT_SCHEMA_VERSION == 2
+
+        client = _make_client(tmp_path, name="schema-v2-client")
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-766-schema-v2")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-766 --headless",
+            label="auto-dev/GEN-766",
+            native_daemon=daemon,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["schema_version"] == 2
+
+
 class TestSpawnCreateImplCsidBackfill:
     """Tests for claude_session_id backfill at spawn-return (issue #635)."""
 

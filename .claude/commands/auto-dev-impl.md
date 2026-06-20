@@ -16,10 +16,41 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ## Stage 2: Implement (Agent in Worktree)
 
-Spawn a **general-purpose** agent in a worktree. Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace):
+### Dispatch Detection — #766 (skip redundant EnterWorktree when already in a cw worktree)
 
-- **Interactive mode:** `isolation: "worktree"`, `run_in_background: true` (parallel — the parent waits for the next user gate anyway, no orphan hazard).
-- **`--headless` mode:** `isolation: "worktree"`, **synchronous** (omit `run_in_background`). Same orphan-hazard rationale as the Step 1b Plan agent fix (`750ea77`). Impl runs can be long; synchronous wait is the price of pipeline completion. If the impl tool call hits a runtime cap, that is a separate failure mode to ticket — `session.timeout` is louder than silent orphan-COMPLETED.
+**Before spawning the Stage 2 agent, check whether this session is already running
+inside a cw dispatch worktree:**
+
+```bash
+if [ -f ".claude/cw-context.json" ]; then
+  IN_DISPATCH_WORKTREE=true
+else
+  IN_DISPATCH_WORKTREE=false
+fi
+```
+
+Alternatively: inspect `.claude/cw-context.json` for `"headless": true` — that field
+is only present when cw dispatch wrote the context.
+
+The `isolation: "worktree"` flag on the Agent() call creates a **second, nested worktree
+inside the main checkout** (at `<main_repo>/.claude/worktrees/<slug>`). When cw dispatch
+already provided an isolated worktree as the session cwd, this nested worktree is
+redundant AND it places the impl agent in a position where the main checkout path is
+trivially derivable — causing the #766 leak pattern (worker `cd`s to main checkout and
+commits there).
+
+**Spawn shape depends on mode AND dispatch context:**
+
+- **Interactive mode AND not in a dispatch worktree:** `isolation: "worktree"`,
+  `run_in_background: true` (parallel — the parent waits for the next user gate anyway,
+  no orphan hazard).
+- **`--headless` mode AND not in a dispatch worktree:** `isolation: "worktree"`,
+  **synchronous** (omit `run_in_background`). Same orphan-hazard rationale as the Step
+  1b Plan agent fix (`750ea77`).
+- **In a dispatch worktree (either mode):** **omit `isolation: "worktree"` entirely**.
+  The dispatch worktree IS the impl agent's sandbox. Spawn synchronously with no
+  `isolation` key — the agent works directly in the current cwd. The `worktree_path`
+  in `.claude/cw-context.json` is the authoritative anchor for all git operations.
 
 ### Worktree Isolation Guard (headless) — #402
 
@@ -88,6 +119,21 @@ Stage 2 agent spawn:
   - If touched files transitively expose untouched-file mypy errors that didn't exist before your edit, treat those as your errors too — fix them or report as BLOCK.
 - Instruction to read model/schema definitions before writing code
 - Instruction to use Read/Write tools for file operations, not Bash cp/mv/cat
+- **Pre-mutation guard (hard, not prose) — #766:** Before any `git add`, `git commit`,
+  or `git push`, run:
+  ```bash
+  python .claude/scripts/check_not_main_checkout.py
+  ```
+  This script reads `.claude/cw-context.json` (searching upward from cwd) and exits
+  non-zero with a `BLOCKED (#766)` message if the current git repo root matches the
+  operator's main checkout (`workspace_path` in the context). On non-zero exit: DO NOT
+  proceed with the git operation — EXIT `blocked` with `blocker.reason: "impl_failed"`,
+  `blocker.details: "check_not_main_checkout exited <N>: <stderr>"`. The script is a
+  no-op (exit 0) when no dispatch context is found, so interactive runs are unaffected.
+  The guard path is relative to the worktree root; if the script is absent (pre-#766
+  checkout), skip the check and log `"check_not_main_checkout: script absent, skipped"`
+  in friction, but do NOT proceed past any git op that resolves to a path other than
+  `worktree_path`.
 - Instruction: if anything fails or surprises you, report it in friction — do NOT silently skip or suppress
 - **Incremental commits required** (Subagent Reliability Mitigation 3): Commit after every logical step — do NOT defer all commits to the end. One bad-batch commit at the end means an OOM/crash loses all the work; one commit per step means the orchestrator can resume from the last commit. For each file or coherent feature: make changes → `git add <files>` → `git commit -m "..."`. The friction report's `git log --oneline` output (see Completion Artifacts below) MUST show more than one commit for any non-trivial change. A single end-of-run commit is treated as a discipline failure.
 - Instruction to stage and commit changes with a conventional commit message
