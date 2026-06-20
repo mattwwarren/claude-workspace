@@ -1240,12 +1240,12 @@ def _apply_events_to_store(
 
 
 def consume_completed_sessions() -> int:
-    """Process session.completed events and mark tasks COMPLETED in the queue.
+    """Process session.completed events from the dispatch inbox.
 
-    Reads new SESSION_COMPLETED events from the inbox since the last
-    cursor position for the "dispatch" consumer.  For each event that
-    carries a ``ticket_id`` in its payload, the corresponding TicketTask
-    (if found in RUNNING state) is marked COMPLETED.
+    Reads new SESSION_COMPLETED events from the inbox since the last cursor
+    position for the "dispatch" consumer. For each event that carries a
+    ``ticket_id`` in its payload, the corresponding TicketTask (if found in
+    RUNNING state) is marked COMPLETED.
 
     Advances the cursor after processing.
 
