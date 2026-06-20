@@ -13,6 +13,7 @@ from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.models import (
     DEFAULT_LANE,
+    DEFAULT_STAGE,
     CompletionReason,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -124,6 +125,8 @@ def _detect_stalled_candidates(
                 reap_reason=ReapReason.WALL_CLOCK_BUDGET,
                 lane=task.lane if task else DEFAULT_LANE,
                 client=session.client,
+                stage=task.stage if task else DEFAULT_STAGE,
+                attempts=task.attempts if task else 0,
             )
         )
     return candidates
@@ -340,6 +343,29 @@ def _act_on_stalled_candidates(
     """
     if not candidates:
         return [], []
+
+    # Emit SESSION_STAGE_TIMED_OUT_RETRIED before policy routing so the event
+    # fires for both auto and signal_only lanes (visibility-only; no retry cap).
+    # Skips merged-PR and gh-blocked tickets — those are not genuine timeouts.
+    # See GitHub #724.
+    _excluded_tids = merged_ticket_ids | gh_blocked_ticket_ids
+    for _c in candidates:
+        if _c.proposed_action is not ProposedAction.REVERT_TASK:
+            continue
+        if _c.ticket_id is None or _c.ticket_id in _excluded_tids:
+            continue
+        record_event(
+            OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED,
+            {
+                "ticket_id": _c.ticket_id,
+                "session_id": _c.session_id,
+                "stage": _c.stage,
+                "client": _c.client,
+                "elapsed_seconds": _c.elapsed_seconds,
+                "attempts": _c.attempts,
+            },
+            correlation_id=_c.ticket_id,
+        )
 
     candidates = _route_stalled_by_policy(
         candidates,
