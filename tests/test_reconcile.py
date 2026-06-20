@@ -1401,7 +1401,7 @@ def test_session_stage_timed_out_retried_event_emitted_auto_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Auto policy: genuine timeout emits SESSION_STAGE_TIMED_OUT_RETRIED with payload."""
+    """Auto policy: genuine timeout emits SESSION_STAGE_TIMED_OUT_RETRIED."""
     from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
 
     worktree = tmp_path / "wt-retried-auto"
@@ -1449,7 +1449,7 @@ def test_session_stage_timed_out_retried_event_emitted_signal_only_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Signal-only policy: SESSION_STAGE_TIMED_OUT_RETRIED still fires before policy routing."""
+    """Signal-only: SESSION_STAGE_TIMED_OUT_RETRIED fires before policy routing."""
     from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
 
     worktree = tmp_path / "wt-retried-signal"
