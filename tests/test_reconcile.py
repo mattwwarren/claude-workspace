@@ -1392,6 +1392,143 @@ def test_revert_stalled_gh_prepass_second_candidate_skips_when_gh_gone(
 
 
 # ---------------------------------------------------------------------------
+# SESSION_STAGE_TIMED_OUT_RETRIED event (GitHub issue #724)
+# ---------------------------------------------------------------------------
+
+
+def test_session_stage_timed_out_retried_event_emitted_auto_policy(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto policy: genuine timeout emits SESSION_STAGE_TIMED_OUT_RETRIED with payload."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-retried-auto"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("retried-auto", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="retried-auto",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="retried-auto",
+        stage=Stage.PLAN,
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    events = read_events(
+        consumer="test-retried-auto",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] == "retried-auto"
+    assert payload["session_id"] == "retried-auto"
+    assert payload["stage"] == Stage.PLAN
+    assert payload["client"] == "client-a"
+    assert payload["elapsed_seconds"] >= HEADLESS_TIMEOUT_SECONDS
+    assert payload["attempts"] == 1
+
+
+def test_session_stage_timed_out_retried_event_emitted_signal_only_policy(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Signal-only policy: SESSION_STAGE_TIMED_OUT_RETRIED still fires before policy routing."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-retried-signal"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("retried-signal", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="retried-signal",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="retried-signal",
+        stage=Stage.PLAN,
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    # signal_only is the default OrchestratorConfig
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-retried-signal",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["ticket_id"] == "retried-signal"
+
+
+def test_session_stage_timed_out_retried_not_emitted_for_merged_pr(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Merged PR: SESSION_STAGE_TIMED_OUT_RETRIED is NOT emitted."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-retried-merged"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("retried-merged", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="retried-merged",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="retried-merged",
+        stage=Stage.PLAN,
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (True, True),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    events = read_events(
+        consumer="test-retried-merged",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    assert not any(e.payload.get("ticket_id") == "retried-merged" for e in events)
+
+
+# ---------------------------------------------------------------------------
 # Stale-worktree cleanup on timeout (GitHub issue #404): a timed-out session's
 # task is reverted to PENDING, so its worktree must be removed or the retry
 # would inherit this run's branch/commits.
