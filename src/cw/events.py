@@ -255,6 +255,89 @@ def read_events(
 
 
 _FOLLOW_POLL_INTERVAL: float = 0.05  # 50ms — satisfies ≤100ms acceptance criterion
+_WAIT_POLL_INTERVAL: float = 0.05
+
+
+def _event_matches_wait(
+    event: OrchestratorEvent,
+    *,
+    correlation_id: str | None,
+    session_id: str | None,
+) -> bool:
+    """Return True if event passes correlation_id and session_id filters."""
+    if correlation_id is not None and event.correlation_id != correlation_id:
+        return False
+    return session_id is None or event.payload.get("session_id") == session_id
+
+
+def wait_for_event(
+    *,
+    event_types: list[OrchestratorEventType] | None = None,
+    correlation_id: str | None = None,
+    session_id: str | None = None,
+    timeout: float = 3600.0,
+    follow: bool = False,
+    poll_interval: float = _WAIT_POLL_INTERVAL,
+) -> Generator[OrchestratorEvent]:
+    """Yield matching events from the inbox, blocking until they arrive.
+
+    Reads from the beginning of the inbox so events recorded before the
+    call started are also matched.  Polls the inbox every *poll_interval*
+    seconds for new content.
+
+    In default mode (follow=False) exits after the first match.  With
+    follow=True streams all matches until timeout.
+
+    Args:
+        event_types: Filter by event type(s).
+        correlation_id: Filter by event.correlation_id.
+        session_id: Filter by payload["session_id"].
+        timeout: Seconds before raising TimeoutError.
+        follow: If True, keep streaming after first match.
+        poll_interval: Seconds between inbox polls.
+
+    Raises:
+        TimeoutError: If no match arrives within *timeout* seconds.
+    """
+    deadline = time.monotonic() + timeout
+    last_cursor: str | None = None
+    last_size: int | None = None
+    matched = False
+
+    while True:
+        inbox = _inbox_path()
+        current_size: int = 0
+        if inbox.exists():
+            try:
+                current_size = inbox.stat().st_size
+            except OSError:
+                current_size = 0
+
+        if last_size is None or current_size != last_size:
+            last_size = current_size
+            new_events = read_events(
+                since_cursor=last_cursor,
+                event_types=event_types,
+            )
+            for ev in new_events:
+                last_cursor = ev.id
+                if _event_matches_wait(
+                    ev,
+                    correlation_id=correlation_id,
+                    session_id=session_id,
+                ):
+                    matched = True
+                    yield ev
+                    if not follow:
+                        return
+
+        if time.monotonic() >= deadline:
+            if not matched:
+                msg = f"No matching event after {timeout:.0f}s"
+                raise TimeoutError(msg)
+            return
+
+        time.sleep(poll_interval)
 
 
 def tail_events_follow(

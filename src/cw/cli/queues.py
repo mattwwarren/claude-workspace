@@ -17,6 +17,7 @@ from cw.events import (
     read_events,
     record_event,
     tail_events_follow,
+    wait_for_event,
 )
 from cw.exceptions import CwError
 from cw.models import (
@@ -448,3 +449,63 @@ def event_tail(
     if consumer is not None and events:
         advance_cursor(consumer, events[-1].id)
         click.echo(f"Cursor advanced to: {events[-1].id}", err=True)
+
+
+@event.command(name="wait")
+@click.option("--ticket", default=None, help="Filter by correlation ID (ticket ID).")
+@click.option(
+    "--session",
+    "session_id",
+    default=None,
+    help="Filter by payload session_id.",
+)
+@click.option(
+    "--type",
+    "type_filter",
+    multiple=True,
+    help="Filter by event type (repeatable).",
+)
+@click.option(
+    "--timeout",
+    default=3600.0,
+    show_default=True,
+    type=float,
+    help="Max seconds to wait before giving up.",
+)
+@click.option(
+    "--follow",
+    "-f",
+    is_flag=True,
+    help="Stream all matches without exiting on first.",
+)
+@handle_errors
+def event_wait(
+    ticket: str | None,
+    session_id: str | None,
+    type_filter: tuple[str, ...],
+    timeout: float,
+    follow: bool,
+) -> None:
+    """Block until a matching event arrives in the inbox.
+
+    Reads from the beginning of the inbox so events recorded before the
+    command started are also matched.  Outputs one JSON line per match.
+    Exits 0 on match (or --follow exhaustion); exits non-zero on timeout.
+    """
+    etype_filter = _resolve_event_types(type_filter)
+    try:
+        for ev in wait_for_event(
+            event_types=etype_filter,
+            correlation_id=ticket,
+            session_id=session_id,
+            timeout=timeout,
+            follow=follow,
+        ):
+            click.echo(ev.model_dump_json())
+            sys.stdout.flush()
+    except TimeoutError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except KeyboardInterrupt:
+        raise click.exceptions.Exit(130) from None
+    except BrokenPipeError:
+        raise click.exceptions.Exit(0) from None
