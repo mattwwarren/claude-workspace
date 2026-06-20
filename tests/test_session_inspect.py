@@ -404,7 +404,7 @@ class TestSessionResult:
         runner = CliRunner()
         result = runner.invoke(main, ["session", "result", "abcd1234"])
         assert result.exit_code == 1
-        assert result.stderr  # stderr has a message
+        assert "No result recorded" in result.output
 
     def test_result_not_found_exits_nonzero(
         self, tmp_config_dir: Path, tmp_path: Path

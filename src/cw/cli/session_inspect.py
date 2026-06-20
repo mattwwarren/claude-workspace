@@ -10,7 +10,7 @@ import click
 from cw.cli._base import _relative_time, handle_errors
 from cw.config import load_state
 from cw.models import Session, SessionStatus
-from cw.reconcile._shared import ticket_id_for_session
+from cw.reconcile import ticket_id_for_session
 
 _WAIT_POLL_INTERVAL: int = 5
 _WAIT_DEFAULT_TIMEOUT: int = 300
@@ -22,8 +22,6 @@ _TERMINAL_STATUSES: frozenset[SessionStatus] = frozenset(
 
 _SESSION_LIST_HEADERS = ["ID", "CLIENT", "PURPOSE", "STATUS", "NAME", "STARTED"]
 _SESSION_LIST_WIDTHS = [10, 16, 10, 12, 30, 12]
-_TASK_LIST_HEADERS = ["TICKET_ID", "CLIENT", "STATUS", "SESSION_ID", "ATTEMPTS", "LANE"]
-_TASK_LIST_WIDTHS = [12, 16, 16, 12, 8, 12]
 
 
 def _resolve_session(session_ref: str) -> Session | None:
@@ -87,6 +85,9 @@ def _print_session_human(session: Session) -> None:
 
 
 def _print_session_list_human(sessions: list[Session]) -> None:
+    if not sessions:
+        click.echo("No sessions found.")
+        return
     header = "  ".join(
         f"{h:<{w}}"
         for h, w in zip(_SESSION_LIST_HEADERS, _SESSION_LIST_WIDTHS, strict=True)
@@ -107,8 +108,6 @@ def _print_session_list_human(sessions: list[Session]) -> None:
                 f"{v:<{w}}" for v, w in zip(row, _SESSION_LIST_WIDTHS, strict=True)
             )
         )
-    if not sessions:
-        click.echo("No sessions found.")
 
 
 @click.group(name="session")
@@ -234,16 +233,7 @@ def session_wait(
     deadline = start + timeout_seconds
 
     while True:
-        state = load_state()
-        session = next(
-            (
-                s
-                for s in state.sessions
-                if s.id.startswith(session_ref)
-                or (s.claude_session_id and s.claude_session_id.startswith(session_ref))
-            ),
-            None,
-        )
+        session = _resolve_session(session_ref)
 
         if session is not None and session.status in until_statuses:
             elapsed = time.time() - start
