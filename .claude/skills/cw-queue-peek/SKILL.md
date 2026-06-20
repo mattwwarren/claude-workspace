@@ -36,12 +36,11 @@ Do **not** use this skill for:
 
 ## Required tool
 
-The skill wraps `.claude/scripts/cw_queue_peek.py` in the claude-workspace
-repo. The script reads `~/.local/share/cw/dev_queue.json`, locates each
-RUNNING task's claude transcript jsonl, parses last-emitted sentinel + last
-activity timestamps, and calls `gh pr view` to resolve PR state.
+The skill calls `cw queue peek`, which reads `~/.local/share/cw/dev_queue.json`,
+locates each RUNNING task's claude transcript jsonl, parses last-emitted sentinel
++ last activity timestamps, and calls `gh pr view` to resolve PR state.
 
-The script never stops sessions itself — it only reports. The operator runs
+The command never stops sessions itself — it only reports. The operator runs
 `cw spawn close <session_id>` after reviewing the report.
 
 ## Execution
@@ -49,7 +48,7 @@ The script never stops sessions itself — it only reports. The operator runs
 ### Default — one-shot peek for a client
 
 ```bash
-python3 .claude/scripts/cw_queue_peek.py --client claude-workspace
+cw queue peek --client claude-workspace
 ```
 
 Output is a table with one row per RUNNING task. Columns:
@@ -73,7 +72,7 @@ stops" footer prints the exact `cw spawn close` invocation for STOP rows.
 ### JSON output
 
 ```bash
-python3 .claude/scripts/cw_queue_peek.py --client claude-workspace --json
+cw queue peek --client claude-workspace --json
 ```
 
 For orchestrator subagents or wave-monitor automation that needs to act on
@@ -85,12 +84,12 @@ Omit `--client` to peek across all clients. Useful for cross-project wave
 monitoring.
 
 ```bash
-python3 .claude/scripts/cw_queue_peek.py
+cw queue peek
 ```
 
 ## Peek-stop ladder
 
-The script's recommendation is computed from this ladder. Higher rules win:
+The command's recommendation is computed from this ladder. Higher rules win:
 
 1. **Stuck post-PR-merge**: `pr_state == MERGED` and `idle_min > 5` → **STOP**.
    The canonical "worker forgot to exit" pattern. PR has shipped; further
@@ -123,7 +122,7 @@ useful work.
 
 ## Acting on recommendations
 
-The script never executes stops. After reading the report:
+The command never executes stops. After reading the report:
 
 ```bash
 # Stop the session

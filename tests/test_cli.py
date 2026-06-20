@@ -7655,3 +7655,63 @@ class TestBoardCommand:
         assert result.exit_code == 0
         assert called
         assert called[0]["once"] is True
+
+
+# ---------------------------------------------------------------------------
+# cw queue peek CLI
+# ---------------------------------------------------------------------------
+
+_QUEUE_PEEK_SAMPLE_ROWS = [
+    {
+        "ticket": 143,
+        "session": "abc123456789",
+        "client": "test-client",
+        "attempts": 1,
+        "age_min": 12.5,
+        "idle_min": 2.1,
+        "stage": None,
+        "status": None,
+        "pr": None,
+        "pr_state": None,
+        "recommend": "WAIT",
+        "reason": "age 12min — early/healthy",
+    }
+]
+
+
+class TestQueuePeekCli:
+    def test_table_output_calls_print_table(self) -> None:
+        """Default (no --json) routes through print_table."""
+        _rows = _QUEUE_PEEK_SAMPLE_ROWS
+        with (
+            patch("cw.queue_peek.build_peek_rows", return_value=_rows),
+            patch("cw.queue_peek.print_table") as mock_print,
+        ):
+            result = CliRunner().invoke(main, ["queue", "peek"])
+        assert result.exit_code == 0
+        mock_print.assert_called_once_with(_rows)
+
+    def test_json_flag_emits_json(self) -> None:
+        """--json flag emits JSON to stdout instead of calling print_table."""
+        _rows = _QUEUE_PEEK_SAMPLE_ROWS
+        with (
+            patch("cw.queue_peek.build_peek_rows", return_value=_rows),
+            patch("cw.queue_peek.print_table") as mock_print,
+        ):
+            result = CliRunner().invoke(main, ["queue", "peek", "--json"])
+        assert result.exit_code == 0
+        mock_print.assert_not_called()
+        parsed = json.loads(result.output)
+        assert parsed[0]["ticket"] == 143
+
+    def test_client_filter_passed_through(self) -> None:
+        """--client option is forwarded to build_peek_rows."""
+        with (
+            patch("cw.queue_peek.build_peek_rows", return_value=[]) as mock_build,
+            patch("cw.queue_peek.print_table"),
+        ):
+            result = CliRunner().invoke(main, ["queue", "peek", "--client", "myorg"])
+        assert result.exit_code == 0
+        mock_build.assert_called_once()
+        call_client = mock_build.call_args[0][0]
+        assert call_client == "myorg"
