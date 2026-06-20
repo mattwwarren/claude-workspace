@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -1889,3 +1890,113 @@ class TestMoveTicket:
 
         with pytest.raises(CwError, match="No dev-queue task found"):
             move_ticket("GEN-MISSING", "genhealth", "fast")
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueTasks — cw dev-queue tasks
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueTasks:
+    def _three_tasks(self) -> list[TicketTask]:
+        return [
+            TicketTask(
+                ticket_id="238",
+                client="claude-workspace",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess0001",
+                attempts=2,
+                lane="default",
+            ),
+            TicketTask(
+                ticket_id="239",
+                client="claude-workspace",
+                status=QueueItemStatus.PENDING,
+                session_id=None,
+                attempts=0,
+                lane="default",
+            ),
+            TicketTask(
+                ticket_id="240",
+                client="other-client",
+                status=QueueItemStatus.COMPLETED,
+                session_id="sess0003",
+                attempts=1,
+                lane="fast",
+            ),
+        ]
+
+    def test_tasks_json_all(self, tmp_config_dir: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=self._three_tasks()))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0
+        tasks = json.loads(result.output)
+        assert isinstance(tasks, list)
+        assert len(tasks) == 3
+        expected_fields = {
+            "ticket_id",
+            "client",
+            "status",
+            "session_id",
+            "attempts",
+            "priority",
+            "lane",
+            "created_at",
+            "total_cost_usd",
+            "worktree_path",
+        }
+        assert set(tasks[0].keys()) == expected_fields
+
+    def test_tasks_filter_by_client(self, tmp_config_dir: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=self._three_tasks()))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "tasks", "--client", "claude-workspace", "--json"]
+        )
+        assert result.exit_code == 0
+        tasks = json.loads(result.output)
+        assert len(tasks) == 2
+        assert all(t["client"] == "claude-workspace" for t in tasks)
+
+    def test_tasks_filter_by_status(self, tmp_config_dir: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=self._three_tasks()))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "tasks", "--status", "running", "--json"]
+        )
+        assert result.exit_code == 0
+        tasks = json.loads(result.output)
+        assert len(tasks) == 1
+        assert tasks[0]["ticket_id"] == "238"
+        assert tasks[0]["status"] == "running"
+
+    def test_tasks_filter_by_ticket(self, tmp_config_dir: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=self._three_tasks()))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "tasks", "--ticket", "238", "--json"]
+        )
+        assert result.exit_code == 0
+        tasks = json.loads(result.output)
+        assert len(tasks) == 1
+        assert tasks[0]["ticket_id"] == "238"
+
+    def test_tasks_human_output_columns(self, tmp_config_dir: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=self._three_tasks()))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0
+        assert "TICKET_ID" in result.output
+        assert "CLIENT" in result.output
+        assert "STATUS" in result.output
+        assert "SESSION_ID" in result.output
+        assert "ATTEMPTS" in result.output
+        assert "LANE" in result.output
+
+    def test_tasks_empty_output(self, tmp_config_dir: Path) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0
+        assert "No tasks found" in result.output

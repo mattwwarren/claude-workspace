@@ -22,62 +22,46 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
 
-_SESSIONS_PATH = Path.home() / ".local" / "share" / "cw" / "sessions.json"
 
-
-def _load_sessions() -> dict[str, dict[str, Any]]:
-    if not _SESSIONS_PATH.is_file():
-        return {}
-    with _SESSIONS_PATH.open(encoding="utf-8") as handle:
-        data = json.load(handle)
-    sessions = data.get("sessions", {}) if isinstance(data, dict) else {}
-    if isinstance(sessions, dict):
-        return sessions
-    if isinstance(sessions, list):
-        result: dict[str, dict[str, Any]] = {}
-        for entry in sessions:
-            if not isinstance(entry, dict):
-                continue
-            entry_id = entry.get("id")
-            if isinstance(entry_id, str):
-                result[entry_id] = entry
-        return result
-    return {}
+def _run_cw_json(*cw_args: str) -> Any:
+    """Run a cw command and return parsed JSON output, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["cw", *cw_args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        return json.loads(result.stdout)
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return None
 
 
 def _resolve_by_session_id(session_id: str) -> dict[str, Any] | None:
-    sessions = _load_sessions()
-    if session_id in sessions:
-        return sessions[session_id]
-    # Allow prefix match for the short ID convention
-    matches = [s for sid, s in sessions.items() if sid.startswith(session_id)]
-    if len(matches) == 1:
-        return matches[0]
-    return None
+    """Prefix-match a session by short id via cw session show."""
+    data = _run_cw_json("session", "show", session_id, "--json")
+    return data if isinstance(data, dict) else None
 
 
 def _resolve_by_ticket_id(ticket_id: str) -> dict[str, Any] | None:
-    """Most recent session whose worktree_path or branch references the ticket."""
-    sessions = _load_sessions()
+    """Most recent session whose name references the ticket (via cw session list)."""
     needle = str(ticket_id).lstrip("#")
-    candidates = []
-    for session in sessions.values():
-        worktree = session.get("worktree_path") or ""
-        branch = session.get("branch") or ""
-        # auto-dev/<n>, auto-dev-<n>, dev/issue-<n>-... patterns
-        if (
-            f"auto-dev-{needle}" in worktree
-            or f"auto-dev/{needle}" in branch
-            or f"auto-dev/#{needle}" in branch
-            or f"issue-{needle}" in branch
-        ):
-            candidates.append(session)
+    candidates: list[dict[str, Any]] = []
+    # Query non-terminal, completed, and timed_out sessions to cover all cases.
+    for extra in ([], ["--status", "completed"], ["--status", "timed_out"]):
+        args = ["session", "list", "--ticket", needle, "--json", *extra]
+        data = _run_cw_json(*args)
+        if isinstance(data, list):
+            candidates.extend(s for s in data if isinstance(s, dict))
     if not candidates:
         return None
     return max(candidates, key=lambda s: s.get("started_at") or "")
