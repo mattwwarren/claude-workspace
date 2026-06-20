@@ -1528,6 +1528,47 @@ def test_session_stage_timed_out_retried_not_emitted_for_merged_pr(
     assert not any(e.payload.get("ticket_id") == "retried-merged" for e in events)
 
 
+def test_session_stage_timed_out_retried_not_emitted_for_gh_blocked(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH-blocked candidate: SESSION_STAGE_TIMED_OUT_RETRIED is NOT emitted."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-retried-gh-blocked"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("retried-gh-blocked", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="retried-gh-blocked",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="retried-gh-blocked",
+        stage=Stage.PLAN,
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (None, False),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    events = read_events(
+        consumer="test-retried-gh-blocked",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    assert not any(e.payload.get("ticket_id") == "retried-gh-blocked" for e in events)
+
+
 # ---------------------------------------------------------------------------
 # Stale-worktree cleanup on timeout (GitHub issue #404): a timed-out session's
 # task is reverted to PENDING, so its worktree must be removed or the retry
