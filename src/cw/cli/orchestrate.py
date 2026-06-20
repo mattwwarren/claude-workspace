@@ -80,6 +80,7 @@ def _format_status_human(status: OrchestratorStatus) -> str:
                     lines.append(
                         f"    {lane_name}: claimed={stats.get('claimed', 0)}"
                         f" running={stats.get('running', 0)}"
+                        f" blocked={stats.get('blocked', 0)}"
                         f" pending={stats.get('pending', 0)}"
                     )
     else:
