@@ -32,6 +32,38 @@ class _FakeCompleted:
         self.returncode = returncode
 
 
+class TestRealNativeDaemonClientSpawnGitEnv:
+    """spawn_bg must not leak GIT_* env vars into the worker subprocess."""
+
+    def test_git_vars_stripped_from_subprocess_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GIT_DIR and GIT_INDEX_FILE must not appear in env passed to subprocess.run.
+
+        Without the fix, spawn_bg passes no env= argument and the worker inherits
+        the orchestrator's GIT_DIR / GIT_INDEX_FILE, misdirecting all git ops to
+        the orchestrator's checkout (GitHub issue #766).
+        """
+        captured: dict[str, object] = {}
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            captured.update(kwargs)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setenv("GIT_DIR", "/some/other/repo/.git")
+        monkeypatch.setenv("GIT_INDEX_FILE", "/some/other/repo/.git/index")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        client = RealNativeDaemonClient()
+        client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        env = captured.get("env")
+        assert isinstance(env, dict), "spawn_bg must pass env= to subprocess.run"
+        git_keys = [k for k in env if k.startswith("GIT_")]
+        assert not git_keys, f"GIT_* vars must be stripped; found: {git_keys}"
+        assert "PATH" in env, "non-GIT env vars must be preserved (PATH missing)"
+
+
 class TestRealNativeDaemonClientSpawn:
     """spawn_bg shells out to claude --bg and parses the short id."""
 

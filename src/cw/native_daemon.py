@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -68,6 +69,24 @@ _ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 # "--bg with bypassPermissions requires accepting the disclaimer first.
 #  Run `claude --dangerously-skip-permissions` once interactively."
 _DISCLAIMER_REJECTION_PATTERN = "requires accepting the disclaimer first"
+
+
+def _spawn_clean_env() -> dict[str, str]:
+    """Return os.environ with GIT_* vars stripped.
+
+    Prevents the spawned ``claude --bg`` worker from inheriting GIT_DIR,
+    GIT_WORK_TREE, or GIT_INDEX_FILE from the orchestrator's environment.
+    Without this, worker git operations are misdirected to the orchestrator's
+    ``.git`` / index file — leaking commits and uncommitted changes into the
+    main checkout instead of staying in the worker's worktree (#766).
+
+    Mirrors the identical helper in ``spawn.py:_git_clean_env`` and
+    ``worktree.py:_run_git``. The duplication is intentional for now:
+    importing from ``spawn`` would create a circular import
+    (``spawn`` already imports ``native_daemon``). A future shared util
+    (e.g. ``cw._git``) can consolidate all three.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
 @runtime_checkable
@@ -150,6 +169,7 @@ class RealNativeDaemonClient:
             proc = subprocess.run(
                 cmd,
                 cwd=cwd,
+                env=_spawn_clean_env(),
                 capture_output=True,
                 text=True,
                 check=True,
