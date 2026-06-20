@@ -39,6 +39,7 @@ from cw.events import read_events
 from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.models import (
     DEFAULT_LANE,
+    DEFAULT_STAGE,
     ClientConfig,
     CompletionReason,
     OrchestratorConfig,
@@ -49,6 +50,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.reconcile import _deps
@@ -223,6 +225,10 @@ class ReapCandidate:
     # can look up the lane config for this candidate.
     client: str | None = None
     worktree_path: Path | None = None
+    # Stamped from task.stage / task.attempts in stalled detect; carried into
+    # SESSION_STAGE_TIMED_OUT_RETRIED payload. See GitHub #724.
+    stage: Stage = DEFAULT_STAGE
+    attempts: int = 0
 
 
 @dataclass(frozen=True)
