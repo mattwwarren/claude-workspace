@@ -225,8 +225,8 @@ class DispatchSkipReason(StrEnum):
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
     CAP_FULL = "cap_full"
-    SPAWN_ERROR = "spawn_error"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
+    SPAWN_ERROR = "spawn_error"
     NO_PENDING = "no_pending"
     NONE = "none"
 
