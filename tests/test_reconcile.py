@@ -395,6 +395,63 @@ def test_reconcile_clears_session_id_on_revert(
     assert queue.tasks[0].session_id is None
 
 
+def test_reconcile_usage_limited_true_from_phantom_path(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reconcile() report has usage_limited=True when a phantom DAEMON session's
+    transcript contains a usage-limit message (#804, Fix 3)."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-phantom-ul"
+    surface_ref = "dead-ul-r"  # 8-char short id that doesn't appear in live set
+
+    sess = _mk_phantom_daemon_session(
+        "phantom-ul-reconcile",
+        started_at,
+        surface_ref=surface_ref,
+        worktree_path=worktree,
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="phantom-ul-reconcile",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="phantom-ul-reconcile",
+                )
+            ]
+        )
+    )
+
+    transcript = _write_idle_transcript_with_text(
+        home,
+        worktree,
+        "You've hit your session limit · resets 3:40am (America/New_York)",
+        filename=f"{surface_ref}-sess-804r.jsonl",
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    # Non-empty live set bypasses outage guard; surface_ref not present → phantom.
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "decoy000"}],
+    )
+    report = reconcile()
+
+    assert report.usage_limited is True
+    assert "phantom-ul-reconcile" in report.reverted_ticket_ids
+
+
 def test_reconcile_noop_when_no_phantoms(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -10718,6 +10775,186 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     assert len(candidates) == 1
     assert candidates[0].worktree_dirty is True
     assert _state_queue_snapshot() == snap
+
+
+def test_detect_phantom_candidates_usage_limit_detected_true(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DAEMON phantom with usage-limit transcript → usage_limit_detected=True (#804)."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-ul-phantom"
+    sess = _mk_phantom_daemon_session(
+        "phantom-ul-1",
+        started_at,
+        surface_ref="ul-phantom-ref",
+        worktree_path=worktree,
+    )
+    transcript = _write_idle_transcript_with_text(
+        home,
+        worktree,
+        "You've hit your session limit · resets 5:00am",
+        filename="ul-phantom-ref-sess-804.jsonl",
+    )
+    # Timestamp transcript after session start so _detect_usage_limit finds it.
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(state, phantom_set={sess.id})
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.usage_limit_detected is True
+
+
+def test_detect_phantom_candidates_usage_limit_false_when_no_transcript(
+    tmp_config_dir: Path,
+) -> None:
+    """DAEMON phantom with no transcript → usage_limit_detected=False (#804)."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-noul-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(state, phantom_set={sess.id})
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.usage_limit_detected is False
+
+
+def test_act_on_phantom_candidates_propagates_usage_limited(
+    tmp_config_dir: Path,
+) -> None:
+    """_act_on_phantom_candidates returns usage_limited=True when a CRASH_COMPLETE
+    candidate carries usage_limit_detected=True (#804)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-ul-act-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-ul-act-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-ul-act-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-ul-act-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-ul-act-1",
+        worktree_dirty=False,
+        usage_limit_detected=True,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _, _, usage_limited, _, _, _ = _act_on_phantom_candidates(
+        state, [candidate], now=now, config=_auto_config()
+    )
+
+    assert usage_limited is True
+
+
+def test_act_on_phantom_candidates_usage_limited_false_without_flag(
+    tmp_config_dir: Path,
+) -> None:
+    """_act_on_phantom_candidates returns usage_limited=False when no candidate
+    has usage_limit_detected=True (#804)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-noul-act-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-noul-act-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-noul-act-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-noul-act-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-noul-act-1",
+        worktree_dirty=False,
+        usage_limit_detected=False,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _, _, usage_limited, _, _, _ = _act_on_phantom_candidates(
+        state, [candidate], now=now, config=_auto_config()
+    )
+
+    assert usage_limited is False
+
+
+def test_act_on_phantom_candidates_signal_only_still_propagates_usage_limited(
+    tmp_config_dir: Path,
+) -> None:
+    """Under signal_only (default) policy, a CRASH_COMPLETE candidate with
+    usage_limit_detected=True is routed to BLOCKED_ON_USER (filtered from
+    auto-reap), but usage_limited=True is still returned in position 2 (#804).
+
+    This exercises the early-return path at line 538 of phantom.py that
+    returns `usage_limited` instead of hard-coded `False`."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-ul-so-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-ul-so-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-ul-so-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-ul-so-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-ul-so-1",
+        worktree_dirty=False,
+        usage_limit_detected=True,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    # OrchestratorConfig() has reap_policy=SIGNAL_ONLY (the default), which
+    # routes clean CRASH_COMPLETE candidates to BLOCKED_ON_USER and removes
+    # them from the auto-reap list — triggering the early-return on line 538.
+    _, _, usage_limited, _, _, _ = _act_on_phantom_candidates(
+        state, [candidate], now=now, config=OrchestratorConfig()
+    )
+
+    assert usage_limited is True
 
 
 # --- Act dispatcher tests ---

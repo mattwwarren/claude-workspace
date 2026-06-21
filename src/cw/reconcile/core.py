@@ -321,7 +321,7 @@ def _reconcile_locked(
     (
         reverted,
         phantom_names,
-        _watchdog_usage_limited_phantom,
+        phantom_usage_limited,
         _salvaged_phantom_ticket_ids,
         _salvaged_phantom_results,
         merged_from_phantom,
@@ -363,7 +363,7 @@ def _reconcile_locked(
             phantom_session_names=phantom_names,
             reverted_ticket_ids=all_reverted,
             completed_ticket_ids=all_merged_completed,
-            usage_limited=watchdog_usage_limited,
+            usage_limited=watchdog_usage_limited or phantom_usage_limited,
         ),
         salvage_git_candidates,
     )

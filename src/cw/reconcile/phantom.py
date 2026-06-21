@@ -146,12 +146,22 @@ def _detect_phantom_candidates(
             if session.origin is SessionOrigin.DAEMON
             else False
         )
+        # Scan for usage-limit text in the transcript so the dispatch loop can
+        # engage its backoff when a phantom was killed by a rate limit, not a
+        # code bug (#804). Only meaningful for DAEMON sessions (USER sessions
+        # have no auto-dev transcript path).
+        usage_limit_detected = (
+            _shared.detect_usage_limit(session)
+            if session.origin is SessionOrigin.DAEMON
+            else False
+        )
         candidates.append(
             ReapCandidate(
                 session_id=session.id,
                 proposed_action=ProposedAction.CRASH_COMPLETE,
                 ticket_id=ticket_id,
                 worktree_dirty=worktree_dirty,
+                usage_limit_detected=usage_limit_detected,
                 lane=lane,
                 client=session.client,
                 worktree_path=session.worktree_path,
@@ -515,6 +525,9 @@ def _act_on_phantom_candidates(
     if not candidates:
         return [], [], False, [], {}, []
 
+    # Compute before policy routing: signal-only candidates are dropped from the
+    # auto-reap list but still carry their usage_limit_detected flag (#804).
+    usage_limited = any(c.usage_limit_detected for c in candidates)
     candidates = _route_phantom_by_policy(
         candidates,
         config=config,
@@ -522,7 +535,7 @@ def _act_on_phantom_candidates(
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
     if not candidates:
-        return [], [], False, [], {}, []
+        return [], [], usage_limited, [], {}, []
 
     session_by_id = {s.id: s for s in state.sessions}
 
@@ -634,7 +647,7 @@ def _act_on_phantom_candidates(
     return (
         ticket_ids_to_revert,
         phantom_names,
-        False,
+        usage_limited,
         salvaged_ticket_ids,
         salvaged_result_by_ticket,
         merged_completed_ids,

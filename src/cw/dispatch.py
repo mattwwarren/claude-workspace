@@ -28,7 +28,9 @@ from cw.config import (
     load_effective_clients,
     load_effective_config,
     load_state,
+    load_usage_limited_until,
     save_state,
+    save_usage_limited_until,
     sessions_lock,
 )
 from cw.dev_queue import (
@@ -913,6 +915,15 @@ def dispatch_tick(
         _emit_usage_limit_skip_events(clients, config, state)
         return DispatchTickResult(spawned=0, usage_limit_detected=False)
 
+    # Same-tick race fix: reconcile reverts rate-limited phantom tasks to PENDING
+    # on the same tick they're detected. Without this gate the spawn loop runs
+    # immediately after reconcile and re-spawns the now-PENDING task, hitting the
+    # same limit again. Skip spawning this tick so the caller can set
+    # usage_limited_until before the next tick fires (#804).
+    if any_usage_limit_detected:
+        _emit_usage_limit_skip_events(clients, config, state)
+        return DispatchTickResult(spawned=0, usage_limit_detected=True)
+
     # Tier-1: optionally cap how many clients are eligible per tick.
     # max_parallel_clients=None preserves the original behaviour (all clients).
     dispatched_client_count = 0
@@ -1364,9 +1375,10 @@ def run_dispatch_loop(
     warned_stale: set[tuple[str, str]] = set()
     # Track fetch-fail-warn deduplication for persistently unreachable remotes.
     warned_fetch_fail: set[str] = set()
-    # Back-off window: set when a UsageLimitError is detected during a tick.
-    # Subsequent ticks skip all spawns until this window elapses.
-    usage_limited_until: datetime | None = None
+    # Back-off window: loaded from the persisted sidecar so a loop restart after
+    # a code merge honours an active backoff rather than re-opening the spawn gate
+    # immediately (#804).
+    usage_limited_until: datetime | None = load_usage_limited_until()
 
     try:
         while True:
@@ -1399,6 +1411,7 @@ def run_dispatch_loop(
                 usage_limited_until = datetime.now(UTC) + timedelta(
                     seconds=config.usage_limit_backoff_seconds
                 )
+                save_usage_limited_until(usage_limited_until)
                 _log.warning(
                     "dispatch: usage limit detected; backing off until %s",
                     usage_limited_until,
