@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.models import CwState, Session, TicketTask
+    from cw.models import ClientConfig, CwState, Session, TicketTask
 
 
 def _resolve_finalize_blocked_condition(
@@ -63,6 +63,9 @@ def _resolve_finalize_blocked_condition(
     session: Session,
     wt_path: Path,
     default_branch: str,
+    *,
+    clients: dict[str, ClientConfig] | None = None,
+    finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] | None = None,
 ) -> tuple[bool, str | None]:
     """Return (is_finalize_blocked, branch_name_or_none).
 
@@ -72,17 +75,26 @@ def _resolve_finalize_blocked_condition(
     - no open PR exists for the feature branch
     - gh is available (gh-unavailable falls through to REVERT_TASK)
 
+    clients: pre-loaded effective clients dict; loaded lazily if None.
+    finalize_pr_by_branch: pre-computed pr_exists_for_branch results keyed by
+      branch name, computed in reconcile()'s lockless pre-pass to avoid calling
+      gh under sessions_lock (#485). Falls back to a direct call when None
+      (used by tests and revert_stalled_headless_sessions).
+
     Returns (False, None) for any short-circuit.
     """
     if task is None or task.stage != Stage.FINALIZE:
         return False, None
     if not _has_commits_beyond_base(wt_path, default_branch):
         return False, None
-    if task.ticket_id is None:
-        return False, None
-    clients = _deps.load_effective_clients()
-    branch = feature_branch_key(session.client, task.ticket_id, clients)
-    pr_result, gh_available = pr_exists_for_branch(branch)
+    effective_clients = (
+        clients if clients is not None else _deps.load_effective_clients()
+    )
+    branch = feature_branch_key(session.client, task.ticket_id, effective_clients)
+    if finalize_pr_by_branch is not None:
+        pr_result, gh_available = finalize_pr_by_branch.get(branch, (None, False))
+    else:
+        pr_result, gh_available = pr_exists_for_branch(branch)
     # gh absent, PR already open, or transient error — fall through to REVERT_TASK.
     # Only pr_result is False (confirmed no open PR) triggers FINALIZE_BLOCKED.
     if not gh_available or pr_result is not False:
@@ -96,12 +108,16 @@ def _detect_stalled_candidates(
     now: datetime,
     config: OrchestratorConfig,
     task_by_ticket: dict[str, TicketTask],
+    finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for stalled headless DAEMON sessions.
 
     Returns a list of ReapCandidate objects. Makes zero writes to state,
     queue, or event bus. See GitHub #552, ADR-0006.
     """
+    # Load clients once for finalize-blocked branch-key resolution across all
+    # sessions in this pass, rather than per-session inside the loop.
+    effective_clients = _deps.load_effective_clients()
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
@@ -159,15 +175,19 @@ def _detect_stalled_candidates(
         # a PR (GitHub #812). Must run BEFORE the retry-cap check so the task
         # is parked (preserving the worktree) rather than capped-and-abandoned.
         if session.worktree_path is not None and task is not None:
-            _fb_clients = _deps.load_effective_clients()
-            _fb_client_cfg = _fb_clients.get(session.client)
-            _fb_default_branch = (
-                _fb_client_cfg.default_branch if _fb_client_cfg is not None else "main"
+            fb_client_cfg = effective_clients.get(session.client)
+            fb_default_branch = (
+                fb_client_cfg.default_branch if fb_client_cfg is not None else "main"
             )
-            _fb_blocked, _fb_branch = _resolve_finalize_blocked_condition(
-                task, session, session.worktree_path, _fb_default_branch
+            fb_blocked, fb_branch = _resolve_finalize_blocked_condition(
+                task,
+                session,
+                session.worktree_path,
+                fb_default_branch,
+                clients=effective_clients,
+                finalize_pr_by_branch=finalize_pr_by_branch,
             )
-            if _fb_blocked and _fb_branch is not None:
+            if fb_blocked and fb_branch is not None:
                 candidates.append(
                     ReapCandidate(
                         session_id=session.id,
@@ -179,7 +199,7 @@ def _detect_stalled_candidates(
                         client=session.client,
                         stage=task.stage,
                         worktree_path=session.worktree_path,
-                        branch=_fb_branch,
+                        branch=fb_branch,
                     )
                 )
                 continue

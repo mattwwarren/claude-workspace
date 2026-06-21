@@ -313,6 +313,8 @@ def _rescue_mark_attempted(session_id: str) -> None:
             if s.id == session_id:
                 if isinstance(s.last_result, dict):
                     s.last_result = {**s.last_result, "rescue_attempted": True}
+                else:
+                    s.last_result = {"rescue_attempted": True}
                 break
         save_state(fresh_state)
 
@@ -368,6 +370,7 @@ def _rescue_complete(
         )
 
     now = datetime.now(UTC)
+    mutated = False
     with sessions_lock():
         fresh_state = load_state()
         for s in fresh_state.sessions:
@@ -376,9 +379,14 @@ def _rescue_complete(
                     s.status = SessionStatus.COMPLETED
                     s.completed_at = now
                     s.completed_reason = CompletionReason.NORMAL
-                    s.reap_reason = ReapReason.SALVAGE_COMPLETED
+                    mutated = True
                 break
         save_state(fresh_state)
+
+    if not mutated:
+        # Session already advanced past TIMED_OUT by a concurrent path; skip
+        # duplicate event and daemon stop to keep the audit log clean.
+        return
 
     if ticket_id:
         with dev_queue_lock():
@@ -449,6 +457,11 @@ def rescue_finalize_blocked_sessions() -> list[str]:
             )
             continue
         pr_result, gh_available = pr_exists_for_branch(branch)
+        # Why: gh-unavailable and transient errors (pr_result=None) are not
+        # tombstoned with rescue_attempted. The intent is to retry on the next
+        # tick — these conditions are expected to be transient. Only definitive
+        # gh pr create failures are tombstoned (below) because they indicate the
+        # branch or repo state is incompatible, not a transient availability issue.
         if not gh_available or pr_result is None:
             continue
         pr_created = pr_result is not False or _rescue_open_pr(

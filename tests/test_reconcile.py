@@ -14999,9 +14999,7 @@ class TestFinalizeBlocked:
             event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
         )
         attn = [e for e in events if e.payload.get("ticket_id") == ticket_id]
-        assert any(
-            e.payload.get("paused_status") == "gh_check_blocked" for e in attn
-        )
+        assert any(e.payload.get("paused_status") == "gh_check_blocked" for e in attn)
 
     # ── 1.6 worktree NOT cleaned up ──────────────────────────────────────
 
@@ -15148,9 +15146,7 @@ class TestFinalizeBlocked:
             config=_auto_config(),
             task_by_ticket={t.ticket_id: t for t in load_dev_queue().tasks},
         )
-        fb_candidates = [
-            c for c in candidates2 if c.session_id == "fb-sess-8"
-        ]
+        fb_candidates = [c for c in candidates2 if c.session_id == "fb-sess-8"]
         assert not fb_candidates  # TIMED_OUT session skipped by _LIVE_STATUSES
 
     # ── 1.9 unit test for _resolve_finalize_blocked_condition ─────────────
@@ -15235,9 +15231,7 @@ class TestFinalizeBlocked:
 
         gh_args_seen: list[list[str]] = []
 
-        def _fake_subprocess_run(
-            args: list[str], **_kw: object
-        ) -> MagicMock:
+        def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
             gh_args_seen.append(list(args))
             result = MagicMock()
             result.returncode = 0
@@ -15263,7 +15257,7 @@ class TestFinalizeBlocked:
         reloaded = load_state()
         s = next(s for s in reloaded.sessions if s.id == sid)
         assert s.status == SessionStatus.COMPLETED
-        assert s.reap_reason == ReapReason.SALVAGE_COMPLETED
+        assert s.reap_reason == ReapReason.FINALIZE_BLOCKED
 
         # Verify gh pr create and gh pr merge were called
         create_calls = [a for a in gh_args_seen if a[:3] == ["gh", "pr", "create"]]
@@ -15398,3 +15392,501 @@ class TestFinalizeBlocked:
         s = next(s for s in reloaded.sessions if s.id == sid)
         assert isinstance(s.last_result, dict)
         assert s.last_result.get("rescue_attempted") is True
+
+    # ── 1.13 _rescue_mark_attempted: non-dict last_result ────────────────
+
+    def test_rescue_mark_attempted_non_dict_last_result(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_rescue_mark_attempted: when last_result is not a dict, set to dict."""
+        from cw.reconcile.salvage import _rescue_mark_attempted
+
+        sid = "fb-sess-13"
+        ticket_id = "FB-13"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        # last_result=None (default) → else branch sets it to {"rescue_attempted": True}
+        save_state(CwState(sessions=[sess]))
+
+        _rescue_mark_attempted(sid)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == sid)
+        assert s.last_result == {"rescue_attempted": True}
+
+    # ── 1.14 _rescue_complete: not-mutated early return (race) ───────────
+
+    def test_rescue_complete_not_mutated_returns_early(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_rescue_complete: session already COMPLETED under lock → no event emitted."""
+        from cw.reconcile.salvage import _rescue_complete
+
+        sid = "fb-sess-14"
+        ticket_id = "FB-14"
+        branch = f"dev/{ticket_id}"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        # State has session already COMPLETED (simulates concurrent completion).
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.status = SessionStatus.COMPLETED
+        save_state(CwState(sessions=[sess]))
+
+        completed_ticket_ids: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        stale_sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        _rescue_complete(stale_sess, ticket_id, branch, completed_ticket_ids)
+
+        assert not completed_ticket_ids
+        events = read_events(
+            consumer="test-fb-14-no-event",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(e.payload.get("session_id") == sid for e in events)
+
+    # ── 1.15 _rescue_complete: surface_ref set → daemon stop ─────────────
+
+    def test_rescue_complete_daemon_stop_on_surface_ref(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_rescue_complete: surface_ref present → daemon.stop() is called."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        sid = "fb-sess-15"
+        ticket_id = "FB-15"
+        branch = f"dev/{ticket_id}"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.reap_reason = ReapReason.FINALIZE_BLOCKED
+        sess.last_result = {"paused_status": _FINALIZE_BLOCKED_REASON, "branch": branch}
+        sess.surface_ref = "surf-ref-15"
+        save_state(CwState(sessions=[sess]))
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.subprocess.run",
+            lambda _a, **_kw: MagicMock(returncode=0, stdout=""),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+
+        rescue_finalize_blocked_sessions()
+
+        assert daemon.stop_calls
+
+    # ── 1.16 merge failure swallowed, session still completed ─────────────
+
+    def test_rescue_merge_failure_swallowed(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """gh pr merge CalledProcessError is swallowed; session still COMPLETED."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        sid = "fb-sess-16"
+        ticket_id = "FB-16"
+        branch = f"dev/{ticket_id}"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.reap_reason = ReapReason.FINALIZE_BLOCKED
+        sess.last_result = {"paused_status": _FINALIZE_BLOCKED_REASON, "branch": branch}
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                    )
+                ]
+            )
+        )
+
+        import subprocess as _sub
+
+        def _fake_run(args: list[str], **_kw: object) -> MagicMock:
+            if args[:3] == ["gh", "pr", "merge"]:
+                raise _sub.CalledProcessError(1, "gh")
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", _fake_run)
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        completed = rescue_finalize_blocked_sessions()
+
+        assert ticket_id in completed
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == sid)
+        assert s.status == SessionStatus.COMPLETED
+
+    # ── 1.17 rescue filter edge cases ────────────────────────────────────
+
+    def test_rescue_filter_wrong_paused_status(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """rescue_finalize_blocked_sessions: wrong paused_status → session skipped."""
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        sid = "fb-sess-17a"
+        ticket_id = "FB-17A"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.last_result = {
+            "paused_status": "some_other_reason",
+            "branch": f"dev/{ticket_id}",
+        }
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        completed = rescue_finalize_blocked_sessions()
+        assert ticket_id not in completed
+
+    def test_rescue_filter_rescue_attempted(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """rescue_finalize_blocked_sessions: rescue_attempted=True → session skipped."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        sid = "fb-sess-17b"
+        ticket_id = "FB-17B"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.last_result = {
+            "paused_status": _FINALIZE_BLOCKED_REASON,
+            "branch": f"dev/{ticket_id}",
+            "rescue_attempted": True,
+        }
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        completed = rescue_finalize_blocked_sessions()
+        assert ticket_id not in completed
+
+    def test_rescue_filter_empty_branch(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """rescue_finalize_blocked_sessions: empty branch → session skipped."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        sid = "fb-sess-17c"
+        ticket_id = "FB-17C"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.last_result = {
+            "paused_status": _FINALIZE_BLOCKED_REASON,
+            "branch": "",
+        }
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        completed = rescue_finalize_blocked_sessions()
+        assert ticket_id not in completed
+
+    def test_rescue_filter_unknown_client(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """rescue_finalize_blocked_sessions: unknown client → log warning, skip."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        sid = "fb-sess-17d"
+        ticket_id = "FB-17D"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.client = "no-such-client"
+        sess.name = f"no-such-client/auto-dev/{ticket_id}"
+        sess.last_result = {
+            "paused_status": _FINALIZE_BLOCKED_REASON,
+            "branch": f"dev/{ticket_id}",
+        }
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        completed = rescue_finalize_blocked_sessions()
+        assert ticket_id not in completed
+
+    # ── 1.18 _resolve_finalize_blocked_condition with pre-computed dict ───
+
+    def test_resolve_uses_finalize_pr_by_branch_dict(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_resolve_finalize_blocked_condition uses pre-computed dict when provided."""
+        from cw.reconcile.stalled import _resolve_finalize_blocked_condition
+
+        worktree = tmp_path / "wt-fb-18"
+        worktree.mkdir(parents=True)
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = self._mk_finalize_session("fb-sess-18", "FB-18", worktree, started_at)
+        task = self._mk_finalize_task("FB-18", "fb-sess-18")
+
+        monkeypatch.setattr(
+            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+        )
+
+        branch = "dev/FB-18"
+        finalize_pr_by_branch = {branch: (False, True)}
+
+        blocked, result_branch = _resolve_finalize_blocked_condition(
+            task,
+            sess,
+            worktree,
+            "main",
+            finalize_pr_by_branch=finalize_pr_by_branch,
+        )
+        assert blocked is True
+        assert result_branch == branch
+
+    # ── 1.19 _apply_finalize_blocked_queue_mutations: filter branches ─────
+
+    def test_apply_finalize_blocked_queue_mutations_filter_branches(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_apply_finalize_blocked_queue_mutations: filter branches."""
+        from cw.models import ReapReason
+        from cw.reconcile._shared import ProposedAction, ReapCandidate
+        from cw.reconcile.stalled import _apply_finalize_blocked_queue_mutations
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        candidate = ReapCandidate(
+            session_id="fb-sess-19",
+            proposed_action=ProposedAction.PARK_FINALIZE_BLOCKED,
+            ticket_id="FB-19",
+            elapsed_seconds=7200,
+            reap_reason=ReapReason.FINALIZE_BLOCKED,
+            lane="default",
+            client="client-a",
+        )
+
+        task_target = TicketTask(
+            ticket_id="FB-19",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+        )
+        task_other = TicketTask(
+            ticket_id="OTHER-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+        )
+        task_not_running = TicketTask(
+            ticket_id="FB-19",
+            client="client-a",
+            status=QueueItemStatus.PENDING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_other, task_not_running, task_target]))
+
+        _apply_finalize_blocked_queue_mutations([candidate])
+
+        store = load_dev_queue()
+        target_tasks = [t for t in store.tasks if t.ticket_id == "FB-19"]
+        other_tasks = [t for t in store.tasks if t.ticket_id == "OTHER-1"]
+
+        assert other_tasks[0].status == QueueItemStatus.RUNNING
+        running_target = next(
+            (t for t in target_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER),
+            None,
+        )
+        assert running_target is not None
+
+    # ── 1.20 _build_finalize_pr_map direct tests ─────────────────────────
+
+    def test_build_finalize_pr_map(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_build_finalize_pr_map: FINALIZE DAEMON session → calls pr_exists."""
+        from cw.reconcile.core import _build_finalize_pr_map
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        worktree = tmp_path / "wt-fb-20"
+        worktree.mkdir(parents=True)
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+        sess_finalize = self._mk_finalize_session(
+            "fb-sess-20", "FB-20", worktree, started_at
+        )
+        sess_finalize.status = SessionStatus.ACTIVE
+
+        # Session with no valid ticket_id in name → skipped (line 130)
+        sess_no_tid = Session(
+            id="fb-sess-20b",
+            name="client-a/impl",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=worktree,
+            started_at=started_at,
+        )
+
+        task = TicketTask(
+            ticket_id="FB-20",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        calls: list[str] = []
+
+        def _fake_pr_exists(branch: str, **_kw: object) -> tuple[bool | None, bool]:
+            calls.append(branch)
+            return False, True
+
+        monkeypatch.setattr("cw.reconcile.core.pr_exists_for_branch", _fake_pr_exists)
+
+        from cw.config import load_clients
+
+        clients = load_clients()
+        state = CwState(sessions=[sess_finalize, sess_no_tid])
+
+        result = _build_finalize_pr_map(state, clients)
+
+        assert calls, "pr_exists_for_branch should have been called"
+        assert any("FB-20" in branch for branch in calls)
+        assert any(pr is False for pr, _ in result.values())
+
+    # ── 1.21 reconcile(): ticket_id=None and gh_blocked in pr_is_merged pass
+
+    def test_reconcile_prepass_ticket_id_none_and_gh_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile(): DAEMON sessions where ticket_id is None or gh is unavailable."""
+        from cw.reconcile import reconcile
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        # Session A: DAEMON with name that yields no ticket_id → line 177 continue
+        sess_no_tid = Session(
+            id="fb-prepass-no-tid",
+            name="client-a/impl",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=None,
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            surface_ref="surf-no-tid",
+        )
+
+        # Session B: gh returns unavailable → _gh_blocked_tids.
+        # Session C below hits the gh_blocked branch (_gh_available now False).
+        sess_gh_blocked = Session(
+            id="fb-prepass-gh-blocked",
+            name="client-a/auto-dev/FB-21-A",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=None,
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            surface_ref="surf-gh-blocked",
+        )
+
+        sess_second = Session(
+            id="fb-prepass-second",
+            name="client-a/auto-dev/FB-21-B",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=None,
+            started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            surface_ref="surf-second",
+        )
+
+        save_state(CwState(sessions=[sess_no_tid, sess_gh_blocked, sess_second]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a: None
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (None, False),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core.pr_exists_for_branch", lambda _b, **_kw: (None, False)
+        )
+
+        report = reconcile()
+        assert report is not None
