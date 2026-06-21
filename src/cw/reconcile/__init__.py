@@ -59,6 +59,7 @@ from cw.reconcile._shared import (
     _CAUSE_IDLE_STALL,
     _CAUSE_USAGE_LIMIT,
     _DIRTY_WORKTREE_REASON,
+    _FINALIZE_BLOCKED_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_SKIP_REASON,
@@ -121,7 +122,10 @@ from cw.reconcile.phantom import (
     _detect_phantom_candidates,
     _emit_reap_proposed,
 )
-from cw.reconcile.salvage import salvage_committed_no_pr_sessions
+from cw.reconcile.salvage import (
+    rescue_finalize_blocked_sessions,
+    salvage_committed_no_pr_sessions,
+)
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -145,6 +149,7 @@ __all__ = [
     "_CAUSE_IDLE_STALL",
     "_CAUSE_USAGE_LIMIT",
     "_DIRTY_WORKTREE_REASON",
+    "_FINALIZE_BLOCKED_REASON",
     "_NEEDS_SALVAGE_REASON",
     "_SALVAGE_KIND_GIT_STATE",
     "_SALVAGE_SKIP_REASON",
@@ -189,6 +194,7 @@ __all__ = [
     "feature_branch_key",
     "flag_silently_idle_daemon_sessions",
     "reconcile",
+    "rescue_finalize_blocked_sessions",
     "resolve_headless_budget",
     "resolve_idle_retry_cap",
     "resolve_idle_watchdog_budget",
