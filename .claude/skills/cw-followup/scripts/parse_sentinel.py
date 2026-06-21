@@ -175,6 +175,7 @@ def main() -> int:
 
     blocks_scanned = 0
     sentinel_text: str | None = None
+    last_result: AutoDevResult | BlockedResult | None = None
     for text in _iter_sentinel_text_blocks(transcript_path):
         blocks_scanned += 1
         if extract_block(text) is not None:
@@ -184,13 +185,14 @@ def main() -> int:
             ):
                 continue
             sentinel_text = text
+            last_result = candidate
 
-    if sentinel_text is None:
+    if last_result is None:
         result: AutoDevResult | BlockedResult = parse_stdout(
             "",
         )  # produces a BlockedResult(no_result_emitted)
     else:
-        result = parse_stdout(sentinel_text)
+        result = last_result
 
     output: dict[str, Any] = {
         "transcript_path": str(transcript_path),
