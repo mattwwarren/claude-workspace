@@ -8702,6 +8702,84 @@ class TestSalvageCommittedNoPrSessions:
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
+    def test_high_path_uses_client_default_branch_not_main(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HIGH path uses client's default_branch in gh pr create.
+
+        Regression: hardcoded 'main' was replaced by the client's
+        default_branch in the --base arg.
+        """
+        worktree = tmp_path / "wt-devbranch"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-DEVBRANCH"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-devbranch", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-devbranch",
+                    )
+                ]
+            )
+        )
+
+        # Write a client config with default_branch=develop (not main)
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            "    workspace_path: /tmp/ws-staged\n"
+            "    default_branch: develop\n"
+            "    pipeline:\n"
+            "      stages: [plan, impl, review, finalize]\n"
+        )
+
+        _write_stage_event("sess-devbranch", _STAGE_REVIEW_COMPLETE, sess.started_at)
+
+        gh_base_args: list[str] = []
+
+        def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            if args[:2] == ["git", "push"]:
+                result.stdout = ""
+                return result
+            if args[:2] == ["gh", "pr"]:
+                gh_base_args.extend(args)
+                result.stdout = "https://github.com/org/repo/pull/77\n"
+                return result
+            return result
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_subprocess_run)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-devbranch", ticket_id, "dev/devbranch", str(worktree), True)]
+        )
+
+        assert ticket_id in completed
+        # Verify --base uses the client's default_branch, not "main"
+        assert "--base" in gh_base_args
+        base_idx = gh_base_args.index("--base")
+        assert gh_base_args[base_idx + 1] == "develop"
+
 
 # ---------------------------------------------------------------------------
 # TestDetectPostReviewClean

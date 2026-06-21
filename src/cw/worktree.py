@@ -178,6 +178,10 @@ def _has_commits_beyond_base(wt_path: Path, default_branch: str) -> bool:
 
     Runs git log origin/<default_branch>..HEAD in the worktree cwd. Returns False on
     any failure — conservative default so uncertainty never triggers salvage.
+
+    # Why: salvage is a side-effecting external write. A false positive
+    # (salvaging a session with no real commits) is worse than a false
+    # negative (missing a salvageable session). Fail safe to False.
     """
     if not wt_path.exists():
         return False

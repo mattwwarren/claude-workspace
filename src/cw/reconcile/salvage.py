@@ -109,7 +109,12 @@ def salvage_committed_no_pr_sessions(
         if post_review_clean:
             # HIGH path: automated draft PR.
             _salvage_high_path(
-                session, ticket_id, branch, wt_path, completed_ticket_ids
+                session,
+                ticket_id,
+                branch,
+                wt_path,
+                completed_ticket_ids,
+                default_branch,
             )
         else:
             # LOW path: flag for human salvage.
@@ -124,6 +129,7 @@ def _salvage_high_path(
     branch: str,
     wt_path: Path,
     completed_ticket_ids: list[str],
+    default_branch: str,
 ) -> None:
     """Execute the HIGH-confidence automated draft PR path."""
     # Idempotency re-check immediately before creating the PR.
@@ -157,7 +163,7 @@ def _salvage_high_path(
                 "create",
                 "--draft",
                 "--base",
-                "main",
+                default_branch,
                 "--head",
                 branch,
                 "--title",
