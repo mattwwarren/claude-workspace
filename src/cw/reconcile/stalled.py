@@ -31,6 +31,7 @@ from cw.reconcile._shared import (
     _PHANTOM_REAP_MERGED_REASON,
     _SALVAGE_SKIP_REASON,
     _SILENTLY_IDLE_REASON,
+    _STALLED_CAP_PARKED_REASON,
     ProposedAction,
     ReapCandidate,
     _apply_queue_mutations,
@@ -41,6 +42,7 @@ from cw.reconcile._shared import (
     feature_branch_key,
     resolve_headless_budget,
     resolve_reap_policy,
+    resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
 
@@ -116,6 +118,24 @@ def _detect_stalled_candidates(
                 )
             )
             continue
+        cap = resolve_stalled_retry_cap(task, config)
+        # Why: task.attempts is the shared counter for both this per-tier stalled cap
+        # and the future global attempt ceiling (#786). Do not add a parallel counter.
+        if task is not None and task.attempts >= cap:
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+                    ticket_id=ticket_id,
+                    elapsed_seconds=elapsed,
+                    reap_reason=ReapReason.STALLED_RETRY_CAP_PARKED,
+                    lane=task.lane if task else DEFAULT_LANE,
+                    client=session.client,
+                    stage=task.stage if task else DEFAULT_STAGE,
+                    attempts=task.attempts if task else 0,
+                )
+            )
+            continue
         candidates.append(
             ReapCandidate(
                 session_id=session.id,
@@ -173,10 +193,62 @@ def _route_stalled_by_policy(
     return auto_candidates
 
 
+def _apply_stalled_state_mutations(
+    session_by_id: dict[str, Session],
+    *,
+    now: datetime,
+    salvage_candidates: list[ReapCandidate],
+    merged_revert_candidates: list[ReapCandidate],
+    gh_blocked_revert_candidates: list[ReapCandidate],
+    revert_candidates: list[ReapCandidate],
+    park_candidates: list[ReapCandidate],
+) -> None:
+    """Apply in-place session-state mutations for stalled dispositions.
+
+    Mirrors the pattern from _apply_idle_state_mutations; save_state is left
+    to the caller's combined flush.
+    """
+    for candidate in salvage_candidates:
+        session = session_by_id[candidate.session_id]
+        if candidate.salvage_result is None or candidate.salvage_csid is None:
+            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
+        _apply_salvaged_completion(
+            session, candidate.salvage_result, candidate.salvage_csid, now=now
+        )
+    # Merged-complete: PR already shipped; mark session COMPLETED, not TIMED_OUT.
+    for candidate in merged_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
+    # GH-blocked: can't verify PR status; terminate so not re-detected as stalled.
+    for candidate in gh_blocked_revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
+    for candidate in revert_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
+    # Cap exceeded: terminate and park BLOCKED_ON_USER (not re-queued to PENDING).
+    for candidate in park_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.STALLED_RETRY_CAP_PARKED
+
+
 def _apply_stalled_queue_mutations(
     revert_candidates: list[ReapCandidate],
     merged_revert_candidates: list[ReapCandidate],
     gh_blocked_revert_candidates: list[ReapCandidate],
+    park_candidates: list[ReapCandidate],
     salvage_candidates: list[ReapCandidate],
     salvaged_result_by_ticket: dict[str, AutoDevResult],
 ) -> tuple[list[str], list[str]]:
@@ -188,6 +260,7 @@ def _apply_stalled_queue_mutations(
     timed_out_ticket_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
     merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
     gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
+    parked_tids = {c.ticket_id for c in park_candidates if c.ticket_id}
     salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
     reverted: list[str] = []
     merged_completed: list[str] = []
@@ -195,6 +268,7 @@ def _apply_stalled_queue_mutations(
         timed_out_ticket_ids
         or merged_tids
         or gh_blocked_tids
+        or parked_tids
         or salvaged_ticket_ids_set
     ):
         return reverted, merged_completed
@@ -214,7 +288,7 @@ def _apply_stalled_queue_mutations(
                 task.session_id = None
                 merged_completed.append(task.ticket_id)
                 changed = True
-            elif task.ticket_id in gh_blocked_tids:
+            elif task.ticket_id in gh_blocked_tids or task.ticket_id in parked_tids:
                 task.status = QueueItemStatus.BLOCKED_ON_USER
                 task.session_id = None
                 changed = True
@@ -232,6 +306,7 @@ def _emit_stalled_events(
     revert_candidates: list[ReapCandidate],
     merged_revert_candidates: list[ReapCandidate],
     gh_blocked_revert_candidates: list[ReapCandidate],
+    park_candidates: list[ReapCandidate],
     salvage_candidates: list[ReapCandidate],
 ) -> None:
     """Emit lifecycle events and stop/cleanup surfaces for stalled dispositions.
@@ -297,6 +372,31 @@ def _emit_stalled_events(
             },
             correlation_id=candidate.ticket_id,
         )
+
+    for candidate in park_candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+        _cleanup_timed_out_worktree(session, candidate.ticket_id)
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _STALLED_CAP_PARKED_REASON,
+                "breadcrumbs": str(session.worktree_path)
+                if session.worktree_path
+                else "",
+                "crashed": False,
+                "stage": str(candidate.stage),
+                "attempts": candidate.attempts,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+        _deps.fire_push_notification(session.name, session.client)
 
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
@@ -386,6 +486,11 @@ def _act_on_stalled_candidates(
     all_revert_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK
     ]
+    park_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
     # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
@@ -420,43 +525,20 @@ def _act_on_stalled_candidates(
             correlation_id=candidate.ticket_id,
         )
 
-    if not salvage_candidates and not all_revert_candidates:
+    if not salvage_candidates and not all_revert_candidates and not park_candidates:
         return [], []
 
-    # Apply state mutations for salvage, merged-complete, and revert.
     session_by_id = {s.id: s for s in state.sessions}
 
-    for candidate in salvage_candidates:
-        session = session_by_id[candidate.session_id]
-        if candidate.salvage_result is None or candidate.salvage_csid is None:
-            continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
-        _apply_salvaged_completion(
-            session, candidate.salvage_result, candidate.salvage_csid, now=now
-        )
-
-    # Merged-complete: PR already shipped; mark session COMPLETED, not TIMED_OUT.
-    for candidate in merged_revert_candidates:
-        session = session_by_id[candidate.session_id]
-        session.status = SessionStatus.COMPLETED
-        session.completed_at = now
-        session.completed_reason = CompletionReason.NORMAL
-        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
-
-    # GH-blocked: can't verify PR status; terminate session so it is not
-    # re-detected as a stalled candidate on subsequent ticks.
-    for candidate in gh_blocked_revert_candidates:
-        session = session_by_id[candidate.session_id]
-        session.status = SessionStatus.TIMED_OUT
-        session.completed_at = now
-        session.completed_reason = CompletionReason.TIMED_OUT
-        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
-
-    for candidate in revert_candidates:
-        session = session_by_id[candidate.session_id]
-        session.status = SessionStatus.TIMED_OUT
-        session.completed_at = now
-        session.completed_reason = CompletionReason.TIMED_OUT
-        session.reap_reason = ReapReason.WALL_CLOCK_BUDGET
+    _apply_stalled_state_mutations(
+        session_by_id,
+        now=now,
+        salvage_candidates=salvage_candidates,
+        merged_revert_candidates=merged_revert_candidates,
+        gh_blocked_revert_candidates=gh_blocked_revert_candidates,
+        revert_candidates=revert_candidates,
+        park_candidates=park_candidates,
+    )
 
     save_state(state)
 
@@ -469,6 +551,7 @@ def _act_on_stalled_candidates(
         revert_candidates,
         merged_revert_candidates,
         gh_blocked_revert_candidates,
+        park_candidates,
         salvage_candidates,
         salvaged_result_by_ticket,
     )
@@ -478,6 +561,7 @@ def _act_on_stalled_candidates(
         revert_candidates,
         merged_revert_candidates,
         gh_blocked_revert_candidates,
+        park_candidates,
         salvage_candidates,
     )
 

@@ -240,11 +240,109 @@ ECOSYSTEM_GATES: dict[str, list[Gate]] = {
 }
 
 
+# uv run flags that consume the next token as their argument value
+_UV_RUN_ARGUMENT_FLAGS: frozenset[str] = frozenset(
+    {
+        "--extra",
+        "--python",
+        "--with",
+        "--directory",
+        "--project",
+        "--package",
+        "--env-file",
+        "--python-preference",
+    }
+)
+
+
+def _strip_inline_comment(line: str) -> str:
+    """Remove trailing shell comment (first ' #' to end-of-line)."""
+    idx = line.find(" #")
+    return line[:idx] if idx != -1 else line
+
+
+def _derive_gate_name(command: str) -> str:
+    """Derive a gate name from a shell command string.
+
+    - ``uv run [options] <cmd>`` → ``<cmd>`` (skips uv-run flags and their args)
+    - ``npx <cmd>`` → ``<cmd>``
+    - Anything else → first token
+    """
+    tokens = command.split()
+    if not tokens:
+        return ""
+    if len(tokens) >= 2 and tokens[0] == "uv" and tokens[1] == "run":
+        i = 2
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok.startswith("-"):
+                i += 1
+                if (
+                    tok.startswith("--")
+                    and "=" not in tok
+                    and tok in _UV_RUN_ARGUMENT_FLAGS
+                    and i < len(tokens)
+                ):
+                    i += 1  # skip the flag's value token
+            else:
+                return tok
+        return ""
+    if tokens[0] == "npx" and len(tokens) >= 2:
+        return tokens[1]
+    return tokens[0]
+
+
+def _parse_bash_block_gates(fence_lines: list[str]) -> list[Gate]:
+    """Parse Gate objects from the lines inside a bash code fence.
+
+    Joins continuation lines (trailing backslash), strips inline comments,
+    and derives gate names from executables. No autofix for bash-block gates.
+    """
+    gates: list[Gate] = []
+    pending = ""
+    for raw in fence_lines:
+        if raw.rstrip().endswith("\\"):
+            pending += raw.rstrip()[:-1].rstrip() + " "
+        else:
+            full = (pending + raw.strip()).strip()
+            pending = ""
+            command = _strip_inline_comment(full).strip()
+            if not command or command.startswith("#"):
+                continue
+            name = _derive_gate_name(command)
+            if name:
+                gates.append(Gate(name=name, command=command))
+    if pending.strip():
+        command = _strip_inline_comment(pending.strip()).strip()
+        if command and not command.startswith("#"):
+            name = _derive_gate_name(command)
+            if name:
+                gates.append(Gate(name=name, command=command))
+    return gates
+
+
 def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
     """Parse quality gates from a CLAUDE.md file.
 
-    Looks for a ## Quality Gates section with lines starting with '- '.
-    Each line format: `- name: command` or `- name: command | autofix_command`
+    Supports two formats inside the ``## Quality Gates`` section:
+
+    Bullet lines (name with optional autofix)::
+
+        - name: command
+        - name: command | autofix_command
+
+    Bash code block (gate name derived from executable)::
+
+        ```bash
+        uv run ruff check src/ tests/
+        uv run diff-cover coverage.xml --compare-branch=origin/main \\
+          --fail-under=90
+        ```
+
+    When both formats appear in the same section, bash-block gates override
+    bullet gates that share the same name (bullets first, then bash-block wins).
+    Inline comments (`` # …``) are stripped from bash-block commands.
+    An unclosed fence returns no bash-block gates and raises no exception.
     """
     if not claude_md_path.exists():
         return []
@@ -255,30 +353,42 @@ def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
         return []
 
     in_gates_section = False
-    gates: list[Gate] = []
+    in_bash_fence = False
+    fence_lines: list[str] = []
+    bullet_gates: list[Gate] = []
+    block_gates: list[Gate] = []
 
     for line in content.splitlines():
         stripped = line.strip()
-        # Detect section headers
-        if stripped.startswith("## "):
+
+        # While inside a bash fence, ## headers are treated as fence content
+        # (rare/malformed, but avoids false section-exit on ## inside code blocks).
+        if not in_bash_fence and stripped.startswith("## "):
             in_gates_section = stripped == "## Quality Gates"
             continue
 
         if not in_gates_section:
             continue
 
-        # Parse gate lines
-        if stripped.startswith("- "):
+        if in_bash_fence:
+            if stripped == "```":
+                block_gates.extend(_parse_bash_block_gates(fence_lines))
+                in_bash_fence = False
+                fence_lines = []
+            else:
+                fence_lines.append(line)
+        elif stripped in ("```bash", "```sh", "```"):
+            in_bash_fence = True
+            fence_lines = []
+        elif stripped.startswith("- "):
             gate_text = stripped[2:].strip()
             if ": " not in gate_text:
                 continue
-
             name, rest = gate_text.split(": ", 1)
             name = name.strip()
-
             if " | " in rest:
                 command, autofix = rest.split(" | ", 1)
-                gates.append(
+                bullet_gates.append(
                     Gate(
                         name=name.strip(),
                         command=command.strip(),
@@ -286,9 +396,14 @@ def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
                     )
                 )
             else:
-                gates.append(Gate(name=name.strip(), command=rest.strip()))
+                bullet_gates.append(Gate(name=name.strip(), command=rest.strip()))
 
-    return gates
+    # Bash-block gates override bullet gates of the same name; bullets kept first
+    # for any names not overridden (mirrors detect_gates() dedup logic).
+    block_names = {g.name for g in block_gates}
+    merged = [g for g in bullet_gates if g.name not in block_names]
+    merged.extend(block_gates)
+    return merged
 
 
 def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:

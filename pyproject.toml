@@ -141,6 +141,11 @@ ignore = [
 # These are untested standalone scripts; extracting helpers solely to satisfy the
 # refactor rules would be unverified churn. (PLR0913 is already globally ignored.)
 ".claude/**/*.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
+# sys.path bootstrap: these scripts call _bootstrap_sys_path() before the cw import so
+# they work under bare python3 (not just uv run). E402 is intentional here — the import
+# must follow the sys.path mutation, not precede it.
+".claude/skills/cw-followup/scripts/parse_sentinel.py" = ["E402"]
+".claude/skills/cw-validate-result/scripts/validate_sentinel.py" = ["E402"]
 "src/cw/models.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
 ]
