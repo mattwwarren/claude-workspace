@@ -1383,3 +1383,91 @@ class TestLoadEffectiveClients:
 
         self._write_clients_yaml(tmp_config_dir, tmp_path)
         assert load_effective_clients() == load_clients()
+
+
+# ---------------------------------------------------------------------------
+# TestUsageLimitedUntilPersistence
+# ---------------------------------------------------------------------------
+
+
+class TestUsageLimitedUntilPersistence:
+    """Unit tests for load_usage_limited_until / save_usage_limited_until (#804)."""
+
+    def test_save_and_load_roundtrip(self, tmp_config_dir: Path) -> None:
+        """save then load returns the same datetime (within 1s due to isoformat)."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import load_usage_limited_until, save_usage_limited_until
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        loaded = load_usage_limited_until()
+        assert loaded is not None
+        assert abs((loaded - future).total_seconds()) < 1
+
+    def test_load_returns_none_when_file_absent(self, tmp_config_dir: Path) -> None:
+        import cw.config
+        from cw.config import load_usage_limited_until
+
+        cw.config.DISPATCH_STATE_FILE.unlink(missing_ok=True)
+        assert load_usage_limited_until() is None
+
+    def test_load_returns_none_for_expired_timestamp(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A persisted timestamp in the past is treated as expired → None."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import load_usage_limited_until, save_usage_limited_until
+
+        past = datetime.now(UTC) - timedelta(hours=1)
+        save_usage_limited_until(past)
+        assert load_usage_limited_until() is None
+
+    def test_save_none_clears_backoff(self, tmp_config_dir: Path) -> None:
+        """save_usage_limited_until(None) writes null → load returns None."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import load_usage_limited_until, save_usage_limited_until
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        save_usage_limited_until(None)
+        assert load_usage_limited_until() is None
+
+    def test_load_returns_none_on_corrupt_json(self, tmp_config_dir: Path) -> None:
+        """Corrupt JSON in DISPATCH_STATE_FILE → None (silent, no exception)."""
+        import cw.config
+        from cw.config import load_usage_limited_until
+
+        cw.config.DISPATCH_STATE_FILE.write_text("not-json")
+        assert load_usage_limited_until() is None
+
+    def test_load_returns_none_for_naive_timestamp(self, tmp_config_dir: Path) -> None:
+        """Naive (timezone-unaware) ISO timestamp in sidecar → None, no crash (#804)."""
+        import json
+
+        import cw.config
+        from cw.config import load_usage_limited_until
+
+        # Write a naive ISO string (no +00:00 suffix) to the sidecar.
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"usage_limited_until": "2099-01-01T00:00:00"})
+        )
+        assert load_usage_limited_until() is None
+
+    def test_save_warns_and_does_not_raise_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """save_usage_limited_until swallows OSError and emits a warning (#804)."""
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import patch
+
+        from cw.config import save_usage_limited_until
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        with patch("cw.config.atomic_write_text", side_effect=OSError("disk full")):
+            save_usage_limited_until(future)

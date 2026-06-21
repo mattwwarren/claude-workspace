@@ -492,7 +492,7 @@ def load_usage_limited_until() -> datetime | None:
             return None
         dt = datetime.fromisoformat(ts)
         return dt if dt > datetime.now(UTC) else None
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return None
 
 

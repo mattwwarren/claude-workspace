@@ -10913,6 +10913,50 @@ def test_act_on_phantom_candidates_usage_limited_false_without_flag(
     assert usage_limited is False
 
 
+def test_act_on_phantom_candidates_signal_only_still_propagates_usage_limited(
+    tmp_config_dir: Path,
+) -> None:
+    """Under signal_only (default) policy, a CRASH_COMPLETE candidate with
+    usage_limit_detected=True is routed to BLOCKED_ON_USER (filtered from
+    auto-reap), but usage_limited=True is still returned in position 2 (#804).
+
+    This exercises the early-return path at line 538 of phantom.py that
+    returns `usage_limited` instead of hard-coded `False`."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-ul-so-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-ul-so-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-ul-so-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-ul-so-1",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="phantom-ul-so-1",
+        worktree_dirty=False,
+        usage_limit_detected=True,
+        client="client-a",
+        worktree_path=None,
+    )
+
+    # OrchestratorConfig() has reap_policy=SIGNAL_ONLY (the default), which
+    # routes clean CRASH_COMPLETE candidates to BLOCKED_ON_USER and removes
+    # them from the auto-reap list — triggering the early-return on line 538.
+    _, _, usage_limited, _, _, _ = _act_on_phantom_candidates(
+        state, [candidate], now=now, config=OrchestratorConfig()
+    )
+
+    assert usage_limited is True
+
+
 # --- Act dispatcher tests ---
 
 
