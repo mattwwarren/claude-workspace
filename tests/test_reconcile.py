@@ -1570,6 +1570,213 @@ def test_session_stage_timed_out_retried_not_emitted_for_gh_blocked(
 
 
 # ---------------------------------------------------------------------------
+# resolve_stalled_retry_cap + stalled_retry_cap_by_tier config field (#756)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_stalled_retry_cap_default_with_no_task() -> None:
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP, resolve_stalled_retry_cap
+
+    assert resolve_stalled_retry_cap(None, _auto_config()) == DEFAULT_STALLED_RETRY_CAP
+
+
+def test_resolve_stalled_retry_cap_respects_per_tier() -> None:
+    from cw.reconcile import resolve_stalled_retry_cap
+
+    cfg = _auto_config(stalled_retry_cap_by_tier={"large": 5})
+    task = TicketTask(ticket_id="T", client="c", scope_hint="large")
+    assert resolve_stalled_retry_cap(task, cfg) == 5
+
+
+def test_resolve_stalled_retry_cap_unknown_tier_falls_back() -> None:
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP, resolve_stalled_retry_cap
+
+    cfg = _auto_config(stalled_retry_cap_by_tier={"large": 5})
+    task = TicketTask(ticket_id="T", client="c", scope_hint="small")
+    assert resolve_stalled_retry_cap(task, cfg) == DEFAULT_STALLED_RETRY_CAP
+
+
+def test_stalled_retry_cap_reverts_below_cap(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """attempts < DEFAULT_STALLED_RETRY_CAP → normal REVERT_TASK path (PENDING)."""
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP, HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-below-cap"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("below-cap", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="below-cap",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="below-cap",
+        attempts=DEFAULT_STALLED_RETRY_CAP - 1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "below-cap" in reverted
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "below-cap")
+    assert t.status == QueueItemStatus.PENDING
+
+
+def test_stalled_retry_cap_parks_when_at_cap(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """attempts >= cap → BLOCKED_ON_USER, SESSION_NEEDS_ATTENTION emitted (#756)."""
+    from cw.reconcile import (
+        _STALLED_CAP_PARKED_REASON,
+        DEFAULT_STALLED_RETRY_CAP,
+        HEADLESS_TIMEOUT_SECONDS,
+    )
+
+    worktree = tmp_path / "wt-at-cap"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("at-cap", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="at-cap",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="at-cap",
+        stage=Stage.IMPL,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "at-cap" not in reverted
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "at-cap")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    assert t.session_id is None
+
+    s = next(s for s in state.sessions if s.id == "at-cap")
+    assert s.status == SessionStatus.TIMED_OUT
+    assert s.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
+
+    events = read_events(
+        consumer="test-at-cap",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] == "at-cap"
+    assert payload["paused_status"] == _STALLED_CAP_PARKED_REASON
+
+
+def test_stalled_retry_cap_no_retried_event_when_parked(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parked by retry cap: SESSION_STAGE_TIMED_OUT_RETRIED must NOT fire (#756)."""
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP, HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-cap-no-retry-evt"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("cap-no-evt", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="cap-no-evt",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cap-no-evt",
+        stage=Stage.IMPL,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    events = read_events(
+        consumer="test-cap-no-evt",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    assert not any(e.payload.get("ticket_id") == "cap-no-evt" for e in events)
+
+
+def test_stalled_retry_cap_per_tier_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stalled_retry_cap_by_tier overrides default — large-tier cap=1 parks after 1."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-tier-cap"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("tier-cap", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="tier-cap",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="tier-cap",
+        scope_hint="large",
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    cfg = _auto_config(stalled_retry_cap_by_tier={"large": 1})
+    reverted = revert_stalled_headless_sessions(state, now=now, config=cfg)
+
+    assert "tier-cap" not in reverted
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "tier-cap")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
 # Stale-worktree cleanup on timeout (GitHub issue #404): a timed-out session's
 # task is reverted to PENDING, so its worktree must be removed or the retry
 # would inherit this run's branch/commits.
