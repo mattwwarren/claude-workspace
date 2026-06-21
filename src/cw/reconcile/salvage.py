@@ -14,9 +14,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.config import load_state, save_state, sessions_lock
+from cw.config import get_client, load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.gh import pr_exists_for_branch
 from cw.models import (
     CompletionReason,
@@ -71,8 +72,15 @@ def salvage_committed_no_pr_sessions(
 
         wt_path = Path(worktree_path_str)
 
+        # Resolve default_branch from client config; fall back to "main" if the
+        # client is no longer configured (removed between session creation and now).
+        try:
+            default_branch = get_client(session.client).default_branch
+        except CwError:
+            default_branch = "main"
+
         # Confirm git-state trigger: commits beyond base AND no open PR.
-        has_commits = _has_commits_beyond_base(wt_path)
+        has_commits = _has_commits_beyond_base(wt_path, default_branch)
         if not has_commits:
             # No commits beyond base — not a salvage candidate; fall through to
             # existing recover/park on the next reconcile tick.

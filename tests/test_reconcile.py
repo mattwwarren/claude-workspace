@@ -7936,7 +7936,7 @@ class TestSalvageCommittedNoPrSessions:
             return result
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         # First call (pre-check): no PR; second call (idempotency): no PR
         monkeypatch.setattr(
@@ -8002,7 +8002,7 @@ class TestSalvageCommittedNoPrSessions:
         # No stage event written → post_review_clean=False
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8072,7 +8072,7 @@ class TestSalvageCommittedNoPrSessions:
             push_calls.append((name, client))
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8134,7 +8134,7 @@ class TestSalvageCommittedNoPrSessions:
             return True, True  # idempotency re-check: PR now exists
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", _pr_exists_side_effect
@@ -8188,7 +8188,7 @@ class TestSalvageCommittedNoPrSessions:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (None, False)
@@ -8238,7 +8238,7 @@ class TestSalvageCommittedNoPrSessions:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: False
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: False
         )
 
         candidates = [
@@ -8440,7 +8440,7 @@ class TestSalvageCommittedNoPrSessions:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8472,7 +8472,7 @@ class TestSalvageCommittedNoPrSessions:
         save_dev_queue(DevQueueStore(tasks=[]))
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8518,7 +8518,7 @@ class TestSalvageCommittedNoPrSessions:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         # (None, True) = transient error, gh available
         monkeypatch.setattr(
@@ -8561,7 +8561,7 @@ class TestSalvageCommittedNoPrSessions:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (True, True)
@@ -8609,7 +8609,7 @@ class TestSalvageCommittedNoPrSessions:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8668,7 +8668,7 @@ class TestSalvageCommittedNoPrSessions:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -9457,7 +9457,7 @@ def test_reap_reason_salvage_completed(
         return result
 
     monkeypatch.setattr(
-        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
     )
     monkeypatch.setattr(
         "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -9510,7 +9510,7 @@ def test_reap_reason_salvage_parked(
     )
 
     monkeypatch.setattr(
-        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
     )
     monkeypatch.setattr(
         "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
