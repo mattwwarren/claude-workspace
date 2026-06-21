@@ -2417,6 +2417,94 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
 
+    def test_signal_stop_finds_sentinel_via_worktree_path_fallback(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """EnterWorktree cwd shift: fallback to session.worktree_path for transcript.
+
+        When auto-dev-impl calls EnterWorktree, Claude Code shifts the active
+        cwd to a nested worktree inside .claude/worktrees/<slug>. The Stop hook
+        fires with the nested worktree cwd, but the transcript lives in the
+        dispatch worktree's project dir.
+
+        signal_stop must fall back to session.worktree_path when the cwd-based
+        lookup returns None so the session completes in the same Stop hook turn
+        rather than deferring to reconcile. See GitHub issue #799.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-799", "dispatch-worktree-799"
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+
+        # Transcript lives under the DISPATCH worktree's project dir.
+        claude_session_id = "uuid-799-fallback"
+        fake_home = tmp_path / "fake-home-799"
+        self._write_transcript(
+            worktree,
+            claude_session_id,
+            _SENTINEL_285_SHIPPED,
+            fake_home,
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        # Simulate EnterWorktree: nested worktree dir with cw-context.json
+        # (Claude Code copies hook settings into nested worktrees, so the
+        # Stop hook still fires and _resolve_signal_stop_context succeeds
+        # even though cwd is the nested path).
+        nested_worktree = worktree / ".claude" / "worktrees" / "peppy-finding-tide"
+        (nested_worktree / ".claude").mkdir(parents=True, exist_ok=True)
+        self._write_headless_context(nested_worktree, session_id=session.id)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        # Stop hook fires with the NESTED worktree as cwd.
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(nested_worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        # Session must be COMPLETED immediately — not deferred to reconcile.
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        # No TIMED_OUT event.
+        timed_out_events = read_events(
+            consumer="test-799-no-timed-out",
+            event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+        )
+        assert not any(
+            e.payload.get("session_id") == session.id for e in timed_out_events
+        )
+
 
 class TestSentinelPresentInTranscript:
     """Direct tests for the real _sentinel_present_in_transcript helper.
