@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import click
 
+from cw import queue_peek as _queue_peek
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
 from cw.events import (
@@ -195,6 +196,28 @@ def queue_next(client: str, purpose: str | None, as_json: bool) -> None:
             f"{item.id}  priority={item.task.priority}"
             f"  purpose={item.task.purpose}  {item.task.description}"
         )
+
+
+@queue.command(name="peek")
+@click.option("--client", "-c", default=None, help="Filter to one client.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of a table.")
+@handle_errors
+def queue_peek(client: str | None, as_json: bool) -> None:
+    """In-flight inspection of RUNNING dev-queue sessions.
+
+    For each RUNNING task, reports age, idle gap, last sentinel status, PR
+    state, and a WAIT / PEEK / STOP recommendation from the peek-stop ladder.
+    Reports only — never stops sessions itself.
+
+    To stop a session after reviewing:
+      cw spawn close <session_id>
+    """
+    now = datetime.now(UTC)
+    rows = _queue_peek.build_peek_rows(client, now)
+    if as_json:
+        click.echo(json.dumps(rows, indent=2, default=str))
+    else:
+        _queue_peek.print_table(rows)
 
 
 @queue.command(name="claim")

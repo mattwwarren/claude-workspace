@@ -15,16 +15,19 @@ from cw.config import get_client, load_clients, load_orchestrator_config, load_s
 from cw.dev_queue import (
     _find_ticket,
     add_ticket,
+    approve_ticket,
     cancel_ticket,
     clear_tickets,
     list_tickets,
     load_dev_queue,
     move_ticket,
     remove_ticket,
+    requeue_ticket,
     resolve_client,
+    unblock_ticket,
     wait_for_terminal,
 )
-from cw.dispatch import run_dispatch_loop
+from cw.dispatch import TICK_STALE_SECONDS, run_dispatch_loop
 from cw.events import record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
@@ -141,6 +144,92 @@ def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
         },
     )
     click.echo(f"Moved {ticket_id} ({client}): {from_lane} -> {to_lane}")
+
+
+@dev_queue.command(name="approve")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@handle_errors
+def dev_queue_approve(ticket_id: str, client: str | None) -> None:
+    """Approve a plan or review gate and advance to the next stage.
+
+    The ticket must be BLOCKED_ON_USER with last_result status of
+    plan_pending_approval or review_pending_approval.
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    result = approve_ticket(ticket_id, resolved)
+    record_event(
+        OrchestratorEventType.TICKET_APPROVED,
+        {
+            "ticket_id": ticket_id,
+            "client": resolved,
+            "from_stage": result["from_stage"],
+            "to_stage": result["to_stage"],
+        },
+    )
+    click.echo(
+        f"Approved {ticket_id} ({resolved}):"
+        f" {result['from_stage']} -> {result['to_stage']}"
+    )
+
+
+@dev_queue.command(name="requeue")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@click.option(
+    "--stage",
+    "stage_override",
+    type=click.Choice(["plan", "impl", "review", "finalize"]),
+    default=None,
+    help="Stage to requeue at (default: current stage). Forward-only.",
+)
+@handle_errors
+def dev_queue_requeue(
+    ticket_id: str, client: str | None, stage_override: str | None
+) -> None:
+    """Requeue a BLOCKED_ON_USER ticket back to PENDING.
+
+    Defaults to re-running the current stage. Use --stage to advance forward
+    (never backward — forward-only guard enforced).
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    result = requeue_ticket(ticket_id, resolved, stage_override)
+    record_event(
+        OrchestratorEventType.TICKET_REQUEUED,
+        {
+            "ticket_id": ticket_id,
+            "client": resolved,
+            "from_stage": result["from_stage"],
+            "to_stage": result["to_stage"],
+        },
+    )
+    click.echo(
+        f"Requeued {ticket_id} ({resolved}):"
+        f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
+    )
+
+
+@dev_queue.command(name="unblock")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@handle_errors
+def dev_queue_unblock(ticket_id: str, client: str | None) -> None:
+    """Clear salvage/park markers and requeue a SALVAGE_PARKED ticket.
+
+    The ticket must be BLOCKED_ON_USER with a SALVAGE_PARKED session.
+    Clears both last_result and reap_reason on the session, then
+    sets the task back to PENDING.
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    unblock_ticket(ticket_id, resolved)
+    record_event(
+        OrchestratorEventType.TICKET_UNBLOCKED,
+        {"ticket_id": ticket_id, "client": resolved},
+    )
+    click.echo(f"Unblocked {ticket_id} ({resolved}): cleared park markers, PENDING")
 
 
 @dev_queue.command(name="remove")
@@ -282,14 +371,20 @@ def dev_queue_status(client: str | None) -> None:
             "  (snapshot from the most recent dispatch tick"
             " — not live queue state; see the table above)"
         )
+        now = datetime.now(UTC)
         for client_name in clients_seen:
             if client_name in tick_data:
                 tick = tick_data[client_name]
-                click.echo(
+                tick_line = (
                     f"  {client_name}: claimed={tick.claimed}  pending={tick.pending}"
                     f"  running={tick.running}/{tick.cap}"
                     f"  skip={tick.skip_reason}"
                 )
+                age_secs = (now - tick.tick_at).total_seconds()
+                age = int(age_secs)
+                if age_secs > TICK_STALE_SECONDS:
+                    tick_line += f" [STALE — no tick in {age}s]"
+                click.echo(tick_line)
                 _emit_dev_queue_lane_breakdown(by_client[client_name])
 
 
@@ -868,6 +963,83 @@ def dev_queue_wait(
         )
 
         time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
+
+
+def _task_to_dict(task: TicketTask) -> dict[str, object]:
+    return {
+        "ticket_id": task.ticket_id,
+        "client": task.client,
+        "status": task.status.value,
+        "session_id": task.session_id,
+        "attempts": task.attempts,
+        "priority": task.priority,
+        "lane": task.lane,
+        "created_at": task.created_at.isoformat(),
+        "total_cost_usd": task.total_cost_usd,
+        "worktree_path": str(task.worktree_path) if task.worktree_path else None,
+    }
+
+
+def _print_tasks_human(tasks: list[TicketTask]) -> None:
+    if not tasks:
+        click.echo("No tasks found.")
+        return
+    headers = ["TICKET_ID", "CLIENT", "STATUS", "SESSION_ID", "ATTEMPTS", "LANE"]
+    col_widths = [12, 16, 16, 12, 8, 12]
+    header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
+    click.echo(header)
+    click.echo("-" * len(header))
+    for t in tasks:
+        row = [
+            t.ticket_id[:12],
+            t.client[:16],
+            t.status.value[:16],
+            (t.session_id or "-")[:12],
+            str(t.attempts)[:8],
+            t.lane[:12],
+        ]
+        click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
+
+
+@dev_queue.command(name="tasks")
+@click.option("--ticket", "-t", default=None, help="Filter by ticket id.")
+@click.option(
+    "--status",
+    "-s",
+    default=None,
+    type=click.Choice([s.value for s in QueueItemStatus]),
+    help="Filter by task status.",
+)
+@click.option("--client", "-c", default=None, help="Filter by client name.")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON array.")
+@handle_errors
+def dev_queue_tasks(
+    ticket: str | None,
+    status: str | None,
+    client: str | None,
+    output_json: bool,
+) -> None:
+    """List dev-queue tasks with typed field output.
+
+    Programmatic inspection view. For the human aggregate summary use dev-queue status.
+    """
+    queue = load_dev_queue()
+    tasks: list[TicketTask] = queue.tasks
+
+    if ticket is not None:
+        tasks = [t for t in tasks if t.ticket_id == ticket]
+
+    if status is not None:
+        target_status = QueueItemStatus(status)
+        tasks = [t for t in tasks if t.status == target_status]
+
+    if client is not None:
+        tasks = [t for t in tasks if t.client == client]
+
+    if output_json:
+        click.echo(json.dumps([_task_to_dict(t) for t in tasks]))
+    else:
+        _print_tasks_human(tasks)
 
 
 @dev_queue.command(name="refresh-all")

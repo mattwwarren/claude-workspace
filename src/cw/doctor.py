@@ -36,6 +36,7 @@ from cw.config import (
     state_file,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dispatch import TICK_STALE_SECONDS
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
@@ -48,6 +49,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
+from cw.orchestrate import TickSummary, latest_tick_summary_by_client
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     feature_branch_key,
@@ -55,7 +57,7 @@ from cw.reconcile import (
     ticket_id_for_session,
 )
 from cw.tracker import PROJECT_CONFIG_RELPATH
-from cw.worktree import _git_dir
+from cw.worktree import _git_dir, get_head_branch
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, DevQueueStore, Session, TicketTask
@@ -413,6 +415,55 @@ def _check_workspace_paths() -> list[CheckResult]:
                     f"workspace/{name}",
                     ok=False,
                     detail=f"path does not exist: {git_dir}",
+                )
+            )
+    return results
+
+
+def _check_dispatch_repo_head(
+    clients: dict[str, ClientConfig],
+) -> list[CheckResult]:
+    """Check each client's dispatch repo HEAD is on its default branch."""
+    results: list[CheckResult] = []
+    for name, client in clients.items():
+        try:
+            branch = get_head_branch(client)
+        except OSError as exc:
+            results.append(
+                CheckResult(
+                    f"dispatch-repo-head/{name}",
+                    ok=True,
+                    warn=True,
+                    detail=f"could not read HEAD: {exc}",
+                )
+            )
+            continue
+        if branch is None:
+            git_dir = _git_dir(client)
+            default = client.default_branch
+            results.append(
+                CheckResult(
+                    f"dispatch-repo-head/{name}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"repo HEAD is detached, expected '{default}'"
+                        f" — run: git -C {git_dir} checkout {default}"
+                    ),
+                )
+            )
+        elif branch != client.default_branch:
+            git_dir = _git_dir(client)
+            default = client.default_branch
+            results.append(
+                CheckResult(
+                    f"dispatch-repo-head/{name}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"repo HEAD is on '{branch}', expected '{default}'"
+                        f" — run: git -C {git_dir} checkout {default}"
+                    ),
                 )
             )
     return results
@@ -837,6 +888,43 @@ def _check_loop_health() -> list[CheckResult]:
     return results
 
 
+def _check_loop_liveness() -> list[CheckResult]:
+    """Warn when any client's last dispatch tick is stale and has pending tickets."""
+    tick_data: dict[str, TickSummary] = latest_tick_summary_by_client()
+    if not tick_data:
+        return [
+            CheckResult("loop-liveness", ok=True, warn=False, detail="no tick history")
+        ]
+
+    now = datetime.now(UTC)
+    results: list[CheckResult] = []
+    for client, tick in tick_data.items():
+        age = (now - tick.tick_at).total_seconds()
+        if age > TICK_STALE_SECONDS and tick.pending > 0:
+            results.append(
+                CheckResult(
+                    f"loop-liveness/{client}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"no dispatch tick for {client} in {int(age)}s"
+                        f" ({tick.pending} pending) — loop may have exited."
+                        " Run `cw dev-queue run`."
+                    ),
+                )
+            )
+    if not results:
+        results.append(
+            CheckResult(
+                "loop-liveness",
+                ok=True,
+                warn=False,
+                detail="no stale+pending condition",
+            )
+        )
+    return results
+
+
 def _gh_pr_states(branch: str) -> tuple[list[dict[str, Any]], bool]:
     """Return (pr_list, gh_missing) for the given branch.
 
@@ -1058,7 +1146,9 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_cw_version())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())
+    report.checks.extend(_check_loop_liveness())
     report.checks.extend(_check_workspace_paths())
+    report.checks.extend(_check_dispatch_repo_head(_clients))
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:

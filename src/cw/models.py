@@ -203,6 +203,7 @@ class OrchestratorEventType(StrEnum):
     PR_MERGEABLE = "pr.mergeable"
     PR_MERGED = "pr.merged"
     DISPATCH_TICK = "dispatch.tick"
+    DISPATCH_LOOP_EXITED = "dispatch.loop_exited"
     SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
     SESSION_REAP_PROPOSED = "session.reap_proposed"
@@ -212,6 +213,10 @@ class OrchestratorEventType(StrEnum):
     LANE_PAUSED = "lane.paused"
     LANE_RESUMED = "lane.resumed"
     TICKET_MOVED = "ticket.moved"
+    TICKET_APPROVED = "ticket.approved"
+    TICKET_REQUEUED = "ticket.requeued"
+    TICKET_UNBLOCKED = "ticket.unblocked"
+    SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
 
 
 class DispatchSkipReason(StrEnum):

@@ -17,7 +17,7 @@ validation logic:
 - **pre-flight** reuses `cw-smoke-test/scripts/preflight.py` (per ticket).
 - **dispatch** uses `cw dev-queue add` + `cw dev-queue run`.
 - **wave lifecycle** uses the bundled `scripts/wave_status.py` (is the batch done?).
-- **in-flight health** uses `.claude/scripts/cw_queue_peek.py` (WAIT/PEEK/STOP).
+- **in-flight health** uses `cw queue peek` (WAIT/PEEK/STOP).
 - **attention** uses the `session.needs_attention` / `session.timed_out` event bus.
 
 ## When to use
@@ -143,7 +143,7 @@ immediately and pause for the operator. Do not silently re-dispatch.
 For the `in_flight` tickets, run the peek-stop ladder:
 
 ```bash
-python3 .claude/scripts/cw_queue_peek.py --client <CLIENT>
+cw queue peek --client <CLIENT>
 ```
 
 Follow `/cw-queue-peek`: act on STOP / STOP-OR-PEEK rows (stuck post-PR-merge,

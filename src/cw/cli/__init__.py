@@ -17,6 +17,7 @@ from cw.cli import (
     config_cmds,
     maintenance,
     queues,
+    session_inspect,
     worktree,
 )
 from cw.cli._base import (
@@ -43,6 +44,7 @@ from cw.cli.orchestrate import (
     _drain_reap_proposals,
     _format_status_human,
 )
+from cw.cli.session_inspect import session_group
 from cw.cli.sessions import _display_sessions, _display_status
 from cw.cli.spawn import (
     _spawn_close_impl,
@@ -54,6 +56,8 @@ from cw.result import result as result_group
 
 # Result command group is defined in cw.result; attach it to the root group.
 main.add_command(result_group)
+# Session inspection group defined in cw.cli.session_inspect.
+main.add_command(session_group)
 
 __all__ = [
     "_ORCHESTRATOR_AGENT",
@@ -82,5 +86,7 @@ __all__ = [
     "main",
     "maintenance",
     "queues",
+    "session_group",
+    "session_inspect",
     "worktree",
 ]

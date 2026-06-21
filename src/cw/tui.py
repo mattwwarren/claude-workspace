@@ -609,11 +609,10 @@ def _handle_action_key(
         return
 
     if key == "p":
-        row = rows[cursor] if n > 0 else None
-        if shutil.which("cw") is not None and row is not None and row.session_id:
-            subprocess.run(["cw", "queue-peek", row.session_id], check=False)
+        if shutil.which("cw") is not None:
+            subprocess.run(["cw", "queue", "peek"], check=False)
         else:
-            notice_queue.put("queue-peek not available")
+            notice_queue.put("cw not on PATH")
         return
 
     if key == "c":

@@ -4149,3 +4149,256 @@ class TestWedgeDeadSessionBlockedOnUser:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "TST-590-H")
         assert t.status == QueueItemStatus.PENDING
+
+
+# TestCheckLoopLiveness
+# ---------------------------------------------------------------------------
+
+
+class TestCheckLoopLiveness:
+    """Tests for _check_loop_liveness."""
+
+    def _make_tick_summary(self, *, pending: int, tick_at: datetime) -> object:
+        from cw.orchestrate import TickSummary
+
+        return TickSummary(
+            claimed=0,
+            pending=pending,
+            running=0,
+            cap=3,
+            skip_reason="none",
+            tick_at=tick_at,
+        )
+
+    def test_stale_tick_with_pending_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Stale tick_at + pending>0 → warn=True."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        stale_at = datetime.now(UTC) - timedelta(seconds=200)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {
+                "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
+            },
+        )
+        results = _check_loop_liveness()
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "loop-liveness" in warn_results[0].name
+        assert "test-client" in warn_results[0].name
+
+    def test_fresh_tick_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Fresh tick_at → no warn."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        fresh_at = datetime.now(UTC) - timedelta(seconds=10)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {
+                "test-client": self._make_tick_summary(pending=2, tick_at=fresh_at)
+            },
+        )
+        results = _check_loop_liveness()
+        assert not any(r.warn for r in results)
+
+    def test_empty_tick_data_returns_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Empty tick_data (no-tick-ever) → ok, no warn."""
+        from cw.doctor import _check_loop_liveness
+
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            dict,
+        )
+        results = _check_loop_liveness()
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].warn is False
+
+    def test_stale_tick_without_pending_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Stale tick but pending=0 → no warn."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        stale_at = datetime.now(UTC) - timedelta(seconds=200)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            lambda: {
+                "test-client": self._make_tick_summary(pending=0, tick_at=stale_at)
+            },
+        )
+        results = _check_loop_liveness()
+        assert not any(r.warn for r in results)
+
+    def test_run_doctor_includes_liveness_check(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """run_doctor() includes at least one loop-liveness CheckResult."""
+        _stub_claude_version_ok(monkeypatch)
+        monkeypatch.setattr(
+            "cw.doctor.latest_tick_summary_by_client",
+            dict,
+        )
+        report = run_doctor()
+        liveness_checks = [c for c in report.checks if "loop-liveness" in c.name]
+        assert liveness_checks, "expected at least one loop-liveness check in report"
+
+
+# ---------------------------------------------------------------------------
+# TestCheckDispatchRepoHead
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDispatchRepoHead:
+    """Tests for _check_dispatch_repo_head doctor check."""
+
+    def _write_client(
+        self, tmp_config_dir: Path, tmp_path: Path, name: str = "my-client"
+    ) -> Path:
+        workspace = tmp_path / name
+        workspace.mkdir()
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  {name}:\n    workspace_path: {workspace}\n"
+            f"    default_branch: main\n"
+        )
+        return workspace
+
+    def test_on_default_branch_returns_empty(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HEAD on default_branch → no check results emitted."""
+        from cw.doctor import _check_dispatch_repo_head
+
+        self._write_client(tmp_config_dir, tmp_path)
+        monkeypatch.setattr("cw.doctor.get_head_branch", lambda _: "main")
+
+        results = _check_dispatch_repo_head({"my-client": _load_client("my-client")})
+
+        assert results == []
+
+    def test_off_default_branch_returns_warn(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HEAD on wrong branch → warn CheckResult with remediation hint."""
+        from cw.doctor import _check_dispatch_repo_head
+
+        workspace = self._write_client(tmp_config_dir, tmp_path)
+        monkeypatch.setattr("cw.doctor.get_head_branch", lambda _: "feature-x")
+
+        results = _check_dispatch_repo_head({"my-client": _load_client("my-client")})
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.name == "dispatch-repo-head/my-client"
+        assert r.ok is True
+        assert r.warn is True
+        assert "feature-x" in r.detail
+        assert "main" in r.detail
+        assert str(workspace) in r.detail
+        assert "checkout" in r.detail
+
+    def test_detached_head_returns_warn(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HEAD detached (get_head_branch returns None) → warn with 'detached'."""
+        from cw.doctor import _check_dispatch_repo_head
+
+        workspace = self._write_client(tmp_config_dir, tmp_path)
+        monkeypatch.setattr("cw.doctor.get_head_branch", lambda _: None)
+
+        results = _check_dispatch_repo_head({"my-client": _load_client("my-client")})
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.name == "dispatch-repo-head/my-client"
+        assert r.ok is True
+        assert r.warn is True
+        assert "detached" in r.detail
+        assert "main" in r.detail
+        assert str(workspace) in r.detail
+        assert "checkout" in r.detail
+
+    def test_oserror_returns_warn_no_crash(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OSError from get_head_branch → graceful-degrade warn, no crash."""
+        from cw.doctor import _check_dispatch_repo_head
+
+        self._write_client(tmp_config_dir, tmp_path)
+
+        def _raise(client: object) -> str:
+            msg = "git: not found"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.doctor.get_head_branch", _raise)
+
+        results = _check_dispatch_repo_head({"my-client": _load_client("my-client")})
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.name == "dispatch-repo-head/my-client"
+        assert r.ok is True
+        assert r.warn is True
+        assert "could not read HEAD" in r.detail
+        assert "git: not found" in r.detail
+
+    def test_no_clients_returns_empty(self) -> None:
+        """Empty client dict → []."""
+        from cw.doctor import _check_dispatch_repo_head
+
+        assert _check_dispatch_repo_head({}) == []
+
+    def test_run_doctor_wires_check(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_doctor surfaces dispatch-repo-head warn when HEAD is off default."""
+        _stub_claude_version_ok(monkeypatch)
+        self._write_client(tmp_config_dir, tmp_path)
+        monkeypatch.setattr("cw.doctor.get_head_branch", lambda _: "hotfix")
+
+        report = run_doctor()
+
+        head_checks = [
+            c for c in report.checks if c.name.startswith("dispatch-repo-head/")
+        ]
+        assert len(head_checks) == 1
+        assert head_checks[0].warn is True
+        assert "hotfix" in head_checks[0].detail
+
+
+def _load_client(name: str) -> ClientConfig:
+    """Load a single ClientConfig by name from the current config."""
+    from cw.config import load_clients
+
+    return load_clients()[name]
