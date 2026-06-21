@@ -191,3 +191,122 @@ class TestIterSentinelTextBlocks:
 
         monkeypatch.setattr("pathlib.Path.open", _boom)
         assert list(_iter_sentinel_text_blocks(transcript)) == []
+
+
+class TestParseSentinelFromTranscriptToolResult:
+    """Integration test: _parse_sentinel_from_transcript finds sentinel in tool_result.
+
+    Regression for GitHub #774 / #731: the skill-script scanner previously only
+    walked assistant text blocks, missing sentinels emitted via Bash stdout
+    (tool_result). This test drives the full chain — _parse_sentinel_from_transcript
+    → _iter_sentinel_text_blocks → extract_block → parse_stdout — with a transcript
+    whose sentinel lives exclusively inside a tool_result block.
+    """
+
+    _SENTINEL_TOOL_RESULT = (
+        "<<<AUTO_DEV_RESULT\n"
+        "{\n"
+        '  "schema_version": 4,\n'
+        '  "ticket_id": "774",\n'
+        '  "status": "stage_complete",\n'
+        '  "stage_reached": "stage2_impl",\n'
+        '  "scope": {"tier": "small", "files": 2, "lines_estimate": 20,'
+        ' "lines_actual": 18, "forbidden_touched": false},\n'
+        '  "plan_source": "github_issue_existing",\n'
+        '  "branch": "dev/774",\n'
+        '  "worktree_path": "/tmp/wt/774",\n'
+        '  "fork_point_sha": "abc1234",\n'
+        '  "commits": ["sha1"],\n'
+        '  "pr": null,\n'
+        '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+        '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false,'
+        ' "shortcuts": [], "recommendation": "PROCEED",'
+        ' "downgrade_applied": false, "fix_loop_escalated": false},\n'
+        '  "friction_highlights": [],\n'
+        '  "blocker": null,\n'
+        '  "next_actions": []\n'
+        "}\n"
+        "AUTO_DEV_RESULT>>>"
+    )
+
+    def _write_transcript_tool_result(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        sentinel_text: str,
+        home: Path,
+    ) -> None:
+        """Write a transcript where the sentinel is in a tool_result block only."""
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        # Assistant block with NO sentinel — just a narrative line
+        assistant_record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Impl complete."}],
+            },
+        }
+        # User block carrying the tool_result (Bash stdout) with the real sentinel
+        tool_result_record = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": sentinel_text}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(assistant_record) + "\n" + json.dumps(tool_result_record) + "\n"
+        )
+
+    def test_parses_sentinel_from_tool_result_block(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel in tool_result stdout → AutoDevResult, not None."""
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-774"
+        worktree.mkdir(parents=True)
+        self._write_transcript_tool_result(
+            worktree, "uuid-774", self._SENTINEL_TOOL_RESULT, fake_home
+        )
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-774")
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "774"
+        assert parsed.status == "stage_complete"
+
+    def test_no_sentinel_in_assistant_text_alone_returns_none(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sanity: when sentinel is NOT in tool_result or assistant text → None."""
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-774b"
+        worktree.mkdir(parents=True)
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        # Only a plain assistant narrative — no sentinel anywhere
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Just a progress note."}],
+            },
+        }
+        (project_dir / "uuid-774b.jsonl").write_text(json.dumps(record) + "\n")
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-774b") is None
