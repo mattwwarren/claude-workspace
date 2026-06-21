@@ -26,6 +26,23 @@ import sys
 from pathlib import Path
 from typing import Any, get_args
 
+
+def _bootstrap_sys_path() -> None:
+    """Add repo src/ to sys.path so cw imports work under bare python3."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            src = str(parent / "src")
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            return
+    msg = (
+        f"Could not locate pyproject.toml walking up from {__file__} — bootstrap failed"
+    )
+    raise RuntimeError(msg)
+
+
+_bootstrap_sys_path()
+
 # Single source of truth for the canonical status set — never hardcode it.
 # `Status` grew two v4 members in issue #191 (ambiguities_pending_resolution,
 # premises_pending_verification); deriving the set keeps this validator in
