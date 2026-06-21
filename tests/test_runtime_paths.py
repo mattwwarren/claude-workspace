@@ -9,12 +9,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING
 
 import pytest
-
-if TYPE_CHECKING:
-    pass
 
 _RUNTIME_PATHS = (
     Path(__file__).resolve().parents[1]
