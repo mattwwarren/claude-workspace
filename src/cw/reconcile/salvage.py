@@ -9,14 +9,16 @@ session lock. See GitHub issue #497.
 from __future__ import annotations
 
 import contextlib
+import logging
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.config import load_state, save_state, sessions_lock
+from cw.config import get_client, load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.gh import pr_exists_for_branch
 from cw.models import (
     CompletionReason,
@@ -37,6 +39,8 @@ from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
     from cw.models import Session
+
+_log = logging.getLogger(__name__)
 
 
 def salvage_committed_no_pr_sessions(
@@ -71,8 +75,20 @@ def salvage_committed_no_pr_sessions(
 
         wt_path = Path(worktree_path_str)
 
+        # Resolve default_branch from client config; skip session if client no
+        # longer configured (removed between session creation and now).
+        try:
+            default_branch = get_client(session.client).default_branch
+        except CwError:
+            _log.warning(
+                "salvage: unknown client %r for session %s — skipping",
+                session.client,
+                session_id,
+            )
+            continue
+
         # Confirm git-state trigger: commits beyond base AND no open PR.
-        has_commits = _has_commits_beyond_base(wt_path)
+        has_commits = _has_commits_beyond_base(wt_path, default_branch)
         if not has_commits:
             # No commits beyond base — not a salvage candidate; fall through to
             # existing recover/park on the next reconcile tick.
@@ -93,7 +109,12 @@ def salvage_committed_no_pr_sessions(
         if post_review_clean:
             # HIGH path: automated draft PR.
             _salvage_high_path(
-                session, ticket_id, branch, wt_path, completed_ticket_ids
+                session,
+                ticket_id,
+                branch,
+                wt_path,
+                completed_ticket_ids,
+                default_branch,
             )
         else:
             # LOW path: flag for human salvage.
@@ -108,6 +129,7 @@ def _salvage_high_path(
     branch: str,
     wt_path: Path,
     completed_ticket_ids: list[str],
+    default_branch: str,
 ) -> None:
     """Execute the HIGH-confidence automated draft PR path."""
     # Idempotency re-check immediately before creating the PR.
@@ -141,7 +163,7 @@ def _salvage_high_path(
                 "create",
                 "--draft",
                 "--base",
-                "main",
+                default_branch,
                 "--head",
                 branch,
                 "--title",

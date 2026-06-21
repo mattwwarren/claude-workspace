@@ -7916,6 +7916,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         # Write a stage event for post-review clean
         _write_stage_event("sess-high", _STAGE_REVIEW_COMPLETE, sess.started_at)
 
@@ -7936,7 +7938,7 @@ class TestSalvageCommittedNoPrSessions:
             return result
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         # First call (pre-check): no PR; second call (idempotency): no PR
         monkeypatch.setattr(
@@ -8001,8 +8003,10 @@ class TestSalvageCommittedNoPrSessions:
         )
         # No stage event written → post_review_clean=False
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8066,13 +8070,15 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         push_calls: list[tuple[str, str]] = []
 
         def _capture_push(name: str, client: str, **_kw: object) -> None:
             push_calls.append((name, client))
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8125,6 +8131,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         call_count = [0]
 
         def _pr_exists_side_effect(branch: str, **_kw: object) -> tuple[bool, bool]:
@@ -8134,7 +8142,7 @@ class TestSalvageCommittedNoPrSessions:
             return True, True  # idempotency re-check: PR now exists
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", _pr_exists_side_effect
@@ -8187,8 +8195,10 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (None, False)
@@ -8237,8 +8247,10 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: False
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: False
         )
 
         candidates = [
@@ -8427,6 +8439,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         # Write event with a timestamp AFTER session started
         # (but _detect_post_review_clean uses since_ts=session.started_at
         #  and checks session_id match)
@@ -8440,7 +8454,7 @@ class TestSalvageCommittedNoPrSessions:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8472,7 +8486,7 @@ class TestSalvageCommittedNoPrSessions:
         save_dev_queue(DevQueueStore(tasks=[]))
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8517,8 +8531,10 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         # (None, True) = transient error, gh available
         monkeypatch.setattr(
@@ -8560,8 +8576,10 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (True, True)
@@ -8574,6 +8592,42 @@ class TestSalvageCommittedNoPrSessions:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.RUNNING
+
+    def test_salvage_skips_session_with_unknown_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Unknown client → CwError caught, session skipped, completed empty."""
+        worktree = tmp_path / "wt-unknown-client"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-UNKNOWNCLIENT"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-unknownclient", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-unknownclient",
+                    )
+                ]
+            )
+        )
+        # Intentionally no _write_staged_clients_yaml call → get_client raises CwError
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-unknownclient", ticket_id, "dev/uc-branch", str(worktree), True)]
+        )
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING  # unchanged — session skipped
 
     def test_git_push_failure_downgrades_to_low(
         self,
@@ -8602,6 +8656,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         def _subprocess_push_fails(args: list[str], **_kw: object) -> None:
             if args[:2] == ["git", "push"]:
                 raise subprocess.CalledProcessError(1, args)
@@ -8609,7 +8665,7 @@ class TestSalvageCommittedNoPrSessions:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8656,6 +8712,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         def _subprocess_create_fails(args: list[str], **_kw: object) -> MagicMock:
             if args[:2] == ["git", "push"]:
                 result = MagicMock()
@@ -8668,7 +8726,7 @@ class TestSalvageCommittedNoPrSessions:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -8687,6 +8745,84 @@ class TestSalvageCommittedNoPrSessions:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_high_path_uses_client_default_branch_not_main(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HIGH path uses client's default_branch in gh pr create.
+
+        Regression: hardcoded 'main' was replaced by the client's
+        default_branch in the --base arg.
+        """
+        worktree = tmp_path / "wt-devbranch"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-DEVBRANCH"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-devbranch", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-devbranch",
+                    )
+                ]
+            )
+        )
+
+        # Write a client config with default_branch=develop (not main)
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            "    workspace_path: /tmp/ws-staged\n"
+            "    default_branch: develop\n"
+            "    pipeline:\n"
+            "      stages: [plan, impl, review, finalize]\n"
+        )
+
+        _write_stage_event("sess-devbranch", _STAGE_REVIEW_COMPLETE, sess.started_at)
+
+        gh_base_args: list[str] = []
+
+        def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            if args[:2] == ["git", "push"]:
+                result.stdout = ""
+                return result
+            if args[:2] == ["gh", "pr"]:
+                gh_base_args.extend(args)
+                result.stdout = "https://github.com/org/repo/pull/77\n"
+                return result
+            return result
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_subprocess_run)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-devbranch", ticket_id, "dev/devbranch", str(worktree), True)]
+        )
+
+        assert ticket_id in completed
+        # Verify --base uses the client's default_branch, not "main"
+        assert "--base" in gh_base_args
+        base_idx = gh_base_args.index("--base")
+        assert gh_base_args[base_idx + 1] == "develop"
 
 
 # ---------------------------------------------------------------------------
@@ -9450,6 +9586,8 @@ def test_reap_reason_salvage_completed(
         )
     )
 
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
     def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
         result = MagicMock()
         result.returncode = 0
@@ -9457,7 +9595,7 @@ def test_reap_reason_salvage_completed(
         return result
 
     monkeypatch.setattr(
-        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
     )
     monkeypatch.setattr(
         "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
@@ -9509,8 +9647,10 @@ def test_reap_reason_salvage_parked(
         )
     )
 
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
     monkeypatch.setattr(
-        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p: True
+        "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
     )
     monkeypatch.setattr(
         "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
