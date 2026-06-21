@@ -9,6 +9,7 @@ session lock. See GitHub issue #497.
 from __future__ import annotations
 
 import contextlib
+import logging
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,8 @@ from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
     from cw.models import Session
+
+_log = logging.getLogger(__name__)
 
 
 def salvage_committed_no_pr_sessions(
@@ -72,12 +75,17 @@ def salvage_committed_no_pr_sessions(
 
         wt_path = Path(worktree_path_str)
 
-        # Resolve default_branch from client config; fall back to "main" if the
-        # client is no longer configured (removed between session creation and now).
+        # Resolve default_branch from client config; skip session if client no
+        # longer configured (removed between session creation and now).
         try:
             default_branch = get_client(session.client).default_branch
         except CwError:
-            default_branch = "main"
+            _log.warning(
+                "salvage: unknown client %r for session %s — skipping",
+                session.client,
+                session_id,
+            )
+            continue
 
         # Confirm git-state trigger: commits beyond base AND no open PR.
         has_commits = _has_commits_beyond_base(wt_path, default_branch)

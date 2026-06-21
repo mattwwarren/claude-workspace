@@ -7916,6 +7916,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         # Write a stage event for post-review clean
         _write_stage_event("sess-high", _STAGE_REVIEW_COMPLETE, sess.started_at)
 
@@ -8001,6 +8003,8 @@ class TestSalvageCommittedNoPrSessions:
         )
         # No stage event written → post_review_clean=False
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
             "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
@@ -8066,6 +8070,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         push_calls: list[tuple[str, str]] = []
 
         def _capture_push(name: str, client: str, **_kw: object) -> None:
@@ -8124,6 +8130,8 @@ class TestSalvageCommittedNoPrSessions:
                 ]
             )
         )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
 
         call_count = [0]
 
@@ -8427,6 +8435,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         # Write event with a timestamp AFTER session started
         # (but _detect_post_review_clean uses since_ts=session.started_at
         #  and checks session_id match)
@@ -8602,6 +8612,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         def _subprocess_push_fails(args: list[str], **_kw: object) -> None:
             if args[:2] == ["git", "push"]:
                 raise subprocess.CalledProcessError(1, args)
@@ -8655,6 +8667,8 @@ class TestSalvageCommittedNoPrSessions:
                 ]
             )
         )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
 
         def _subprocess_create_fails(args: list[str], **_kw: object) -> MagicMock:
             if args[:2] == ["git", "push"]:
@@ -9450,6 +9464,8 @@ def test_reap_reason_salvage_completed(
         )
     )
 
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
     def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
         result = MagicMock()
         result.returncode = 0
@@ -9508,6 +9524,8 @@ def test_reap_reason_salvage_parked(
             ]
         )
     )
+
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
 
     monkeypatch.setattr(
         "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
