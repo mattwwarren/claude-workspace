@@ -57,7 +57,7 @@ from cw.reconcile.tasks import (
 )
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, CwState
+    from cw.models import CwState
 
 _log = logging.getLogger(__name__)
 
@@ -109,13 +109,24 @@ def _verify_supervisor_session_id(state: CwState) -> int:
 
 def _build_finalize_pr_map(
     state: CwState,
-    clients: dict[str, ClientConfig],
 ) -> dict[str, tuple[bool | None, bool]]:
     """Return pr_exists_for_branch results for FINALIZE-stage DAEMON sessions.
 
     Must run OUTSIDE sessions_lock — gh subprocess is not safe under the lock
     (liveness invariant, #485). Called by reconcile() as a lockless pre-pass.
+
+    Uses load_effective_clients() to match the branch-key lookup in
+    _detect_stalled_candidates; the two functions must use the same client dict
+    shape so the pre-computed result is found in the dict and not silently
+    missed due to a feature_branch_prefix format divergence (#812).
+
+    Note: load_dev_queue() here and in _reconcile_locked() are two separate
+    reads with no consistency guarantee. A task that advances to FINALIZE
+    between these two reads will miss the pre-pass (dict lookup returns default
+    (None, False) → conservative non-detection for one tick). The next tick
+    will catch it.
     """
+    effective_clients = _deps.load_effective_clients()
     pre_tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
     result: dict[str, tuple[bool | None, bool]] = {}
     for session in state.sessions:
@@ -131,7 +142,7 @@ def _build_finalize_pr_map(
         task = pre_tasks.get(ticket_id)
         if task is None or task.stage != Stage.FINALIZE:
             continue
-        branch = feature_branch_key(session.client, ticket_id, clients)
+        branch = feature_branch_key(session.client, ticket_id, effective_clients)
         if branch not in result:
             result[branch] = pr_exists_for_branch(branch)
     return result
@@ -197,7 +208,7 @@ def reconcile() -> ReconcileReport:
 
     # Pre-pass: check PR existence for FINALIZE-stage sessions with pushed branches.
     # gh subprocess must NOT run under sessions_lock (liveness invariant, #485).
-    finalize_pr_by_branch = _build_finalize_pr_map(pre_state, _clients)
+    finalize_pr_by_branch = _build_finalize_pr_map(pre_state)
 
     with sessions_lock():
         locked_report, salvage_git_candidates = _reconcile_locked(

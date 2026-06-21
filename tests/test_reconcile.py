@@ -15445,6 +15445,12 @@ class TestFinalizeBlocked:
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
+        # _rescue_complete calls gh pr merge BEFORE the lock guard; patch to
+        # avoid a real subprocess invocation in this race-condition test path.
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.subprocess.run",
+            lambda *_a, **_kw: MagicMock(returncode=0, stdout=""),
+        )
 
         stale_sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
         _rescue_complete(stale_sess, ticket_id, branch, completed_ticket_ids)
@@ -15663,6 +15669,41 @@ class TestFinalizeBlocked:
         completed = rescue_finalize_blocked_sessions()
         assert ticket_id not in completed
 
+    def test_rescue_filter_gh_unavailable(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """gh unavailable → session skipped, rescue_attempted not written."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        sid = "fb-sess-17e"
+        ticket_id = "FB-17E"
+        branch = f"dev/{ticket_id}"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.last_result = {"paused_status": _FINALIZE_BLOCKED_REASON, "branch": branch}
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b: (None, False)
+        )
+
+        completed = rescue_finalize_blocked_sessions()
+
+        assert completed == []
+        # gh-unavailable is transient — rescue_attempted must NOT be tombstoned.
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == sid)
+        assert not (
+            isinstance(s.last_result, dict) and s.last_result.get("rescue_attempted")
+        )
+
     # ── 1.18 _resolve_finalize_blocked_condition with pre-computed dict ───
 
     def test_resolve_uses_finalize_pr_by_branch_dict(
@@ -15753,6 +15794,12 @@ class TestFinalizeBlocked:
             None,
         )
         assert running_target is not None
+        # Non-RUNNING FB-19 task must stay PENDING (filter branch coverage).
+        pending_target = next(
+            (t for t in target_tasks if t.status == QueueItemStatus.PENDING),
+            None,
+        )
+        assert pending_target is not None
 
     # ── 1.20 _build_finalize_pr_map direct tests ─────────────────────────
 
@@ -15805,16 +15852,15 @@ class TestFinalizeBlocked:
 
         monkeypatch.setattr("cw.reconcile.core.pr_exists_for_branch", _fake_pr_exists)
 
-        from cw.config import load_clients
-
-        clients = load_clients()
         state = CwState(sessions=[sess_finalize, sess_no_tid])
 
-        result = _build_finalize_pr_map(state, clients)
+        result = _build_finalize_pr_map(state)
 
         assert calls, "pr_exists_for_branch should have been called"
         assert any("FB-20" in branch for branch in calls)
         assert any(pr is False for pr, _ in result.values())
+        # sess_no_tid has no valid ticket_id → excluded; only 1 branch checked.
+        assert len(calls) == 1
 
     # ── 1.21 reconcile(): ticket_id=None and gh_blocked in pr_is_merged pass
 
@@ -15889,4 +15935,5 @@ class TestFinalizeBlocked:
         )
 
         report = reconcile()
-        assert report is not None
+        # No tasks → nothing completed; gh-unavailable pre-pass didn't corrupt state.
+        assert report.completed_ticket_ids == []
