@@ -8195,6 +8195,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
             "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
@@ -8244,6 +8246,8 @@ class TestSalvageCommittedNoPrSessions:
                 ]
             )
         )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
 
         monkeypatch.setattr(
             "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: False
@@ -8527,6 +8531,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
             "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
@@ -8570,6 +8576,8 @@ class TestSalvageCommittedNoPrSessions:
             )
         )
 
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
         monkeypatch.setattr(
             "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
@@ -8584,6 +8592,42 @@ class TestSalvageCommittedNoPrSessions:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.RUNNING
+
+    def test_salvage_skips_session_with_unknown_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Unknown client → CwError caught, session skipped, completed empty."""
+        worktree = tmp_path / "wt-unknown-client"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-UNKNOWNCLIENT"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-unknownclient", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-unknownclient",
+                    )
+                ]
+            )
+        )
+        # Intentionally no _write_staged_clients_yaml call → get_client raises CwError
+
+        completed = salvage_committed_no_pr_sessions(
+            [("sess-unknownclient", ticket_id, "dev/uc-branch", str(worktree), True)]
+        )
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING  # unchanged — session skipped
 
     def test_git_push_failure_downgrades_to_low(
         self,
