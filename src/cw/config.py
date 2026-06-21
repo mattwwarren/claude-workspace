@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -73,6 +74,7 @@ DEV_PLAN_LOCK = STATE_DIR / ".dev_plan.lock"
 DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
 CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
+DISPATCH_STATE_FILE = STATE_DIR / "dispatch_state.json"
 CONCURRENCY_OVERRIDE_FILE = STATE_DIR / "concurrency_overrides.json"
 CONCURRENCY_OVERRIDE_LOCK = STATE_DIR / ".concurrency_overrides.lock"
 
@@ -471,6 +473,43 @@ def save_state(state: CwState) -> None:
     """Persist session state to disk atomically."""
     state_dir().mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_file(), state.model_dump_json(indent=2))
+
+
+def load_usage_limited_until() -> datetime | None:
+    """Load the persisted usage-limit backoff expiry from DISPATCH_STATE_FILE.
+
+    Returns None when the file is absent, unreadable, malformed, or the stored
+    timestamp is already in the past (so a stale backoff from a previous loop
+    run never silently re-blocks a fresh loop start).
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        ts = raw.get("usage_limited_until")
+        if not isinstance(ts, str):
+            return None
+        dt = datetime.fromisoformat(ts)
+        return dt if dt > datetime.now(UTC) else None
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def save_usage_limited_until(dt: datetime | None) -> None:
+    """Persist (or clear) the usage-limit backoff expiry to DISPATCH_STATE_FILE.
+
+    Writes ``{"usage_limited_until": "<iso>"}`` when *dt* is set; writes
+    ``{"usage_limited_until": null}`` to clear it.  Creates STATE_DIR if
+    needed.  Silently swallows write errors — a failed persist just means
+    the next loop start won't honour the backoff (acceptable degradation).
+    """
+    try:
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"usage_limited_until": dt.isoformat() if dt is not None else None}
+        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning("dispatch_state: failed to persist usage_limited_until")
 
 
 def load_orchestrator_config() -> OrchestratorConfig:
