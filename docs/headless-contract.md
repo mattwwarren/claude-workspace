@@ -369,7 +369,9 @@ The skill can fail to emit a complete sentinel block. cw must handle:
 1. **No `<<<AUTO_DEV_RESULT` sentinel anywhere** — skill crashed before the emit step, or the run was not headless. The parser first attempts the **loose fallback** (see below); if that also fails, treat as `blocked` with synthetic blocker `{stage: "unknown", reason: "no_result_emitted", details: <last-N-lines-of-stdout>}`.
 2. **Opening sentinel present, closing sentinel missing** — skill crashed mid-emit. Same handling as (1), but the loose fallback does NOT apply (the open sentinel takes precedence).
 3. **Block present but JSON does not parse** — skill bug. Same handling as (1); include the raw block in `details`.
-4. **`schema_version` higher than parser supports** — skill upgraded ahead of cw. Surface verbatim and refuse to act on `next_actions`; do not auto-merge or auto-route.
+4. **`schema_version` higher than parser supports** — skill upgraded ahead of cw.
+   - **One-version look-ahead (`schema_version == max_supported + 1`):** best-effort parse using the current max schema. A `WARNING` is logged naming the skew. The result is usable — proceed with normal routing. This handles the self-ship skew where a schema-bump PR ships while the running parser is still at N (issue #395).
+   - **Two or more versions ahead (`schema_version >= max_supported + 2`), missing, or non-int:** surface verbatim and refuse to act on `next_actions`; do not auto-merge or auto-route. Reason code: `schema_version_unsupported`.
 5. **Unknown `status` value** — same as (4). The closed enum in §4.1 covers all recognized values including `ambiguities_pending_resolution` and `premises_pending_verification` (promoted to canonical status in v4 via #191). Any value outside this set routes through `reason=status_unknown`.
 6. **Multiple complete sentinel blocks in one invocation's stdout** — skill bug (the contract is exactly one per invocation; see §3.1). Same handling as (1), with `reason: "multiple_result_blocks"` and `details` containing the count and the LAST block's raw payload.
 

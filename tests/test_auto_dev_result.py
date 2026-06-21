@@ -1715,9 +1715,18 @@ class TestV4StatusPromotion:
         assert isinstance(result, AutoDevResult)
         assert result.schema_version == 4
 
-    def test_v5_schema_rejected(self) -> None:
+    def test_v5_schema_parsed_best_effort(self) -> None:
+        # v5 == max+1: one-version look-ahead tolerance (issue #395).
         p = _ambiguities_pending_payload()
         p["schema_version"] = 5
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+
+    def test_v6_schema_rejected(self) -> None:
+        # v6 == max+2: still rejected per §6(4).
+        p = _ambiguities_pending_payload()
+        p["schema_version"] = 6
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, BlockedResult)
         assert result.blocker.reason == "schema_version_unsupported"
