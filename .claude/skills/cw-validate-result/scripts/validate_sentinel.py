@@ -123,7 +123,7 @@ def _build_checks(parser_output: dict[str, Any], outcome: str) -> list[dict[str,
         _check(
             "sentinel_emitted",
             outcome != "no_sentinel",
-            f"assistant_blocks_scanned={parser_output.get('assistant_blocks_scanned')}",
+            f"blocks_scanned={parser_output.get('blocks_scanned')}",
         ),
     )
 
