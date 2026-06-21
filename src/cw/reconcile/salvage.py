@@ -343,7 +343,7 @@ def _rescue_complete(
     session: Session,
     ticket_id: str | None,
     branch: str,
-    completed_ticket_ids: list[str],
+    rescued_ticket_ids: list[str],
 ) -> None:
     """Mark session + task COMPLETED and emit SESSION_COMPLETED event."""
     now = datetime.now(UTC)
@@ -394,7 +394,7 @@ def _rescue_complete(
                 ):
                     task.status = QueueItemStatus.COMPLETED
                     save_dev_queue(store)
-                    completed_ticket_ids.append(ticket_id)
+                    rescued_ticket_ids.append(ticket_id)
                     break
 
     record_event(
@@ -425,10 +425,10 @@ def rescue_finalize_blocked_sessions() -> list[str]:
     Idempotency: after a gh failure, writes last_result["rescue_attempted"] = True
     so the session is not retried on every subsequent reconcile tick.
 
-    Returns list of ticket_ids that were auto-completed.
+    Returns list of rescued ticket_ids (placed in ReconcileReport.rescued_ticket_ids).
     """
     state = load_state()
-    completed_ticket_ids: list[str] = []
+    rescued_ticket_ids: list[str] = []
 
     for session in state.sessions:
         if session.status != SessionStatus.TIMED_OUT:
@@ -466,6 +466,6 @@ def rescue_finalize_blocked_sessions() -> list[str]:
         if not pr_created:
             _rescue_mark_attempted(session.id)
             continue
-        _rescue_complete(session, ticket_id, branch, completed_ticket_ids)
+        _rescue_complete(session, ticket_id, branch, rescued_ticket_ids)
 
-    return completed_ticket_ids
+    return rescued_ticket_ids

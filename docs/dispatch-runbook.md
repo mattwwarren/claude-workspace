@@ -428,7 +428,7 @@ network blip) and the rescue loop will not retry.
 
 ```bash
 cw dev-queue status          # task shows BLOCKED_ON_USER
-cw session view <ticket-id>  # last_result contains rescue_attempted: true
+cw session show <ticket-id>  # last_result contains rescue_attempted: true
 ```
 
 Verify the branch exists on origin:

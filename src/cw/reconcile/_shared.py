@@ -270,6 +270,9 @@ class ReconcileReport:
     ``salvaged_ticket_ids`` — ticket IDs auto-completed via the HIGH-path
     git-state salvage (committed-but-no-PR reaped sessions). Populated by
     :func:`salvage_committed_no_pr_sessions`. See GitHub issue #497.
+    ``rescued_ticket_ids`` — ticket IDs auto-completed via the finalize-blocked
+    rescue path (TIMED_OUT sessions whose PR creation previously failed).
+    Populated by :func:`rescue_finalize_blocked_sessions`. See GitHub #812 #816.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
