@@ -7,8 +7,14 @@ from pathlib import Path
 
 
 def repo_root() -> Path:
-    """Return the tracked global-claude repo root."""
-    return Path(__file__).resolve().parents[2]
+    """Return the repo root (nearest ancestor containing pyproject.toml)."""
+    current = Path(__file__).resolve().parent
+    while current != current.parent:
+        if (current / "pyproject.toml").exists():
+            return current
+        current = current.parent
+    msg = f"Could not find repo root: no pyproject.toml ancestor of {__file__!r}"
+    raise RuntimeError(msg)
 
 
 def claude_home() -> Path:
@@ -82,7 +88,7 @@ def review_monitor_script_path() -> Path:
     if override:
         return Path(override).expanduser()
 
-    repo_script = repo_root() / "scripts" / "review_monitor.py"
+    repo_script = repo_root() / ".claude" / "scripts" / "review_monitor.py"
     if repo_script.exists():
         return repo_script
 
