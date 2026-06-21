@@ -27,6 +27,28 @@ import sys
 from pathlib import Path
 from typing import Any
 
+
+def _bootstrap_sys_path() -> None:
+    """Add repo src/ to sys.path so cw imports work under bare python3.
+
+    # Why: this cannot be extracted to a shared module — it must run BEFORE any cw
+    # import, so there is no shared cw path yet to import it from. Each standalone
+    # script that imports cw carries its own copy. Do not deduplicate.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            src = str(parent / "src")
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            return
+    msg = (
+        f"Could not locate pyproject.toml walking up from {__file__} — bootstrap failed"
+    )
+    raise RuntimeError(msg)
+
+
+_bootstrap_sys_path()
+
 from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
 
 
