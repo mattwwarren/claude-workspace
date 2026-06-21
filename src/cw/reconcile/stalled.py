@@ -119,6 +119,8 @@ def _detect_stalled_candidates(
             )
             continue
         cap = resolve_stalled_retry_cap(task, config)
+        # Why: task.attempts is the shared counter for both this per-tier stalled cap
+        # and the future global attempt ceiling (#786). Do not add a parallel counter.
         if task is not None and task.attempts >= cap:
             candidates.append(
                 ReapCandidate(
@@ -394,6 +396,7 @@ def _emit_stalled_events(
             },
             correlation_id=candidate.ticket_id,
         )
+        _deps.fire_push_notification(session.name, session.client)
 
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]

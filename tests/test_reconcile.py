@@ -1634,6 +1634,14 @@ def test_stalled_retry_cap_reverts_below_cap(
     t = next(t for t in store.tasks if t.ticket_id == "below-cap")
     assert t.status == QueueItemStatus.PENDING
 
+    # Regression guard for #724: SESSION_STAGE_TIMED_OUT_RETRIED must still fire
+    # on the below-cap path (session is being retried, not parked).
+    events = read_events(
+        consumer="test-below-cap-retried",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    assert any(e.payload.get("ticket_id") == "below-cap" for e in events)
+
 
 def test_stalled_retry_cap_parks_when_at_cap(
     tmp_config_dir: Path,
