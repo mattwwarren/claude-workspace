@@ -65,9 +65,11 @@ from cw.reconcile._shared import (
     _SALVAGE_TERMINAL_STATUSES,
     _SILENTLY_IDLE_REASON,
     _STAGE_REVIEW_COMPLETE,
+    _STALLED_CAP_PARKED_REASON,
     _VALIDATION_FAILED_MAX_ATTEMPTS,
     AUTO_DEV_LABEL_PREFIX,
     DEFAULT_IDLE_RETRY_CAP,
+    DEFAULT_STALLED_RETRY_CAP,
     HEADLESS_TIMEOUT_SECONDS,
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
@@ -101,6 +103,7 @@ from cw.reconcile._shared import (
     resolve_idle_retry_cap,
     resolve_idle_watchdog_budget,
     resolve_reap_policy,
+    resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
 from cw.reconcile.core import (
@@ -133,6 +136,7 @@ from cw.reconcile.tasks import (
 __all__ = [
     "AUTO_DEV_LABEL_PREFIX",
     "DEFAULT_IDLE_RETRY_CAP",
+    "DEFAULT_STALLED_RETRY_CAP",
     "HEADLESS_TIMEOUT_SECONDS",
     "IDLE_WATCHDOG_SECONDS",
     "SPAWN_GRACE_SECONDS",
@@ -147,6 +151,7 @@ __all__ = [
     "_SALVAGE_TERMINAL_STATUSES",
     "_SILENTLY_IDLE_REASON",
     "_STAGE_REVIEW_COMPLETE",
+    "_STALLED_CAP_PARKED_REASON",
     "_VALIDATION_FAILED_MAX_ATTEMPTS",
     "ProposedAction",
     "ReapCandidate",
@@ -188,6 +193,7 @@ __all__ = [
     "resolve_idle_retry_cap",
     "resolve_idle_watchdog_budget",
     "resolve_reap_policy",
+    "resolve_stalled_retry_cap",
     "revert_completed_silent_tasks",
     "revert_stalled_headless_sessions",
     "revert_timed_out_tasks",
