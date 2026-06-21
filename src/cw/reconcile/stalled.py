@@ -553,6 +553,16 @@ def revert_stalled_headless_sessions(
             continue
         if _merged:
             _merged_tids.append(candidate.ticket_id)
+            continue
+        # Signal #2: PR not merged — check if branch was deleted (post-merge cleanup).
+        # Fail-open: (None, *) falls through to TIMED_OUT; (None, False) = gh gone.
+        _branch_gone, _branch_gh_avail = _deps.branch_exists_on_origin(_branch)
+        if not _branch_gh_avail:
+            _gh_available = False
+            _gh_blocked_tids.append(candidate.ticket_id)
+            continue
+        if _branch_gone is False:  # branch absent = deleted after merge
+            _merged_tids.append(candidate.ticket_id)
     merged_ticket_ids = frozenset(_merged_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
     # Discard merged_completed_ids — callers expect list[str] (reverted only).

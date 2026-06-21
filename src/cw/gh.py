@@ -177,6 +177,51 @@ def pr_is_merged_for_ticket(
     return False, True
 
 
+def branch_exists_on_origin(
+    branch: str, *, timeout: int = 10
+) -> tuple[bool | None, bool]:
+    """Check whether *branch* still exists on origin.
+
+    Uses ``gh api repos/{owner}/{repo}/git/refs/heads/{branch}`` where the
+    owner/repo is inferred from the current directory's git remote (same
+    convention as all other gh.py helpers — no explicit repo param needed).
+
+    Returns (exists, gh_available):
+    - (True, True)   — branch present on origin
+    - (False, True)  — branch absent on origin (404 = deleted after merge)
+    - (None, True)   — gh responded but result unclear (unexpected status)
+    - (None, False)  — gh unavailable (timeout, auth error, subprocess failure)
+
+    Fail-open: callers must treat (None, *) as "cannot determine" and fall
+    through to the default TIMED_OUT path.
+    """
+    try:
+        result = _sp.run(
+            [
+                "gh",
+                "api",
+                f"repos/{{owner}}/{{repo}}/git/refs/heads/{branch}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None, False
+    except (OSError, _sp.TimeoutExpired):
+        return None, False
+
+    if result.returncode == 0:
+        return True, True
+    # gh exits non-zero for both 404 and auth/network errors.
+    # Inspect combined output for a 404 indicator to distinguish "absent" from error.
+    combined = result.stdout + result.stderr
+    if "HTTP 404" in combined or '"Not Found"' in combined:
+        return False, True
+    return None, False
+
+
 def pr_exists_for_branch(
     branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT
 ) -> tuple[bool | None, bool]:

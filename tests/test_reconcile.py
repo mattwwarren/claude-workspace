@@ -875,6 +875,7 @@ def _mk_headless_daemon_session(
 def test_revert_stalled_headless_sessions_transitions_past_budget(
     tmp_config_dir: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Session past budget → TIMED_OUT, task reverted, event emitted."""
     worktree = tmp_path / "wt-stalled"
@@ -893,6 +894,11 @@ def test_revert_stalled_headless_sessions_transitions_past_budget(
         session_id="stalled-1",
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
+    # Signal #2: branch still present → TIMED_OUT (genuine timeout; no false positive).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -943,6 +949,7 @@ def test_revert_stalled_headless_sessions_leaves_under_budget_alone(
 def test_revert_stalled_headless_sessions_catches_idle_sessions(
     tmp_config_dir: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """IDLE headless DAEMON session past budget → TIMED_OUT (not ACTIVE-only)."""
     worktree = tmp_path / "wt-idle"
@@ -953,6 +960,11 @@ def test_revert_stalled_headless_sessions_catches_idle_sessions(
     sess.status = SessionStatus.IDLE
     state = CwState(sessions=[sess])
     save_state(state)
+    # Signal #2: branch still present → TIMED_OUT (genuine timeout).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1064,6 +1076,10 @@ def test_revert_stalled_headless_sessions_stops_daemon_surface(
     daemon = FakeNativeDaemonClient()
     short_id = daemon.spawn_bg(cwd=tmp_path, prompt="seed")
     monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     sess = _mk_headless_daemon_session(
         "stop-me", worktree, started_at, surface_ref=short_id
@@ -1159,6 +1175,11 @@ def test_revert_stalled_headless_sessions_not_merged_times_out(
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
+    )
+    # Signal #2: branch still present → not a deleted-after-merge case → TIMED_OUT.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
     )
 
     reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
@@ -1392,6 +1413,164 @@ def test_revert_stalled_gh_prepass_second_candidate_skips_when_gh_gone(
 
 
 # ---------------------------------------------------------------------------
+# Signal #2: branch_exists_on_origin (GitHub issue #315)
+# ---------------------------------------------------------------------------
+
+
+def test_revert_stalled_headless_sessions_branch_deleted_completes_not_times_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315 Signal #2: PR not merged but branch deleted → COMPLETED."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-315-branch-deleted"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("315-branch-deleted", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="315-branch-deleted",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-branch-deleted",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    # PR not merged, but gh is available.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    # Branch absent on origin (deleted after merge cleanup).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (False, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "315-branch-deleted" not in reverted
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.completed_reason == CompletionReason.NORMAL
+    assert sess.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+
+    store = load_dev_queue()
+    task_after = next(t for t in store.tasks if t.ticket_id == "315-branch-deleted")
+    assert task_after.status == QueueItemStatus.COMPLETED
+    assert task_after.session_id is None
+
+    completed_events = read_events(
+        consumer="test-315-branch-deleted-completed",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert any(e.payload.get("session_id") == sess.id for e in completed_events)
+
+    timed_out_events = read_events(
+        consumer="test-315-branch-deleted-no-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert not any(e.payload.get("session_id") == sess.id for e in timed_out_events)
+
+
+def test_revert_stalled_headless_sessions_branch_present_times_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315 Signal #2: PR not merged + branch present → TIMED_OUT, no false positive."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-315-branch-present"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("315-branch-present", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="315-branch-present",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-branch-present",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    # Branch still present on origin → not a merged-and-cleaned-up case.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "315-branch-present" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+
+    store = load_dev_queue()
+    task_after = next(t for t in store.tasks if t.ticket_id == "315-branch-present")
+    assert task_after.status == QueueItemStatus.PENDING
+
+
+def test_revert_stalled_headless_sessions_branch_check_error_times_out(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#315 Signal #2: branch-check transient error (None, True) → TIMED_OUT."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-315-branch-error"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("315-branch-error", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="315-branch-error",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="315-branch-error",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    # Unclear result from branch check (transient error, gh available) → fail-open.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (None, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "315-branch-error" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+
+    timed_out_events = read_events(
+        consumer="test-315-branch-error-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    assert any(e.payload.get("session_id") == sess.id for e in timed_out_events)
+
+
+# ---------------------------------------------------------------------------
 # SESSION_STAGE_TIMED_OUT_RETRIED event (GitHub issue #724)
 # ---------------------------------------------------------------------------
 
@@ -1426,6 +1605,11 @@ def test_session_stage_timed_out_retried_event_emitted_auto_policy(
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
+    )
+    # Signal #2: branch still present → TIMED_OUT path (genuine timeout).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
     )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
@@ -1474,6 +1658,11 @@ def test_session_stage_timed_out_retried_event_emitted_signal_only_policy(
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
+    )
+    # Signal #2: branch still present → TIMED_OUT path (genuine timeout).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
     )
 
     # signal_only is the default OrchestratorConfig
@@ -1604,6 +1793,10 @@ def test_revert_stalled_cleans_up_worktree(
             (client.name, branch, force)
         ),
     )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1634,6 +1827,10 @@ def test_revert_stalled_worktree_cleanup_is_best_effort(
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr("cw.reconcile._shared.remove_worktree", boom)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1717,6 +1914,10 @@ def test_revert_stalled_skips_removal_and_blocks_task_when_dirty(
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
     )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1767,6 +1968,10 @@ def test_revert_stalled_removes_when_clean(
     # Clean worktree
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
     )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
@@ -2089,6 +2294,10 @@ def test_revert_stalled_no_salvage_without_sentinel_times_out(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
     worktree = tmp_path / "wt-nosent"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
@@ -2143,6 +2352,10 @@ def test_revert_stalled_ignores_stale_transcript(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
     worktree = tmp_path / "wt-stale"
     # started_at in the future relative to the (real-now) transcript mtime, so
     # the freshly-written transcript is "stale" by the started_at guard.
@@ -2732,6 +2945,7 @@ def test_resolve_headless_budget_non_dict_last_result_falls_to_scope_hint(
 def test_revert_stalled_uses_per_session_budget(
     tmp_config_dir: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Session with tier='small' (budget=1800) elapsed 2000s → timed out (< 3600)."""
     worktree = tmp_path / "wt-per-sess"
@@ -2758,6 +2972,11 @@ def test_revert_stalled_uses_per_session_budget(
         session_id="per-sess-small",
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
+    # Signal #2: branch still present → TIMED_OUT (genuine timeout).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     reverted = revert_stalled_headless_sessions(state, now=now, config=config)
 
