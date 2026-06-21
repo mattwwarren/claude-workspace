@@ -15691,7 +15691,7 @@ class TestFinalizeBlocked:
         save_dev_queue(DevQueueStore(tasks=[]))
 
         monkeypatch.setattr(
-            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b: (None, False)
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (None, False)
         )
 
         completed = rescue_finalize_blocked_sessions()
