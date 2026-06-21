@@ -2919,6 +2919,197 @@ class TestDispatchUsageLimitBackoff:
         assert isinstance(result, DispatchTickResult)
         assert result.usage_limit_detected is True
 
+    def test_reconcile_usage_limit_skips_spawn_same_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same-tick race fix: when reconcile reports usage_limited, dispatch_tick
+        skips spawning immediately (before the spawn loop runs) so the task is not
+        re-spawned into the active rate-limit window (#804)."""
+        from cw.reconcile import ReconcileReport
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RACE", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+
+        # Reconcile returns usage_limited=True (phantom with usage-limit transcript).
+        monkeypatch.setattr(
+            "cw.dispatch._reconcile_usage_limited",
+            lambda: True,
+        )
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert result.usage_limit_detected is True
+        assert daemon.spawn_calls == []
+
+    def test_reconcile_usage_limit_emits_skip_event_same_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same-tick race: skip event has skip_reason=usage_limited (#804)."""
+        from cw.reconcile import ReconcileReport
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RACE2", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.dispatch._reconcile_usage_limited",
+            lambda: True,
+        )
+
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-ul-race-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.USAGE_LIMITED
+
+    def test_run_dispatch_loop_persists_usage_limited_until(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop calls save_usage_limited_until when usage limit is
+        detected in multi-tick mode (once=False). Verified by monkeypatching
+        save_usage_limited_until and checking the captured argument (#804)."""
+        import cw.dispatch
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-PERSIST", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        saved: list[object] = []
+
+        real_save = cw.dispatch.save_usage_limited_until
+
+        def capturing_save(dt: object) -> None:
+            saved.append(dt)
+            real_save(dt)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("cw.dispatch.save_usage_limited_until", capturing_save)
+
+        # Patch time.sleep so the loop exits on the second tick.
+        call_count = 0
+        original_tick = cw.dispatch.dispatch_tick
+
+        def one_shot_tick(*args: object, **kwargs: object) -> DispatchTickResult:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simulate usage_limit_detected=True on first tick via a real spawn
+                # error (raise_usage_limit path).
+                daemon.raise_usage_limit = True
+                result = original_tick(*args, **kwargs)  # type: ignore[arg-type]
+                daemon.raise_usage_limit = False
+                return result
+            # Second tick: exit the loop
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("cw.dispatch.dispatch_tick", one_shot_tick)
+        monkeypatch.setattr("cw.dispatch.time.sleep", lambda _: None)
+
+        try:
+            run_dispatch_loop(native_daemon=daemon)
+        except KeyboardInterrupt:
+            pass
+
+        assert len(saved) >= 1
+        saved_dt = saved[0]
+        assert isinstance(saved_dt, datetime)
+        assert saved_dt > datetime.now(UTC)
+
+    def test_run_dispatch_loop_loads_persisted_backoff(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop reads persisted usage_limited_until on start; if still
+        active, spawning is suppressed without requiring a fresh detection (#804)."""
+        from datetime import timedelta
+
+        from cw.config import save_usage_limited_until
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-LOAD", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+
+        # Pre-write a backoff window that hasn't expired yet.
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+        # Spawn must have been suppressed because the loaded backoff is still active.
+        assert daemon.spawn_calls == []
+
+
+# ---------------------------------------------------------------------------
+# TestUsageLimitedUntilPersistence
+# ---------------------------------------------------------------------------
+
+
+class TestUsageLimitedUntilPersistence:
+    """Unit tests for load_usage_limited_until / save_usage_limited_until (#804)."""
+
+    def test_save_and_load_roundtrip(self, tmp_config_dir: Path) -> None:
+        """save then load returns the same datetime (within 1s due to isoformat)."""
+        from datetime import timedelta
+
+        from cw.config import load_usage_limited_until, save_usage_limited_until
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        loaded = load_usage_limited_until()
+        assert loaded is not None
+        assert abs((loaded - future).total_seconds()) < 1
+
+    def test_load_returns_none_when_file_absent(self, tmp_config_dir: Path) -> None:
+        import cw.config
+        from cw.config import load_usage_limited_until
+
+        cw.config.DISPATCH_STATE_FILE.unlink(missing_ok=True)
+        assert load_usage_limited_until() is None
+
+    def test_load_returns_none_for_expired_timestamp(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A persisted timestamp in the past is treated as expired → None."""
+        from datetime import timedelta
+
+        from cw.config import load_usage_limited_until, save_usage_limited_until
+
+        past = datetime.now(UTC) - timedelta(hours=1)
+        save_usage_limited_until(past)
+        assert load_usage_limited_until() is None
+
+    def test_save_none_clears_backoff(self, tmp_config_dir: Path) -> None:
+        """save_usage_limited_until(None) writes null → load returns None."""
+        from datetime import timedelta
+
+        from cw.config import load_usage_limited_until, save_usage_limited_until
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        save_usage_limited_until(None)
+        assert load_usage_limited_until() is None
+
 
 # ---------------------------------------------------------------------------
 # TestConfigReloadedEachTick
