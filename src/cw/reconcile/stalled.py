@@ -6,6 +6,7 @@ produced no further Stop-hook firings. See GitHub #185, #552, ADR-0006.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from cw.config import save_state
@@ -57,6 +58,8 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.models import ClientConfig, CwState, Session, TicketTask
 
+_log = logging.getLogger(__name__)
+
 
 def _resolve_finalize_blocked_condition(
     task: TicketTask | None,
@@ -94,6 +97,10 @@ def _resolve_finalize_blocked_condition(
     if finalize_pr_by_branch is not None:
         pr_result, gh_available = finalize_pr_by_branch.get(branch, (None, False))
     else:
+        # Why: None means caller is outside sessions_lock (e.g.
+        # revert_stalled_headless_sessions). Direct gh call is safe there.
+        # _reconcile_locked converts None → {} so gh never runs under the lock
+        # (#816 SHOULD_FIX 1).
         pr_result, gh_available = pr_exists_for_branch(branch)
     # gh absent, PR already open, or transient error — fall through to REVERT_TASK.
     # Only pr_result is False (confirmed no open PR) triggers FINALIZE_BLOCKED.
@@ -176,33 +183,37 @@ def _detect_stalled_candidates(
         # is parked (preserving the worktree) rather than capped-and-abandoned.
         if session.worktree_path is not None and task is not None:
             fb_client_cfg = effective_clients.get(session.client)
-            fb_default_branch = (
-                fb_client_cfg.default_branch if fb_client_cfg is not None else "main"
-            )
-            fb_blocked, fb_branch = _resolve_finalize_blocked_condition(
-                task,
-                session,
-                session.worktree_path,
-                fb_default_branch,
-                clients=effective_clients,
-                finalize_pr_by_branch=finalize_pr_by_branch,
-            )
-            if fb_blocked and fb_branch is not None:
-                candidates.append(
-                    ReapCandidate(
-                        session_id=session.id,
-                        proposed_action=ProposedAction.PARK_FINALIZE_BLOCKED,
-                        ticket_id=ticket_id,
-                        elapsed_seconds=elapsed,
-                        reap_reason=ReapReason.FINALIZE_BLOCKED,
-                        lane=task.lane,
-                        client=session.client,
-                        stage=task.stage,
-                        worktree_path=session.worktree_path,
-                        branch=fb_branch,
-                    )
+            if fb_client_cfg is None:
+                _log.warning(
+                    "finalize_blocked: unknown client %r for session %s — skipping",
+                    session.client,
+                    session.id,
                 )
-                continue
+            else:
+                fb_blocked, fb_branch = _resolve_finalize_blocked_condition(
+                    task,
+                    session,
+                    session.worktree_path,
+                    fb_client_cfg.default_branch,
+                    clients=effective_clients,
+                    finalize_pr_by_branch=finalize_pr_by_branch,
+                )
+                if fb_blocked and fb_branch is not None:
+                    candidates.append(
+                        ReapCandidate(
+                            session_id=session.id,
+                            proposed_action=ProposedAction.PARK_FINALIZE_BLOCKED,
+                            ticket_id=ticket_id,
+                            elapsed_seconds=elapsed,
+                            reap_reason=ReapReason.FINALIZE_BLOCKED,
+                            lane=task.lane,
+                            client=session.client,
+                            stage=task.stage,
+                            worktree_path=session.worktree_path,
+                            branch=fb_branch,
+                        )
+                    )
+                    continue
         cap = resolve_stalled_retry_cap(task, config)
         # Why: task.attempts is the shared counter for both this per-tier stalled cap
         # and the future global attempt ceiling (#786). Do not add a parallel counter.

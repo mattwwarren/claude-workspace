@@ -149,6 +149,12 @@ _SALVAGE_PR_BODY_TEMPLATE = (
     "Review this branch and merge when satisfied.\n\n"
     "Ticket: #{ticket_id}"
 )
+_RESCUE_PR_BODY_TEMPLATE = (
+    "Auto-rescued by reconcile after finalize was blocked.\n\n"
+    "The worker completed impl+review and pushed the branch but could not open"
+    " the PR (permission classifier / usage limit / transient gh failure)."
+    " Ticket: #{ticket_id}"
+)
 
 # Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
 # idle_stall_recovered — watchdog fired but no usage-limit message found.
@@ -272,6 +278,7 @@ class ReconcileReport:
     completed_ticket_ids: list[str] = field(default_factory=list)
     usage_limited: bool = False
     salvaged_ticket_ids: list[str] = field(default_factory=list)
+    rescued_ticket_ids: list[str] = field(default_factory=list)
 
 
 def _claude_agents_json() -> list[dict[str, object]]:

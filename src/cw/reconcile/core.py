@@ -230,11 +230,10 @@ def reconcile() -> ReconcileReport:
         phantom_session_ids=locked_report.phantom_session_ids,
         phantom_session_names=locked_report.phantom_session_names,
         reverted_ticket_ids=locked_report.reverted_ticket_ids,
-        completed_ticket_ids=locked_report.completed_ticket_ids
-        + completed_ticket_ids
-        + rescued_ticket_ids,
+        completed_ticket_ids=locked_report.completed_ticket_ids + completed_ticket_ids,
         usage_limited=locked_report.usage_limited,
         salvaged_ticket_ids=salvaged_ticket_ids,
+        rescued_ticket_ids=rescued_ticket_ids,
     )
 
 
@@ -259,6 +258,11 @@ def _reconcile_locked(
     salvage_git_candidates is the list of git-state salvage candidates for
     the post-lock pass in salvage_committed_no_pr_sessions.
     """
+    # Why: None means the caller did not run the lockless pre-pass. Default to
+    # empty dict so _resolve_finalize_blocked_condition never calls pr_exists_for_branch
+    # under sessions_lock (#816 SHOULD_FIX 1 — latent lock-under-gh footgun).
+    if finalize_pr_by_branch is None:
+        finalize_pr_by_branch = {}
     state = load_state()
     now = datetime.now(UTC)
 
