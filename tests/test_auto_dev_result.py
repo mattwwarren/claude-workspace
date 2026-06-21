@@ -507,6 +507,7 @@ class TestSchemaVersionSkew:
             result = parse_stdout(_wrap_sentinel(payload))
         assert isinstance(result, AutoDevResult)
         assert result.status == "shipped"
+        assert result.schema_version == max(SUPPORTED_SCHEMA_VERSIONS)
         assert any("schema-bump skew" in rec.message for rec in caplog.records)
 
     def test_schema_version_max_plus_two_still_rejected(self) -> None:
@@ -1722,6 +1723,7 @@ class TestV4StatusPromotion:
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.status == "ambiguities_pending_resolution"
+        assert result.schema_version == max(SUPPORTED_SCHEMA_VERSIONS)
 
     def test_v6_schema_rejected(self) -> None:
         # v6 == max+2: still rejected per §6(4).

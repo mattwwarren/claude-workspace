@@ -846,9 +846,11 @@ def _decode_payload(raw_block: str) -> dict[str, Any] | BlockedResult:
     # the field is missing or non-int. Pre-validate before handing to Pydantic
     # so the caller gets a structured surface instead of a ValidationError.
     raw_version = payload.get("schema_version")
-    _max_supported = max(SUPPORTED_SCHEMA_VERSIONS)
 
-    if isinstance(raw_version, int) and raw_version == _max_supported + 1:
+    if (
+        isinstance(raw_version, int)
+        and raw_version == AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION + 1
+    ):
         # One-version look-ahead: schema-bump PR self-shipped while the running
         # parser is still at N. Best-effort parse with the current max schema so
         # the shipped result is recognised rather than mis-flagged as a failure.
@@ -857,10 +859,10 @@ def _decode_payload(raw_block: str) -> dict[str, Any] | BlockedResult:
             "auto-dev sentinel schema_version=%r is one ahead of parser max=%r; "
             "best-effort parse using schema %r (schema-bump skew tolerance)",
             raw_version,
-            _max_supported,
-            _max_supported,
+            AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
+            AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
         )
-        payload["schema_version"] = _max_supported
+        payload["schema_version"] = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
 
     elif (
         not isinstance(raw_version, int) or raw_version not in SUPPORTED_SCHEMA_VERSIONS
