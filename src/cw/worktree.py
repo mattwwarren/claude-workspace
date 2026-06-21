@@ -173,11 +173,15 @@ def _checked_out_branch(wt_path: Path) -> str | None:
     return result.stdout.strip() or None
 
 
-def _has_commits_beyond_base(wt_path: Path) -> bool:
-    """Return True iff the worktree has commits beyond origin/main.
+def _has_commits_beyond_base(wt_path: Path, default_branch: str) -> bool:
+    """Return True iff the worktree has commits beyond origin/<default_branch>.
 
-    Runs git log origin/main..HEAD in the worktree cwd. Returns False on
-    any failure — conservative default so uncertainty never triggers salvage.
+    Two-level fallback matching _resolve_branch_start_point:
+    1. origin/<default_branch>..HEAD — authoritative remote ref.
+    2. <default_branch>..HEAD — local fallback for offline / bare-clone.
+
+    Returns False on any failure — conservative default so uncertainty never
+    triggers salvage.
 
     # Why: salvage is a side-effecting external write. A false positive
     # (salvaging a session with no real commits) is worse than a false
@@ -186,18 +190,30 @@ def _has_commits_beyond_base(wt_path: Path) -> bool:
     if not wt_path.exists():
         return False
     try:
+        # Level 1: origin/<default_branch> — authoritative remote ref.
         result = _run_git(
             "log",
-            "origin/main..HEAD",
+            f"origin/{default_branch}..HEAD",
             "--oneline",
             cwd=wt_path,
             check=False,
         )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
+
+        # Level 2: local <default_branch> — offline / bare-clone fallback.
+        result = _run_git(
+            "log",
+            f"{default_branch}..HEAD",
+            "--oneline",
+            cwd=wt_path,
+            check=False,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
     except OSError:
         return False
-    if result.returncode != 0:
-        return False
-    return bool(result.stdout.strip())
+    return False
 
 
 def _register_cw_exclude(git_cwd: Path) -> None:

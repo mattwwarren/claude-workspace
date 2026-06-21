@@ -2520,7 +2520,7 @@ class TestHasCommitsBeyondBase:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is True
+        assert _has_commits_beyond_base(tmp_path, "main") is True
 
     def test_no_commits_returns_false(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2534,7 +2534,7 @@ class TestHasCommitsBeyondBase:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is False
+        assert _has_commits_beyond_base(tmp_path, "main") is False
 
     def test_git_failure_returns_false(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2548,7 +2548,7 @@ class TestHasCommitsBeyondBase:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is False
+        assert _has_commits_beyond_base(tmp_path, "main") is False
 
     def test_nonexistent_path_returns_false(self) -> None:
         """Path that doesn't exist → False."""
@@ -2556,7 +2556,7 @@ class TestHasCommitsBeyondBase:
 
         from cw.worktree import _has_commits_beyond_base
 
-        assert _has_commits_beyond_base(_Path("/nonexistent/path/xyz")) is False
+        assert _has_commits_beyond_base(_Path("/nonexistent/path/xyz"), "main") is False
 
     def test_oserror_returns_false(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2569,4 +2569,49 @@ class TestHasCommitsBeyondBase:
             raise OSError(msg)
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is False
+        assert _has_commits_beyond_base(tmp_path, "main") is False
+
+    def test_custom_default_branch_used(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """default_branch is passed to git log, not hardcoded 'main'."""
+        from cw.worktree import _has_commits_beyond_base
+
+        captured_args: list[str] = []
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            captured_args.extend(args)
+            result = MagicMock(returncode=0)
+            result.stdout = "abc1234 feat: custom branch commit\n"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert _has_commits_beyond_base(tmp_path, "develop") is True
+        assert "origin/develop..HEAD" in captured_args
+        assert "origin/main..HEAD" not in captured_args
+
+    def test_local_fallback_when_origin_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Falls back to local <default_branch>..HEAD when origin ref is unavailable."""
+        from cw.worktree import _has_commits_beyond_base
+
+        call_count = 0
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock()
+            if call_count == 1:
+                # Level 1: origin/<default_branch> fails (e.g. no remote)
+                result.returncode = 128
+                result.stdout = ""
+            else:
+                # Level 2: local ref succeeds
+                result.returncode = 0
+                result.stdout = "abc1234 feat: commit\n"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert _has_commits_beyond_base(tmp_path, "trunk") is True
+        assert call_count == 2
