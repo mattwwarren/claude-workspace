@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import subprocess
 from datetime import UTC, datetime
@@ -2929,8 +2930,6 @@ class TestDispatchUsageLimitBackoff:
         """Same-tick race fix: when reconcile reports usage_limited, dispatch_tick
         skips spawning immediately (before the spawn loop runs) so the task is not
         re-spawned into the active rate-limit window (#804)."""
-        from cw.reconcile import ReconcileReport
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RACE", client="test-client"))
 
@@ -2956,8 +2955,6 @@ class TestDispatchUsageLimitBackoff:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Same-tick race: skip event has skip_reason=usage_limited (#804)."""
-        from cw.reconcile import ReconcileReport
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RACE2", client="test-client"))
 
@@ -3022,10 +3019,8 @@ class TestDispatchUsageLimitBackoff:
         monkeypatch.setattr("cw.dispatch.dispatch_tick", one_shot_tick)
         monkeypatch.setattr("cw.dispatch.time.sleep", lambda _: None)
 
-        try:
+        with contextlib.suppress(KeyboardInterrupt):
             run_dispatch_loop(native_daemon=daemon)
-        except KeyboardInterrupt:
-            pass
 
         assert len(saved) >= 1
         saved_dt = saved[0]
@@ -3109,6 +3104,30 @@ class TestUsageLimitedUntilPersistence:
         save_usage_limited_until(future)
         save_usage_limited_until(None)
         assert load_usage_limited_until() is None
+
+    def test_load_returns_none_on_corrupt_json(self, tmp_config_dir: Path) -> None:
+        """Corrupt JSON in DISPATCH_STATE_FILE → None (silent, no exception)."""
+        import cw.config
+        from cw.config import load_usage_limited_until
+
+        cw.config.DISPATCH_STATE_FILE.write_text("not-json")
+        assert load_usage_limited_until() is None
+
+    def test_save_warns_and_does_not_raise_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """save_usage_limited_until swallows OSError and emits a warning (#804)."""
+        from datetime import timedelta
+        from unittest.mock import patch
+
+        from cw.config import save_usage_limited_until
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        with patch("cw.config.atomic_write_text", side_effect=OSError("disk full")):
+            # Must not raise; warning is logged, no exception propagates.
+            save_usage_limited_until(future)
 
 
 # ---------------------------------------------------------------------------
