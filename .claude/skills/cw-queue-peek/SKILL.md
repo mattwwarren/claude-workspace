@@ -146,6 +146,25 @@ between the remove and the close).
 - API rate-limit state (no visibility into model-side throttling)
 - CI failure reasons (the script reports PR_state OPEN/MERGED/CLOSED; deeper
   CI inspection requires `gh pr checks`)
+- **A live session whose task has no `claude_session_id` *and* no `surface_ref`**
+  (both None — can persist across attempts before reconcile backfills them).
+  Peek can't resolve the transcript, so `stage`/`status`/`age_m`/`idle_m` come
+  back null and `recommend` is a bare `PEEK` with reason "no transcript
+  timestamps — verify session is alive." That is a **blind** signal, NOT a
+  stall — do not stop the session on it. Fall back to scanning the worktree's
+  claude project dir directly (newest `*.jsonl`, line-growth for liveness, last
+  `AUTO_DEV_RESULT` for stage/status). Tracked by #817; see
+  `docs/session-disposition.md §4`.
+
+## Reading att / status transitions (advance vs churn)
+
+A rising `att` and a `running → pending` flip are **stage mechanics**, not
+churn — auto-dev bumps `att` and requeues on every stage transition
+(plan → impl → review → ship), each ending in an `AUTO_DEV_RESULT` sentinel.
+Churn requires **all three**: no terminal sentinel + no new worktree commits +
+fast death. A single att bump preceded by a sentinel is a healthy advance. Use
+this skill's `stage`/`status`/`recommend` for the verdict, not the raw counter.
+Full contract: `docs/session-disposition.md §4`.
 
 ## Related skills
 
