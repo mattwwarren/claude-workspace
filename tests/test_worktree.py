@@ -20,6 +20,7 @@ from cw.worktree import (
     check_main_ff_safety,
     check_not_main_checkout,
     create_worktree,
+    effective_worktree_bases,
     fast_forward_main,
     fetch_feature_branch,
     is_main_behind_origin,
@@ -102,6 +103,36 @@ class TestResolveWorktreeBase:
         client = ClientConfig(name="test", workspace_path=ws)
         expected = tmp_path / "projects" / ".worktrees" / "my-repo"
         assert resolve_worktree_base(client) == expected
+
+
+class TestEffectiveWorktreeBases:
+    def test_explicit_worktree_base_returns_singleton(self, tmp_path: Path) -> None:
+        custom = tmp_path / "custom-wt"
+        client = ClientConfig(
+            name="test", workspace_path=tmp_path, worktree_base=custom
+        )
+        bases = effective_worktree_bases(client)
+        assert bases == frozenset({custom})
+
+    def test_no_worktree_base_returns_two_paths(self, tmp_path: Path) -> None:
+        """Without explicit worktree_base, both default and hash bases returned."""
+        client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
+        bases = effective_worktree_bases(client)
+        assert len(bases) == 2
+
+    def test_no_worktree_base_includes_resolve_worktree_base(
+        self, tmp_path: Path
+    ) -> None:
+        client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
+        assert resolve_worktree_base(client) in effective_worktree_bases(client)
+
+    def test_explicit_worktree_base_no_hash_fallback(self, tmp_path: Path) -> None:
+        """Explicit base → only one path, no hash fallback added."""
+        custom = tmp_path / "custom"
+        client = ClientConfig(
+            name="test", workspace_path=tmp_path, worktree_base=custom
+        )
+        assert len(effective_worktree_bases(client)) == 1
 
 
 class TestWorktreePathFor:

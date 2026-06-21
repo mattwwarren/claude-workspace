@@ -8,7 +8,7 @@ from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
 from cw.exceptions import CwError
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _git_dir, resolve_worktree_base
+from cw.worktree import _git_dir, effective_worktree_bases
 from cw.worktree_gc import (
     GC_REMOVE_VERDICTS,
     GcVerdict,
@@ -28,6 +28,7 @@ _GC_VERDICT_LABEL: dict[GcVerdict, str] = {
     GcVerdict.SKIP_DETACHED: "SKIP  ",
     GcVerdict.SKIP_BARE: "SKIP  ",
     GcVerdict.SKIP_DIRTY: "SKIP  ",
+    GcVerdict.SKIP_LIVE: "SKIP  ",
 }
 
 _GC_VERDICT_REASON: dict[GcVerdict, str] = {
@@ -41,6 +42,7 @@ _GC_VERDICT_REASON: dict[GcVerdict, str] = {
     GcVerdict.SKIP_DETACHED: "detached HEAD",
     GcVerdict.SKIP_BARE: "bare worktree",
     GcVerdict.SKIP_DIRTY: "dirty",
+    GcVerdict.SKIP_LIVE: "live session or running task",
 }
 
 
@@ -75,6 +77,12 @@ def _format_gc_report(report: WorktreeGcReport, *, apply: bool) -> str:
     n_skip = len(report.skipped)
 
     lines.append("")
+    if report.capped:
+        n_shown = len(report.results)
+        lines.append(
+            f"run capped at {n_shown} of {report.total_discovered}"
+            f" (pass --limit to adjust)"
+        )
     if apply:
         n_ok = n_remove - report.removal_failures
         if report.removal_failures:
@@ -123,16 +131,26 @@ def worktree_group() -> None:
     show_default=True,
     help="gh CLI timeout in seconds.",
 )
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap worktrees processed per client (applied after base filtering).",
+)
 @handle_errors
 def worktree_gc(
-    apply: bool, include_closed: bool, client_name: str | None, timeout: int
+    apply: bool,
+    include_closed: bool,
+    client_name: str | None,
+    timeout: int,
+    limit: int | None,
 ) -> None:
     """GC worktrees for squash-merged or closed branches.
 
     Checks each worktree branch's PR state via the gh CLI and removes
     worktrees where the PR is MERGED (or CLOSED with --include-closed).
     Dry-run by default; pass --apply to act.
-    Locked and dirty worktrees are always skipped.
+    Locked, dirty, and live-session worktrees are always skipped.
     Runs against all configured GitHub-tracked clients by default.
     """
     clients = load_clients()
@@ -158,13 +176,14 @@ def worktree_gc(
             continue
 
         git_cwd = _git_dir(client)
-        wt_base = resolve_worktree_base(client)
+        wt_bases = effective_worktree_bases(client)
         report = run_worktree_gc(
             git_cwd,
             apply=apply,
             timeout=timeout,
             include_closed=include_closed,
-            worktree_base=wt_base,
+            worktree_bases=wt_bases,
+            limit=limit,
         )
 
         if len(selected) > 1:

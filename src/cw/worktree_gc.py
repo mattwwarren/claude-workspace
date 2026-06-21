@@ -10,6 +10,10 @@ import subprocess as _sp
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cw.config import load_state
+from cw.dev_queue import load_dev_queue
+from cw.models import QueueItemStatus, SessionStatus
+
 _log = logging.getLogger(__name__)
 
 # git worktree list --porcelain field prefixes
@@ -19,6 +23,14 @@ _PORCELAIN_LOCKED = "locked"
 _PORCELAIN_DETACHED = "detached"
 _PORCELAIN_BARE = "bare"
 _PORCELAIN_HEAD = "HEAD "
+
+# Git porcelain v1: "XY path" — 2-char status code + 1 space = 3 chars before path.
+# Mirrors worktree._GIT_PORCELAIN_PATH_OFFSET; duplicated per D5 (issue #764) to
+# avoid importing the private name cross-module.
+_GIT_PORCELAIN_PATH_OFFSET = 3
+# cw-managed per-session scratch files share this path prefix. They are written
+# fresh each spawn and must not be counted as real uncommitted work.
+_CW_SCRATCH_PREFIX = ".claude/"
 
 # gh CLI subcommand args
 _GH_PR_LIST_STATE_ALL = "all"
@@ -57,6 +69,7 @@ class GcVerdict(enum.Enum):
     SKIP_DETACHED = "SKIP_DETACHED"
     SKIP_BARE = "SKIP_BARE"
     SKIP_DIRTY = "SKIP_DIRTY"
+    SKIP_LIVE = "SKIP_LIVE"
 
 
 # Canonical verdict partitions — single source of truth for all three report properties
@@ -74,6 +87,7 @@ GC_SKIP_VERDICTS: frozenset[GcVerdict] = frozenset(
         GcVerdict.SKIP_DETACHED,
         GcVerdict.SKIP_BARE,
         GcVerdict.SKIP_DIRTY,
+        GcVerdict.SKIP_LIVE,
     }
 )
 
@@ -103,6 +117,11 @@ class WorktreeGcReport:
 
     results: list[WorktreeGcResult]
     removal_failures: int = 0  # REMOVE_* worktrees where git worktree remove failed
+    # Total worktrees discovered (post base-filter, pre-limit). Equal to
+    # len(results) when no limit was applied.
+    total_discovered: int = 0
+    # True when a --limit cap was hit and some discovered worktrees were dropped.
+    capped: bool = False
 
     @property
     def to_remove(self) -> list[WorktreeGcResult]:
@@ -295,8 +314,15 @@ def _is_dirty(wt_path: Path, branch: str) -> bool:
     """Return True if *wt_path* has uncommitted changes or unpushed commits.
 
     Checks both:
-    - Uncommitted changes (``git status --porcelain`` is non-empty)
+    - Uncommitted changes (``git status --porcelain`` is non-empty after
+      filtering out cw-managed scratch files that are not real user work)
     - Unpushed commits (``git log origin/<branch>..HEAD`` is non-empty)
+
+    cw writes transient per-session files under ``.claude/`` (e.g.
+    ``cw-context.json``, ``prep-pr-state.json``) that are gitignored in the
+    main checkout but may be untracked inside pre-#759 worktrees — making every
+    worktree appear permanently dirty. These are excluded from the dirty check
+    so a worktree whose only "dirt" is cw scratch is still reapable.
 
     Conservative: returns True on any subprocess error so that a git failure
     never allows a destructive removal to proceed.
@@ -311,7 +337,15 @@ def _is_dirty(wt_path: Path, branch: str) -> bool:
         )
     except (OSError, FileNotFoundError):
         return True  # conservative for destructive operation
-    if result.stdout.strip():
+    lines = [
+        line
+        for line in result.stdout.splitlines()
+        if not (
+            len(line) > _GIT_PORCELAIN_PATH_OFFSET
+            and line[_GIT_PORCELAIN_PATH_OFFSET:].startswith(_CW_SCRATCH_PREFIX)
+        )
+    ]
+    if lines:
         return True
     return _has_unpushed_commits(wt_path, branch)
 
@@ -339,12 +373,53 @@ def _verdict_for_state(
     return GcVerdict.REMOVE_CLOSED
 
 
+_NON_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
+    {SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED}
+)
+
+
+def _live_worktree_paths() -> frozenset[Path]:
+    """Return paths of all worktrees backing live sessions or running dispatch tasks.
+
+    Loads CwState and DevQueueStore the same way reconcile does. Conservative:
+    on any load error returns an empty set so a corrupted state file never
+    blocks GC from running — it only disables the live-session safety guard for
+    that run (logged at WARNING).
+    """
+    live: set[Path] = set()
+
+    try:
+        state = load_state()
+        for session in state.sessions:
+            if (
+                session.status in _NON_TERMINAL_SESSION_STATUSES
+                and session.worktree_path is not None
+            ):
+                live.add(session.worktree_path)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("gc: failed to load session state for live-path guard: %s", exc)
+
+    try:
+        queue = load_dev_queue()
+        for task in queue.tasks:
+            if (
+                task.status == QueueItemStatus.RUNNING
+                and task.worktree_path is not None
+            ):
+                live.add(task.worktree_path)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("gc: failed to load dev-queue for live-path guard: %s", exc)
+
+    return frozenset(live)
+
+
 def classify_worktrees(
     git_cwd: Path,
     timeout: int = 10,
     *,
     include_closed: bool = False,
-    worktree_base: Path | None = None,
+    worktree_bases: frozenset[Path] | None = None,
+    live_worktree_paths: frozenset[Path] = frozenset(),
 ) -> list[WorktreeGcResult]:
     """Classify all non-main worktrees in the repo at *git_cwd*.
 
@@ -352,11 +427,16 @@ def classify_worktrees(
         git_cwd: Path to the main git checkout.
         timeout: Seconds per ``gh`` CLI call.
         include_closed: When True, CLOSED PRs are candidates for removal.
-        worktree_base: When given, only worktrees whose path is under this
-            directory are classified. Others are silently skipped. Used to
-            restrict GC to cw-managed worktrees.
+        worktree_bases: When given, only worktrees whose path is under one of
+            these directories are classified. Others are silently skipped. Pass
+            ``effective_worktree_bases(client)`` from ``cw.worktree`` to cover
+            both the default sibling layout and the hash-derived fallback.
+        live_worktree_paths: Worktree paths that back live sessions or running
+            dispatch tasks. These receive SKIP_LIVE regardless of PR state.
 
     Verdicts:
+        - Path not in worktree_bases → silently excluded (not in results)
+        - Live session or running task → SKIP_LIVE (no PR lookup)
         - Bare → SKIP_BARE (no PR lookup)
         - Locked → SKIP_LOCKED (no PR lookup)
         - Detached HEAD → SKIP_DETACHED
@@ -374,7 +454,18 @@ def classify_worktrees(
     _gh_seen_unavailable = False
 
     for entry in entries:
-        if worktree_base is not None and not entry.path.is_relative_to(worktree_base):
+        if worktree_bases is not None and not any(
+            entry.path.is_relative_to(b) for b in worktree_bases
+        ):
+            continue
+
+        if entry.path in live_worktree_paths:
+            _log.info("gc: skip live worktree %s", entry.path)
+            results.append(
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.SKIP_LIVE, pr_number=None
+                )
+            )
             continue
 
         if entry.is_bare:
@@ -508,7 +599,8 @@ def run_worktree_gc(
     apply: bool = False,
     timeout: int = 10,
     include_closed: bool = False,
-    worktree_base: Path | None = None,
+    worktree_bases: frozenset[Path] | None = None,
+    limit: int | None = None,
 ) -> WorktreeGcReport:
     """GC worktrees for the repo at *git_cwd*.
 
@@ -520,18 +612,33 @@ def run_worktree_gc(
         apply: When True, remove worktrees with REMOVE_* verdicts. Dry-run by default.
         timeout: Seconds per ``gh`` CLI call.
         include_closed: When True, also remove worktrees for CLOSED (abandoned) PRs.
-        worktree_base: When given, restrict GC to worktrees under this path.
+        worktree_bases: When given, restrict GC to worktrees under one of these paths.
+            Pass ``effective_worktree_bases(client)`` to cover both the default
+            sibling layout and the hash-derived fallback (issue #764 fix).
+        limit: When given, cap the number of worktrees classified (and acted on)
+            to this value. Applied after base-path filtering (D2 / issue #764).
+            The report carries total_discovered (pre-cap) and capped=True so
+            callers can surface "run capped at N of M" messaging.
 
     Returns:
         WorktreeGcReport with classification results for all worktrees.
     """
-    results = classify_worktrees(
+    live = _live_worktree_paths()
+    all_results = classify_worktrees(
         git_cwd,
         timeout=timeout,
         include_closed=include_closed,
-        worktree_base=worktree_base,
+        worktree_bases=worktree_bases,
+        live_worktree_paths=live,
     )
-    report = WorktreeGcReport(results=results)
+    total_discovered = len(all_results)
+    capped = limit is not None and len(all_results) > limit
+    results = all_results[:limit] if limit is not None else all_results
+    report = WorktreeGcReport(
+        results=results,
+        total_discovered=total_discovered,
+        capped=capped,
+    )
 
     if apply:
         for gc_result in report.to_remove:

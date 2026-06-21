@@ -75,6 +75,22 @@ def resolve_worktree_base(client: ClientConfig) -> Path:
     return ws.parent / ".worktrees" / ws.name
 
 
+def effective_worktree_bases(client: ClientConfig) -> frozenset[Path]:
+    """Return all directories that may contain cw-managed worktrees for *client*.
+
+    ``worktree_path_for`` silently redirects to a hash-derived base under
+    ``~/.cw/wt/`` when the default sibling path would exceed
+    ``_WORKTREE_NAME_CAP``. GC must search *both* to avoid silently skipping
+    worktrees created when that fallback was in effect.
+
+    When ``client.worktree_base`` is set explicitly only that directory is
+    returned — the user chose a location and there is no hash fallback.
+    """
+    if client.worktree_base is not None:
+        return frozenset({client.worktree_base})
+    return frozenset({resolve_worktree_base(client), _hashed_worktree_base(client)})
+
+
 def _hashed_worktree_base(client: ClientConfig) -> Path:
     """Return a short hash-derived worktree base for a client.
 
