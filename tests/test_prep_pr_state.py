@@ -10,8 +10,20 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from typing import Protocol, cast
 
-import pytest
+# ---------------------------------------------------------------------------
+# Protocol for dynamically-loaded Gate objects
+# ---------------------------------------------------------------------------
+
+
+class _GateP(Protocol):
+    """Structural type for Gate dataclass instances loaded via importlib."""
+
+    name: str
+    command: str
+    autofix: str | None
+
 
 # ---------------------------------------------------------------------------
 # Script loader
@@ -23,16 +35,20 @@ _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "prep_pr_state.py"
 
 def _load_module() -> types.ModuleType:
     spec = importlib.util.spec_from_file_location("prep_pr_state", _SCRIPT)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules.setdefault("prep_pr_state", mod)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    spec.loader.exec_module(mod)
     return mod
 
 
 _mod = _load_module()
-_parse_claude_md_gates = _mod._parse_claude_md_gates
-Gate = _mod.Gate
+_raw_parse = _mod._parse_claude_md_gates
+
+
+def _parse_claude_md_gates(path: Path) -> list[_GateP]:
+    return cast("list[_GateP]", _raw_parse(path))
 
 
 # ---------------------------------------------------------------------------
@@ -69,10 +85,10 @@ uv run ruff format --check src/ tests/                           # 2. Format
 uv run mypy --strict src/                                        # 3. Type check
 uv run pre-commit run --all-files                                # 4. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \\
-  --cov=cw --cov-report=xml --cov-fail-under=88                  # 5. Unit + total cov >=88%
-uv run pytest tests/ -m integration                              # 6. tmux integration
+  --cov=cw --cov-report=xml --cov-fail-under=88  # 5. Unit + total cov >=88%
+uv run pytest tests/ -m integration                # 6. tmux integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \\
-  --fail-under=90                                                # 7. Patch coverage >=90%
+  --fail-under=90  # 7. Patch coverage >=90%
 ```
 
 Requirements section.
@@ -163,7 +179,7 @@ class TestBulletOnly:
 
 
 class TestBashBlockOnly:
-    def _gates(self, tmp_path: Path) -> list[Gate]:
+    def _gates(self, tmp_path: Path) -> list[_GateP]:
         path = _write_claude_md(tmp_path, _BASH_BLOCK_ONLY)
         return _parse_claude_md_gates(path)
 
@@ -235,7 +251,7 @@ class TestBashBlockOnly:
 
 
 class TestMixedFormat:
-    def _gates(self, tmp_path: Path) -> list[Gate]:
+    def _gates(self, tmp_path: Path) -> list[_GateP]:
         path = _write_claude_md(tmp_path, _MIXED)
         return _parse_claude_md_gates(path)
 
