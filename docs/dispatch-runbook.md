@@ -414,3 +414,51 @@ the false-failure in the first place.
 
 Related issues: #774 (false-failed sentinel), #766 (worktree leak that can
 co-occur), #786 (re-spawn churn), #787 (diff-cover skipped pre-PR).
+
+---
+
+### 9.5 Manual PR for a tombstoned finalize-blocked session (#816)
+
+**Symptom.** A task is stuck at `blocked_on_user` with `paused_status:
+finalize_blocked` and a `rescue_attempted: true` marker. The branch is pushed
+to origin; `gh pr create` failed transiently (permission error, usage limit, or
+network blip) and the rescue loop will not retry.
+
+**Diagnose.**
+
+```bash
+cw dev-queue status          # task shows BLOCKED_ON_USER
+cw session show <ticket-id>  # last_result contains rescue_attempted: true
+```
+
+Verify the branch exists on origin:
+
+```bash
+gh pr list --head dev/<ticket-id>
+# or
+git ls-remote origin dev/<ticket-id>
+```
+
+**Recovery.** The branch is preserved; create the PR and enable auto-merge
+manually:
+
+```bash
+# 1. Create the PR
+gh pr create \
+  --base main \
+  --head dev/<ticket-id> \
+  --title "<ticket title>" \
+  --body "Manual finalize — rescue_attempted tombstone (#816)"
+
+# 2. Enable squash auto-merge
+gh pr merge <PR-number> --squash --auto
+
+# 3. Once the PR merges, retire the stale queue task
+cw dev-queue cancel <ticket-id> --client <client>
+```
+
+The `rescue_attempted` tombstone prevents duplicate PR creation on every
+subsequent reconcile tick. It is NOT automatically cleared — the above manual
+steps are the operator self-service reset. Do not re-dispatch the ticket.
+
+Related issues: #812 (finalize-blocked detection), #816 (tombstone hardening).

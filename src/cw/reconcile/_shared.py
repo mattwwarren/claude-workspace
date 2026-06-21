@@ -149,6 +149,12 @@ _SALVAGE_PR_BODY_TEMPLATE = (
     "Review this branch and merge when satisfied.\n\n"
     "Ticket: #{ticket_id}"
 )
+_RESCUE_PR_BODY_TEMPLATE = (
+    "Auto-rescued by reconcile after finalize was blocked.\n\n"
+    "The worker completed impl+review and pushed the branch but could not open"
+    " the PR (permission classifier / usage limit / transient gh failure)."
+    " Ticket: #{ticket_id}"
+)
 
 # Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
 # idle_stall_recovered — watchdog fired but no usage-limit message found.
@@ -264,6 +270,9 @@ class ReconcileReport:
     ``salvaged_ticket_ids`` — ticket IDs auto-completed via the HIGH-path
     git-state salvage (committed-but-no-PR reaped sessions). Populated by
     :func:`salvage_committed_no_pr_sessions`. See GitHub issue #497.
+    ``rescued_ticket_ids`` — ticket IDs auto-completed via the finalize-blocked
+    rescue path (TIMED_OUT sessions whose PR creation previously failed).
+    Populated by :func:`rescue_finalize_blocked_sessions`. See GitHub #812 #816.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
@@ -272,6 +281,7 @@ class ReconcileReport:
     completed_ticket_ids: list[str] = field(default_factory=list)
     usage_limited: bool = False
     salvaged_ticket_ids: list[str] = field(default_factory=list)
+    rescued_ticket_ids: list[str] = field(default_factory=list)
 
 
 def _claude_agents_json() -> list[dict[str, object]]:

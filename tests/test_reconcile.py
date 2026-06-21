@@ -15937,3 +15937,188 @@ class TestFinalizeBlocked:
         report = reconcile()
         # No tasks → nothing completed; gh-unavailable pre-pass didn't corrupt state.
         assert report.completed_ticket_ids == []
+
+    # ── 1.22 rescued_ticket_ids field on ReconcileReport (SHOULD_FIX 2) ────
+
+    def test_rescue_ids_land_in_rescued_ticket_ids_not_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile(): rescued IDs go to rescued_ticket_ids, not completed."""
+        from cw.reconcile import reconcile
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+
+        ticket_id = "FB-22"
+        branch = f"dev/{ticket_id}"
+        sid = "fb-sess-22"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.reap_reason = ReapReason.FINALIZE_BLOCKED
+        sess.last_result = {"paused_status": _FINALIZE_BLOCKED_REASON, "branch": branch}
+        save_state(CwState(sessions=[sess]))
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.subprocess.run",
+            lambda *_a, **_kw: MagicMock(returncode=0, stdout=""),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a: None
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (None, True),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core.pr_exists_for_branch", lambda _b, **_kw: (None, True)
+        )
+        monkeypatch.setattr("cw.reconcile._shared._claude_agents_json", list)
+
+        report = reconcile()
+
+        assert ticket_id in report.rescued_ticket_ids
+        assert ticket_id not in report.completed_ticket_ids
+
+    # ── 1.23 _rescue_complete: merge only after mutated guard (SHOULD_FIX 3) ──
+
+    def test_rescue_complete_merge_skipped_on_concurrent_completion(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_rescue_complete: gh pr merge NOT called when session past TIMED_OUT."""
+        from cw.reconcile.salvage import _rescue_complete
+
+        sid = "fb-sess-23"
+        ticket_id = "FB-23"
+        branch = f"dev/{ticket_id}"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        # Session is already COMPLETED — simulates concurrent completion race.
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.status = SessionStatus.COMPLETED
+        save_state(CwState(sessions=[sess]))
+
+        merge_called: list[bool] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> MagicMock:
+            if args[:3] == ["gh", "pr", "merge"]:
+                merge_called.append(True)
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", _fake_run)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        completed_ticket_ids: list[str] = []
+        stale_sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        _rescue_complete(stale_sess, ticket_id, branch, completed_ticket_ids)
+
+        # mutated=False → returns early; gh pr merge must NOT have been called.
+        assert not merge_called
+        assert not completed_ticket_ids
+
+    # ── 1.24 unknown client in finalize-blocked detect → skip (NIT 4) ───────
+
+    def test_finalize_blocked_unknown_client_skip(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unknown client in _detect_stalled_candidates: skip, not 'main' fallback."""
+        from cw.reconcile.stalled import _detect_stalled_candidates
+
+        worktree = tmp_path / "wt-fb-24"
+        worktree.mkdir(parents=True)
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+        ticket_id = "FB-24"
+
+        # No clients configured — all clients unknown.
+        _write_staged_clients_yaml(tmp_config_dir, "other-client")
+
+        # Session with a client that is NOT in the loaded effective_clients.
+        sess = Session(
+            id="fb-sess-24",
+            name=f"unknown-client/auto-dev/{ticket_id}",
+            client="unknown-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=worktree,
+            surface_ref="surf-24",
+            started_at=started_at,
+        )
+        context_dir = worktree / ".claude"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "cw-context.json").write_text(
+            '{"headless": true, "session_id": "fb-sess-24"}'
+        )
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="unknown-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="fb-sess-24",
+            stage=Stage.FINALIZE,
+        )
+
+        state = CwState(sessions=[sess])
+        config = _auto_config()
+        monkeypatch.setattr(
+            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+        )
+        pr_calls: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile.stalled.pr_exists_for_branch",
+            lambda b, **_kw: pr_calls.append(b) or (False, True),  # type: ignore[func-returns-value]
+        )
+
+        candidates = _detect_stalled_candidates(
+            state,
+            now=now,
+            config=config,
+            task_by_ticket={ticket_id: task},
+        )
+
+        # Unknown client → finalize-blocked detection skipped entirely.
+        # Session should still be detected as REVERT_TASK (timed out).
+        fb_candidates = [
+            c for c in candidates if c.proposed_action.value == "park_finalize_blocked"
+        ]
+        assert not fb_candidates
+        # pr_exists_for_branch must NOT have been called for this unknown client
+        # (previously would have been called with the "main" fallback).
+        assert not pr_calls
+
+    # ── 1.25 _RESCUE_PR_BODY_TEMPLATE in _shared (NIT 5) ────────────────────
+
+    def test_rescue_pr_body_template_in_shared(self) -> None:
+        """_RESCUE_PR_BODY_TEMPLATE is importable from _shared (NIT 5)."""
+        from cw.reconcile._shared import _RESCUE_PR_BODY_TEMPLATE
+
+        assert "finalize" in _RESCUE_PR_BODY_TEMPLATE.lower()
+        assert "{ticket_id}" in _RESCUE_PR_BODY_TEMPLATE

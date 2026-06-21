@@ -31,6 +31,7 @@ from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _FINALIZE_BLOCKED_REASON,
     _NEEDS_SALVAGE_REASON,
+    _RESCUE_PR_BODY_TEMPLATE,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_PR_BODY_TEMPLATE,
     _SALVAGE_PR_TITLE_TEMPLATE,
@@ -297,14 +298,6 @@ def _salvage_low_path(
     _deps.fire_push_notification(session.name, session.client)
 
 
-_RESCUE_PR_BODY_TEMPLATE = (
-    "Auto-rescued by reconcile after finalize was blocked.\n\n"
-    "The worker completed impl+review and pushed the branch but could not open"
-    " the PR (permission classifier / usage limit / transient gh failure)."
-    " Ticket: #{ticket_id}"
-)
-
-
 def _rescue_mark_attempted(session_id: str) -> None:
     """Write rescue_attempted=True so the session is skipped on future ticks."""
     with sessions_lock():
@@ -350,25 +343,9 @@ def _rescue_complete(
     session: Session,
     ticket_id: str | None,
     branch: str,
-    completed_ticket_ids: list[str],
+    rescued_ticket_ids: list[str],
 ) -> None:
     """Mark session + task COMPLETED and emit SESSION_COMPLETED event."""
-    # Enable auto-merge (non-fatal if it fails — PR is open, human can merge).
-    try:
-        subprocess.run(
-            ["gh", "pr", "merge", "--auto", "--squash", branch],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        _log.warning(
-            "rescue_finalize_blocked: gh pr merge failed for branch %r session %s",
-            branch,
-            session.id,
-        )
-
     now = datetime.now(UTC)
     mutated = False
     with sessions_lock():
@@ -388,6 +365,25 @@ def _rescue_complete(
         # duplicate event and daemon stop to keep the audit log clean.
         return
 
+    # Why: gh pr merge runs AFTER the mutated guard so a concurrent-completion
+    # race does not issue a redundant merge-enable (#816). The PR was opened
+    # by _rescue_open_pr before this function runs, so the branch is valid.
+    # Non-fatal if merge fails — PR is open, human can merge.
+    try:
+        subprocess.run(
+            ["gh", "pr", "merge", "--auto", "--squash", branch],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        _log.warning(
+            "rescue_finalize_blocked: gh pr merge failed for branch %r session %s",
+            branch,
+            session.id,
+        )
+
     if ticket_id:
         with dev_queue_lock():
             store = load_dev_queue()
@@ -398,7 +394,7 @@ def _rescue_complete(
                 ):
                     task.status = QueueItemStatus.COMPLETED
                     save_dev_queue(store)
-                    completed_ticket_ids.append(ticket_id)
+                    rescued_ticket_ids.append(ticket_id)
                     break
 
     record_event(
@@ -429,10 +425,10 @@ def rescue_finalize_blocked_sessions() -> list[str]:
     Idempotency: after a gh failure, writes last_result["rescue_attempted"] = True
     so the session is not retried on every subsequent reconcile tick.
 
-    Returns list of ticket_ids that were auto-completed.
+    Returns list of rescued ticket_ids (placed in ReconcileReport.rescued_ticket_ids).
     """
     state = load_state()
-    completed_ticket_ids: list[str] = []
+    rescued_ticket_ids: list[str] = []
 
     for session in state.sessions:
         if session.status != SessionStatus.TIMED_OUT:
@@ -470,6 +466,6 @@ def rescue_finalize_blocked_sessions() -> list[str]:
         if not pr_created:
             _rescue_mark_attempted(session.id)
             continue
-        _rescue_complete(session, ticket_id, branch, completed_ticket_ids)
+        _rescue_complete(session, ticket_id, branch, rescued_ticket_ids)
 
-    return completed_ticket_ids
+    return rescued_ticket_ids
