@@ -134,7 +134,8 @@ def worktree_group() -> None:
 @click.option(
     "--limit",
     type=int,
-    default=None,
+    default=100,
+    show_default=True,
     help="Cap worktrees processed per client (applied after base filtering).",
 )
 @handle_errors

@@ -30,6 +30,8 @@ _PORCELAIN_HEAD = "HEAD "
 _GIT_PORCELAIN_PATH_OFFSET = 3
 # cw-managed per-session scratch files share this path prefix. They are written
 # fresh each spawn and must not be counted as real uncommitted work.
+# Mirrors worktree._CW_SCRATCH_PREFIX; duplicated per D5 to avoid importing
+# the private name cross-module.
 _CW_SCRATCH_PREFIX = ".claude/"
 
 # gh CLI subcommand args

@@ -16,6 +16,7 @@ from cw.models import ClientConfig
 from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
+    _hashed_worktree_base,
     _register_cw_exclude,
     check_main_ff_safety,
     check_not_main_checkout,
@@ -119,6 +120,7 @@ class TestEffectiveWorktreeBases:
         client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
         bases = effective_worktree_bases(client)
         assert len(bases) == 2
+        assert _hashed_worktree_base(client) in bases
 
     def test_no_worktree_base_includes_resolve_worktree_base(
         self, tmp_path: Path
