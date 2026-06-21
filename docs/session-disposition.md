@@ -99,7 +99,49 @@ For the full status-enum semantics and `blocker` shape, see
 
 ---
 
-## 4. The orphan condition
+## 4. Attempts and status transitions are mechanics, not outcomes
+
+A dev-queue task's `attempts` counter and its `running` ↔ `pending`
+transitions are **pipeline mechanics, not health signals**. Reading them as
+churn is a recurring false alarm — it cost a manual transcript investigation on
+2026-06-21 (#817).
+
+- **`attempts` increments on every stage transition.** auto-dev runs as staged
+  sessions (plan → impl → review → ship); each stage completes by emitting an
+  `AUTO_DEV_RESULT` sentinel (§1), after which the dispatcher bumps `attempts`
+  and re-spawns for the next stage. So `att=4` can mean "advanced through four
+  healthy stages," not "retried four times."
+- **`running → pending` is the between-stage requeue.** A pure-plan session
+  leaves no impl commits; the orchestrator reverts the task to `pending` and the
+  next tick respawns it into the impl stage. This is correct, not a stall.
+
+**The discriminator is the sentinel, not the counter.** An attempt bump is a
+*healthy advance* if the just-ended session emitted a terminal `AUTO_DEV_RESULT`
+(§1). It is *churn* only when sessions die **without** a sentinel **and** leave
+**no new worktree commits and** die fast — i.e. sustained no-progress, not a
+single bump. Three conditions, all required: no-sentinel + no-artifact +
+fast-death.
+
+**Use `cw queue peek` for the in-flight verdict**, not raw `cw dev-queue
+tasks`. Peek resolves the transcript, parses the last sentinel into
+`stage`/`status`, and emits a WAIT / PEEK / STOP recommendation via the
+peek-stop ladder (see the `cw-queue-peek` skill). `att ≥ 3` and
+long-stall-without-PR are already encoded there — don't re-derive them by hand.
+
+**Degraded-signal fallback.** Peek resolves the transcript via the task's
+`claude_session_id` / `surface_ref` (§1). When **both are None** — which can
+persist across attempts before reconcile backfills them (§2 Gotcha 3, and the
+backfill gap tracked by #817) — peek returns null `stage`/`status`/`age`/`idle`
+and a bare `PEEK` ("no transcript timestamps — verify session is alive"). That
+is a **blind** signal, not a stall. Fall back to a direct scan of the worktree's
+claude project dir: the newest `*.jsonl`, whether its line count is still
+growing (liveness), and its last parseable `AUTO_DEV_RESULT` (progress). A blind
+peek row reads identically to a genuine stall today — that is the #817 defect,
+not evidence the worker is stuck.
+
+---
+
+## 5. The orphan condition
 
 A session that emits a terminal sentinel (`shipped` / `no_op`) but is reaped
 as idle *before* `reconcile()` consumes the sentinel leaves its dev-queue task
@@ -137,7 +179,7 @@ cw doctor --reap
 
 ---
 
-## 5. Cross-references
+## 6. Cross-references
 
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) — full end-to-end dispatch procedure.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` event.
