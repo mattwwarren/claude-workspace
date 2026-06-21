@@ -134,6 +134,10 @@ _GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when the stalled
 # watchdog parks a session after exhausting its wall-clock retry cap (GitHub #756).
 _STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when a FINALIZE-stage
+# session times out with commits pushed but no PR (GitHub #812). The worktree is
+# preserved; rescue_finalize_blocked_sessions opens the PR on the next tick.
+_FINALIZE_BLOCKED_REASON = "finalize_blocked"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -195,6 +199,10 @@ class ProposedAction(StrEnum):
     # Fires at sentinel_unrouted_check_seconds; exempt from signal_only.
     # See GitHub #578.
     ROUTE_EMITTED_SENTINEL = "route_emitted_sentinel"
+    # Session at Stage.FINALIZE timed out with commits pushed but no PR.
+    # Worktree is preserved; rescue_finalize_blocked_sessions opens the PR.
+    # See GitHub #812.
+    PARK_FINALIZE_BLOCKED = "park_finalize_blocked"
 
 
 @dataclass(frozen=True)

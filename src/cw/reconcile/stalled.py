@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from cw.config import save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
+from cw.gh import pr_exists_for_branch
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -22,9 +23,11 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionStatus,
+    Stage,
 )
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
+    _FINALIZE_BLOCKED_REASON,
     _GH_CHECK_BLOCKED_REASON,
     _LIVE_STATUSES,
     _NEEDS_SALVAGE_REASON,
@@ -45,12 +48,46 @@ from cw.reconcile._shared import (
     resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
+from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
     from cw.models import CwState, Session, TicketTask
+
+
+def _resolve_finalize_blocked_condition(
+    task: TicketTask | None,
+    session: Session,
+    wt_path: Path,
+    default_branch: str,
+) -> tuple[bool, str | None]:
+    """Return (is_finalize_blocked, branch_name_or_none).
+
+    True when all conditions hold:
+    - task.stage == Stage.FINALIZE
+    - worktree has commits beyond origin/<default_branch>
+    - no open PR exists for the feature branch
+    - gh is available (gh-unavailable falls through to REVERT_TASK)
+
+    Returns (False, None) for any short-circuit.
+    """
+    if task is None or task.stage != Stage.FINALIZE:
+        return False, None
+    if not _has_commits_beyond_base(wt_path, default_branch):
+        return False, None
+    if task.ticket_id is None:
+        return False, None
+    clients = _deps.load_effective_clients()
+    branch = feature_branch_key(session.client, task.ticket_id, clients)
+    pr_result, gh_available = pr_exists_for_branch(branch)
+    # gh absent, PR already open, or transient error — fall through to REVERT_TASK.
+    # Only pr_result is False (confirmed no open PR) triggers FINALIZE_BLOCKED.
+    if not gh_available or pr_result is not False:
+        return False, None
+    return True, branch
 
 
 def _detect_stalled_candidates(
@@ -118,6 +155,34 @@ def _detect_stalled_candidates(
                 )
             )
             continue
+        # Finalize-blocked check: branch pushed but finalize failed before opening
+        # a PR (GitHub #812). Must run BEFORE the retry-cap check so the task
+        # is parked (preserving the worktree) rather than capped-and-abandoned.
+        if session.worktree_path is not None and task is not None:
+            _fb_clients = _deps.load_effective_clients()
+            _fb_client_cfg = _fb_clients.get(session.client)
+            _fb_default_branch = (
+                _fb_client_cfg.default_branch if _fb_client_cfg is not None else "main"
+            )
+            _fb_blocked, _fb_branch = _resolve_finalize_blocked_condition(
+                task, session, session.worktree_path, _fb_default_branch
+            )
+            if _fb_blocked and _fb_branch is not None:
+                candidates.append(
+                    ReapCandidate(
+                        session_id=session.id,
+                        proposed_action=ProposedAction.PARK_FINALIZE_BLOCKED,
+                        ticket_id=ticket_id,
+                        elapsed_seconds=elapsed,
+                        reap_reason=ReapReason.FINALIZE_BLOCKED,
+                        lane=task.lane,
+                        client=session.client,
+                        stage=task.stage,
+                        worktree_path=session.worktree_path,
+                        branch=_fb_branch,
+                    )
+                )
+                continue
         cap = resolve_stalled_retry_cap(task, config)
         # Why: task.attempts is the shared counter for both this per-tier stalled cap
         # and the future global attempt ceiling (#786). Do not add a parallel counter.
@@ -202,6 +267,7 @@ def _apply_stalled_state_mutations(
     gh_blocked_revert_candidates: list[ReapCandidate],
     revert_candidates: list[ReapCandidate],
     park_candidates: list[ReapCandidate],
+    finalize_blocked_candidates: list[ReapCandidate],
 ) -> None:
     """Apply in-place session-state mutations for stalled dispositions.
 
@@ -242,6 +308,18 @@ def _apply_stalled_state_mutations(
         session.completed_at = now
         session.completed_reason = CompletionReason.TIMED_OUT
         session.reap_reason = ReapReason.STALLED_RETRY_CAP_PARKED
+    # Finalize-blocked: work complete, PR not opened. Preserve worktree for rescue.
+    # Write branch into last_result so rescue_finalize_blocked_sessions can find it.
+    for candidate in finalize_blocked_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.TIMED_OUT
+        session.completed_at = now
+        session.completed_reason = CompletionReason.TIMED_OUT
+        session.reap_reason = ReapReason.FINALIZE_BLOCKED
+        session.last_result = {
+            "paused_status": _FINALIZE_BLOCKED_REASON,
+            "branch": candidate.branch,
+        }
 
 
 def _apply_stalled_queue_mutations(
@@ -301,6 +379,62 @@ def _apply_stalled_queue_mutations(
     return reverted, merged_completed
 
 
+def _apply_finalize_blocked_queue_mutations(
+    candidates: list[ReapCandidate],
+) -> None:
+    """Route RUNNING tasks for finalize-blocked sessions to BLOCKED_ON_USER.
+
+    Separate from _apply_stalled_queue_mutations because finalize-blocked tasks
+    are RUNNING at detection time (not yet reverted to PENDING by a prior tick).
+    Under dev_queue_lock; no-op when the candidate set is empty. See GitHub #812.
+    """
+    ticket_ids = {c.ticket_id for c in candidates if c.ticket_id}
+    if not ticket_ids:
+        return
+    with dev_queue_lock():
+        store = load_dev_queue()
+        changed = False
+        for task in store.tasks:
+            if task.ticket_id not in ticket_ids:
+                continue
+            if task.status != QueueItemStatus.RUNNING:
+                continue
+            task.status = QueueItemStatus.BLOCKED_ON_USER
+            task.session_id = None
+            changed = True
+        if changed:
+            save_dev_queue(store)
+
+
+def _emit_finalize_blocked_events(
+    session_by_id: dict[str, Session],
+    candidates: list[ReapCandidate],
+) -> None:
+    """Emit events for finalize-blocked sessions: stop daemon, SESSION_NEEDS_ATTENTION.
+
+    Worktree is NOT cleaned up — rescue_finalize_blocked_sessions opens the PR.
+    """
+    for candidate in candidates:
+        session = session_by_id[candidate.session_id]
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _FINALIZE_BLOCKED_REASON,
+                "breadcrumbs": candidate.branch or "",
+                "crashed": False,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+        _deps.fire_push_notification(session.name, session.client)
+
+
 def _emit_stalled_events(
     session_by_id: dict[str, Session],
     revert_candidates: list[ReapCandidate],
@@ -308,12 +442,13 @@ def _emit_stalled_events(
     gh_blocked_revert_candidates: list[ReapCandidate],
     park_candidates: list[ReapCandidate],
     salvage_candidates: list[ReapCandidate],
+    finalize_blocked_candidates: list[ReapCandidate],
 ) -> None:
     """Emit lifecycle events and stop/cleanup surfaces for stalled dispositions.
 
     Mirrors the post-queue side effects of the original act phase: SESSION_TIMED_OUT
     + worktree cleanup for reverts, SESSION_COMPLETED for merged/salvage, and
-    SESSION_NEEDS_ATTENTION for gh-blocked candidates.
+    SESSION_NEEDS_ATTENTION for gh-blocked and finalize-blocked candidates.
     """
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -416,6 +551,8 @@ def _emit_stalled_events(
         if session.surface_ref is not None:
             _deps.get_native_daemon_client().stop(session.surface_ref)
 
+    _emit_finalize_blocked_events(session_by_id, finalize_blocked_candidates)
+
 
 def _act_on_stalled_candidates(
     state: CwState,
@@ -491,6 +628,11 @@ def _act_on_stalled_candidates(
         for c in candidates
         if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
     ]
+    finalize_blocked_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.PARK_FINALIZE_BLOCKED
+    ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
     # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
@@ -525,7 +667,12 @@ def _act_on_stalled_candidates(
             correlation_id=candidate.ticket_id,
         )
 
-    if not salvage_candidates and not all_revert_candidates and not park_candidates:
+    if (
+        not salvage_candidates
+        and not all_revert_candidates
+        and not park_candidates
+        and not finalize_blocked_candidates
+    ):
         return [], []
 
     session_by_id = {s.id: s for s in state.sessions}
@@ -538,6 +685,7 @@ def _act_on_stalled_candidates(
         gh_blocked_revert_candidates=gh_blocked_revert_candidates,
         revert_candidates=revert_candidates,
         park_candidates=park_candidates,
+        finalize_blocked_candidates=finalize_blocked_candidates,
     )
 
     save_state(state)
@@ -556,6 +704,8 @@ def _act_on_stalled_candidates(
         salvaged_result_by_ticket,
     )
 
+    _apply_finalize_blocked_queue_mutations(finalize_blocked_candidates)
+
     _emit_stalled_events(
         session_by_id,
         revert_candidates,
@@ -563,6 +713,7 @@ def _act_on_stalled_candidates(
         gh_blocked_revert_candidates,
         park_candidates,
         salvage_candidates,
+        finalize_blocked_candidates,
     )
 
     return reverted, merged_completed

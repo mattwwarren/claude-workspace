@@ -41,7 +41,10 @@ from cw.reconcile.phantom import (
     _detect_phantom_candidates,
     _emit_reap_proposed,
 )
-from cw.reconcile.salvage import salvage_committed_no_pr_sessions
+from cw.reconcile.salvage import (
+    rescue_finalize_blocked_sessions,
+    salvage_committed_no_pr_sessions,
+)
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -171,15 +174,18 @@ def reconcile() -> ReconcileReport:
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
     salvaged_ticket_ids = salvage_committed_no_pr_sessions(salvage_git_candidates)
+    rescued_ticket_ids = rescue_finalize_blocked_sessions()
 
-    if not completed_ticket_ids and not salvaged_ticket_ids:
+    if not completed_ticket_ids and not salvaged_ticket_ids and not rescued_ticket_ids:
         return locked_report
 
     return ReconcileReport(
         phantom_session_ids=locked_report.phantom_session_ids,
         phantom_session_names=locked_report.phantom_session_names,
         reverted_ticket_ids=locked_report.reverted_ticket_ids,
-        completed_ticket_ids=locked_report.completed_ticket_ids + completed_ticket_ids,
+        completed_ticket_ids=locked_report.completed_ticket_ids
+        + completed_ticket_ids
+        + rescued_ticket_ids,
         usage_limited=locked_report.usage_limited,
         salvaged_ticket_ids=salvaged_ticket_ids,
     )

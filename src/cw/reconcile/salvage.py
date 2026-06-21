@@ -29,11 +29,13 @@ from cw.models import (
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
+    _FINALIZE_BLOCKED_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_PR_BODY_TEMPLATE,
     _SALVAGE_PR_TITLE_TEMPLATE,
     _SalvageCandidate,
+    ticket_id_for_session,
 )
 from cw.worktree import _has_commits_beyond_base
 
@@ -293,3 +295,168 @@ def _salvage_low_path(
         },
     )
     _deps.fire_push_notification(session.name, session.client)
+
+
+_RESCUE_PR_BODY_TEMPLATE = (
+    "Auto-rescued by reconcile after finalize was blocked.\n\n"
+    "The worker completed impl+review and pushed the branch but could not open"
+    " the PR (permission classifier / usage limit / transient gh failure)."
+    " Ticket: #{ticket_id}"
+)
+
+
+def _rescue_mark_attempted(session_id: str) -> None:
+    """Write rescue_attempted=True so the session is skipped on future ticks."""
+    with sessions_lock():
+        fresh_state = load_state()
+        for s in fresh_state.sessions:
+            if s.id == session_id:
+                if isinstance(s.last_result, dict):
+                    s.last_result = {**s.last_result, "rescue_attempted": True}
+                break
+        save_state(fresh_state)
+
+
+def _rescue_open_pr(branch: str, default_branch: str, ticket_id: str | None) -> bool:
+    """Create a PR from branch → default_branch. Returns True on success."""
+    try:
+        subprocess.run(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--base",
+                default_branch,
+                "--head",
+                branch,
+                "--title",
+                f"auto-dev: finalize for {ticket_id or 'unknown'}",
+                "--body",
+                _RESCUE_PR_BODY_TEMPLATE.format(ticket_id=ticket_id or "unknown"),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return False
+    return True
+
+
+def _rescue_complete(
+    session: Session,
+    ticket_id: str | None,
+    branch: str,
+    completed_ticket_ids: list[str],
+) -> None:
+    """Mark session + task COMPLETED and emit SESSION_COMPLETED event."""
+    # Enable auto-merge (non-fatal if it fails — PR is open, human can merge).
+    try:
+        subprocess.run(
+            ["gh", "pr", "merge", "--auto", "--squash", branch],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        _log.warning(
+            "rescue_finalize_blocked: gh pr merge failed for branch %r session %s",
+            branch,
+            session.id,
+        )
+
+    now = datetime.now(UTC)
+    with sessions_lock():
+        fresh_state = load_state()
+        for s in fresh_state.sessions:
+            if s.id == session.id:
+                if s.status == SessionStatus.TIMED_OUT:
+                    s.status = SessionStatus.COMPLETED
+                    s.completed_at = now
+                    s.completed_reason = CompletionReason.NORMAL
+                    s.reap_reason = ReapReason.SALVAGE_COMPLETED
+                break
+        save_state(fresh_state)
+
+    if ticket_id:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id == ticket_id
+                    and task.status == QueueItemStatus.BLOCKED_ON_USER
+                ):
+                    task.status = QueueItemStatus.COMPLETED
+                    save_dev_queue(store)
+                    completed_ticket_ids.append(ticket_id)
+                    break
+
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "crashed": False,
+            "salvaged": True,
+            "salvage_kind": "finalize_blocked_rescue",
+            "branch": branch,
+        },
+    )
+    if session.surface_ref is not None:
+        with contextlib.suppress(Exception):
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+
+
+def rescue_finalize_blocked_sessions() -> list[str]:
+    """Post-pass: open PRs for sessions blocked at the finalize stage (GitHub #812).
+
+    Called from reconcile() AFTER sessions_lock releases. Finds TIMED_OUT sessions
+    with last_result["paused_status"] == _FINALIZE_BLOCKED_REASON, opens a PR for
+    the pushed branch, then marks the session and its task COMPLETED.
+
+    Idempotency: after a gh failure, writes last_result["rescue_attempted"] = True
+    so the session is not retried on every subsequent reconcile tick.
+
+    Returns list of ticket_ids that were auto-completed.
+    """
+    state = load_state()
+    completed_ticket_ids: list[str] = []
+
+    for session in state.sessions:
+        if session.status != SessionStatus.TIMED_OUT:
+            continue
+        if not isinstance(session.last_result, dict):
+            continue
+        if session.last_result.get("paused_status") != _FINALIZE_BLOCKED_REASON:
+            continue
+        if session.last_result.get("rescue_attempted"):
+            continue
+        branch = session.last_result.get("branch")
+        if not isinstance(branch, str) or not branch:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        try:
+            default_branch = get_client(session.client).default_branch
+        except CwError:
+            _log.warning(
+                "rescue_finalize_blocked: unknown client %r for session %s — skipping",
+                session.client,
+                session.id,
+            )
+            continue
+        pr_result, gh_available = pr_exists_for_branch(branch)
+        if not gh_available or pr_result is None:
+            continue
+        pr_created = pr_result is not False or _rescue_open_pr(
+            branch, default_branch, ticket_id
+        )
+        if not pr_created:
+            _rescue_mark_attempted(session.id)
+            continue
+        _rescue_complete(session, ticket_id, branch, completed_ticket_ids)
+
+    return completed_ticket_ids

@@ -79,6 +79,7 @@ class ReapReason(StrEnum):
     COMPLETED_BACKSTOP = "completed_backstop"
     SALVAGE_COMPLETED = "salvage_completed"
     SALVAGE_PARKED = "salvage_parked"
+    FINALIZE_BLOCKED = "finalize_blocked"
 
 
 class Stage(StrEnum):
