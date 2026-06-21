@@ -92,6 +92,7 @@ HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
 
 DEFAULT_IDLE_RETRY_CAP = 2  # idle-stall auto-retries before parking (#384)
+DEFAULT_STALLED_RETRY_CAP = 2  # wall-clock-budget retries before parking (#756)
 
 # How recently a session's transcript must have been modified to be considered
 # actively making progress. If the newest .jsonl under the session's project
@@ -130,6 +131,9 @@ _PHANTOM_REAP_MERGED_REASON = "phantom_reap_merged"
 # task is routed to BLOCKED_ON_USER rather than being reverted to PENDING
 # (fail-closed on ambiguous world state; GitHub issue #637).
 _GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when the stalled
+# watchdog parks a session after exhausting its wall-clock retry cap (GitHub #756).
+_STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -981,6 +985,24 @@ def resolve_idle_retry_cap(
         if tier_cap is not None:
             return tier_cap
     return DEFAULT_IDLE_RETRY_CAP
+
+
+def resolve_stalled_retry_cap(
+    task: TicketTask | None,
+    config: OrchestratorConfig,
+) -> int:
+    """Return the wall-clock-budget stalled-stage auto-retry cap for a ticket.
+
+    Precedence: task.scope_hint per-tier override, else the global default.
+    See GitHub issue #756.
+    """
+    if task is None:
+        return DEFAULT_STALLED_RETRY_CAP
+    if task.scope_hint is not None:
+        tier_cap = config.stalled_retry_cap_by_tier.get(task.scope_hint)
+        if tier_cap is not None:
+            return tier_cap
+    return DEFAULT_STALLED_RETRY_CAP
 
 
 def resolve_reap_policy(
