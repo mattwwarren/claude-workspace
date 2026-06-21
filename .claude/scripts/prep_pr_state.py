@@ -312,6 +312,12 @@ def _parse_bash_block_gates(fence_lines: list[str]) -> list[Gate]:
             name = _derive_gate_name(command)
             if name:
                 gates.append(Gate(name=name, command=command))
+    if pending.strip():
+        command = _strip_inline_comment(pending.strip()).strip()
+        if command and not command.startswith("#"):
+            name = _derive_gate_name(command)
+            if name:
+                gates.append(Gate(name=name, command=command))
     return gates
 
 
@@ -355,8 +361,8 @@ def _parse_claude_md_gates(claude_md_path: Path) -> list[Gate]:
     for line in content.splitlines():
         stripped = line.strip()
 
-        # Section headers end any open fence (shouldn't happen in well-formed
-        # docs, but keeps state consistent if the file is malformed).
+        # While inside a bash fence, ## headers are treated as fence content
+        # (rare/malformed, but avoids false section-exit on ## inside code blocks).
         if not in_bash_fence and stripped.startswith("## "):
             in_gates_section = stripped == "## Quality Gates"
             continue

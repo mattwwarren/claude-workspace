@@ -309,3 +309,29 @@ class TestUnclosedFence:
         path = _write_claude_md(tmp_path, _UNCLOSED_FENCE)
         result = _parse_claude_md_gates(path)
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Case (g): trailing continuation — last fence line ends with backslash
+# ---------------------------------------------------------------------------
+
+_TRAILING_CONTINUATION = """\
+# Project
+
+## Quality Gates
+
+```bash
+uv run mypy \\
+```
+"""
+
+
+class TestTrailingContinuation:
+    def test_pending_flushed_when_fence_ends_mid_continuation(
+        self, tmp_path: Path
+    ) -> None:
+        """Last fence line ending with backslash must not be dropped."""
+        path = _write_claude_md(tmp_path, _TRAILING_CONTINUATION)
+        gates = _parse_claude_md_gates(path)
+        assert len(gates) == 1
+        assert gates[0].name == "mypy"
