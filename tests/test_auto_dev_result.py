@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from cw.auto_dev_result import (
     SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
+    SUPPORTED_SCHEMA_VERSIONS,
     AutoDevResult,
     BlockedResult,
     extract_block,
@@ -491,6 +493,28 @@ class TestSentinelFailureModes:
         result = parse_stdout(_wrap_sentinel(payload))
         assert isinstance(result, BlockedResult)
         assert result.blocker.reason == "validation_failed"
+
+
+class TestSchemaVersionSkew:
+    """schema_version one-version look-ahead tolerance (issue #395)."""
+
+    def test_schema_version_max_plus_one_parsed_best_effort(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        payload = _shipped_payload()
+        payload["schema_version"] = max(SUPPORTED_SCHEMA_VERSIONS) + 1
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "shipped"
+        assert any("schema-bump skew" in rec.message for rec in caplog.records)
+
+    def test_schema_version_max_plus_two_still_rejected(self) -> None:
+        payload = _shipped_payload()
+        payload["schema_version"] = max(SUPPORTED_SCHEMA_VERSIONS) + 2
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == "schema_version_unsupported"
 
 
 # ---------------------------------------------------------------------------
