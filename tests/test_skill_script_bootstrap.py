@@ -37,12 +37,16 @@ _VALIDATE_SENTINEL = (
 # Venv site-packages provides pydantic (a cw dep) without exposing cw itself:
 # the editable-install .pth file is not processed when the path is added via
 # PYTHONPATH rather than being a real site-packages directory activated by Python.
-_VENV_SITE_PACKAGES = sysconfig.get_path("purelib") or ""
+_VENV_SITE_PACKAGES = sysconfig.get_path("purelib")
+assert _VENV_SITE_PACKAGES, (
+    "Could not determine venv site-packages path for test isolation"
+)
 
 
 def _bare_env() -> dict[str, str]:
     """Env with pydantic available but cw NOT importable — bootstrap required."""
     return {
+        "HOME": str(Path.home()),
         "PATH": "/usr/bin:/bin",
         "PYTHONPATH": _VENV_SITE_PACKAGES,
     }

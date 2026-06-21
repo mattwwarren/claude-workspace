@@ -29,7 +29,12 @@ from typing import Any
 
 
 def _bootstrap_sys_path() -> None:
-    """Add repo src/ to sys.path so cw imports work under bare python3."""
+    """Add repo src/ to sys.path so cw imports work under bare python3.
+
+    # Why: this cannot be extracted to a shared module — it must run BEFORE any cw
+    # import, so there is no shared cw path yet to import it from. Each standalone
+    # script that imports cw carries its own copy. Do not deduplicate.
+    """
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").exists():
             src = str(parent / "src")
