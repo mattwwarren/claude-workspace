@@ -1336,3 +1336,323 @@ def test_cli_event_wait_type_comma_separated(tmp_events_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output.strip())
     assert data["id"] == ev.id
+
+
+# ---------------------------------------------------------------------------
+# --client filter (issue #783)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_client_filter(tmp_events_dir: Path) -> None:
+    """--client filters events by payload.client field."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", "alpha"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "bbb" not in result.output
+
+
+def test_cli_event_tail_client_filter_multiple(tmp_events_dir: Path) -> None:
+    """--client can be repeated to include events from multiple clients."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "gamma", "session_id": "ccc"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--client", "alpha", "--client", "beta"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "bbb" in result.output
+    assert "ccc" not in result.output
+
+
+def test_cli_event_tail_client_filter_no_match(tmp_events_dir: Path) -> None:
+    """--client with no matching events outputs 'No events.'"""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", "gamma"])
+    assert result.exit_code == 0, result.output
+    assert "No events." in result.output
+
+
+def test_cli_event_tail_client_filter_events_without_client_field(
+    tmp_events_dir: Path,
+) -> None:
+    """Events with no payload.client field are excluded when --client is used."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", "alpha"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "pr.registered" not in result.output
+
+
+def test_cli_event_tail_client_filter_comma_separated(tmp_events_dir: Path) -> None:
+    """--client a,b is equivalent to --client a --client b."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "gamma", "session_id": "ccc"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", "alpha,beta"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "bbb" in result.output
+    assert "ccc" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# --dedup-terminal (issue #783)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_dedup_terminal_collapses_same_session(
+    tmp_events_dir: Path,
+) -> None:
+    """--dedup-terminal keeps only first occurrence of (type, session) pair."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {"session_id": "s1"},
+            correlation_id="T-1",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--dedup-terminal"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.timed_out") == 1
+
+
+def test_cli_event_tail_dedup_terminal_different_sessions_not_collapsed(
+    tmp_events_dir: Path,
+) -> None:
+    """--dedup-terminal keeps one event per unique session."""
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"session_id": "s1"},
+        correlation_id="T-1",
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"session_id": "s2"},
+        correlation_id="T-2",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--dedup-terminal"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.timed_out") == 2
+
+
+def test_cli_event_tail_dedup_terminal_non_terminal_events_not_deduped(
+    tmp_events_dir: Path,
+) -> None:
+    """--dedup-terminal does not collapse non-terminal events."""
+    for _ in range(3):
+        events_record_event(OrchestratorEventType.DISPATCH_TICK, {"n": 1})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--dedup-terminal"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("dispatch.tick") == 3
+
+
+def test_cli_event_tail_dedup_terminal_paused_status_field_in_key(
+    tmp_events_dir: Path,
+) -> None:
+    """--dedup-terminal uses paused_status: different conditions kept separate."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"session_id": "s1", "paused_status": "dirty_worktree"},
+        correlation_id="T-1",
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"session_id": "s1", "paused_status": "dirty_worktree"},
+        correlation_id="T-1",
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"session_id": "s1", "paused_status": "silently_idle"},
+        correlation_id="T-1",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--dedup-terminal"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.needs_attention") == 2
+
+
+def test_cli_event_tail_follow_dedup_terminal(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--follow --dedup-terminal suppresses repeated terminal events in stream."""
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"session_id": "s1"},
+        correlation_id="T-1",
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"session_id": "s1"},
+        correlation_id="T-1",
+    )
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow", "--dedup-terminal"])
+    assert result.exit_code == 130
+    assert result.output.count("session.timed_out") == 1
+
+
+def test_cli_event_tail_follow_client_filter(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--follow --client filters events by payload.client in the stream."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow", "--client", "alpha"])
+    assert result.exit_code == 130
+    assert "aaa" in result.output
+    assert "bbb" not in result.output
+
+
+def test_cli_event_tail_client_and_dedup_terminal_compose(
+    tmp_events_dir: Path,
+) -> None:
+    """--client and --dedup-terminal compose: client filter applied before dedup."""
+    # alpha has repeated terminal events; beta has one
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {"session_id": "s1", "client": "alpha"},
+        )
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"session_id": "s2", "client": "beta"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--client", "alpha", "--dedup-terminal"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.timed_out") == 1
+    assert "s2" not in result.output
+
+
+def test_cli_event_tail_client_filter_with_json(tmp_events_dir: Path) -> None:
+    """--client --json outputs valid JSON containing only matching client events."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", "alpha", "--json"])
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.output.strip().splitlines() if line]
+    assert len(lines) == 1
+    import json
+
+    parsed = json.loads(lines[0])
+    assert parsed["payload"]["client"] == "alpha"
+    assert parsed["payload"]["session_id"] == "aaa"
+
+
+def test_cli_event_tail_client_filter_with_type(tmp_events_dir: Path) -> None:
+    """--client and --type compose: only events matching both filters are returned."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--client", "alpha", "--type", "session.spawned"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "session.timed_out" not in result.output
+    assert "bbb" not in result.output
+
+
+def test_cli_event_tail_client_comma_only_no_events(tmp_events_dir: Path) -> None:
+    """--client ',' (comma-only) normalizes to None and returns all events."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", ","])
+    assert result.exit_code == 0, result.output
+    # Comma-only produces empty frozenset normalized to None — no filter applied
+    assert "aaa" in result.output
