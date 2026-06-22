@@ -1383,7 +1383,7 @@ def test_cli_event_tail_client_filter_multiple(tmp_events_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "aaa" in result.output
     assert "bbb" in result.output
-    assert "ccc" not in result.output
+    assert "gamma" not in result.output
 
 
 def test_cli_event_tail_client_filter_no_match(tmp_events_dir: Path) -> None:

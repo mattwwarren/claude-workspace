@@ -34,8 +34,7 @@ In the existing reaper pre-pass (`revert_stalled_headless_sessions` in `src/cw/r
 - `(None, _)` / gh-absent `(_, False)` → existing fail-open handling — *unchanged*.
 - `(False, True)` (no merged PR) → **NEW** — call `branch_exists_on_origin`:
   - `(False, True)` branch **absent** → still `timed_out` → task reverts to PENDING (retry); the `SESSION_TIMED_OUT` event is tagged `branch_state: "absent_no_merged_pr"`.
-  - `(True, True)` branch **present** → `timed_out`, `branch_state: "present"`.
-  - `(None, _)` error / unavailable → `timed_out`, **no tag** (fail-open — never block on the gh call).
+  - `(True, True)` branch **present** OR `(None, _)` error / unavailable → `timed_out`, **no tag** (fail-open — never block on the gh call).
 
 The branch check is purely diagnostic; the disposition (TIMED_OUT → PENDING) is identical in every branch.
 
@@ -47,12 +46,11 @@ Add a single nullable `branch_state` field to the **`SESSION_TIMED_OUT` event pa
 - **No** new `CompletionReason` / `ReapReason` enum value.
 - **No** new event type.
 
-This mirrors the scope-down discipline of #315 / #793 (no new reason, no synthesized sentinel, no new event type). The per-candidate annotation is threaded via a `branch_absent_ticket_ids: frozenset[str]` forwarded through `_act_on_stalled_candidates`, exactly mirroring the existing `merged_ticket_ids` / `gh_blocked_ticket_ids` forwarding pattern (`stalled.py:255`, `:594`). The `SESSION_TIMED_OUT` emit site (`stalled.py:495`) adds `branch_state` to its payload: `"absent_no_merged_pr"` when the ticket is in the set, `"present"` when the branch check ran and found it present, and the key is **omitted** when the check did not run or was unavailable (a consumer's `payload.get("branch_state")` then returns `None`).
+This mirrors the scope-down discipline of #315 / #793 (no new reason, no synthesized sentinel, no new event type). The per-candidate annotation is threaded via a `branch_absent_ticket_ids: frozenset[str]` forwarded through `_act_on_stalled_candidates`, exactly mirroring the existing `merged_ticket_ids` / `gh_blocked_ticket_ids` forwarding pattern (`stalled.py:255`, `:594`). The `SESSION_TIMED_OUT` emit site adds `branch_state` to its payload only when the ticket is in `branch_absent_ticket_ids`; in every other case (branch found, check error, check not run), the key is **omitted** (a consumer's `payload.get("branch_state")` returns `None`).
 
-`branch_state` value vocabulary:
+`branch_state` value vocabulary (two outcomes):
 - `"absent_no_merged_pr"` — anomaly: no merged PR and branch gone (never-pushed / force-deleted).
-- `"present"` — ordinary timeout; branch still on origin.
-- *omitted* — branch check did not run or failed (fail-open); no claim made.
+- *omitted* — every other case: branch present, check error, check not run (fail-open; no claim made).
 
 ## Reuse, don't reinvent
 
@@ -78,7 +76,7 @@ Do **not** touch `src/cw/models.py`, `src/cw/reconcile/core.py`, `src/cw/reconci
 Mock seams: `cw.reconcile._deps.pr_is_merged_for_ticket` and `cw.reconcile._deps.branch_exists_on_origin`. Pass an explicit `now` past budget. Reuse `_mk_headless_daemon_session`, `_auto_config()`, `FakeNativeDaemonClient`, `read_events`.
 
 - **(a)** no merged PR `(False, True)` + branch absent `(False, True)` → session `TIMED_OUT`, task `PENDING` (retry — **NOT** COMPLETED; this is the security assertion), `SESSION_TIMED_OUT` emitted with `branch_state == "absent_no_merged_pr"`, `SESSION_COMPLETED` **not** emitted.
-- **(b)** no merged PR + branch present `(True, True)` → `TIMED_OUT`, `branch_state == "present"`.
+- **(b)** no merged PR + branch present `(True, True)` → `TIMED_OUT`, `branch_state` key **absent** (key omitted, not `"present"`).
 - **(c)** branch-check transient error `(None, True)` → `TIMED_OUT`, `branch_state` key omitted from payload (fail-open).
 - **(d)** merged PR `(True, True)` → COMPLETED; `branch_exists_on_origin` **not called** (assert call_count == 0).
 - **(e)** transient PR error `(None, True)` → existing `_merged is None` guard fires first; `branch_exists_on_origin` **not called**; `TIMED_OUT`.
@@ -91,14 +89,14 @@ Patch coverage ≥90% on changed lines, including the fail-open and not-called p
 The annotation is only useful if the disposition tooling and operators know to read it.
 
 - **`docs/session-disposition.md`** — add a subsection (under §5 "The orphan condition", cross-linked from §3) documenting:
-  - the `branch_state` field on `SESSION_TIMED_OUT` and its three values;
+  - the `branch_state` field on `SESSION_TIMED_OUT` and its two-outcome contract;
   - that `absent_no_merged_pr` is an **anomaly** (never-pushed / force-deleted), distinct from an ordinary timeout, but still retried — **never** inferred-complete;
   - the rationale (branch-absence ≠ merged) and cross-references to #315 (Signal #1) and #808.
 - **`docs/dispatch-runbook.md`** — in the disposition/monitor section (around the `cw-session-watch` breadcrumb, ~line 59–70), add a one-line breadcrumb: a `SESSION_TIMED_OUT` carrying `branch_state: absent_no_merged_pr` means the worker died before push or the branch was force-deleted — investigate the worker, don't just let it churn through retries.
 
 ## Skill updates (in-scope for this ticket)
 
-- **`.claude/skills/cw-session-watch/SKILL.md`** — document that a `session.timed_out` outcome may carry `branch_state` on the event, and what `absent_no_merged_pr` vs `present` mean for disposition (anomaly worth investigating vs ordinary slow timeout). This skill reads the event bus, so it is the primary consumer.
+- **`.claude/skills/cw-session-watch/SKILL.md`** — document that a `session.timed_out` outcome may carry `branch_state` on the event: `"absent_no_merged_pr"` means anomaly (died-pre-push / force-deleted); absent key means ordinary slow timeout. This skill reads the event bus, so it is the primary consumer.
 - **`.claude/skills/cw-fanout/SKILL.md`** — light cross-reference: when a watched ticket fires `session.timed_out`, note the `branch_state` field as the discriminator for "stuck/slow" vs "died-pre-push/force-deleted".
 - **`.claude/skills/cw-queue-peek/SKILL.md`** — peek is RUNNING-only and `timed_out` is terminal, so this is at most a one-line cross-reference to `session-disposition.md`'s new subsection; no behavioral change to the peek ladder.
 - `.claude/skills/cw-followup/scripts/parse_sentinel.py` — **no change**: `branch_state` lives on the reaper-emitted `SESSION_TIMED_OUT` event, not on the `AUTO_DEV_RESULT` sentinel (a timed_out session has no parseable sentinel — that is why it timed out).

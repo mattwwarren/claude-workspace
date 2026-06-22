@@ -71,6 +71,11 @@ monitor skills:
   skill for the exit-event classification.
 - **Post-mortem the sentinel a finished session produced** → the
   **`cw-validate-result`** skill.
+- **`session.timed_out` with `branch_state: absent_no_merged_pr`** — the
+  worker died before pushing (or the branch was force-deleted); this is an
+  anomaly, not an ordinary slow timeout. Investigate the worker before letting
+  it churn through retries. See [`session-disposition.md §5a`](session-disposition.md)
+  for the full `branch_state` vocabulary.
 
 If you are scripting a long-running monitor loop, prefer driving it off `cw
 queue peek --json` (the recommend ladder) over re-deriving health from raw task

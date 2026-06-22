@@ -7,7 +7,7 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-from cw.gh import pr_exists_for_branch, pr_is_merged_for_ticket
+from cw.gh import branch_exists_on_origin, pr_exists_for_branch, pr_is_merged_for_ticket
 
 if TYPE_CHECKING:
     import pytest
@@ -402,3 +402,84 @@ class TestPrExistsForBranch:
         exists, gh_available = pr_exists_for_branch("dev/497")
         assert exists is None
         assert gh_available is False
+
+
+class TestBranchExistsOnOrigin:
+    """Tests for branch_exists_on_origin / _fetch_branch_exists_on_origin."""
+
+    def test_branch_present_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """returncode 0 → (True, True)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, "{}"),
+        )
+        exists, gh_available = branch_exists_on_origin("dev/808")
+        assert exists is True
+        assert gh_available is True
+
+    def test_branch_absent_404_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-zero with HTTP 404 in output → (False, True)."""
+        result = _make_run_result(1, "")
+        result.stderr = "error: HTTP 404: Not Found"
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: result)
+        exists, gh_available = branch_exists_on_origin("dev/808")
+        assert exists is False
+        assert gh_available is True
+
+    def test_branch_absent_not_found_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-zero with '"Not Found"' in output → (False, True)."""
+        result = _make_run_result(1, '{"message": "Not Found"}')
+        result.stderr = ""
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: result)
+        exists, gh_available = branch_exists_on_origin("dev/808")
+        assert exists is False
+        assert gh_available is True
+
+    def test_unknown_nonzero_returns_none_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-zero with unrecognized output → transient (None, True)."""
+        result = _make_run_result(1, "")
+        result.stderr = "some other error"
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: result)
+        exists, gh_available = branch_exists_on_origin("dev/808")
+        assert exists is None
+        assert gh_available is True
+
+    def test_file_not_found_returns_none_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FileNotFoundError (gh absent) → (None, False)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(FileNotFoundError("gh")),
+        )
+        exists, gh_available = branch_exists_on_origin("dev/808")
+        assert exists is None
+        assert gh_available is False
+
+    def test_os_error_returns_none_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """OSError (transient) → (None, True)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(OSError("pipe error")),
+        )
+        exists, gh_available = branch_exists_on_origin("dev/808")
+        assert exists is None
+        assert gh_available is True
+
+    def test_timeout_returns_none_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TimeoutExpired → (None, True)."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                subprocess.TimeoutExpired("gh", 10)
+            ),
+        )
+        exists, gh_available = branch_exists_on_origin("dev/808")
+        assert exists is None
+        assert gh_available is True

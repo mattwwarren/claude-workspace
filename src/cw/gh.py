@@ -177,6 +177,61 @@ def pr_is_merged_for_ticket(
     return False, True
 
 
+def _fetch_branch_exists_on_origin(
+    branch: str, timeout: int
+) -> tuple[bool | None, bool]:
+    """Return (exists, gh_available) for *branch* via ``gh api`` refs endpoint.
+
+    Returns:
+      (True, True)   — branch present on origin
+      (False, True)  — branch absent on origin (404)
+      (None, True)   — transient error (unexpected non-zero, JSON parse failure)
+      (None, False)  — gh binary not found (FileNotFoundError)
+    """
+    try:
+        result = _sp.run(
+            [
+                "gh",
+                "api",
+                f"repos/{{owner}}/{{repo}}/git/refs/heads/{branch}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None, False
+    except (OSError, _sp.TimeoutExpired):
+        return None, True
+
+    if result.returncode == 0:
+        return True, True
+    combined = result.stdout + result.stderr
+    if "HTTP 404" in combined or '"Not Found"' in combined:
+        return False, True
+    return None, True
+
+
+def branch_exists_on_origin(
+    branch: str, *, timeout: int = 10
+) -> tuple[bool | None, bool]:
+    """Check whether *branch* still exists on origin.
+
+    Uses ``gh api repos/{owner}/{repo}/git/refs/heads/{branch}`` (owner/repo
+    inferred from the current directory's git remote).
+
+    Returns (exists, gh_available):
+      (True, True)   — branch present on origin
+      (False, True)  — branch absent on origin
+      (None, True)   — transient error; treat as "cannot determine"
+      (None, False)  — gh binary not found
+
+    Fail-open: callers must treat (None, *) as "cannot determine".
+    """
+    return _fetch_branch_exists_on_origin(branch, timeout)
+
+
 def pr_exists_for_branch(
     branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT
 ) -> tuple[bool | None, bool]:

@@ -185,6 +185,26 @@ If a reap occurs and you need to force reconcile to re-examine state:
 cw doctor --reap
 ```
 
+### 5a. Branch-absence anomaly on `SESSION_TIMED_OUT` (#808)
+
+When a session times out with no sentinel and no merged PR, the reaper checks
+whether the feature branch still exists on origin and annotates the
+`SESSION_TIMED_OUT` event with a `branch_state` field:
+
+- `"absent_no_merged_pr"` — **anomaly**: no merged PR and the branch is gone.
+  This means the worker died before pushing (or the branch was force-deleted).
+  It is categorically different from a slow timeout: the worker left no
+  artifacts. Investigation is warranted; do not let it churn silently through
+  retries without understanding why the push never happened.
+- *(key omitted)* — every other case: branch still on origin, branch check
+  unavailable, or check did not run (fail-open).
+
+**Critical invariant:** `"absent_no_merged_pr"` **never** routes a session to
+COMPLETED. The session still times out and the task reverts to PENDING. Signal
+#1 (`pr_is_merged_for_ticket`, §5 cross-ref) is the only safe completion
+signal; branch-absence alone is not (#808 security finding). See also
+[`docs/dispatch-runbook.md`](dispatch-runbook.md) for the operator breadcrumb.
+
 ---
 
 ## 6. Cross-references
