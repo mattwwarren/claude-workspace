@@ -533,7 +533,7 @@ def _act_on_idle_candidates(
         for c in park_candidates
         if (sess := session_by_id.get(c.session_id)) is not None
         and isinstance(sess.last_result, dict)
-        and sess.last_result.get("paused_status") is not None
+        and sess.last_result.get("paused_status") == _SILENTLY_IDLE_REASON
     }
 
     counters_changed = _apply_idle_state_mutations(
