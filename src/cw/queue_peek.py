@@ -53,6 +53,8 @@ IDLE_POST_PR_MIN: int = 5  # idle this long after PR shipped → stuck in stage5
 STOP_ATTEMPTS_MIN: int = 3  # at or above this attempt count → systemic failure
 
 RECOMMEND_BLIND = "PEEK-BLIND"
+_SIGNAL_SOURCE_BLIND = "blind"
+_SIGNAL_SOURCE_TRANSCRIPT = "transcript"
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
 
 
@@ -445,10 +447,10 @@ def recommend(
 
 def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     """Build a report dict for one RUNNING task."""
-    signal_source: str = info.get("signal_source", "transcript")
+    signal_source: str = info.get("signal_source", _SIGNAL_SOURCE_TRANSCRIPT)
     jsonl_idle_min: float | None = info.get("jsonl_idle_min")
 
-    if signal_source == "blind":
+    if signal_source == _SIGNAL_SOURCE_BLIND:
         if jsonl_idle_min is not None:
             reason = f"no resolvable transcript; newest jsonl {jsonl_idle_min:.0f}m ago"
         else:
@@ -505,11 +507,11 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
         )
         if transcript is not None:
             info: dict[str, Any] = parse_transcript(transcript)
-            info["signal_source"] = "transcript"
+            info["signal_source"] = _SIGNAL_SOURCE_TRANSCRIPT
             info["jsonl_idle_min"] = None
         else:
             info = {
-                "signal_source": "blind",
+                "signal_source": _SIGNAL_SOURCE_BLIND,
                 "jsonl_idle_min": _compute_jsonl_idle_min(t, now),
             }
         rows.append(format_row(t, info, now))

@@ -1549,3 +1549,23 @@ class TestBlindRow:
         task = _make_ticket_task("901", worktree_path=wt)
         result = queue_peek._compute_jsonl_idle_min(task, _NOW)
         assert result is None
+
+    def test_compute_jsonl_idle_min_no_worktree_falls_back_to_matching_dirs(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """No worktree_path + no session refs → falls back to _matching_project_dirs."""
+        import os
+
+        # Create a project dir whose name ends with "-902" (matches ticket "902")
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-user-dev-902"
+        proj.mkdir(parents=True)
+        jsonl = proj / "session.jsonl"
+        jsonl.touch()
+        # Set mtime to 5 minutes before _NOW
+        mtime = _NOW.timestamp() - 300
+        os.utime(jsonl, (mtime, mtime))
+
+        # Task with no worktree_path; no sessions.json written → refs empty
+        task = _make_ticket_task("902", worktree_path=None)
+        result = queue_peek._compute_jsonl_idle_min(task, _NOW)
+        assert result == 5.0
