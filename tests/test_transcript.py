@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
-import time
+import os
 from pathlib import Path
-
-import pytest
 
 from cw._transcript import locate_transcript
 
@@ -19,8 +17,6 @@ def _touch(path: Path, mtime: float | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     if mtime is not None:
-        import os
-
         os.utime(path, (mtime, mtime))
     return path
 
@@ -56,7 +52,7 @@ class TestLocateTranscript:
         assert result == expected
 
     def test_csid_file_missing_returns_none(self, tmp_path: Path) -> None:
-        """csid set but file absent → None (no surface_ref fallthrough in pure helper)."""
+        """csid set but file absent → None; no surface_ref fallthrough in pure."""
         _touch(tmp_path / "bbbb2222.jsonl")  # surface_ref match would exist
         result = locate_transcript(
             project_dir=tmp_path,
@@ -100,23 +96,6 @@ class TestLocateTranscript:
         )
         assert result is None
 
-    def test_surface_ref_newest_only_stale_wins(self, tmp_path: Path) -> None:
-        """Newest candidate is stale → None even if older candidates are fresh."""
-        # newest is stale (before started_at)
-        stale_mtime = _PAST.timestamp() - 120
-        _touch(tmp_path / "abcd1234-b.jsonl", mtime=stale_mtime)
-        # older candidate is fresh (after started_at) — but newest-only ignores it
-        fresh_mtime = _PAST.timestamp() + 30
-        _touch(tmp_path / "abcd1234-a.jsonl", mtime=fresh_mtime)
-
-        # Ensure "b" has a higher mtime than "a" so it's newest
-        # stale_mtime < fresh_mtime, so actually "a" would be newest
-        # Let's flip: make "b" the newest by giving it a higher mtime, but still stale
-        # Adjust: make stale newer than fresh by picking times carefully
-        # stale: after started_at boundary but before started_at for this test
-        # Actually we want: newest > started_at? No. Let's redo with explicit control.
-        pass  # see test_surface_ref_newest_only_stale_newest below
-
     def test_surface_ref_newest_only_stale_newest_returns_none(
         self, tmp_path: Path
     ) -> None:
@@ -155,12 +134,9 @@ class TestLocateTranscript:
 
     def test_oserror_returns_none(self, tmp_path: Path) -> None:
         """OSError during glob/stat → None (not raised)."""
-        # Make project_dir non-readable so glob raises
-        import os
-
         proj = tmp_path / "proj"
         proj.mkdir()
-        os.chmod(proj, 0o000)
+        proj.chmod(0o000)
         try:
             result = locate_transcript(
                 project_dir=proj,
@@ -170,4 +146,4 @@ class TestLocateTranscript:
             )
             assert result is None
         finally:
-            os.chmod(proj, 0o755)
+            proj.chmod(0o755)

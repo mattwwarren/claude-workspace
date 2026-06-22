@@ -1138,6 +1138,35 @@ class TestBuildPeekRows:
             queue_peek.build_peek_rows("my-client", _NOW)
         mock_load.assert_called_once_with("my-client")
 
+    def test_transcript_found_sets_signal_source_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        """When transcript is found, row has signal_source=transcript."""
+        task = _make_ticket_task("T-1")
+        transcript_path = tmp_path / "session.jsonl"
+        transcript_path.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-20T11:50:00Z",
+                    "message": {"content": "start"},
+                }
+            )
+            + "\n"
+        )
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch(
+                "cw.queue_peek.find_transcript_for_ticket",
+                return_value=transcript_path,
+            ),
+            patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert len(rows) == 1
+        assert rows[0]["signal_source"] == "transcript"
+        assert rows[0]["jsonl_idle_min"] is None
+
 
 # ---------------------------------------------------------------------------
 # load_running_tasks
@@ -1469,9 +1498,7 @@ class TestBlindRow:
         captured = capsys.readouterr()
         assert "Suggested stops:" not in captured.out
 
-    def test_build_peek_rows_blind_when_no_transcript(
-        self, patched_peek: None
-    ) -> None:
+    def test_build_peek_rows_blind_when_no_transcript(self, patched_peek: None) -> None:
         """When find_transcript_for_ticket returns None, row is blind."""
         task = _make_ticket_task("999")
         with (
