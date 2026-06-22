@@ -27,11 +27,17 @@ from cw.dev_queue import (
     unblock_ticket,
     wait_for_terminal,
 )
-from cw.dispatch import TICK_STALE_SECONDS, run_dispatch_loop
+from cw.dispatch import (
+    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_NON_MAIN_HEAD,
+    TICK_STALE_SECONDS,
+    run_dispatch_loop,
+)
 from cw.events import record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
+    DispatchSkipReason,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -291,6 +297,34 @@ def dev_queue_clear(client: str, status_filter: str | None) -> None:
     click.echo(f"Cleared {count} dev-queue task(s) for {client}.")
 
 
+def _emit_freshness_subline(
+    client_name: str,
+    tick_freshness_detail: str | None,
+    tick_blocked_branch: str | None,
+    n_pending: int,
+) -> None:
+    """Print a freshness-block subline under a stale tick entry."""
+    if tick_freshness_detail == FRESHNESS_NON_MAIN_HEAD:
+        try:
+            cc = get_client(client_name)
+            default_br: str = cc.default_branch
+            ws_path: str = str(cc.workspace_path)
+        except CwError:
+            default_br = "main"
+            ws_path = client_name
+        branch_str = tick_blocked_branch or "(detached)"
+        click.echo(
+            f"  ⚠ base checkout HEAD on '{branch_str}'"
+            f" (not {default_br})"
+            f" — {n_pending} pending blocked."
+            f" Fix: git -C {ws_path} checkout {default_br}"
+        )
+    elif tick_freshness_detail == FRESHNESS_MAIN_BEHIND:
+        click.echo(
+            f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed"
+        )
+
+
 def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
     """Print indented lane lines for tasks when multi-lane or non-default lanes used.
 
@@ -319,9 +353,26 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
 
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
+@click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
 @handle_errors
-def dev_queue_status(client: str | None) -> None:
+def dev_queue_status(client: str | None, output_json: bool) -> None:
     """Show dev queue status grouped by client."""
+    if output_json:
+        tick_data = latest_tick_summary_by_client()
+        click.echo(
+            json.dumps(
+                {
+                    c: {
+                        "skip_reason": tick.skip_reason,
+                        "freshness_detail": tick.freshness_detail,
+                        "blocked_branch": tick.blocked_branch,
+                    }
+                    for c, tick in tick_data.items()
+                }
+            )
+        )
+        return
+
     tasks = list_tickets(client)
 
     if not tasks:
@@ -385,6 +436,18 @@ def dev_queue_status(client: str | None) -> None:
                 if age_secs > TICK_STALE_SECONDS:
                     tick_line += f" [STALE — no tick in {age}s]"
                 click.echo(tick_line)
+                if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE:
+                    n_pending = sum(
+                        1
+                        for t in by_client[client_name]
+                        if t.status == QueueItemStatus.PENDING
+                    )
+                    _emit_freshness_subline(
+                        client_name,
+                        tick.freshness_detail,
+                        tick.blocked_branch,
+                        n_pending,
+                    )
                 _emit_dev_queue_lane_breakdown(by_client[client_name])
 
 
