@@ -407,9 +407,7 @@ class TestPrExistsForBranch:
 class TestBranchExistsOnOrigin:
     """Tests for branch_exists_on_origin / _fetch_branch_exists_on_origin."""
 
-    def test_branch_present_returns_true(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_branch_present_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """returncode 0 → (True, True)."""
         monkeypatch.setattr(
             "cw.gh._sp.run",
@@ -464,9 +462,7 @@ class TestBranchExistsOnOrigin:
         assert exists is None
         assert gh_available is False
 
-    def test_os_error_returns_none_true(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_os_error_returns_none_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """OSError (transient) → (None, True)."""
         monkeypatch.setattr(
             "cw.gh._sp.run",
@@ -476,9 +472,7 @@ class TestBranchExistsOnOrigin:
         assert exists is None
         assert gh_available is True
 
-    def test_timeout_returns_none_true(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_timeout_returns_none_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """TimeoutExpired → (None, True)."""
         monkeypatch.setattr(
             "cw.gh._sp.run",
