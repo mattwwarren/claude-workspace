@@ -60,10 +60,11 @@ def load_running_tasks(client: str | None) -> list[TicketTask]:
 def _load_session_refs(session_id: str | None) -> dict[str, Any]:
     """Load session lookup fields from CW_STATE for a cw session id.
 
-    Returns a dict with ``claude_session_id``, ``surface_ref``, and
-    ``started_at`` (all may be None), or an empty dict when session_id is
-    absent or no match is found. Reads CW_STATE directly so tests can
-    monkeypatch the path without wiring through the full cw.config stack.
+    Returns a dict with ``claude_session_id``, ``surface_ref``,
+    ``started_at``, and ``worktree_path`` (all may be None), or an empty
+    dict when session_id is absent or no match is found. Reads CW_STATE
+    directly so tests can monkeypatch the path without wiring through the
+    full cw.config stack.
     """
     if not session_id or not CW_STATE.exists():
         return {}
@@ -77,6 +78,7 @@ def _load_session_refs(session_id: str | None) -> dict[str, Any]:
                 "claude_session_id": sess.get("claude_session_id"),
                 "surface_ref": sess.get("surface_ref"),
                 "started_at": sess.get("started_at"),
+                "worktree_path": sess.get("worktree_path"),
             }
     return {}
 
@@ -163,13 +165,13 @@ def _find_transcript_in_project_dir(
 
 
 def _matching_project_dirs(ticket_id: str) -> list[Path]:
-    """Return project dirs whose name contains ``auto-dev-{ticket_id}``."""
+    """Return project dirs whose name ends with ``-{ticket_id}``."""
     if not CLAUDE_PROJECTS.exists():
         return []
     return [
         p
         for p in CLAUDE_PROJECTS.iterdir()
-        if p.is_dir() and f"auto-dev-{ticket_id}" in p.name
+        if p.is_dir() and p.name.endswith(f"-{ticket_id}")
     ]
 
 
@@ -217,23 +219,37 @@ def find_transcript_for_ticket(
 ) -> Path | None:
     """Locate the main /auto-dev transcript jsonl for a ticket.
 
-    When *worktree_path* is provided (DAEMON sessions always have it), uses
-    ``claude_project_dir(worktree_path)`` to find the project dir directly —
-    this works for dispatch workers whose project dirs are named after the
-    worktree path (e.g. ``-home-u--cw-wt-<hash>-dev-817``) rather than
-    containing ``auto-dev-{ticket_id}`` in the name.
+    Uses ``claude_project_dir(worktree_path)`` to find the project dir when
+    a worktree path is available — this resolves correctly for dispatch workers
+    whose project dirs are named after the worktree path (e.g.
+    ``-home-u--cw-wt-<hash>-dev-817``) rather than containing
+    ``auto-dev-{ticket_id}`` in the name.
+
+    The effective worktree path is resolved in priority order:
+    1. Explicit ``worktree_path`` parameter (USER-origin sessions that stamp it).
+    2. ``worktree_path`` from the Session in CW_STATE (DAEMON-origin sessions;
+       dispatch writes worktree_path to the Session but not to the TicketTask).
 
     Within the project dir, resolution order is: (1) exact csid match, (2)
     surface_ref-prefix glob with mtime guard, (3) newest ``*.jsonl`` (degraded
     fallback when backfill hasn't fired yet for the session ids).
 
     Falls back to the legacy heuristic (name-based project dir search) when
-    worktree_path is absent or its project dir is not found on disk.
+    no worktree path is available or its project dir is not found on disk.
     """
     refs = _load_session_refs(session_id)
 
-    if worktree_path is not None:
-        project_dir = claude_project_dir(worktree_path)
+    # Prefer explicit arg; fall back to worktree_path from the Session in CW_STATE.
+    # TicketTask.worktree_path is None for dispatch tasks (dispatch stamps
+    # session_id but not worktree_path); the Session object carries the real path.
+    effective_wt = worktree_path
+    if effective_wt is None:
+        raw_wt = refs.get("worktree_path")
+        if raw_wt is not None:
+            effective_wt = Path(str(raw_wt))
+
+    if effective_wt is not None:
+        project_dir = claude_project_dir(effective_wt)
         transcript = _find_transcript_in_project_dir(
             project_dir,
             refs.get("claude_session_id"),

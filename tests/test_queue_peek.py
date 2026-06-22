@@ -333,9 +333,7 @@ class TestFindTranscriptInProjectDir:
         result = queue_peek._find_transcript_in_project_dir(proj, None, None, None)
         assert result is None
 
-    def test_surface_ref_naive_started_at_is_utc_coerced(
-        self, tmp_path: Path
-    ) -> None:
+    def test_surface_ref_naive_started_at_is_utc_coerced(self, tmp_path: Path) -> None:
         """Naive (tz-less) started_at_iso is treated as UTC, not dropped."""
         proj = tmp_path / "proj"
         proj.mkdir()
@@ -362,7 +360,7 @@ class TestFindTranscriptInProjectDir:
         result = queue_peek._find_transcript_in_project_dir(
             proj, None, surface_ref, "not-a-date"
         )
-        # started_at is None after the ValueError → no mtime guard → first candidate returned
+        # started_at stays None after ValueError → no mtime guard → first candidate
         assert result == jsonl
 
 
@@ -473,6 +471,99 @@ class TestFindTranscriptForTicketWorktreePath:
 
 
 # ---------------------------------------------------------------------------
+# find_transcript_for_ticket — session.worktree_path fallback (DAEMON path)
+# ---------------------------------------------------------------------------
+
+
+class TestFindTranscriptForTicketDaemonWorktreePath:
+    """DAEMON-origin sessions: TicketTask.worktree_path is None; worktree_path
+    must be loaded from the Session in CW_STATE."""
+
+    def test_daemon_task_resolves_via_session_worktree_path(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """Regression: task worktree_path=None but session carries it."""
+        from cw._util import claude_project_dir
+
+        worktree = tmp_path / ".cw" / "wt" / "abc123" / "dev-816"
+        worktree.mkdir(parents=True)
+        proj = claude_project_dir(worktree)
+        proj.mkdir(parents=True)
+        csid = "feed0000-0000-0000-0000-000000000000"
+        jsonl = proj / f"{csid}.jsonl"
+        jsonl.write_text("")
+
+        session_id = "feedbeef"
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [
+                {
+                    "id": session_id,
+                    "claude_session_id": csid,
+                    "surface_ref": None,
+                    "worktree_path": str(worktree),
+                }
+            ],
+        )
+        # Pass worktree_path=None to simulate TicketTask.worktree_path for a
+        # dispatch-created task — the function must fall back to CW_STATE.
+        result = queue_peek.find_transcript_for_ticket(
+            "816", session_id=session_id, worktree_path=None
+        )
+        assert result == jsonl
+
+    def test_daemon_task_no_worktree_path_in_session_uses_heuristic(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """When both task and session lack worktree_path, falls back to heuristic."""
+        session_id = "cafe0000"
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [{"id": session_id, "claude_session_id": None, "worktree_path": None}],
+        )
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-cw-dev-504"
+        _make_jsonl(
+            proj,
+            "cccc0000-0000-0000-0000-000000000000",
+            "2026-06-01T10:00:00Z",
+            "/auto-dev 504 --headless",
+        )
+        result = queue_peek.find_transcript_for_ticket(
+            "504", session_id=session_id, worktree_path=None
+        )
+        assert result is not None
+        assert result.name == "cccc0000-0000-0000-0000-000000000000.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# _matching_project_dirs — endswith fix
+# ---------------------------------------------------------------------------
+
+
+class TestMatchingProjectDirs:
+    def test_matches_dev_prefix_dir(self, patched_peek: None) -> None:
+        """dev-816 slug now matches ticket 816 (the regression this PR fixes)."""
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-matthew--cw-wt-7dc983e2-dev-816"
+        proj.mkdir(parents=True)
+        result = queue_peek._matching_project_dirs("816")
+        assert proj in result
+
+    def test_matches_auto_dev_prefix_dir(self, patched_peek: None) -> None:
+        """auto-dev-816 dirs still match — regression guard for other clients."""
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-user-projects-auto-dev-816"
+        proj.mkdir(parents=True)
+        result = queue_peek._matching_project_dirs("816")
+        assert proj in result
+
+    def test_does_not_match_longer_id(self, patched_peek: None) -> None:
+        """dev-8160 does not match ticket 816 — no substring false positives."""
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-user-dev-8160"
+        proj.mkdir(parents=True)
+        result = queue_peek._matching_project_dirs("816")
+        assert proj not in result
+
+
+# ---------------------------------------------------------------------------
 # _load_session_refs
 # ---------------------------------------------------------------------------
 
@@ -487,6 +578,7 @@ class TestLoadSessionRefs:
     def test_returns_all_refs_when_found(
         self, patched_peek: None, tmp_path: Path
     ) -> None:
+        wt = "/home/user/.cw/wt/abc/dev-42"
         _write_sessions(
             queue_peek.CW_STATE,
             [
@@ -495,6 +587,7 @@ class TestLoadSessionRefs:
                     "claude_session_id": "abc12345-0000-0000-0000-000000000000",
                     "surface_ref": "abc12345",
                     "started_at": "2026-06-21T00:00:00+00:00",
+                    "worktree_path": wt,
                 }
             ],
         )
@@ -502,6 +595,7 @@ class TestLoadSessionRefs:
         assert refs["claude_session_id"] == "abc12345-0000-0000-0000-000000000000"
         assert refs["surface_ref"] == "abc12345"
         assert refs["started_at"] == "2026-06-21T00:00:00+00:00"
+        assert refs["worktree_path"] == wt
 
     def test_returns_empty_dict_when_not_found(
         self, patched_peek: None, tmp_path: Path
