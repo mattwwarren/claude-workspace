@@ -191,13 +191,13 @@ When a session times out with no sentinel and no merged PR, the reaper checks
 whether the feature branch still exists on origin and annotates the
 `SESSION_TIMED_OUT` event with a `branch_state` field:
 
-- `"present"` — ordinary slow timeout; the branch is still on origin.
 - `"absent_no_merged_pr"` — **anomaly**: no merged PR and the branch is gone.
   This means the worker died before pushing (or the branch was force-deleted).
   It is categorically different from a slow timeout: the worker left no
   artifacts. Investigation is warranted; do not let it churn silently through
   retries without understanding why the push never happened.
-- *(key omitted)* — branch check was unavailable or did not run (fail-open).
+- *(key omitted)* — every other case: branch still on origin, branch check
+  unavailable, or check did not run (fail-open).
 
 **Critical invariant:** `"absent_no_merged_pr"` **never** routes a session to
 COMPLETED. The session still times out and the task reverts to PENDING. Signal

@@ -182,11 +182,10 @@ form:
   finalization, not redispatch. See "Salvaging timed-out impl" below.
   Additionally, inspect the `branch_state` field on the `session.timed_out`
   event (via `cw event tail --type session.timed_out --json`):
-  - `"present"` — ordinary slow timeout; branch is still on origin.
   - `"absent_no_merged_pr"` — **anomaly**: worker died before push or branch
     was force-deleted. No artifacts left. Investigate before re-dispatching;
     pure retry churn will not fix a dead worker.
-  - *(key absent)* — branch check was unavailable (fail-open); no claim made.
+  - *(key absent)* — branch still on origin, or check unavailable (fail-open).
   See [`session-disposition.md §5a`](../../../docs/session-disposition.md)
   for the full rationale (branch-absence ≠ merged).
 - **Always include `queue_status`**: this is the cw orchestrator's final

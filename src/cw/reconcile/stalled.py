@@ -469,13 +469,10 @@ def _emit_finalize_blocked_events(
 def _branch_state_for_ticket(
     ticket_id: str | None,
     absent: frozenset[str],
-    present: frozenset[str],
 ) -> str | None:
     """Return branch_state tag for SESSION_TIMED_OUT payload, or None if omitted."""
     if ticket_id is not None and ticket_id in absent:
         return "absent_no_merged_pr"
-    if ticket_id is not None and ticket_id in present:
-        return "present"
     return None
 
 
@@ -489,7 +486,6 @@ def _emit_stalled_events(
     finalize_blocked_candidates: list[ReapCandidate],
     *,
     branch_absent_ticket_ids: frozenset[str] = frozenset(),
-    branch_present_ticket_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Emit lifecycle events and stop/cleanup surfaces for stalled dispositions.
 
@@ -509,7 +505,7 @@ def _emit_stalled_events(
             "last_assistant_message_excerpt": "",
         }
         branch_state = _branch_state_for_ticket(
-            candidate.ticket_id, branch_absent_ticket_ids, branch_present_ticket_ids
+            candidate.ticket_id, branch_absent_ticket_ids
         )
         if branch_state is not None:
             payload["branch_state"] = branch_state
@@ -615,7 +611,6 @@ def _act_on_stalled_candidates(
     merged_ticket_ids: frozenset[str] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
     branch_absent_ticket_ids: frozenset[str] = frozenset(),
-    branch_present_ticket_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[str], list[str]]:
     """Act phase for stalled headless sessions: apply all mutations.
 
@@ -769,7 +764,6 @@ def _act_on_stalled_candidates(
         salvage_candidates,
         finalize_blocked_candidates,
         branch_absent_ticket_ids=branch_absent_ticket_ids,
-        branch_present_ticket_ids=branch_present_ticket_ids,
     )
 
     return reverted, merged_completed
@@ -822,7 +816,6 @@ def revert_stalled_headless_sessions(
     _merged_tids: list[str] = []
     _gh_blocked_tids: list[str] = []
     _branch_absent_tids: list[str] = []
-    _branch_present_tids: list[str] = []
     _gh_available = True
     for candidate in candidates:
         if candidate.proposed_action is not ProposedAction.REVERT_TASK:
@@ -850,14 +843,11 @@ def revert_stalled_headless_sessions(
             # No merged PR found: consult branch presence for diagnostic annotation.
             # Fail-open: (None, *) → no tag; never blocks disposition.
             _exists, _ = _deps.branch_exists_on_origin(_branch)
-            if _exists is True:
-                _branch_present_tids.append(candidate.ticket_id)
-            elif _exists is False:
+            if _exists is False:
                 _branch_absent_tids.append(candidate.ticket_id)
     merged_ticket_ids = frozenset(_merged_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
     branch_absent_ticket_ids = frozenset(_branch_absent_tids)
-    branch_present_ticket_ids = frozenset(_branch_present_tids)
     # Discard merged_completed_ids — callers expect list[str] (reverted only).
     # merged completions surface through ReconcileReport.completed_ticket_ids
     # inside _reconcile_locked (GitHub #637).
@@ -869,6 +859,5 @@ def revert_stalled_headless_sessions(
         merged_ticket_ids=merged_ticket_ids,
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
         branch_absent_ticket_ids=branch_absent_ticket_ids,
-        branch_present_ticket_ids=branch_present_ticket_ids,
     )
     return reverted

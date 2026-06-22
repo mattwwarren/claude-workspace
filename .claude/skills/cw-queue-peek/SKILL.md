@@ -32,7 +32,7 @@ Do **not** use this skill for:
   for its exit/attention state, or use `cw-validate-result` for the sentinel
   content. For timed-out sessions, check the `branch_state` field on the
   `session.timed_out` event: `"absent_no_merged_pr"` flags a worker that died
-  before push (an anomaly), distinct from `"present"` (ordinary slow timeout).
+  before push (an anomaly); absent key means ordinary slow timeout.
   See [`session-disposition.md §5a`](../../docs/session-disposition.md).
 - Deciding what to do with the sentinel result — use `cw-followup`
 - Interactive (USER-origin) sessions started via `cw start` — they don't go through dev-queue

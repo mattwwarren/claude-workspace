@@ -1346,12 +1346,12 @@ def test_branch_absent_no_merged_pr_tags_session_timed_out_event(
     assert not any(e.payload.get("session_id") == sess.id for e in completed_events)
 
 
-def test_branch_present_tags_session_timed_out_event(
+def test_branch_present_omits_branch_state_key(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#808 (b): no merged PR + branch present → TIMED_OUT, branch_state='present'."""
+    """#808 (b): no merged PR + branch present → TIMED_OUT, branch_state key absent."""
     from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
 
     worktree = tmp_path / "wt-808-present"
@@ -1391,7 +1391,7 @@ def test_branch_present_tags_session_timed_out_event(
     )
     matching = [e for e in timed_out_events if e.payload.get("session_id") == sess.id]
     assert len(matching) == 1
-    assert matching[0].payload.get("branch_state") == "present"
+    assert "branch_state" not in matching[0].payload
 
 
 def test_branch_check_transient_error_omits_branch_state(

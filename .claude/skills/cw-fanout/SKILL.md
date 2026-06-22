@@ -138,8 +138,9 @@ On `session.needs_attention` (paused-for-input, user-directed blocked, or
 exited-without-sentinel) or `session.timed_out`: surface the ticket + session
 immediately and pause for the operator. Do not silently re-dispatch. When the
 event is `session.timed_out`, check the `branch_state` field: `"absent_no_merged_pr"`
-means the worker died before push (an anomaly worth investigating), while
-`"present"` is an ordinary slow timeout. See [`session-disposition.md §5a`](../../docs/session-disposition.md).
+means the worker died before push (an anomaly worth investigating); absent key
+means the branch is present or the check was unavailable (ordinary slow timeout).
+See [`session-disposition.md §5a`](../../docs/session-disposition.md).
 
 **c. In-flight health — is a running session stuck?**
 
