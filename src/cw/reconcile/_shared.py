@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from cw._transcript import locate_transcript
 from cw._util import _iter_sentinel_text_blocks, claude_project_dir
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
@@ -685,29 +686,21 @@ def _session_project_dir(session: Session) -> Path | None:
 def _newest_surface_ref_transcript(project_dir: Path, session: Session) -> Path | None:
     """Return the newest ``<surface_ref>*.jsonl`` newer than session start, else None.
 
-    The ``surface_ref``-prefix glob excludes sibling transcripts from other
-    sessions that share the same project dir (reused worktree). Do NOT fall
-    back to an unscoped ``*.jsonl`` glob — that would silently read a
-    different session's transcript. Caller guarantees ``surface_ref`` is set.
+    Thin wrapper — delegates to ``locate_transcript`` for surface_ref-only
+    resolution. Caller guarantees ``surface_ref`` is set.
     """
-    surface_ref = session.surface_ref
-    candidates = sorted(
-        project_dir.glob(f"{surface_ref}*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    return locate_transcript(
+        project_dir=project_dir,
+        claude_session_id=None,
+        surface_ref=session.surface_ref,
+        started_at=session.started_at,
     )
-    if not candidates:
-        return None
-    newest = candidates[0]
-    mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
-    if mtime <= session.started_at:
-        return None
-    return newest
 
 
 def _locate_session_transcript(session: Session) -> Path | None:
     """Return the session's transcript path, or None if not locatable.
 
+    Thin wrapper — unpacks the Session and delegates to ``locate_transcript``.
     Resolution order:
     1. ``claude_session_id`` set and ``<project_dir>/<csid>.jsonl`` exists →
        return that path directly (mtime guard not needed; csid is exact).
@@ -716,18 +709,12 @@ def _locate_session_transcript(session: Session) -> Path | None:
        (reused-worktree stale-transcript guard, #358/#372).
     3. No project_dir, or neither identifier set → None.
     """
-    project_dir = _session_project_dir(session)
-    if project_dir is None or not project_dir.is_dir():
-        return None
-    try:
-        if session.claude_session_id is not None:
-            path = project_dir / f"{session.claude_session_id}.jsonl"
-            return path if path.is_file() else None
-        if session.surface_ref is not None:
-            return _newest_surface_ref_transcript(project_dir, session)
-    except OSError:
-        return None
-    return None
+    return locate_transcript(
+        project_dir=_session_project_dir(session),
+        claude_session_id=session.claude_session_id,
+        surface_ref=session.surface_ref,
+        started_at=session.started_at,
+    )
 
 
 def _csid_from_transcript(session: Session) -> str | None:

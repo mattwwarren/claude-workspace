@@ -1040,6 +1040,7 @@ class TestFormatRow:
             "last_sentinel_status": None,
             "last_sentinel_stage": None,
             "last_pr_number": None,
+            "signal_source": "transcript",
         }
         with patch("cw.queue_peek.gh_pr_state", return_value="OPEN"):
             row = queue_peek.format_row(task, info, _NOW)
@@ -1056,6 +1057,8 @@ class TestFormatRow:
             "pr_state",
             "recommend",
             "reason",
+            "signal_source",
+            "jsonl_idle_min",
         }
         assert required_keys == set(row.keys())
 
@@ -1134,6 +1137,35 @@ class TestBuildPeekRows:
         ):
             queue_peek.build_peek_rows("my-client", _NOW)
         mock_load.assert_called_once_with("my-client")
+
+    def test_transcript_found_sets_signal_source_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        """When transcript is found, row has signal_source=transcript."""
+        task = _make_ticket_task("T-1")
+        transcript_path = tmp_path / "session.jsonl"
+        transcript_path.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-20T11:50:00Z",
+                    "message": {"content": "start"},
+                }
+            )
+            + "\n"
+        )
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch(
+                "cw.queue_peek.find_transcript_for_ticket",
+                return_value=transcript_path,
+            ),
+            patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert len(rows) == 1
+        assert rows[0]["signal_source"] == "transcript"
+        assert rows[0]["jsonl_idle_min"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1322,6 +1354,8 @@ _WAIT_ROW = {
     "pr_state": None,
     "recommend": "WAIT",
     "reason": "age 10min — early/healthy",
+    "signal_source": "transcript",
+    "jsonl_idle_min": None,
 }
 
 _STOP_ROW = {
@@ -1371,3 +1405,167 @@ class TestPrintTable:
         queue_peek.print_table([_WAIT_ROW])
         captured = capsys.readouterr()
         assert "Suggested stops:" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# TestBlindRow — blind-labeling when no transcript is resolvable
+# ---------------------------------------------------------------------------
+
+
+def _make_blind_info(jsonl_idle_min: float | None = 12.0) -> dict[str, Any]:
+    return {"signal_source": "blind", "jsonl_idle_min": jsonl_idle_min}
+
+
+class TestBlindRow:
+    def test_blind_signal_source(self) -> None:
+        task = _make_ticket_task()
+        row = queue_peek.format_row(task, _make_blind_info(), _NOW)
+        assert row["signal_source"] == "blind"
+
+    def test_blind_recommend_is_peek_blind(self) -> None:
+        task = _make_ticket_task()
+        row = queue_peek.format_row(task, _make_blind_info(), _NOW)
+        assert row["recommend"] == queue_peek.RECOMMEND_BLIND
+        assert row["recommend"] == "PEEK-BLIND"
+
+    def test_blind_reason_includes_liveness(self) -> None:
+        task = _make_ticket_task()
+        row = queue_peek.format_row(task, _make_blind_info(jsonl_idle_min=12.0), _NOW)
+        assert "no resolvable transcript" in row["reason"]
+        assert "12m ago" in row["reason"]
+
+    def test_blind_reason_none_found_when_no_jsonl(self) -> None:
+        task = _make_ticket_task()
+        row = queue_peek.format_row(task, _make_blind_info(jsonl_idle_min=None), _NOW)
+        assert "no resolvable transcript" in row["reason"]
+        assert "none found" in row["reason"]
+
+    def test_blind_jsonl_idle_min_propagated(self) -> None:
+        task = _make_ticket_task()
+        row = queue_peek.format_row(task, _make_blind_info(jsonl_idle_min=7.5), _NOW)
+        assert row["jsonl_idle_min"] == 7.5
+
+    def test_blind_jsonl_idle_min_none_when_no_jsonl(self) -> None:
+        task = _make_ticket_task()
+        row = queue_peek.format_row(task, _make_blind_info(jsonl_idle_min=None), _NOW)
+        assert row["jsonl_idle_min"] is None
+
+    def test_blind_row_has_null_transcript_fields(self) -> None:
+        task = _make_ticket_task()
+        row = queue_peek.format_row(task, _make_blind_info(), _NOW)
+        assert row["age_min"] is None
+        assert row["idle_min"] is None
+        assert row["stage"] is None
+        assert row["status"] is None
+        assert row["pr"] is None
+
+    def test_non_blind_signal_source_is_transcript(self) -> None:
+        task = _make_ticket_task()
+        info: dict[str, Any] = {
+            "first_user_ts": "2026-06-20T11:50:00+00:00",
+            "last_asst_ts": "2026-06-20T11:55:00+00:00",
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+            "jsonl_idle_min": None,
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["signal_source"] == "transcript"
+        assert row["jsonl_idle_min"] is None
+
+    def test_format_row_defaults_to_transcript_when_signal_source_absent(
+        self,
+    ) -> None:
+        """Backward compat: info without signal_source defaults to transcript path."""
+        task = _make_ticket_task()
+        info: dict[str, Any] = {}
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["signal_source"] == "transcript"
+
+    def test_peek_blind_excluded_from_suggested_stops(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """PEEK-BLIND does not start with STOP — must not appear in the footer."""
+        blind_row = {
+            **_WAIT_ROW,
+            "recommend": "PEEK-BLIND",
+            "reason": "no resolvable transcript; newest jsonl 5m ago",
+            "signal_source": "blind",
+            "jsonl_idle_min": 5.0,
+        }
+        queue_peek.print_table([blind_row])
+        captured = capsys.readouterr()
+        assert "Suggested stops:" not in captured.out
+
+    def test_build_peek_rows_blind_when_no_transcript(self, patched_peek: None) -> None:
+        """When find_transcript_for_ticket returns None, row is blind."""
+        task = _make_ticket_task("999")
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch("cw.queue_peek.find_transcript_for_ticket", return_value=None),
+            patch("cw.queue_peek._compute_jsonl_idle_min", return_value=5.0),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert len(rows) == 1
+        assert rows[0]["signal_source"] == "blind"
+        assert rows[0]["recommend"] == "PEEK-BLIND"
+        assert rows[0]["jsonl_idle_min"] == 5.0
+
+    def test_compute_jsonl_idle_min_with_jsonl(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """_compute_jsonl_idle_min returns round(elapsed, 1) for the newest *.jsonl."""
+        from cw._util import claude_project_dir
+
+        wt = tmp_path / "dev-900"
+        wt.mkdir()
+        proj = claude_project_dir(wt)
+        proj.mkdir(parents=True)
+        jsonl = proj / "session.jsonl"
+        jsonl.touch()
+        # Set mtime to 10 minutes before _NOW
+        mtime = _NOW.timestamp() - 600
+        import os
+
+        os.utime(jsonl, (mtime, mtime))
+
+        task = _make_ticket_task("900", worktree_path=wt)
+        result = queue_peek._compute_jsonl_idle_min(task, _NOW)
+        assert result == 10.0
+
+    def test_compute_jsonl_idle_min_no_jsonl_returns_none(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """_compute_jsonl_idle_min returns None when no *.jsonl files exist."""
+        from cw._util import claude_project_dir
+
+        wt = tmp_path / "dev-901"
+        wt.mkdir()
+        proj = claude_project_dir(wt)
+        proj.mkdir(parents=True)
+        # No .jsonl files
+
+        task = _make_ticket_task("901", worktree_path=wt)
+        result = queue_peek._compute_jsonl_idle_min(task, _NOW)
+        assert result is None
+
+    def test_compute_jsonl_idle_min_no_worktree_falls_back_to_matching_dirs(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """No worktree_path + no session refs → falls back to _matching_project_dirs."""
+        import os
+
+        # Create a project dir whose name ends with "-902" (matches ticket "902")
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-user-dev-902"
+        proj.mkdir(parents=True)
+        jsonl = proj / "session.jsonl"
+        jsonl.touch()
+        # Set mtime to 5 minutes before _NOW
+        mtime = _NOW.timestamp() - 300
+        os.utime(jsonl, (mtime, mtime))
+
+        # Task with no worktree_path; no sessions.json written → refs empty
+        task = _make_ticket_task("902", worktree_path=None)
+        result = queue_peek._compute_jsonl_idle_min(task, _NOW)
+        assert result == 5.0

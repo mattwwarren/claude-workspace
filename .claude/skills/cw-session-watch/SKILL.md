@@ -186,7 +186,7 @@ form:
     was force-deleted. No artifacts left. Investigate before re-dispatching;
     pure retry churn will not fix a dead worker.
   - *(key absent)* — branch still on origin, or check unavailable (fail-open).
-  See [`session-disposition.md §5a`](../../../docs/session-disposition.md)
+  See [`session-disposition.md §5a`](../../../docs/session-disposition.md#5a-branch-absence-anomaly-on-session_timed_out-808)
   for the full rationale (branch-absence ≠ merged).
 - **Always include `queue_status`**: this is the cw orchestrator's final
   routing decision (`completed`, `failed`, `pending` for retry). It's the
