@@ -523,6 +523,19 @@ def _act_on_idle_candidates(
         if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
     ]
 
+    # Snapshot which park candidates already have a paused_status marker BEFORE
+    # mutations run. Used by _emit_idle_events to suppress re-emission of
+    # SESSION_NEEDS_ATTENTION and fire_push_notification on re-park ticks.
+    # Keys off current last_result["paused_status"] (not a permanent flag) per
+    # the authoritative pre-flight resolution. See GitHub #782.
+    already_parked_ids = {
+        c.session_id
+        for c in park_candidates
+        if (sess := session_by_id.get(c.session_id)) is not None
+        and isinstance(sess.last_result, dict)
+        and sess.last_result.get("paused_status") is not None
+    }
+
     counters_changed = _apply_idle_state_mutations(
         session_by_id,
         now=now,
@@ -573,6 +586,7 @@ def _act_on_idle_candidates(
         gh_blocked_revert_candidates,
         salvage_candidates,
         routed_sentinel_candidates,
+        already_parked_ids=already_parked_ids,
     )
 
     salvage_git: list[_SalvageCandidate] = [
@@ -598,6 +612,8 @@ def _emit_idle_events(
     gh_blocked_revert_candidates: list[ReapCandidate],
     salvage_candidates: list[ReapCandidate],
     routed_sentinel_candidates: list[ReapCandidate],
+    *,
+    already_parked_ids: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     """Emit lifecycle events and stop/cleanup surfaces for idle dispositions.
 
@@ -605,6 +621,11 @@ def _emit_idle_events(
     SESSION_TIMED_OUT + worktree cleanup for reverts, SESSION_NEEDS_ATTENTION
     (with push) for parks, SESSION_COMPLETED for merged/salvage/routed, and
     SESSION_NEEDS_ATTENTION for gh-blocked candidates.
+
+    ``already_parked_ids`` is the set of session_ids that already had a
+    paused_status marker before this tick's mutations.  SESSION_NEEDS_ATTENTION
+    and fire_push_notification are suppressed for those sessions so re-park ticks
+    emit only once on transition. See GitHub #782.
     """
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -631,6 +652,10 @@ def _emit_idle_events(
         )
 
     for candidate in park_candidates:
+        # Edge-triggered: suppress re-emission for sessions already parked in a
+        # prior tick (paused_status already set). See GitHub #782.
+        if candidate.session_id in already_parked_ids:
+            continue
         session = session_by_id[candidate.session_id]
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,

@@ -669,7 +669,7 @@ def _emit_reap_proposed(
     *,
     native_live: set[str],
     now: datetime | None = None,
-) -> None:
+) -> set[str]:
     """Emit SESSION_REAP_PROPOSED for reap-shaped candidates before act phase.
 
     Called from _reconcile_locked after each _detect_* and before the
@@ -678,13 +678,17 @@ def _emit_reap_proposed(
     Only emits for REVERT_TASK, CRASH_COMPLETE, PARK_BLOCKED_ON_USER candidates.
     Dedup: sessions with reap_proposed_at already set are skipped.
 
+    Returns the set of session_ids newly stamped in this call. Callers use this
+    to gate edge-triggered events (e.g. SESSION_STAGE_TIMED_OUT_RETRIED) so they
+    fire only on first detection, not on every re-detect tick. See GitHub #782.
+
     save_state is safe under sessions_lock — it is a raw file write, not a
     reentrant lock acquisition. See existing _act_on_stalled_candidates,
     _act_on_idle_candidates.
     """
     _now = now or datetime.now(UTC)
     session_by_id = {s.id: s for s in state.sessions}
-    any_stamped = False
+    newly_stamped: set[str] = set()
 
     for candidate in candidates:
         if candidate.proposed_action not in _REAP_PROPOSED_ACTIONS:
@@ -722,12 +726,13 @@ def _emit_reap_proposed(
         }
         # Stamp before record_event: dedup guard fires on retry if write fails.
         session.reap_proposed_at = _now
-        any_stamped = True
+        newly_stamped.add(candidate.session_id)
         record_event(
             OrchestratorEventType.SESSION_REAP_PROPOSED,
             payload,
             correlation_id=candidate.ticket_id or candidate.session_id,
         )
 
-    if any_stamped:
+    if newly_stamped:
         save_state(state)
+    return newly_stamped

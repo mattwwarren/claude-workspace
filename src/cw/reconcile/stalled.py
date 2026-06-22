@@ -49,6 +49,7 @@ from cw.reconcile._shared import (
     resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
+from cw.reconcile.phantom import _emit_reap_proposed
 from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
@@ -611,6 +612,7 @@ def _act_on_stalled_candidates(
     merged_ticket_ids: frozenset[str] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
     branch_absent_ticket_ids: frozenset[str] = frozenset(),
+    newly_proposed_ids: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[list[str], list[str]]:
     """Act phase for stalled headless sessions: apply all mutations.
 
@@ -626,6 +628,11 @@ def _act_on_stalled_candidates(
     candidates (SALVAGE_*, SKIP_PARKED) are unaffected and pass through.
     Per-lane resolution: each REVERT_TASK candidate's effective policy is
     resolved individually via resolve_reap_policy (GitHub #560).
+
+    ``newly_proposed_ids`` is the set of session_ids stamped by the preceding
+    _emit_reap_proposed call.  SESSION_STAGE_TIMED_OUT_RETRIED fires only for
+    sessions in that set, suppressing re-emission on every subsequent re-detect
+    tick. See GitHub #782.
     """
     if not candidates:
         return [], []
@@ -633,12 +640,15 @@ def _act_on_stalled_candidates(
     # Emit SESSION_STAGE_TIMED_OUT_RETRIED before policy routing so the event
     # fires for both auto and signal_only lanes (visibility-only; no retry cap).
     # Skips merged-PR and gh-blocked tickets — those are not genuine timeouts.
-    # See GitHub #724.
+    # Edge-triggered: fires only for sessions newly proposed this tick (in
+    # newly_proposed_ids). See GitHub #724 (original) and #782 (storm fix).
     _excluded_tids = merged_ticket_ids | gh_blocked_ticket_ids
     for _c in candidates:
         if _c.proposed_action is not ProposedAction.REVERT_TASK:
             continue
         if _c.ticket_id is None or _c.ticket_id in _excluded_tids:
+            continue
+        if _c.session_id not in newly_proposed_ids:
             continue
         record_event(
             OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED,
@@ -848,6 +858,13 @@ def revert_stalled_headless_sessions(
     merged_ticket_ids = frozenset(_merged_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
     branch_absent_ticket_ids = frozenset(_branch_absent_tids)
+    # _emit_reap_proposed stamps reap_proposed_at on newly-detected sessions and
+    # returns the set of newly-stamped session_ids for the edge-trigger gate in
+    # _act_on_stalled_candidates. Mirrors the core.py _reconcile_locked flow so
+    # SESSION_STAGE_TIMED_OUT_RETRIED fires once per transition. See GitHub #782.
+    newly_proposed_ids = _emit_reap_proposed(
+        state, candidates, native_live=set(), now=now
+    )
     # Discard merged_completed_ids — callers expect list[str] (reverted only).
     # merged completions surface through ReconcileReport.completed_ticket_ids
     # inside _reconcile_locked (GitHub #637).
@@ -859,5 +876,6 @@ def revert_stalled_headless_sessions(
         merged_ticket_ids=merged_ticket_ids,
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
         branch_absent_ticket_ids=branch_absent_ticket_ids,
+        newly_proposed_ids=newly_proposed_ids,
     )
     return reverted
