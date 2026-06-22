@@ -91,6 +91,37 @@ def load_claude_session_id(session_id: str | None) -> str | None:
     return str(raw) if raw is not None else None
 
 
+def _pick_surface_ref_transcript(
+    project_dir: Path, surface_ref: str, started_at_iso: str | None
+) -> Path | None:
+    """Return the newest surface_ref*.jsonl newer than started_at, or None.
+
+    Scopes strictly to the surface_ref prefix — does NOT fall through to an
+    unscoped glob, which would silently return a stale file from a prior
+    session sharing the same worktree.
+    """
+    started_at: dt.datetime | None = None
+    if started_at_iso:
+        try:
+            started_at = dt.datetime.fromisoformat(started_at_iso)
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=dt.UTC)
+        except ValueError:
+            pass
+    candidates = sorted(
+        project_dir.glob(f"{surface_ref}*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if started_at is None:
+            return candidate
+        mtime = dt.datetime.fromtimestamp(candidate.stat().st_mtime, tz=dt.UTC)
+        if mtime > started_at:
+            return candidate
+    return None
+
+
 def _find_transcript_in_project_dir(
     project_dir: Path,
     claude_session_id: str | None,
@@ -115,31 +146,12 @@ def _find_transcript_in_project_dir(
             path = project_dir / f"{claude_session_id}.jsonl"
             if path.is_file():
                 return path
-
         if surface_ref:
-            started_at: dt.datetime | None = None
-            if started_at_iso:
-                try:
-                    started_at = dt.datetime.fromisoformat(started_at_iso)
-                    if started_at.tzinfo is None:
-                        started_at = started_at.replace(tzinfo=dt.UTC)
-                except ValueError:
-                    pass
-            candidates = sorted(
-                project_dir.glob(f"{surface_ref}*.jsonl"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
+            return _pick_surface_ref_transcript(
+                project_dir, surface_ref, started_at_iso
             )
-            for candidate in candidates:
-                if started_at is None:
-                    return candidate
-                mtime = dt.datetime.fromtimestamp(
-                    candidate.stat().st_mtime, tz=dt.UTC
-                )
-                if mtime > started_at:
-                    return candidate
-
-        # Degraded fallback: newest *.jsonl — fires when backfill hasn't run yet
+        # Degraded fallback: newest *.jsonl — fires only when both csid and
+        # surface_ref are absent (backfill hasn't run yet).
         all_jsonl = sorted(
             project_dir.glob("*.jsonl"),
             key=lambda p: p.stat().st_mtime,
