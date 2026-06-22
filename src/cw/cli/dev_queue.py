@@ -320,9 +320,7 @@ def _emit_freshness_subline(
             f" Fix: git -C {ws_path} checkout {default_br}"
         )
     elif tick_freshness_detail == FRESHNESS_MAIN_BEHIND:
-        click.echo(
-            f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed"
-        )
+        click.echo(f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed")
 
 
 def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
@@ -368,6 +366,7 @@ def dev_queue_status(client: str | None, output_json: bool) -> None:
                         "blocked_branch": tick.blocked_branch,
                     }
                     for c, tick in tick_data.items()
+                    if client is None or c == client
                 }
             )
         )

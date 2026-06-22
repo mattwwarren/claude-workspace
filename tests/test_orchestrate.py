@@ -14,12 +14,14 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket
+from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
     CompletionReason,
     CwState,
+    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -1524,8 +1526,8 @@ class TestTickSummaryFreshnessFields:
                 "pending": 2,
                 "running": 0,
                 "cap": 3,
-                "skip_reason": "freshness_gate",
-                "freshness_detail": "non_main_head",
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+                "freshness_detail": FRESHNESS_NON_MAIN_HEAD,
                 "blocked_branch": "docs/foo",
             },
         )
@@ -1533,7 +1535,7 @@ class TestTickSummaryFreshnessFields:
         result = _latest_tick_by_client(events)
         assert "freshness-client" in result
         tick = result["freshness-client"]
-        assert tick.freshness_detail == "non_main_head"
+        assert tick.freshness_detail == FRESHNESS_NON_MAIN_HEAD
         assert tick.blocked_branch == "docs/foo"
 
     def test_main_behind_origin_fields_extracted(
@@ -1552,15 +1554,15 @@ class TestTickSummaryFreshnessFields:
                 "pending": 1,
                 "running": 0,
                 "cap": 2,
-                "skip_reason": "freshness_gate",
-                "freshness_detail": "main_behind_origin",
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+                "freshness_detail": FRESHNESS_MAIN_BEHIND,
                 "blocked_branch": None,
             },
         )
         events = read_events()
         result = _latest_tick_by_client(events)
         tick = result["behind-client"]
-        assert tick.freshness_detail == "main_behind_origin"
+        assert tick.freshness_detail == FRESHNESS_MAIN_BEHIND
         assert tick.blocked_branch is None
 
     def test_legacy_event_no_freshness_keys(

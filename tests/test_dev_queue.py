@@ -31,6 +31,7 @@ from cw.dev_queue import (
     save_plan,
     wait_for_terminal,
 )
+from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -38,6 +39,7 @@ from cw.models import (
     DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
+    DispatchSkipReason,
     OrchestratorConfig,
     QueueItemStatus,
     Stage,
@@ -579,9 +581,9 @@ class TestStatusFreshnessSubline:
             pending=1,
             running=0,
             cap=3,
-            skip_reason="freshness_gate",
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
             tick_at=now,
-            freshness_detail="non_main_head",
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
             blocked_branch="docs/foo",
         )
         monkeypatch.setattr(
@@ -621,9 +623,9 @@ class TestStatusFreshnessSubline:
             pending=1,
             running=0,
             cap=3,
-            skip_reason="freshness_gate",
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
             tick_at=now,
-            freshness_detail="non_main_head",
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
             blocked_branch=None,
         )
         monkeypatch.setattr(
@@ -660,9 +662,9 @@ class TestStatusFreshnessSubline:
             pending=1,
             running=0,
             cap=3,
-            skip_reason="freshness_gate",
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
             tick_at=now,
-            freshness_detail="non_main_head",
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
             blocked_branch="feat/x",
         )
         monkeypatch.setattr(
@@ -698,9 +700,9 @@ class TestStatusFreshnessSubline:
             pending=1,
             running=0,
             cap=3,
-            skip_reason="freshness_gate",
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
             tick_at=now,
-            freshness_detail="main_behind_origin",
+            freshness_detail=FRESHNESS_MAIN_BEHIND,
             blocked_branch=None,
         )
         monkeypatch.setattr(
@@ -758,9 +760,9 @@ class TestStatusFreshnessSubline:
             pending=1,
             running=0,
             cap=3,
-            skip_reason="freshness_gate",
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
             tick_at=now,
-            freshness_detail="non_main_head",
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
             blocked_branch="docs/foo",
         )
         monkeypatch.setattr(
@@ -772,8 +774,8 @@ class TestStatusFreshnessSubline:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert "my-client" in data
-        assert data["my-client"]["skip_reason"] == "freshness_gate"
-        assert data["my-client"]["freshness_detail"] == "non_main_head"
+        assert data["my-client"]["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
+        assert data["my-client"]["freshness_detail"] == FRESHNESS_NON_MAIN_HEAD
         assert data["my-client"]["blocked_branch"] == "docs/foo"
 
     def test_json_empty_when_no_ticks(
@@ -791,6 +793,49 @@ class TestStatusFreshnessSubline:
         result = runner.invoke(main, ["dev-queue", "status", "--json"])
         assert result.exit_code == 0, result.output
         assert json.loads(result.output) == {}
+
+    def test_json_client_filter_applied(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json respects --client filter, returning only matching client."""
+        from cw.orchestrate import TickSummary
+
+        now = datetime.now(UTC)
+        tick_a = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
+            blocked_branch=None,
+        )
+        tick_b = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_MAIN_BEHIND,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"client-a": tick_a, "client-b": tick_b},
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "status", "--json", "--client", "client-a"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert list(data.keys()) == ["client-a"]
+        assert "client-b" not in data
 
 
 # ---------------------------------------------------------------------------
