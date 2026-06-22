@@ -1217,6 +1217,10 @@ def test_revert_stalled_headless_sessions_not_merged_times_out(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
     )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1280,6 +1284,259 @@ def test_revert_stalled_headless_sessions_transient_gh_error_times_out(
         event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
     )
     assert any(e.payload.get("session_id") == sess.id for e in timed_out_events)
+
+
+def test_branch_absent_no_merged_pr_tags_session_timed_out_event(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#808 (a): no merged PR + branch absent → TIMED_OUT, PENDING, branch_state."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-808-absent"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("808-absent", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="808-absent",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="808-absent",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (False, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    # Security assertion: branch-absent MUST NOT complete the session.
+    assert "808-absent" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+    assert sess.completed_reason == CompletionReason.TIMED_OUT
+
+    store = load_dev_queue()
+    task_after = next(t for t in store.tasks if t.ticket_id == "808-absent")
+    assert task_after.status == QueueItemStatus.PENDING
+
+    timed_out_events = read_events(
+        consumer="test-808-absent-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    matching = [e for e in timed_out_events if e.payload.get("session_id") == sess.id]
+    assert len(matching) == 1
+    assert matching[0].payload.get("branch_state") == "absent_no_merged_pr"
+
+    completed_events = read_events(
+        consumer="test-808-absent-no-completed",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert not any(e.payload.get("session_id") == sess.id for e in completed_events)
+
+
+def test_branch_present_tags_session_timed_out_event(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#808 (b): no merged PR + branch present → TIMED_OUT, branch_state='present'."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-808-present"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("808-present", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="808-present",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="808-present",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "808-present" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+
+    timed_out_events = read_events(
+        consumer="test-808-present-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    matching = [e for e in timed_out_events if e.payload.get("session_id") == sess.id]
+    assert len(matching) == 1
+    assert matching[0].payload.get("branch_state") == "present"
+
+
+def test_branch_check_transient_error_omits_branch_state(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#808 (c): branch-check error (None, True) → TIMED_OUT, branch_state omitted."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-808-transient"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("808-transient", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="808-transient",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="808-transient",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (None, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "808-transient" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
+
+    timed_out_events = read_events(
+        consumer="test-808-transient-timed-out",
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+    )
+    matching = [e for e in timed_out_events if e.payload.get("session_id") == sess.id]
+    assert len(matching) == 1
+    assert "branch_state" not in matching[0].payload
+
+
+def test_branch_check_not_called_when_pr_merged(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#808 (d): merged PR → COMPLETED; branch_exists_on_origin never called."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-808-merged"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("808-merged", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="808-merged",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="808-merged",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (True, True),
+    )
+
+    branch_check_count = 0
+
+    def _branch_check_forbidden(_branch: str, **_kw: object) -> tuple[bool, bool]:
+        nonlocal branch_check_count
+        branch_check_count += 1
+        return (True, True)
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        _branch_check_forbidden,
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert branch_check_count == 0
+    assert sess.status == SessionStatus.COMPLETED
+
+
+def test_branch_check_not_called_on_transient_pr_error(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#808 (e): transient PR error (None, True) → TIMED_OUT; branch check skipped."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-808-pr-transient"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("808-pr-transient", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="808-pr-transient",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="808-pr-transient",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (None, True),
+    )
+
+    branch_check_count = 0
+
+    def _branch_check_forbidden(_branch: str, **_kw: object) -> tuple[bool, bool]:
+        nonlocal branch_check_count
+        branch_check_count += 1
+        return (True, True)
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        _branch_check_forbidden,
+    )
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert branch_check_count == 0
+    assert "808-pr-transient" in reverted
+    assert sess.status == SessionStatus.TIMED_OUT
 
 
 def test_revert_stalled_gh_prepass_skips_none_ticket_id_and_none_client(
@@ -1484,6 +1741,10 @@ def test_session_stage_timed_out_retried_event_emitted_auto_policy(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
     )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
 
     revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
@@ -1531,6 +1792,10 @@ def test_session_stage_timed_out_retried_event_emitted_signal_only_policy(
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
     )
 
     # signal_only is the default OrchestratorConfig
@@ -1682,6 +1947,10 @@ def test_stalled_retry_cap_reverts_below_cap(
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
     )
 
     reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
