@@ -433,9 +433,9 @@ def _follow_loop(
         ):
             if dedup_terminal:
                 key = _terminal_dedup_key(ev)
-                if key is not None and key in seen_terminal:
-                    continue
                 if key is not None:
+                    if key in seen_terminal:
+                        continue
                     seen_terminal.add(key)
             _print_event(ev, as_json=as_json)
     except KeyboardInterrupt:
@@ -469,7 +469,8 @@ def _follow_loop(
     is_flag=True,
     help=(
         "Collapse repeated terminal re-fires (timed_out, reap_proposed, "
-        "needs_attention) for the same session to a single emission."
+        "needs_attention, stage_timed_out_retried) for the same session to "
+        "a single emission."
     ),
 )
 @handle_errors
@@ -496,8 +497,8 @@ def event_tail(
         consumer, since_ts = _parse_since(since)
 
     etype_filter = _resolve_event_types(type_filter)
-    client_names = (
-        frozenset(c for raw in client_filter for c in raw.split(",") if c)
+    client_names: frozenset[str] | None = (
+        frozenset(c for raw in client_filter for c in raw.split(",") if c) or None
         if client_filter
         else None
     )

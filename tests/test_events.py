@@ -1594,3 +1594,65 @@ def test_cli_event_tail_client_and_dedup_terminal_compose(
     assert result.exit_code == 0, result.output
     assert result.output.count("session.timed_out") == 1
     assert "s2" not in result.output
+
+
+def test_cli_event_tail_client_filter_with_json(tmp_events_dir: Path) -> None:
+    """--client --json outputs valid JSON containing only matching client events."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", "alpha", "--json"])
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.output.strip().splitlines() if line]
+    assert len(lines) == 1
+    import json
+
+    parsed = json.loads(lines[0])
+    assert parsed["payload"]["client"] == "alpha"
+    assert parsed["payload"]["session_id"] == "aaa"
+
+
+def test_cli_event_tail_client_filter_with_type(tmp_events_dir: Path) -> None:
+    """--client and --type compose: only events matching both filters are returned."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "session_id": "bbb"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--client", "alpha", "--type", "session.spawned"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "session.timed_out" not in result.output
+    assert "bbb" not in result.output
+
+
+def test_cli_event_tail_client_comma_only_no_events(tmp_events_dir: Path) -> None:
+    """--client ',' (comma-only) normalizes to None and returns all events."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "session_id": "aaa"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--client", ","])
+    assert result.exit_code == 0, result.output
+    # Comma-only produces empty frozenset normalized to None — no filter applied
+    assert "aaa" in result.output

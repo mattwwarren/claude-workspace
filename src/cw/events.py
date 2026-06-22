@@ -147,8 +147,7 @@ def _event_matches(
     if event_types is not None and event.type not in event_types:
         return False
     return not (
-        client_names is not None
-        and event.payload.get("client") not in client_names
+        client_names is not None and event.payload.get("client") not in client_names
     )
 
 
