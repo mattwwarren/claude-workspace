@@ -74,10 +74,12 @@ class ReapReason(StrEnum):
     IDLE_STALL = "idle_stall"
     USAGE_LIMIT_CUTOFF = "usage_limit_cutoff"
     RETRY_CAP_PARKED = "retry_cap_parked"
+    STALLED_RETRY_CAP_PARKED = "stalled_retry_cap_parked"
     WALL_CLOCK_BUDGET = "wall_clock_budget"
     COMPLETED_BACKSTOP = "completed_backstop"
     SALVAGE_COMPLETED = "salvage_completed"
     SALVAGE_PARKED = "salvage_parked"
+    FINALIZE_BLOCKED = "finalize_blocked"
 
 
 class Stage(StrEnum):
@@ -213,6 +215,9 @@ class OrchestratorEventType(StrEnum):
     LANE_PAUSED = "lane.paused"
     LANE_RESUMED = "lane.resumed"
     TICKET_MOVED = "ticket.moved"
+    TICKET_APPROVED = "ticket.approved"
+    TICKET_REQUEUED = "ticket.requeued"
+    TICKET_UNBLOCKED = "ticket.unblocked"
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
 
 
@@ -423,6 +428,11 @@ class OrchestratorConfig(BaseModel):
     # parked BLOCKED_ON_USER for the operator. Keyed by TicketTask.scope_hint;
     # unknown tiers fall back to DEFAULT_IDLE_RETRY_CAP. See GitHub issue #384.
     idle_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
+    # Per-tier cap on wall-clock-budget (stalled stage) retries before a
+    # headless worker is parked BLOCKED_ON_USER instead of re-queued to PENDING.
+    # Keyed by TicketTask.scope_hint; unknown tiers fall back to
+    # DEFAULT_STALLED_RETRY_CAP. See GitHub issue #756.
+    stalled_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
     # Number of consecutive failed idle-watchdog observations required before a
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.

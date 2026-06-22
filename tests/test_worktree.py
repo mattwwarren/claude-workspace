@@ -16,10 +16,12 @@ from cw.models import ClientConfig
 from cw.worktree import (
     _fetch_default_branch,
     _git_dir,
+    _hashed_worktree_base,
     _register_cw_exclude,
     check_main_ff_safety,
     check_not_main_checkout,
     create_worktree,
+    effective_worktree_bases,
     fast_forward_main,
     fetch_feature_branch,
     is_main_behind_origin,
@@ -102,6 +104,37 @@ class TestResolveWorktreeBase:
         client = ClientConfig(name="test", workspace_path=ws)
         expected = tmp_path / "projects" / ".worktrees" / "my-repo"
         assert resolve_worktree_base(client) == expected
+
+
+class TestEffectiveWorktreeBases:
+    def test_explicit_worktree_base_returns_singleton(self, tmp_path: Path) -> None:
+        custom = tmp_path / "custom-wt"
+        client = ClientConfig(
+            name="test", workspace_path=tmp_path, worktree_base=custom
+        )
+        bases = effective_worktree_bases(client)
+        assert bases == frozenset({custom})
+
+    def test_no_worktree_base_returns_two_paths(self, tmp_path: Path) -> None:
+        """Without explicit worktree_base, both default and hash bases returned."""
+        client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
+        bases = effective_worktree_bases(client)
+        assert len(bases) == 2
+        assert _hashed_worktree_base(client) in bases
+
+    def test_no_worktree_base_includes_resolve_worktree_base(
+        self, tmp_path: Path
+    ) -> None:
+        client = ClientConfig(name="test", workspace_path=tmp_path / "ws")
+        assert resolve_worktree_base(client) in effective_worktree_bases(client)
+
+    def test_explicit_worktree_base_no_hash_fallback(self, tmp_path: Path) -> None:
+        """Explicit base → only one path, no hash fallback added."""
+        custom = tmp_path / "custom"
+        client = ClientConfig(
+            name="test", workspace_path=tmp_path, worktree_base=custom
+        )
+        assert len(effective_worktree_bases(client)) == 1
 
 
 class TestWorktreePathFor:
@@ -2520,7 +2553,7 @@ class TestHasCommitsBeyondBase:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is True
+        assert _has_commits_beyond_base(tmp_path, "main") is True
 
     def test_no_commits_returns_false(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2534,7 +2567,7 @@ class TestHasCommitsBeyondBase:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is False
+        assert _has_commits_beyond_base(tmp_path, "main") is False
 
     def test_git_failure_returns_false(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2548,7 +2581,7 @@ class TestHasCommitsBeyondBase:
             return result
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is False
+        assert _has_commits_beyond_base(tmp_path, "main") is False
 
     def test_nonexistent_path_returns_false(self) -> None:
         """Path that doesn't exist → False."""
@@ -2556,7 +2589,7 @@ class TestHasCommitsBeyondBase:
 
         from cw.worktree import _has_commits_beyond_base
 
-        assert _has_commits_beyond_base(_Path("/nonexistent/path/xyz")) is False
+        assert _has_commits_beyond_base(_Path("/nonexistent/path/xyz"), "main") is False
 
     def test_oserror_returns_false(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2569,4 +2602,23 @@ class TestHasCommitsBeyondBase:
             raise OSError(msg)
 
         monkeypatch.setattr("cw.worktree._run_git", mock_run)
-        assert _has_commits_beyond_base(tmp_path) is False
+        assert _has_commits_beyond_base(tmp_path, "main") is False
+
+    def test_uses_default_branch_in_ref(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """default_branch is passed to git log, not hardcoded 'main'."""
+        from cw.worktree import _has_commits_beyond_base
+
+        captured_args: list[str] = []
+
+        def mock_run(*args: str, cwd: object, check: bool = True) -> MagicMock:
+            captured_args.extend(args)
+            result = MagicMock(returncode=0)
+            result.stdout = "abc1234 feat: custom branch commit\n"
+            return result
+
+        monkeypatch.setattr("cw.worktree._run_git", mock_run)
+        assert _has_commits_beyond_base(tmp_path, "dev") is True
+        assert "origin/dev..HEAD" in captured_args
+        assert "origin/main..HEAD" not in captured_args

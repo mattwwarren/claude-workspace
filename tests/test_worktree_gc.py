@@ -9,6 +9,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cw.models import (
+    CwState,
+    QueueItemStatus,
+    Session,
+    SessionOrigin,
+    SessionPurpose,
+    SessionStatus,
+    TicketTask,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES
 from cw.worktree_gc import (
     _GIT_BRANCH_DELETE_FLAG,
@@ -20,6 +29,7 @@ from cw.worktree_gc import (
     WorktreeGcReport,
     WorktreeGcResult,
     _has_unpushed_commits,
+    _live_worktree_paths,
     check_pr_state,
     classify_worktrees,
     list_repo_worktrees,
@@ -448,8 +458,8 @@ class TestClassifyWorktrees:
         assert results[0].verdict == GcVerdict.KEEP_CLOSED_PR
         assert results[0].pr_number == 734
 
-    def test_worktree_base_filters_out_of_scope(self, tmp_path: Path) -> None:
-        """Worktrees outside worktree_base are silently skipped."""
+    def test_worktree_bases_filters_out_of_scope(self, tmp_path: Path) -> None:
+        """Worktrees outside worktree_bases are silently skipped."""
         in_scope = self._make_entry(tmp_path, "wt-base/dev-630", branch="dev/630")
         out_of_scope = self._make_entry(tmp_path, "other/dev-631", branch="dev/631")
         entries = [in_scope, out_of_scope]
@@ -458,11 +468,31 @@ class TestClassifyWorktrees:
             patch("cw.worktree_gc.check_pr_state", return_value=("OPEN", 736, True)),
         ):
             results = classify_worktrees(
-                tmp_path / "repo", worktree_base=tmp_path / "wt-base"
+                tmp_path / "repo",
+                worktree_bases=frozenset({tmp_path / "wt-base"}),
             )
 
         assert len(results) == 1
         assert results[0].entry.branch == "dev/630"
+
+    def test_worktree_bases_accepts_multiple_bases(self, tmp_path: Path) -> None:
+        """Worktrees under any of the given bases are included."""
+        wt1 = self._make_entry(tmp_path, "base-a/dev-630", branch="dev/630")
+        wt2 = self._make_entry(tmp_path, "base-b/dev-631", branch="dev/631")
+        wt3 = self._make_entry(tmp_path, "other/dev-632", branch="dev/632")
+        entries = [wt1, wt2, wt3]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", return_value=("OPEN", 736, True)),
+        ):
+            results = classify_worktrees(
+                tmp_path / "repo",
+                worktree_bases=frozenset({tmp_path / "base-a", tmp_path / "base-b"}),
+            )
+
+        assert len(results) == 2
+        branches = {r.entry.branch for r in results}
+        assert branches == {"dev/630", "dev/631"}
 
     def test_gh_unavailable_short_circuits_subsequent_entries(
         self, tmp_path: Path
@@ -780,6 +810,7 @@ class TestRunWorktreeGc:
                 side_effect=_pr_state_side_effect,
             ),
             patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=False)
@@ -798,6 +829,7 @@ class TestRunWorktreeGc:
                 side_effect=_pr_state_side_effect,
             ),
             patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=True)
@@ -816,6 +848,7 @@ class TestRunWorktreeGc:
                 side_effect=_pr_state_side_effect,
             ),
             patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             run_worktree_gc(tmp_path / "repo", apply=True)
@@ -838,6 +871,7 @@ class TestRunWorktreeGc:
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", side_effect=_closed_state),
             patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             run_worktree_gc(tmp_path / "repo", apply=True, include_closed=True)
@@ -857,6 +891,7 @@ class TestRunWorktreeGc:
         with (
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", side_effect=_closed_state),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc") as mock_remove,
         ):
             run_worktree_gc(tmp_path / "repo", apply=True)
@@ -879,6 +914,7 @@ class TestRunWorktreeGc:
             patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
             patch("cw.worktree_gc.check_pr_state", side_effect=_all_merged),
             patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc", return_value=False),
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=True)
@@ -899,11 +935,252 @@ class TestRunWorktreeGc:
                 side_effect=_pr_state_side_effect,
             ),
             patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
             patch("cw.worktree_gc.remove_worktree_gc", return_value=True),
         ):
             report = run_worktree_gc(tmp_path / "repo", apply=True)
 
         assert report.removal_failures == 0
+
+    def test_limit_caps_results(self, tmp_path: Path) -> None:
+        """--limit N caps results to N after base filtering (D2)."""
+        entries = [
+            WorktreeEntry(path=tmp_path / f"wt-{i}", branch=f"dev/{i}", locked=False)
+            for i in range(5)
+        ]
+
+        def _all_merged(
+            branch: str, timeout: int = 10, **_kw: object
+        ) -> tuple[str | None, int | None, bool]:
+            return "MERGED", 700, True
+
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch("cw.worktree_gc.check_pr_state", side_effect=_all_merged),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
+            patch("cw.worktree_gc.remove_worktree_gc", return_value=True),
+        ):
+            report = run_worktree_gc(tmp_path / "repo", apply=False, limit=3)
+
+        assert len(report.results) == 3
+        assert report.total_discovered == 5
+        assert report.capped is True
+
+    def test_limit_not_exceeded_capped_false(self, tmp_path: Path) -> None:
+        """When limit >= total, capped is False."""
+        entries = [
+            WorktreeEntry(path=tmp_path / "wt-a", branch="dev/630", locked=False),
+        ]
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=entries),
+            patch(
+                "cw.worktree_gc.check_pr_state",
+                side_effect=_pr_state_side_effect,
+            ),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
+            patch("cw.worktree_gc._live_worktree_paths", return_value=frozenset()),
+        ):
+            report = run_worktree_gc(tmp_path / "repo", apply=False, limit=10)
+
+        assert report.capped is False
+        assert report.total_discovered == 1
+
+
+# ---------------------------------------------------------------------------
+# SKIP_LIVE verdict
+# ---------------------------------------------------------------------------
+
+
+class TestSkipLive:
+    def test_live_worktree_gets_skip_live(self, tmp_path: Path) -> None:
+        """A worktree in live_worktree_paths receives SKIP_LIVE, no PR lookup."""
+        live_path = tmp_path / "wt-live"
+        entry = WorktreeEntry(path=live_path, branch="dev/630", locked=False)
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=[entry]),
+            patch("cw.worktree_gc.check_pr_state") as mock_gh,
+        ):
+            results = classify_worktrees(
+                tmp_path / "repo",
+                live_worktree_paths=frozenset({live_path}),
+            )
+
+        assert results[0].verdict == GcVerdict.SKIP_LIVE
+        mock_gh.assert_not_called()
+
+    def test_non_live_worktree_not_skipped_as_live(self, tmp_path: Path) -> None:
+        """A worktree NOT in live_worktree_paths proceeds to PR lookup."""
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=[entry]),
+            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
+            patch("cw.worktree_gc._is_dirty", return_value=False),
+        ):
+            results = classify_worktrees(
+                tmp_path / "repo",
+                live_worktree_paths=frozenset({tmp_path / "other"}),
+            )
+
+        assert results[0].verdict == GcVerdict.REMOVE_MERGED
+
+    def test_skip_live_in_skip_verdicts(self) -> None:
+        assert GcVerdict.SKIP_LIVE in GC_SKIP_VERDICTS
+
+    def test_skip_live_in_partition(self) -> None:
+        all_verdicts = frozenset(GcVerdict)
+        union = GC_REMOVE_VERDICTS | GC_KEEP_VERDICTS | GC_SKIP_VERDICTS
+        assert union == all_verdicts
+
+
+# ---------------------------------------------------------------------------
+# Dirty-check filtering of cw scratch files
+# ---------------------------------------------------------------------------
+
+
+class TestIsDirtyCwScratchFiltering:
+    def test_cw_scratch_only_not_dirty(self, tmp_path: Path) -> None:
+        """A worktree whose only untracked files are under .claude/ is not dirty."""
+        from cw.worktree_gc import _is_dirty
+
+        cw_status = "?? .claude/cw-context.json\n?? .claude/prep-pr-state.json\n"
+        with (
+            patch("cw.worktree_gc._sp.run") as mock_run,
+            patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout=cw_status, stderr="")
+            result = _is_dirty(tmp_path, "dev/630")
+
+        assert result is False
+
+    def test_cw_scratch_plus_real_change_is_dirty(self, tmp_path: Path) -> None:
+        """When real user changes accompany cw scratch, worktree is still dirty."""
+        from cw.worktree_gc import _is_dirty
+
+        mixed_status = "?? .claude/cw-context.json\n M src/foo.py\n"
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout=mixed_status, stderr=""
+            )
+            result = _is_dirty(tmp_path, "dev/630")
+
+        assert result is True
+
+    def test_merged_pr_with_only_cw_scratch_is_removed(self, tmp_path: Path) -> None:
+        """Regression: merged-PR worktree dirty only with cw scratch → gc removes it."""
+        entry = WorktreeEntry(
+            path=tmp_path / "wt-merged", branch="dev/630", locked=False
+        )
+        cw_status = "?? .claude/cw-context.json\n"
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=[entry]),
+            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 735, True)),
+            patch("cw.worktree_gc._sp.run") as mock_run,
+            patch("cw.worktree_gc._has_unpushed_commits", return_value=False),
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout=cw_status, stderr="")
+            results = classify_worktrees(tmp_path / "repo")
+
+        assert results[0].verdict == GcVerdict.REMOVE_MERGED
+
+    def test_worktree_with_real_user_edits_skipped_and_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: genuine uncommitted edits → SKIP_DIRTY (visible)."""
+        entry = WorktreeEntry(path=tmp_path / "wt-wip", branch="dev/631", locked=False)
+        with (
+            patch("cw.worktree_gc.list_repo_worktrees", return_value=[entry]),
+            patch("cw.worktree_gc.check_pr_state", return_value=("MERGED", 736, True)),
+            patch("cw.worktree_gc._is_dirty", return_value=True),
+        ):
+            results = classify_worktrees(tmp_path / "repo")
+
+        assert results[0].verdict == GcVerdict.SKIP_DIRTY
+        # Skipped worktree must appear in results (visible, not silently dropped).
+        assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# _live_worktree_paths
+# ---------------------------------------------------------------------------
+
+
+class TestLiveWorktreePaths:
+    def test_returns_non_terminal_session_paths(self) -> None:
+        live = Path("/live/wt")
+        completed = Path("/done/wt")
+        sessions = [
+            Session(
+                name="c/impl",
+                client="c",
+                purpose=SessionPurpose.IMPL,
+                status=SessionStatus.ACTIVE,
+                origin=SessionOrigin.DAEMON,
+                workspace_path=Path("/repo"),
+                worktree_path=live,
+            ),
+            Session(
+                name="c/idea",
+                client="c",
+                purpose=SessionPurpose.IDEA,
+                status=SessionStatus.COMPLETED,
+                origin=SessionOrigin.DAEMON,
+                workspace_path=Path("/repo"),
+                worktree_path=completed,
+            ),
+        ]
+        state = CwState(sessions=sessions)
+
+        with (
+            patch("cw.worktree_gc.load_state", return_value=state),
+            patch("cw.worktree_gc.load_dev_queue", return_value=MagicMock(tasks=[])),
+        ):
+            paths = _live_worktree_paths()
+
+        assert live in paths
+        assert completed not in paths
+
+    def test_includes_running_dispatch_task_paths(self) -> None:
+        running_wt = Path("/running/wt")
+        task = TicketTask(
+            ticket_id="100",
+            client="c",
+            status=QueueItemStatus.RUNNING,
+            worktree_path=running_wt,
+        )
+        queue = MagicMock()
+        queue.tasks = [task]
+
+        with (
+            patch("cw.worktree_gc.load_state", return_value=CwState()),
+            patch("cw.worktree_gc.load_dev_queue", return_value=queue),
+        ):
+            paths = _live_worktree_paths()
+
+        assert running_wt in paths
+
+    def test_state_load_error_returns_empty(self) -> None:
+        with (
+            patch("cw.worktree_gc.load_state", side_effect=Exception("corrupt")),
+            patch("cw.worktree_gc.load_dev_queue", return_value=MagicMock(tasks=[])),
+        ):
+            paths = _live_worktree_paths()
+
+        assert isinstance(paths, frozenset)
+        assert len(paths) == 0
+
+    def test_dev_queue_load_error_returns_empty(self) -> None:
+        with (
+            patch("cw.worktree_gc.load_state", return_value=CwState()),
+            patch(
+                "cw.worktree_gc.load_dev_queue",
+                side_effect=Exception("queue corrupt"),
+            ),
+        ):
+            paths = _live_worktree_paths()
+
+        assert isinstance(paths, frozenset)
+        assert len(paths) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -924,7 +1201,10 @@ def _cli_patches(
         patch("cw.cli.worktree.run_worktree_gc", return_value=report),
         patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
         patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
-        patch("cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"),
+        patch(
+            "cw.cli.worktree.effective_worktree_bases",
+            return_value=frozenset({tmp_path / "wt"}),
+        ),
     ]
 
 
@@ -961,7 +1241,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             result = runner.invoke(
@@ -988,7 +1269,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             runner.invoke(
@@ -1022,7 +1304,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             result = runner.invoke(
@@ -1049,7 +1332,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             runner.invoke(
@@ -1075,7 +1359,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             runner.invoke(
@@ -1105,7 +1390,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             result = runner.invoke(cli_main, ["worktree", "gc"])
@@ -1129,7 +1415,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value="linear"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             result = runner.invoke(cli_main, ["worktree", "gc"])
@@ -1153,7 +1440,8 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
-                "cw.cli.worktree.resolve_worktree_base", return_value=tmp_path / "wt"
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
             ),
         ):
             result = runner.invoke(cli_main, ["worktree", "gc"])
@@ -1189,15 +1477,15 @@ class TestWorktreeGcCli:
 
         assert result.exit_code != 0
 
-    def test_worktree_base_passed_to_run_gc(self, tmp_path: Path) -> None:
-        """resolve_worktree_base result is forwarded to run_worktree_gc."""
+    def test_worktree_bases_passed_to_run_gc(self, tmp_path: Path) -> None:
+        """effective_worktree_bases result is forwarded to run_worktree_gc."""
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
 
         client = self._make_client(tmp_path)
         report = WorktreeGcReport(results=[])
-        wt_base = tmp_path / "custom-wt"
+        wt_bases = frozenset({tmp_path / "custom-wt", tmp_path / "hash-wt"})
 
         runner = CliRunner()
         with (
@@ -1205,9 +1493,74 @@ class TestWorktreeGcCli:
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
             patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
-            patch("cw.cli.worktree.resolve_worktree_base", return_value=wt_base),
+            patch("cw.cli.worktree.effective_worktree_bases", return_value=wt_bases),
         ):
             runner.invoke(cli_main, ["worktree", "gc", "--client", "test-client"])
 
         _, kwargs = mock_gc.call_args
-        assert kwargs.get("worktree_base") == wt_base
+        assert kwargs.get("worktree_bases") == wt_bases
+
+    def test_limit_flag_passed_to_run_gc(self, tmp_path: Path) -> None:
+        """--limit N is forwarded to run_worktree_gc."""
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+
+        client = self._make_client(tmp_path)
+        report = WorktreeGcReport(results=[])
+
+        runner = CliRunner()
+        with (
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
+            ),
+        ):
+            runner.invoke(
+                cli_main,
+                ["worktree", "gc", "--client", "test-client", "--limit", "50"],
+            )
+
+        _, kwargs = mock_gc.call_args
+        assert kwargs.get("limit") == 50
+
+    def test_capped_report_shows_message(self, tmp_path: Path) -> None:
+        """When report.capped is True, output includes the cap message."""
+        from click.testing import CliRunner
+
+        from cw.cli import main as cli_main
+
+        client = self._make_client(tmp_path)
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/630", locked=False)
+        report = WorktreeGcReport(
+            results=[
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.REMOVE_MERGED, pr_number=735
+                )
+            ],
+            total_discovered=10,
+            capped=True,
+        )
+
+        runner = CliRunner()
+        with (
+            patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
+            patch("cw.cli.worktree.run_worktree_gc", return_value=report),
+            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
+            patch(
+                "cw.cli.worktree.effective_worktree_bases",
+                return_value=frozenset({tmp_path / "wt"}),
+            ),
+        ):
+            result = runner.invoke(
+                cli_main, ["worktree", "gc", "--client", "test-client"]
+            )
+
+        assert result.exit_code == 0
+        assert "capped" in result.output
+        assert "10" in result.output

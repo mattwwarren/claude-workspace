@@ -41,6 +41,11 @@ _WORKSPACE_HASH_CHARS = 8
 # Pattern appended to $GIT_COMMON_DIR/info/exclude so ephemeral per-session
 # .cw/ artifacts are invisible to git status without touching .gitignore.
 _CW_EXCLUDE_PATTERN = ".cw/"
+# cw-managed per-session scratch files live under this prefix. They are written
+# fresh each spawn and must not count as real uncommitted work.
+# Mirrored in worktree_gc._CW_SCRATCH_PREFIX (duplicated per D5 to avoid
+# importing private names cross-module).
+_CW_SCRATCH_PREFIX = ".claude/"
 
 
 def slugify_branch(branch: str) -> str:
@@ -69,10 +74,26 @@ def resolve_worktree_base(client: ClientConfig) -> Path:
     Uses ``client.worktree_base`` if set, otherwise defaults to
     ``<git_dir.parent>/.worktrees/<git_dir.name>``.
     """
-    if client.worktree_base:
+    if client.worktree_base is not None:
         return client.worktree_base
     ws = _git_dir(client)
     return ws.parent / ".worktrees" / ws.name
+
+
+def effective_worktree_bases(client: ClientConfig) -> frozenset[Path]:
+    """Return all directories that may contain cw-managed worktrees for *client*.
+
+    ``worktree_path_for`` silently redirects to a hash-derived base under
+    ``~/.cw/wt/`` when the default sibling path would exceed
+    ``_WORKTREE_NAME_CAP``. GC must search *both* to avoid silently skipping
+    worktrees created when that fallback was in effect.
+
+    When ``client.worktree_base`` is set explicitly only that directory is
+    returned — the user chose a location and there is no hash fallback.
+    """
+    if client.worktree_base is not None:
+        return frozenset({client.worktree_base})
+    return frozenset({resolve_worktree_base(client), _hashed_worktree_base(client)})
 
 
 def _hashed_worktree_base(client: ClientConfig) -> Path:
@@ -173,10 +194,10 @@ def _checked_out_branch(wt_path: Path) -> str | None:
     return result.stdout.strip() or None
 
 
-def _has_commits_beyond_base(wt_path: Path) -> bool:
-    """Return True iff the worktree has commits beyond origin/main.
+def _has_commits_beyond_base(wt_path: Path, default_branch: str) -> bool:
+    """Return True iff the worktree has commits beyond origin/<default_branch>.
 
-    Runs git log origin/main..HEAD in the worktree cwd. Returns False on
+    Runs git log origin/<default_branch>..HEAD in the worktree cwd. Returns False on
     any failure — conservative default so uncertainty never triggers salvage.
 
     # Why: salvage is a side-effecting external write. A false positive
@@ -188,7 +209,7 @@ def _has_commits_beyond_base(wt_path: Path) -> bool:
     try:
         result = _run_git(
             "log",
-            "origin/main..HEAD",
+            f"origin/{default_branch}..HEAD",
             "--oneline",
             cwd=wt_path,
             check=False,
@@ -472,7 +493,7 @@ def worktree_has_unsaved_work(client: ClientConfig, branch: str) -> bool:
             for line in status.stdout.splitlines()
             if not (
                 len(line) > _GIT_PORCELAIN_PATH_OFFSET
-                and line[_GIT_PORCELAIN_PATH_OFFSET:].startswith(".claude/")
+                and line[_GIT_PORCELAIN_PATH_OFFSET:].startswith(_CW_SCRATCH_PREFIX)
             )
         ]
         if lines:

@@ -22,7 +22,8 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue
-from cw.models import SessionOrigin, SessionStatus
+from cw.gh import pr_exists_for_branch
+from cw.models import SessionOrigin, SessionStatus, Stage
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
@@ -41,7 +42,10 @@ from cw.reconcile.phantom import (
     _detect_phantom_candidates,
     _emit_reap_proposed,
 )
-from cw.reconcile.salvage import salvage_committed_no_pr_sessions
+from cw.reconcile.salvage import (
+    rescue_finalize_blocked_sessions,
+    salvage_committed_no_pr_sessions,
+)
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -103,6 +107,47 @@ def _verify_supervisor_session_id(state: CwState) -> int:
     return cleared
 
 
+def _build_finalize_pr_map(
+    state: CwState,
+) -> dict[str, tuple[bool | None, bool]]:
+    """Return pr_exists_for_branch results for FINALIZE-stage DAEMON sessions.
+
+    Must run OUTSIDE sessions_lock — gh subprocess is not safe under the lock
+    (liveness invariant, #485). Called by reconcile() as a lockless pre-pass.
+
+    Uses load_effective_clients() to match the branch-key lookup in
+    _detect_stalled_candidates; the two functions must use the same client dict
+    shape so the pre-computed result is found in the dict and not silently
+    missed due to a feature_branch_prefix format divergence (#812).
+
+    Note: load_dev_queue() here and in _reconcile_locked() are two separate
+    reads with no consistency guarantee. A task that advances to FINALIZE
+    between these two reads will miss the pre-pass (dict lookup returns default
+    (None, False) → conservative non-detection for one tick). The next tick
+    will catch it.
+    """
+    effective_clients = _deps.load_effective_clients()
+    pre_tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+    result: dict[str, tuple[bool | None, bool]] = {}
+    for session in state.sessions:
+        if session.status not in _LIVE_STATUSES:
+            continue
+        if session.origin is not SessionOrigin.DAEMON:
+            continue
+        if session.worktree_path is None:
+            continue
+        ticket_id = ticket_id_for_session(session.name)
+        if ticket_id is None:
+            continue
+        task = pre_tasks.get(ticket_id)
+        if task is None or task.stage != Stage.FINALIZE:
+            continue
+        branch = feature_branch_key(session.client, ticket_id, effective_clients)
+        if branch not in result:
+            result[branch] = pr_exists_for_branch(branch)
+    return result
+
+
 def reconcile() -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
@@ -161,18 +206,24 @@ def reconcile() -> ReconcileReport:
     merged_ticket_ids = frozenset(_merged_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
 
+    # Pre-pass: check PR existence for FINALIZE-stage sessions with pushed branches.
+    # gh subprocess must NOT run under sessions_lock (liveness invariant, #485).
+    finalize_pr_by_branch = _build_finalize_pr_map(pre_state)
+
     with sessions_lock():
         locked_report, salvage_git_candidates = _reconcile_locked(
             merged_ticket_ids=merged_ticket_ids,
             gh_blocked_ticket_ids=gh_blocked_ticket_ids,
+            finalize_pr_by_branch=finalize_pr_by_branch,
         )
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
     salvaged_ticket_ids = salvage_committed_no_pr_sessions(salvage_git_candidates)
+    rescued_ticket_ids = rescue_finalize_blocked_sessions()
 
-    if not completed_ticket_ids and not salvaged_ticket_ids:
+    if not completed_ticket_ids and not salvaged_ticket_ids and not rescued_ticket_ids:
         return locked_report
 
     return ReconcileReport(
@@ -182,6 +233,7 @@ def reconcile() -> ReconcileReport:
         completed_ticket_ids=locked_report.completed_ticket_ids + completed_ticket_ids,
         usage_limited=locked_report.usage_limited,
         salvaged_ticket_ids=salvaged_ticket_ids,
+        rescued_ticket_ids=rescued_ticket_ids,
     )
 
 
@@ -189,6 +241,7 @@ def _reconcile_locked(
     *,
     merged_ticket_ids: frozenset[str] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
+    finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] | None = None,
 ) -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -198,11 +251,18 @@ def _reconcile_locked(
 
     merged_ticket_ids / gh_blocked_ticket_ids come from a lockless pre-pass in
     reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
+    finalize_pr_by_branch comes from a second lockless pre-pass that checks PR
+    existence for FINALIZE-stage sessions (GitHub #812, liveness invariant #485).
 
     Returns a tuple of (ReconcileReport, salvage_git_candidates) where
     salvage_git_candidates is the list of git-state salvage candidates for
     the post-lock pass in salvage_committed_no_pr_sessions.
     """
+    # Why: None means the caller did not run the lockless pre-pass. Default to
+    # empty dict so _resolve_finalize_blocked_condition never calls pr_exists_for_branch
+    # under sessions_lock (#816 SHOULD_FIX 1 — latent lock-under-gh footgun).
+    if finalize_pr_by_branch is None:
+        finalize_pr_by_branch = {}
     state = load_state()
     now = datetime.now(UTC)
 
@@ -219,6 +279,7 @@ def _reconcile_locked(
         now=now,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
+        finalize_pr_by_branch=finalize_pr_by_branch,
     )
     # native_live not yet known — stalled sweep is pre-daemon-query.
     _emit_reap_proposed(state, stalled_candidates, native_live=set(), now=now)
@@ -321,7 +382,7 @@ def _reconcile_locked(
     (
         reverted,
         phantom_names,
-        _watchdog_usage_limited_phantom,
+        phantom_usage_limited,
         _salvaged_phantom_ticket_ids,
         _salvaged_phantom_results,
         merged_from_phantom,
@@ -363,7 +424,7 @@ def _reconcile_locked(
             phantom_session_names=phantom_names,
             reverted_ticket_ids=all_reverted,
             completed_ticket_ids=all_merged_completed,
-            usage_limited=watchdog_usage_limited,
+            usage_limited=watchdog_usage_limited or phantom_usage_limited,
         ),
         salvage_git_candidates,
     )

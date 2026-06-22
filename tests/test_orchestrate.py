@@ -14,12 +14,14 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket
+from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
     CompletionReason,
     CwState,
+    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -1500,6 +1502,94 @@ class TestTickSummaryLanes:
         parsed = json.loads(snapshot.model_dump_json())
         assert "legacy-json-client" in parsed["last_tick_by_client"]
         assert parsed["last_tick_by_client"]["legacy-json-client"]["lanes"] == {}
+
+
+# ---------------------------------------------------------------------------
+# TestTickSummaryFreshnessFields — freshness_detail + blocked_branch (#820)
+# ---------------------------------------------------------------------------
+
+
+class TestTickSummaryFreshnessFields:
+    def test_non_main_head_fields_extracted(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """freshness_detail + blocked_branch populate TickSummary."""
+        from cw.events import read_events
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "freshness-client",
+                "claimed": 0,
+                "pending": 2,
+                "running": 0,
+                "cap": 3,
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+                "freshness_detail": FRESHNESS_NON_MAIN_HEAD,
+                "blocked_branch": "docs/foo",
+            },
+        )
+        events = read_events()
+        result = _latest_tick_by_client(events)
+        assert "freshness-client" in result
+        tick = result["freshness-client"]
+        assert tick.freshness_detail == FRESHNESS_NON_MAIN_HEAD
+        assert tick.blocked_branch == "docs/foo"
+
+    def test_main_behind_origin_fields_extracted(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK with main_behind_origin has blocked_branch == None."""
+        from cw.events import read_events
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "behind-client",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
+                "freshness_detail": FRESHNESS_MAIN_BEHIND,
+                "blocked_branch": None,
+            },
+        )
+        events = read_events()
+        result = _latest_tick_by_client(events)
+        tick = result["behind-client"]
+        assert tick.freshness_detail == FRESHNESS_MAIN_BEHIND
+        assert tick.blocked_branch is None
+
+    def test_legacy_event_no_freshness_keys(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """Old-format DISPATCH_TICK without freshness keys yields None fields."""
+        from cw.events import read_events
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "old-client",
+                "claimed": 1,
+                "pending": 0,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+                # no freshness_detail or blocked_branch keys
+            },
+        )
+        events = read_events()
+        result = _latest_tick_by_client(events)
+        tick = result["old-client"]
+        assert tick.freshness_detail is None
+        assert tick.blocked_branch is None
 
 
 # ---------------------------------------------------------------------------

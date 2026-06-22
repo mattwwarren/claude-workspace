@@ -92,6 +92,7 @@ HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
 IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
 
 DEFAULT_IDLE_RETRY_CAP = 2  # idle-stall auto-retries before parking (#384)
+DEFAULT_STALLED_RETRY_CAP = 2  # wall-clock-budget retries before parking (#756)
 
 # How recently a session's transcript must have been modified to be considered
 # actively making progress. If the newest .jsonl under the session's project
@@ -130,6 +131,13 @@ _PHANTOM_REAP_MERGED_REASON = "phantom_reap_merged"
 # task is routed to BLOCKED_ON_USER rather than being reverted to PENDING
 # (fail-closed on ambiguous world state; GitHub issue #637).
 _GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when the stalled
+# watchdog parks a session after exhausting its wall-clock retry cap (GitHub #756).
+_STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when a FINALIZE-stage
+# session times out with commits pushed but no PR (GitHub #812). The worktree is
+# preserved; rescue_finalize_blocked_sessions opens the PR on the next tick.
+_FINALIZE_BLOCKED_REASON = "finalize_blocked"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -140,6 +148,12 @@ _SALVAGE_PR_BODY_TEMPLATE = (
     "The worker reached Stage 3 review (clean) and was reaped before opening a PR. "
     "Review this branch and merge when satisfied.\n\n"
     "Ticket: #{ticket_id}"
+)
+_RESCUE_PR_BODY_TEMPLATE = (
+    "Auto-rescued by reconcile after finalize was blocked.\n\n"
+    "The worker completed impl+review and pushed the branch but could not open"
+    " the PR (permission classifier / usage limit / transient gh failure)."
+    " Ticket: #{ticket_id}"
 )
 
 # Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
@@ -191,6 +205,10 @@ class ProposedAction(StrEnum):
     # Fires at sentinel_unrouted_check_seconds; exempt from signal_only.
     # See GitHub #578.
     ROUTE_EMITTED_SENTINEL = "route_emitted_sentinel"
+    # Session at Stage.FINALIZE timed out with commits pushed but no PR.
+    # Worktree is preserved; rescue_finalize_blocked_sessions opens the PR.
+    # See GitHub #812.
+    PARK_FINALIZE_BLOCKED = "park_finalize_blocked"
 
 
 @dataclass(frozen=True)
@@ -252,6 +270,9 @@ class ReconcileReport:
     ``salvaged_ticket_ids`` — ticket IDs auto-completed via the HIGH-path
     git-state salvage (committed-but-no-PR reaped sessions). Populated by
     :func:`salvage_committed_no_pr_sessions`. See GitHub issue #497.
+    ``rescued_ticket_ids`` — ticket IDs auto-completed via the finalize-blocked
+    rescue path (TIMED_OUT sessions whose PR creation previously failed).
+    Populated by :func:`rescue_finalize_blocked_sessions`. See GitHub #812 #816.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
@@ -260,6 +281,7 @@ class ReconcileReport:
     completed_ticket_ids: list[str] = field(default_factory=list)
     usage_limited: bool = False
     salvaged_ticket_ids: list[str] = field(default_factory=list)
+    rescued_ticket_ids: list[str] = field(default_factory=list)
 
 
 def _claude_agents_json() -> list[dict[str, object]]:
@@ -981,6 +1003,24 @@ def resolve_idle_retry_cap(
         if tier_cap is not None:
             return tier_cap
     return DEFAULT_IDLE_RETRY_CAP
+
+
+def resolve_stalled_retry_cap(
+    task: TicketTask | None,
+    config: OrchestratorConfig,
+) -> int:
+    """Return the wall-clock-budget stalled-stage auto-retry cap for a ticket.
+
+    Precedence: task.scope_hint per-tier override, else the global default.
+    See GitHub issue #756.
+    """
+    if task is None:
+        return DEFAULT_STALLED_RETRY_CAP
+    if task.scope_hint is not None:
+        tier_cap = config.stalled_retry_cap_by_tier.get(task.scope_hint)
+        if tier_cap is not None:
+            return tier_cap
+    return DEFAULT_STALLED_RETRY_CAP
 
 
 def resolve_reap_policy(

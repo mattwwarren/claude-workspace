@@ -15,20 +15,29 @@ from cw.config import get_client, load_clients, load_orchestrator_config, load_s
 from cw.dev_queue import (
     _find_ticket,
     add_ticket,
+    approve_ticket,
     cancel_ticket,
     clear_tickets,
     list_tickets,
     load_dev_queue,
     move_ticket,
     remove_ticket,
+    requeue_ticket,
     resolve_client,
+    unblock_ticket,
     wait_for_terminal,
 )
-from cw.dispatch import TICK_STALE_SECONDS, run_dispatch_loop
+from cw.dispatch import (
+    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_NON_MAIN_HEAD,
+    TICK_STALE_SECONDS,
+    run_dispatch_loop,
+)
 from cw.events import record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
+    DispatchSkipReason,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -143,6 +152,92 @@ def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
     click.echo(f"Moved {ticket_id} ({client}): {from_lane} -> {to_lane}")
 
 
+@dev_queue.command(name="approve")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@handle_errors
+def dev_queue_approve(ticket_id: str, client: str | None) -> None:
+    """Approve a plan or review gate and advance to the next stage.
+
+    The ticket must be BLOCKED_ON_USER with last_result status of
+    plan_pending_approval or review_pending_approval.
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    result = approve_ticket(ticket_id, resolved)
+    record_event(
+        OrchestratorEventType.TICKET_APPROVED,
+        {
+            "ticket_id": ticket_id,
+            "client": resolved,
+            "from_stage": result["from_stage"],
+            "to_stage": result["to_stage"],
+        },
+    )
+    click.echo(
+        f"Approved {ticket_id} ({resolved}):"
+        f" {result['from_stage']} -> {result['to_stage']}"
+    )
+
+
+@dev_queue.command(name="requeue")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@click.option(
+    "--stage",
+    "stage_override",
+    type=click.Choice(["plan", "impl", "review", "finalize"]),
+    default=None,
+    help="Stage to requeue at (default: current stage). Forward-only.",
+)
+@handle_errors
+def dev_queue_requeue(
+    ticket_id: str, client: str | None, stage_override: str | None
+) -> None:
+    """Requeue a BLOCKED_ON_USER ticket back to PENDING.
+
+    Defaults to re-running the current stage. Use --stage to advance forward
+    (never backward — forward-only guard enforced).
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    result = requeue_ticket(ticket_id, resolved, stage_override)
+    record_event(
+        OrchestratorEventType.TICKET_REQUEUED,
+        {
+            "ticket_id": ticket_id,
+            "client": resolved,
+            "from_stage": result["from_stage"],
+            "to_stage": result["to_stage"],
+        },
+    )
+    click.echo(
+        f"Requeued {ticket_id} ({resolved}):"
+        f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
+    )
+
+
+@dev_queue.command(name="unblock")
+@click.argument("ticket_id")
+@click.option("--client", "-c", default=None, help="Client name.")
+@handle_errors
+def dev_queue_unblock(ticket_id: str, client: str | None) -> None:
+    """Clear salvage/park markers and requeue a SALVAGE_PARKED ticket.
+
+    The ticket must be BLOCKED_ON_USER with a SALVAGE_PARKED session.
+    Clears both last_result and reap_reason on the session, then
+    sets the task back to PENDING.
+    """
+    config = load_orchestrator_config()
+    resolved = resolve_client(ticket_id, config, client)
+    unblock_ticket(ticket_id, resolved)
+    record_event(
+        OrchestratorEventType.TICKET_UNBLOCKED,
+        {"ticket_id": ticket_id, "client": resolved},
+    )
+    click.echo(f"Unblocked {ticket_id} ({resolved}): cleared park markers, PENDING")
+
+
 @dev_queue.command(name="remove")
 @click.argument("tickets", nargs=-1, required=True)
 @click.option("--client", "-c", "client", required=True, help="Client name")
@@ -202,6 +297,32 @@ def dev_queue_clear(client: str, status_filter: str | None) -> None:
     click.echo(f"Cleared {count} dev-queue task(s) for {client}.")
 
 
+def _emit_freshness_subline(
+    client_name: str,
+    tick_freshness_detail: str | None,
+    tick_blocked_branch: str | None,
+    n_pending: int,
+) -> None:
+    """Print a freshness-block subline under a stale tick entry."""
+    if tick_freshness_detail == FRESHNESS_NON_MAIN_HEAD:
+        try:
+            cc = get_client(client_name)
+            default_br: str = cc.default_branch
+            ws_path: str = str(cc.workspace_path)
+        except CwError:
+            default_br = "main"
+            ws_path = client_name
+        branch_str = tick_blocked_branch or "(detached)"
+        click.echo(
+            f"  ⚠ base checkout HEAD on '{branch_str}'"
+            f" (not {default_br})"
+            f" — {n_pending} pending blocked."
+            f" Fix: git -C {ws_path} checkout {default_br}"
+        )
+    elif tick_freshness_detail == FRESHNESS_MAIN_BEHIND:
+        click.echo(f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed")
+
+
 def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
     """Print indented lane lines for tasks when multi-lane or non-default lanes used.
 
@@ -230,9 +351,27 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
 
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
+@click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
 @handle_errors
-def dev_queue_status(client: str | None) -> None:
+def dev_queue_status(client: str | None, output_json: bool) -> None:
     """Show dev queue status grouped by client."""
+    if output_json:
+        tick_data = latest_tick_summary_by_client()
+        click.echo(
+            json.dumps(
+                {
+                    c: {
+                        "skip_reason": tick.skip_reason,
+                        "freshness_detail": tick.freshness_detail,
+                        "blocked_branch": tick.blocked_branch,
+                    }
+                    for c, tick in tick_data.items()
+                    if client is None or c == client
+                }
+            )
+        )
+        return
+
     tasks = list_tickets(client)
 
     if not tasks:
@@ -296,6 +435,18 @@ def dev_queue_status(client: str | None) -> None:
                 if age_secs > TICK_STALE_SECONDS:
                     tick_line += f" [STALE — no tick in {age}s]"
                 click.echo(tick_line)
+                if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE:
+                    n_pending = sum(
+                        1
+                        for t in by_client[client_name]
+                        if t.status == QueueItemStatus.PENDING
+                    )
+                    _emit_freshness_subline(
+                        client_name,
+                        tick.freshness_detail,
+                        tick.blocked_branch,
+                        n_pending,
+                    )
                 _emit_dev_queue_lane_breakdown(by_client[client_name])
 
 

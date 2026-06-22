@@ -2,8 +2,8 @@
 """Locate and parse the AUTO_DEV_RESULT sentinel for a cw-dispatched session.
 
 Resolves a session reference (short cw id, ticket id, claude session UUID, or
-direct transcript path) to a JSONL transcript, walks each ``assistant`` text
-block to find the LAST sentinel pair, and parses it via
+direct transcript path) to a JSONL transcript, walks each text block (assistant
+text AND tool_result stdout) to find the LAST sentinel pair, and parses it via
 ``cw.auto_dev_result.parse_stdout`` (the production parser — never reimplement).
 
 Output: a single JSON line on stdout describing the resolved transcript and the
@@ -27,7 +27,36 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cw.auto_dev_result import AutoDevResult, BlockedResult, extract_block, parse_stdout
+
+def _bootstrap_sys_path() -> None:
+    """Add repo src/ to sys.path so cw imports work under bare python3.
+
+    # Why: this cannot be extracted to a shared module — it must run BEFORE any cw
+    # import, so there is no shared cw path yet to import it from. Each standalone
+    # script that imports cw carries its own copy. Do not deduplicate.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            src = str(parent / "src")
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            return
+    msg = (
+        f"Could not locate pyproject.toml walking up from {__file__} — bootstrap failed"
+    )
+    raise RuntimeError(msg)
+
+
+_bootstrap_sys_path()
+
+from cw._util import _iter_sentinel_text_blocks
+from cw.auto_dev_result import (
+    AutoDevResult,
+    BlockedResult,
+    extract_block,
+    is_documented_example,
+    parse_stdout,
+)
 
 
 def _run_cw_json(*cw_args: str) -> Any:
@@ -74,48 +103,6 @@ def _transcript_path_for_session(session: dict[str, Any]) -> Path | None:
         return None
     encoded = str(cwd).replace("/", "-").replace(".", "-")
     return Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
-
-
-def _iter_assistant_text_blocks(transcript_path: Path) -> list[str]:
-    """Yield each assistant message text block in order. JSONL-aware.
-
-    The transcript is one JSON record per line. Assistant events carry their
-    text under ``message.content[*].text`` and the text is itself JSON-escaped
-    (real newlines become ``\\n``), which is why scanning the raw file with the
-    sentinel regex misses real runs — see GitHub issue #176 / PR #179.
-    """
-    blocks: list[str] = []
-    if not transcript_path.is_file():
-        return blocks
-    with transcript_path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict) or record.get("type") != "assistant":
-                continue
-            message = record.get("message")
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "text":
-                    continue
-                text = block.get("text")
-                if isinstance(text, str):
-                    blocks.append(text)
-    return blocks
-
-
-def _find_last_sentinel_text(blocks: list[str]) -> str | None:
-    """Walk in reverse — most runs emit the sentinel at the final assistant turn."""
-    for text in reversed(blocks):
-        if extract_block(text) is not None:
-            return text
-    return None
 
 
 def _result_to_dict(result: AutoDevResult | BlockedResult) -> dict[str, Any]:
@@ -186,19 +173,30 @@ def main() -> int:
         sys.stderr.write(f"transcript file not found: {transcript_path}\n")
         return 1
 
-    blocks = _iter_assistant_text_blocks(transcript_path)
-    sentinel_text = _find_last_sentinel_text(blocks)
+    blocks_scanned = 0
+    sentinel_text: str | None = None
+    last_result: AutoDevResult | BlockedResult | None = None
+    for text in _iter_sentinel_text_blocks(transcript_path):
+        blocks_scanned += 1
+        if extract_block(text) is not None:
+            candidate = parse_stdout(text)
+            if isinstance(candidate, AutoDevResult) and is_documented_example(
+                candidate
+            ):
+                continue
+            sentinel_text = text
+            last_result = candidate
 
-    if sentinel_text is None:
+    if last_result is None:
         result: AutoDevResult | BlockedResult = parse_stdout(
             "",
         )  # produces a BlockedResult(no_result_emitted)
     else:
-        result = parse_stdout(sentinel_text)
+        result = last_result
 
     output: dict[str, Any] = {
         "transcript_path": str(transcript_path),
-        "assistant_blocks_scanned": len(blocks),
+        "blocks_scanned": blocks_scanned,
         "sentinel_found": sentinel_text is not None,
         "session": {
             "id": session.get("id") if session else None,

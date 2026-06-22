@@ -344,6 +344,13 @@ Explicitly communicate:
 
 **Then:** Write clean code that passes ruff/mypy on first attempt
 
+### Interpreter & Compiled-Dependency Isolation (test pitfall)
+
+When writing or resolving a test that runs code under a "bare" or *different* interpreter — e.g. invoking `/usr/bin/python3` to prove a `sys.path` bootstrap works outside `uv run` — account for transitive **compiled** dependencies. C extensions (`pydantic_core`, etc.) are **ABI-bound to the interpreter that built them**: the venv's `.so` will not load under a foreign interpreter, even one of the same Python version. "Dependency not importable from this path" is NOT the same as "use a different interpreter."
+
+- **Isolate via flags on the SAME interpreter, not by switching interpreters.** To exercise a bootstrap while keeping compiled deps loadable, use `sys.executable -S` (skips `site` processing so the editable `.pth` doesn't auto-add the package) plus `PYTHONPATH=<venv purelib>` (so deps stay importable) — NOT a foreign `python3`.
+- If you catch yourself reaching for `/usr/bin/python3` (or any non-`sys.executable` interpreter) to "get a clean environment," that IS the cue — stop and ask whether a compiled dep will fail to load there. This pattern shipped a green-locally / red-in-CI test (#671) that the rule would have prevented.
+
 ## When to Use This Process
 
 **Always:**
@@ -413,6 +420,12 @@ When spawning agents to write code, this same process applies. Agents will:
 **Problem**: Copying the same config/value to multiple places
 **Why it hurts**: One change requires N updates, drift becomes inevitable
 **Solution**: Define once, reference everywhere
+
+### Theorizing Before Grepping the Mechanism
+
+**Problem**: When a system behaves unexpectedly (a queue ticket won't dispatch despite seemingly-free slots, a log stops updating, a counter looks wrong), constructing hypotheses — phantoms, buffering, caches, stale state — and acting on them (restarts, reaps) before reading the code that implements the behavior.
+**Why it hurts**: Hypothesis-driven flailing burns time and can trigger destructive moves (an unnecessary restart, a reap) chasing a "bug" that is actually documented behavior. Real incident: ~12 tool calls plus an unneeded loop restart spent on a "lane-cap phantom" that one `grep` of `dispatch.py` resolved instantly — `running_in_lane = RUNNING + BLOCKED_ON_USER`, i.e. blocked tasks hold lane slots **by design**.
+**Solution**: Grep the actual mechanism FIRST — the cheap, definitive code-read comes before the theory. If you catch yourself theorizing about *why* a system does X across more than one step without having read the code path that produces X, that IS the cue — stop and grep it. Sibling of **No Unverified Claims**.
 
 ## Scope and Commit Flow
 

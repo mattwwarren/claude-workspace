@@ -594,6 +594,15 @@ def signal_stop() -> None:
                 cwd_value,
                 claude_session_id if isinstance(claude_session_id, str) else None,
             )
+            # Issue #799: when EnterWorktree shifts the hook cwd to a nested
+            # worktree, cwd_value derives the wrong Claude project dir. Retry
+            # with the session's recorded worktree_path — the directory whose
+            # project dir holds the actual transcript.
+            if parsed_sentinel is None and session.worktree_path is not None:
+                parsed_sentinel = _parse_sentinel_from_transcript(
+                    str(session.worktree_path),
+                    claude_session_id if isinstance(claude_session_id, str) else None,
+                )
             if parsed_sentinel is None:
                 _handle_headless_no_sentinel(
                     state,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import subprocess
 from datetime import UTC, datetime
@@ -2918,6 +2919,140 @@ class TestDispatchUsageLimitBackoff:
         # DispatchTickResult.usage_limit_detected=True but no backoff state set
         assert isinstance(result, DispatchTickResult)
         assert result.usage_limit_detected is True
+
+    def test_reconcile_usage_limit_skips_spawn_same_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same-tick race fix: when reconcile reports usage_limited, dispatch_tick
+        skips spawning immediately (before the spawn loop runs) so the task is not
+        re-spawned into the active rate-limit window (#804)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RACE", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+
+        # Reconcile returns usage_limited=True (phantom with usage-limit transcript).
+        monkeypatch.setattr(
+            "cw.dispatch._reconcile_usage_limited",
+            lambda: True,
+        )
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert result.usage_limit_detected is True
+        assert daemon.spawn_calls == []
+
+    def test_reconcile_usage_limit_emits_skip_event_same_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same-tick race: skip event has skip_reason=usage_limited (#804)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-RACE2", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.dispatch._reconcile_usage_limited",
+            lambda: True,
+        )
+
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-ul-race-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.USAGE_LIMITED
+
+    def test_run_dispatch_loop_persists_usage_limited_until(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop calls save_usage_limited_until when usage limit is
+        detected in multi-tick mode (once=False). Verified by monkeypatching
+        save_usage_limited_until and checking the captured argument (#804)."""
+        import cw.dispatch
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-PERSIST", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        saved: list[object] = []
+
+        real_save = cw.dispatch.save_usage_limited_until
+
+        def capturing_save(dt: object) -> None:
+            saved.append(dt)
+            real_save(dt)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("cw.dispatch.save_usage_limited_until", capturing_save)
+
+        # Patch time.sleep so the loop exits on the second tick.
+        call_count = 0
+        original_tick = cw.dispatch.dispatch_tick
+
+        def one_shot_tick(*args: object, **kwargs: object) -> DispatchTickResult:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simulate usage_limit_detected=True on first tick via a real spawn
+                # error (raise_usage_limit path).
+                daemon.raise_usage_limit = True
+                result = original_tick(*args, **kwargs)  # type: ignore[arg-type]
+                daemon.raise_usage_limit = False
+                return result
+            # Second tick: exit the loop
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("cw.dispatch.dispatch_tick", one_shot_tick)
+        monkeypatch.setattr("cw.dispatch.time.sleep", lambda _: None)
+
+        with contextlib.suppress(KeyboardInterrupt):
+            run_dispatch_loop(native_daemon=daemon)
+
+        assert len(saved) >= 1
+        saved_dt = saved[0]
+        assert isinstance(saved_dt, datetime)
+        assert saved_dt > datetime.now(UTC)
+
+    def test_run_dispatch_loop_loads_persisted_backoff(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop reads persisted usage_limited_until on start; if still
+        active, spawning is suppressed without requiring a fresh detection (#804)."""
+        from datetime import timedelta
+
+        from cw.config import save_usage_limited_until
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-UL-LOAD", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+
+        # Pre-write a backoff window that hasn't expired yet.
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+        # Spawn must have been suppressed because the loaded backoff is still active.
+        assert daemon.spawn_calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,32 @@ bypasses auto-tiering from line counts. Use it when:
 Scope hint on first dispatch is always `None` until Stage 1 sets it from the
 sentinel; subsequent retries inherit the prior sentinel's `scope.tier`.
 
+### After you enqueue — monitor with the skills, not raw status
+
+If you (operator or agent) add tickets to the queue, **you own watching them to
+terminal.** Don't hand-read `cw dev-queue status` att/status columns — they are
+pipeline mechanics and misread easily (a rising `att` + a `running → pending`
+flip is normal stage advancement, **not** churn; see
+[`session-disposition.md §4`](session-disposition.md)). Use the purpose-built
+monitor skills:
+
+- **In-flight wave watch** → the **`cw-queue-peek`** skill (`cw queue peek
+  --client <client> [--json]`). Per running task it parses the last sentinel
+  into `stage`/`status` and emits a WAIT / PEEK / STOP recommendation via the
+  peek-stop ladder. Do not cancel a worker on a single att bump — confirm the
+  ladder says STOP first.
+- **Block on one ticket to terminal** → **`cw dev-queue wait`** (§4 below) — the
+  sentinel-aware single-ticket monitor.
+- **Terminal exit / attention state** → `cw event tail --type
+  session.needs_attention --type session.timed_out`, or the **`cw-session-watch`**
+  skill for the exit-event classification.
+- **Post-mortem the sentinel a finished session produced** → the
+  **`cw-validate-result`** skill.
+
+If you are scripting a long-running monitor loop, prefer driving it off `cw
+queue peek --json` (the recommend ladder) over re-deriving health from raw task
+fields.
+
 ---
 
 ## 3. Dispatch
@@ -114,6 +140,10 @@ next.
 ---
 
 ## 4. Monitor
+
+This section covers the **single-ticket blocking wait**. For multi-ticket wave
+monitoring use the `cw-queue-peek` skill; for terminal/attention state use `cw
+event tail` or the `cw-session-watch` skill (see the breadcrumb under §2).
 
 Use `cw dev-queue wait` — the sentinel-aware monitor (#535):
 
@@ -384,3 +414,51 @@ the false-failure in the first place.
 
 Related issues: #774 (false-failed sentinel), #766 (worktree leak that can
 co-occur), #786 (re-spawn churn), #787 (diff-cover skipped pre-PR).
+
+---
+
+### 9.5 Manual PR for a tombstoned finalize-blocked session (#816)
+
+**Symptom.** A task is stuck at `blocked_on_user` with `paused_status:
+finalize_blocked` and a `rescue_attempted: true` marker. The branch is pushed
+to origin; `gh pr create` failed transiently (permission error, usage limit, or
+network blip) and the rescue loop will not retry.
+
+**Diagnose.**
+
+```bash
+cw dev-queue status          # task shows BLOCKED_ON_USER
+cw session show <ticket-id>  # last_result contains rescue_attempted: true
+```
+
+Verify the branch exists on origin:
+
+```bash
+gh pr list --head dev/<ticket-id>
+# or
+git ls-remote origin dev/<ticket-id>
+```
+
+**Recovery.** The branch is preserved; create the PR and enable auto-merge
+manually:
+
+```bash
+# 1. Create the PR
+gh pr create \
+  --base main \
+  --head dev/<ticket-id> \
+  --title "<ticket title>" \
+  --body "Manual finalize — rescue_attempted tombstone (#816)"
+
+# 2. Enable squash auto-merge
+gh pr merge <PR-number> --squash --auto
+
+# 3. Once the PR merges, retire the stale queue task
+cw dev-queue cancel <ticket-id> --client <client>
+```
+
+The `rescue_attempted` tombstone prevents duplicate PR creation on every
+subsequent reconcile tick. It is NOT automatically cleared — the above manual
+steps are the operator self-service reset. Do not re-dispatch the ticket.
+
+Related issues: #812 (finalize-blocked detection), #816 (tombstone hardening).

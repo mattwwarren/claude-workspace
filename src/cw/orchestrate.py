@@ -386,6 +386,8 @@ class TickSummary(BaseModel):
     skip_reason: str
     tick_at: datetime
     lanes: dict[str, dict[str, int]] = Field(default_factory=dict)
+    freshness_detail: str | None = None
+    blocked_branch: str | None = None
 
 
 class OrchestratorStatus(BaseModel):
@@ -498,6 +500,8 @@ def _latest_tick_by_client(
         existing = result.get(client)
         if existing is None or ev.created_at > existing.tick_at:
             try:
+                fd = ev.payload.get("freshness_detail")
+                bb = ev.payload.get("blocked_branch")
                 result[client] = TickSummary(
                     claimed=int(ev.payload.get("claimed", 0)),
                     pending=int(ev.payload.get("pending", 0)),
@@ -506,6 +510,8 @@ def _latest_tick_by_client(
                     skip_reason=str(ev.payload.get("skip_reason", "none")),
                     tick_at=ev.created_at,
                     lanes=_extract_lanes(ev.payload.get("lanes")),
+                    freshness_detail=fd if isinstance(fd, str) else None,
+                    blocked_branch=bb if isinstance(bb, str) else None,
                 )
             except (TypeError, ValueError):
                 continue

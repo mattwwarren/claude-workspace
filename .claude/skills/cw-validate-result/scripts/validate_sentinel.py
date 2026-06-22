@@ -26,6 +26,28 @@ import sys
 from pathlib import Path
 from typing import Any, get_args
 
+
+def _bootstrap_sys_path() -> None:
+    """Add repo src/ to sys.path so cw imports work under bare python3.
+
+    # Why: this cannot be extracted to a shared module — it must run BEFORE any cw
+    # import, so there is no shared cw path yet to import it from. Each standalone
+    # script that imports cw carries its own copy. Do not deduplicate.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            src = str(parent / "src")
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            return
+    msg = (
+        f"Could not locate pyproject.toml walking up from {__file__} — bootstrap failed"
+    )
+    raise RuntimeError(msg)
+
+
+_bootstrap_sys_path()
+
 # Single source of truth for the canonical status set — never hardcode it.
 # `Status` grew two v4 members in issue #191 (ambiguities_pending_resolution,
 # premises_pending_verification); deriving the set keeps this validator in
@@ -101,7 +123,7 @@ def _build_checks(parser_output: dict[str, Any], outcome: str) -> list[dict[str,
         _check(
             "sentinel_emitted",
             outcome != "no_sentinel",
-            f"assistant_blocks_scanned={parser_output.get('assistant_blocks_scanned')}",
+            f"blocks_scanned={parser_output.get('blocks_scanned')}",
         ),
     )
 

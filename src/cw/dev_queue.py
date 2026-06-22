@@ -18,7 +18,15 @@ from cw.config import (
 from cw.config import (
     dev_queue_lock as _dev_queue_lock_file,
 )
-from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError
+from cw.exceptions import (
+    ApproveGateError,
+    CwError,
+    LaneMoveError,
+    LaneNotFoundError,
+    RequeueStageError,
+    RequeueStateError,
+    UnblockStateError,
+)
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -27,6 +35,7 @@ from cw.models import (
     DispatchPlan,
     OrchestratorConfig,
     QueueItemStatus,
+    Stage,
     TicketTask,
 )
 
@@ -486,3 +495,234 @@ def wait_for_terminal(
         if time.monotonic() >= deadline:
             raise TimeoutError
         time.sleep(poll_interval)
+
+
+def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
+    """Advance task to the next pipeline stage (no status precondition check).
+
+    Mutates task in-place. The caller is responsible for any precondition checks.
+    Does NOT check current status — approve path calls this directly;
+    _stage_advance retains its RUNNING assert and calls this after.
+    """
+    idx = stages.index(task.stage)
+    task.stage = stages[idx + 1]
+    task.status = QueueItemStatus.PENDING
+    task.session_id = None  # R6: clear session_id on advance
+    task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
+
+
+def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
+    """Approve a plan_pending_approval or review_pending_approval gate.
+
+    Returns dict with from_stage, to_stage, ticket_id, client for event emission.
+
+    Raises:
+        ApproveGateError: if ticket is not at an approval gate, session is missing,
+            last_result is absent, or last_result status is not an approval gate.
+        CwError: if no matching task is found.
+    """
+    from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
+    from cw.config import load_state
+
+    with _lock():
+        store = load_dev_queue()
+        task = _find_ticket(store, ticket_id, client_name)
+
+        if task.status != QueueItemStatus.BLOCKED_ON_USER:
+            msg = (
+                f"Cannot approve ticket '{ticket_id}': status is {task.status.value!r},"
+                " expected BLOCKED_ON_USER. Use 'requeue' to re-run a stage."
+            )
+            raise ApproveGateError(msg)
+
+        state = load_state()
+        session = None
+        if task.session_id is not None:
+            session = state.find_by_name_or_id(task.session_id)
+
+        if session is None:
+            msg = (
+                f"Cannot approve ticket '{ticket_id}': session not found"
+                f" (session_id={task.session_id!r}). The session may have been"
+                " cleaned up. Use 'requeue' to re-run the stage."
+            )
+            raise ApproveGateError(msg)
+
+        if (
+            session.last_result is None
+            or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
+        ):
+            actual = session.last_result.get("status") if session.last_result else None
+            msg = (
+                f"Cannot approve ticket '{ticket_id}': not at an approval gate"
+                f" (last_result status={actual!r})."
+                " Expected one of: plan_pending_approval, review_pending_approval."
+                " Use 'requeue' if you want to re-run the current stage."
+            )
+            raise ApproveGateError(msg)
+
+        client_cfg = get_client(client_name)
+        stages = client_cfg.pipeline.stages
+
+        if task.stage not in stages:
+            msg = (
+                f"Cannot approve ticket '{ticket_id}':"
+                f" stage {task.stage!r} not in pipeline."
+            )
+            raise ApproveGateError(msg)
+
+        if task.stage == stages[-1]:
+            msg = (
+                f"Cannot approve ticket '{ticket_id}':"
+                f" already at terminal stage {task.stage!r}."
+            )
+            raise ApproveGateError(msg)
+
+        from_stage = task.stage.value
+        _advance_task_pointer(task, stages)
+        to_stage = task.stage.value
+
+        save_dev_queue(store)
+
+    return {
+        "from_stage": from_stage,
+        "to_stage": to_stage,
+        "ticket_id": ticket_id,
+        "client": client_name,
+    }
+
+
+def requeue_ticket(
+    ticket_id: str,
+    client_name: str,
+    stage_override: str | None = None,
+) -> dict[str, str]:
+    """Requeue a BLOCKED_ON_USER ticket, optionally at a specific stage.
+
+    Returns dict with from_stage, to_stage, ticket_id, client for event emission.
+
+    Raises:
+        RequeueStateError: if ticket is not BLOCKED_ON_USER.
+        RequeueStageError: if stage_override would regress the ticket or is not
+            in the client pipeline.
+        CwError: if no matching task is found.
+    """
+    with _lock():
+        store = load_dev_queue()
+        task = _find_ticket(store, ticket_id, client_name)
+
+        if task.status != QueueItemStatus.BLOCKED_ON_USER:
+            msg = (
+                f"Cannot requeue ticket '{ticket_id}': status is {task.status.value!r},"
+                " expected BLOCKED_ON_USER."
+            )
+            raise RequeueStateError(msg)
+
+        client_cfg = get_client(client_name)
+        stages = client_cfg.pipeline.stages
+
+        from_stage = task.stage
+
+        if stage_override is not None:
+            target_stage = Stage(stage_override)
+            if target_stage not in stages:
+                msg = (
+                    f"Stage '{stage_override}' is not in the pipeline"
+                    f" for client '{client_name}'."
+                )
+                raise RequeueStageError(msg)
+            current_idx = stages.index(task.stage)
+            target_idx = stages.index(target_stage)
+            if target_idx < current_idx:
+                msg = (
+                    f"Cannot requeue ticket '{ticket_id}'"
+                    f" to stage '{stage_override}':"
+                    f" that would regress from '{task.stage.value}'."
+                    " Only same-stage or forward advancement is allowed."
+                )
+                raise RequeueStageError(msg)
+            task.stage = target_stage
+
+        task.status = QueueItemStatus.PENDING
+        task.session_id = None
+        task.stage_base_ref = None
+
+        to_stage = task.stage
+        save_dev_queue(store)
+
+    return {
+        "from_stage": from_stage.value,
+        "to_stage": to_stage.value,
+        "ticket_id": ticket_id,
+        "client": client_name,
+    }
+
+
+def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
+    """Clear salvage/park markers and requeue a SALVAGE_PARKED ticket.
+
+    Returns dict with ticket_id, client for event emission.
+
+    Raises:
+        UnblockStateError: if ticket is not park-marked (reap_reason != SALVAGE_PARKED).
+        CwError: if no matching task is found.
+    """
+    from cw.config import load_state, save_state, sessions_lock
+    from cw.models import ReapReason
+
+    # Fast-fail pre-check outside any lock; re-validated under sessions_lock below.
+    store = load_dev_queue()
+    task = _find_ticket(store, ticket_id, client_name)
+
+    if task.status != QueueItemStatus.BLOCKED_ON_USER:
+        msg = (
+            f"Cannot unblock ticket '{ticket_id}': status is {task.status.value!r},"
+            " expected BLOCKED_ON_USER."
+        )
+        raise UnblockStateError(msg)
+
+    session_id = task.session_id
+
+    # Why: sessions_lock outer, dev_queue_lock inner — canonical dual-lock ordering.
+    # Both saves happen under the outer lock so sessions.json is never written unless
+    # dev_queue.json succeeds first (safe-fail direction for partial-commit scenarios).
+    with sessions_lock():
+        state = load_state()
+        session = None
+        if session_id is not None:
+            session = state.find_by_name_or_id(session_id)
+
+        if session is None or session.reap_reason != ReapReason.SALVAGE_PARKED:
+            if session is None:
+                msg = (
+                    f"Cannot unblock ticket '{ticket_id}': session not found"
+                    f" (session_id={session_id!r}). The park-marked precondition"
+                    " cannot be confirmed."
+                )
+            else:
+                msg = (
+                    f"Cannot unblock ticket '{ticket_id}': session is not park-marked"
+                    f" (reap_reason={session.reap_reason!r},"
+                    " expected SALVAGE_PARKED)."
+                )
+            raise UnblockStateError(msg)
+
+        with _lock():
+            store = load_dev_queue()
+            task = _find_ticket(store, ticket_id, client_name)
+            if task.status != QueueItemStatus.BLOCKED_ON_USER:
+                msg = (
+                    f"Cannot unblock ticket '{ticket_id}': status changed to"
+                    f" {task.status.value!r} concurrently. Re-check and retry."
+                )
+                raise UnblockStateError(msg)
+            task.status = QueueItemStatus.PENDING
+            task.session_id = None
+            task.stage_base_ref = None
+            save_dev_queue(store)
+
+        session.last_result = None
+        session.reap_reason = None
+        save_state(state)
+
+    return {"ticket_id": ticket_id, "client": client_name}
