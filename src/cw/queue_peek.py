@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from cw._transcript import locate_transcript
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     AutoDevResult,
@@ -50,6 +51,9 @@ IDLE_PEEK_MIN: int = 7  # idle this long with no PR → check for stall
 IDLE_STALL_MIN: int = 15  # idle this long → likely stuck
 IDLE_POST_PR_MIN: int = 5  # idle this long after PR shipped → stuck in stage5
 STOP_ATTEMPTS_MIN: int = 3  # at or above this attempt count → systemic failure
+
+RECOMMEND_BLIND = "PEEK-BLIND"
+_EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
 
 
 def load_running_tasks(client: str | None) -> list[TicketTask]:
@@ -93,35 +97,15 @@ def load_claude_session_id(session_id: str | None) -> str | None:
     return str(raw) if raw is not None else None
 
 
-def _pick_surface_ref_transcript(
-    project_dir: Path, surface_ref: str, started_at_iso: str | None
-) -> Path | None:
-    """Return the newest surface_ref*.jsonl newer than started_at, or None.
-
-    Scopes strictly to the surface_ref prefix — does NOT fall through to an
-    unscoped glob, which would silently return a stale file from a prior
-    session sharing the same worktree.
-    """
-    started_at: dt.datetime | None = None
-    if started_at_iso:
-        try:
-            started_at = dt.datetime.fromisoformat(started_at_iso)
-            if started_at.tzinfo is None:
-                started_at = started_at.replace(tzinfo=dt.UTC)
-        except ValueError:
-            pass
-    candidates = sorted(
-        project_dir.glob(f"{surface_ref}*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    for candidate in candidates:
-        if started_at is None:
-            return candidate
-        mtime = dt.datetime.fromtimestamp(candidate.stat().st_mtime, tz=dt.UTC)
-        if mtime > started_at:
-            return candidate
-    return None
+def _parse_started_at(started_at_iso: str | None) -> dt.datetime:
+    """Parse a started_at ISO string, returning _EPOCH on missing/invalid input."""
+    if started_at_iso is None:
+        return _EPOCH
+    try:
+        ts = dt.datetime.fromisoformat(started_at_iso)
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=dt.UTC)
+    except ValueError:
+        return _EPOCH
 
 
 def _find_transcript_in_project_dir(
@@ -132,10 +116,10 @@ def _find_transcript_in_project_dir(
 ) -> Path | None:
     """Find a transcript inside a known Claude project dir.
 
-    Resolution order mirrors reconcile._locate_session_transcript:
-    1. ``claude_session_id`` set → ``<project_dir>/<csid>.jsonl`` (exact match).
-    2. ``surface_ref`` set → newest ``<surface_ref>*.jsonl`` with mtime after
-       ``started_at_iso`` (reused-worktree stale-transcript guard).
+    Resolution order:
+    1. csid set → ``<project_dir>/<csid>.jsonl`` (exact match via locate_transcript).
+    2. csid absent or file missing → surface_ref newest-only with mtime >
+       started_at (reused-worktree stale-transcript guard, via locate_transcript).
     3. Degraded fallback (both ids None) → newest ``*.jsonl`` in project_dir
        (best-effort when backfill hasn't fired yet; may include subagent files).
 
@@ -143,17 +127,27 @@ def _find_transcript_in_project_dir(
     """
     if not project_dir.is_dir():
         return None
+    started_at = _parse_started_at(started_at_iso)
+    # Layer 1: csid exact (locate_transcript does not fall through to surface_ref)
+    if claude_session_id is not None:
+        result = locate_transcript(
+            project_dir=project_dir,
+            claude_session_id=claude_session_id,
+            surface_ref=None,
+            started_at=started_at,
+        )
+        if result is not None:
+            return result
+    # Layer 2: surface_ref newest-only with stale guard
+    if surface_ref is not None:
+        return locate_transcript(
+            project_dir=project_dir,
+            claude_session_id=None,
+            surface_ref=surface_ref,
+            started_at=started_at,
+        )
+    # Layer 3: degraded fallback (both ids absent — backfill hasn't fired yet)
     try:
-        if claude_session_id:
-            path = project_dir / f"{claude_session_id}.jsonl"
-            if path.is_file():
-                return path
-        if surface_ref:
-            return _pick_surface_ref_transcript(
-                project_dir, surface_ref, started_at_iso
-            )
-        # Degraded fallback: newest *.jsonl — fires only when both csid and
-        # surface_ref are absent (backfill hasn't run yet).
         all_jsonl = sorted(
             project_dir.glob("*.jsonl"),
             key=lambda p: p.stat().st_mtime,
@@ -210,6 +204,46 @@ def _find_transcript_heuristic(ticket_id: str) -> Path | None:
     candidates.sort(key=lambda c: c[2], reverse=True)  # latest timestamp first
     candidates.sort(key=lambda c: c[1])  # score 0 before 1 (stable)
     return candidates[0][0]
+
+
+def _compute_jsonl_idle_min(t: TicketTask, now: dt.datetime) -> float | None:
+    """Return minutes since the newest *.jsonl in identifiable project dirs, or None.
+
+    Best-effort liveness for blind rows (no resolvable transcript). Scans
+    the project dir derived from worktree_path (from task or CW_STATE), or
+    falls back to heuristic-matched dirs. Returns round(elapsed, 1) or None.
+    """
+    refs = _load_session_refs(t.session_id)
+    effective_wt = t.worktree_path
+    if effective_wt is None:
+        raw_wt = refs.get("worktree_path")
+        if raw_wt is not None:
+            effective_wt = Path(str(raw_wt))
+
+    project_dirs: list[Path] = []
+    if effective_wt is not None:
+        project_dirs.append(claude_project_dir(effective_wt))
+    else:
+        project_dirs.extend(_matching_project_dirs(str(t.ticket_id)))
+
+    newest_mtime: float | None = None
+    for project_dir in project_dirs:
+        if not project_dir.is_dir():
+            continue
+        try:
+            for p in project_dir.glob("*.jsonl"):
+                mtime = p.stat().st_mtime
+                if newest_mtime is None or mtime > newest_mtime:
+                    newest_mtime = mtime
+        except OSError:
+            continue
+
+    if newest_mtime is None:
+        return None
+    elapsed_seconds = (
+        now - dt.datetime.fromtimestamp(newest_mtime, tz=dt.UTC)
+    ).total_seconds()
+    return round(elapsed_seconds / 60.0, 1)
 
 
 def find_transcript_for_ticket(
@@ -411,6 +445,31 @@ def recommend(
 
 def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     """Build a report dict for one RUNNING task."""
+    signal_source: str = info.get("signal_source", "transcript")
+    jsonl_idle_min: float | None = info.get("jsonl_idle_min")
+
+    if signal_source == "blind":
+        if jsonl_idle_min is not None:
+            reason = f"no resolvable transcript; newest jsonl {jsonl_idle_min:.0f}m ago"
+        else:
+            reason = "no resolvable transcript; none found"
+        return {
+            "ticket": t.ticket_id,
+            "session": (t.session_id or "-")[:12],
+            "client": t.client,
+            "attempts": t.attempts,
+            "age_min": None,
+            "idle_min": None,
+            "stage": None,
+            "status": None,
+            "pr": None,
+            "pr_state": None,
+            "recommend": RECOMMEND_BLIND,
+            "reason": reason,
+            "signal_source": signal_source,
+            "jsonl_idle_min": jsonl_idle_min,
+        }
+
     age = minutes_since(info.get("first_user_ts"), now)
     idle = minutes_since(info.get("last_asst_ts"), now)
     pr_state = None
@@ -432,6 +491,8 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         "pr_state": pr_state,
         "recommend": rec,
         "reason": reason,
+        "signal_source": signal_source,
+        "jsonl_idle_min": None,
     }
 
 
@@ -442,7 +503,15 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
         transcript = find_transcript_for_ticket(
             str(t.ticket_id), t.session_id, t.worktree_path
         )
-        info = parse_transcript(transcript) if transcript else {}
+        if transcript is not None:
+            info: dict[str, Any] = parse_transcript(transcript)
+            info["signal_source"] = "transcript"
+            info["jsonl_idle_min"] = None
+        else:
+            info = {
+                "signal_source": "blind",
+                "jsonl_idle_min": _compute_jsonl_idle_min(t, now),
+            }
         rows.append(format_row(t, info, now))
     return rows
 
