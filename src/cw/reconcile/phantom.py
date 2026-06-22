@@ -1,14 +1,11 @@
 """Phantom-session detection and act phases for reconcile.
 
 A phantom session is ACTIVE/IDLE in cw state but absent from the daemon
-roster (its surface is dead). See GitHub #552, ADR-0006. Also hosts
-``_emit_reap_proposed`` (the propose-before-act hook for all clusters).
+roster (its surface is dead). See GitHub #552, ADR-0006.
 """
 
 from __future__ import annotations
 
-import contextlib
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
@@ -35,7 +32,6 @@ from cw.reconcile._shared import (
     _apply_queue_mutations,
     _apply_salvaged_completion,
     _apply_sentinel_to_task,
-    _locate_session_transcript,
     _parse_any_sentinel_from_transcript,
     _queue_status_for_salvaged,
     resolve_reap_policy,
@@ -43,6 +39,8 @@ from cw.reconcile._shared import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from cw.models import CwState, Session, TicketTask
 
 
@@ -652,82 +650,3 @@ def _act_on_phantom_candidates(
         salvaged_result_by_ticket,
         merged_completed_ids,
     )
-
-
-_REAP_PROPOSED_ACTIONS: frozenset[ProposedAction] = frozenset(
-    {
-        ProposedAction.REVERT_TASK,
-        ProposedAction.CRASH_COMPLETE,
-        ProposedAction.PARK_BLOCKED_ON_USER,
-    }
-)
-
-
-def _emit_reap_proposed(
-    state: CwState,
-    candidates: list[ReapCandidate],
-    *,
-    native_live: set[str],
-    now: datetime | None = None,
-) -> None:
-    """Emit SESSION_REAP_PROPOSED for reap-shaped candidates before act phase.
-
-    Called from _reconcile_locked after each _detect_* and before the
-    corresponding _act_on_*. Satisfies ADR-0006 invariant 3 (propose before act).
-
-    Only emits for REVERT_TASK, CRASH_COMPLETE, PARK_BLOCKED_ON_USER candidates.
-    Dedup: sessions with reap_proposed_at already set are skipped.
-
-    save_state is safe under sessions_lock — it is a raw file write, not a
-    reentrant lock acquisition. See existing _act_on_stalled_candidates,
-    _act_on_idle_candidates.
-    """
-    _now = now or datetime.now(UTC)
-    session_by_id = {s.id: s for s in state.sessions}
-    any_stamped = False
-
-    for candidate in candidates:
-        if candidate.proposed_action not in _REAP_PROPOSED_ACTIONS:
-            continue
-        session = session_by_id.get(candidate.session_id)
-        if session is None or session.reap_proposed_at is not None:
-            continue
-
-        # Compute in_roster
-        in_roster = (
-            session.surface_ref is not None and session.surface_ref in native_live
-        )
-
-        # Compute transcript_age_seconds (best-effort, nullable)
-        transcript_age_seconds: float | None = None
-        transcript_path = _locate_session_transcript(session)
-        if transcript_path is not None and transcript_path.exists():
-            with contextlib.suppress(OSError):
-                mtime = transcript_path.stat().st_mtime
-                transcript_age_seconds = _now.timestamp() - mtime
-
-        payload = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": candidate.ticket_id,
-            "lane": candidate.lane,
-            "proposed_action": candidate.proposed_action.value,
-            "reason": candidate.reap_reason.value if candidate.reap_reason else None,
-            "evidence": {
-                "elapsed_seconds": candidate.elapsed_seconds,
-                "in_roster": in_roster,
-                "transcript_age_seconds": transcript_age_seconds,
-            },
-        }
-        # Stamp before record_event: dedup guard fires on retry if write fails.
-        session.reap_proposed_at = _now
-        any_stamped = True
-        record_event(
-            OrchestratorEventType.SESSION_REAP_PROPOSED,
-            payload,
-            correlation_id=candidate.ticket_id or candidate.session_id,
-        )
-
-    if any_stamped:
-        save_state(state)

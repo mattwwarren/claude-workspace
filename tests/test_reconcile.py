@@ -1892,6 +1892,169 @@ def test_session_stage_timed_out_retried_not_emitted_for_gh_blocked(
 
 
 # ---------------------------------------------------------------------------
+# SESSION_STAGE_TIMED_OUT_RETRIED edge-trigger — fires once, suppressed on
+# re-detect (GitHub #782, Source A)
+# ---------------------------------------------------------------------------
+
+
+def test_timed_out_retried_not_reemitted_on_second_detect_signal_only(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Signal-only keeps session live → TIMED_OUT_RETRIED must fire exactly once."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-retried-storm-a"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("storm-a", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="storm-a",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="storm-a",
+        stage=Stage.PLAN,
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    # Tick 1: event fires, reap_proposed_at stamped and persisted.
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    # Tick 2: reload from disk (mirrors _reconcile_locked production flow) to
+    # verify suppression holds across the persistence boundary, not just in-memory.
+    state = load_state()
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-storm-a",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    matching = [e for e in events if e.payload.get("ticket_id") == "storm-a"]
+    assert len(matching) == 1, (
+        f"Expected exactly 1 TIMED_OUT_RETRIED but got {len(matching)}"
+    )
+
+
+def test_timed_out_retried_suppressed_when_already_proposed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-stamped reap_proposed_at suppresses TIMED_OUT_RETRIED on that session."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-retried-storm-b"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("storm-b", worktree, started_at)
+    # Pre-stamp reap_proposed_at to simulate a prior tick having already proposed.
+    sess.reap_proposed_at = datetime(2026, 1, 1, 0, 30, 0, tzinfo=UTC)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="storm-b",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="storm-b",
+        stage=Stage.PLAN,
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-storm-b",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    assert not any(e.payload.get("ticket_id") == "storm-b" for e in events), (
+        "TIMED_OUT_RETRIED must not fire when session already had reap_proposed_at"
+    )
+
+
+def test_timed_out_retried_fires_for_new_session_suppressed_for_existing(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed: new session fires TIMED_OUT_RETRIED; already-proposed suppressed."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree_new = tmp_path / "wt-storm-new"
+    worktree_old = tmp_path / "wt-storm-old"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess_new = _mk_headless_daemon_session("storm-new", worktree_new, started_at)
+    sess_old = _mk_headless_daemon_session("storm-old", worktree_old, started_at)
+    sess_old.reap_proposed_at = datetime(2026, 1, 1, 0, 30, 0, tzinfo=UTC)
+
+    state = CwState(sessions=[sess_new, sess_old])
+    save_state(state)
+
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="storm-new",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="storm-new",
+                    stage=Stage.PLAN,
+                    attempts=1,
+                ),
+                TicketTask(
+                    ticket_id="storm-old",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="storm-old",
+                    stage=Stage.PLAN,
+                    attempts=1,
+                ),
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
+
+    events = read_events(
+        consumer="test-storm-mixed",
+        event_types=[OrchestratorEventType.SESSION_STAGE_TIMED_OUT_RETRIED],
+    )
+    fired_tids = {e.payload.get("ticket_id") for e in events}
+    assert "storm-new" in fired_tids, "New session must fire TIMED_OUT_RETRIED"
+    assert "storm-old" not in fired_tids, (
+        "Already-proposed session must NOT fire TIMED_OUT_RETRIED"
+    )
+
+
+# ---------------------------------------------------------------------------
 # resolve_stalled_retry_cap + stalled_retry_cap_by_tier config field (#756)
 # ---------------------------------------------------------------------------
 
@@ -4123,6 +4286,240 @@ def test_confirm_before_reap_second_observation_fires(
     )
     assert len(events) == 1
     assert events[0].payload["session_id"] == "cbreap-2"
+
+
+# ---------------------------------------------------------------------------
+# SESSION_NEEDS_ATTENTION idle park edge-trigger — fires once, suppressed on
+# re-park ticks (GitHub #782, Source B)
+# ---------------------------------------------------------------------------
+
+
+def test_idle_park_session_needs_attention_fires_only_on_first_park(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Idle park: SESSION_NEEDS_ATTENTION fires once, suppressed on re-park ticks."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="park-once",
+        name="client-a/auto-dev/park-once",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-park-once",
+        started_at=started_at,
+        idle_observation_count=1,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="park-once",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="park-once",
+        attempts=2,  # at cap → park path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    push_calls: list[tuple[str, str]] = []
+
+    def _capture_push(name: str, client: str, **_kw: object) -> None:
+        push_calls.append((name, client))
+
+    with patch("cw.reconcile._deps.fire_push_notification", _capture_push):
+        # Tick 1: fresh park — event and push must fire.
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-park-once"},
+            config=_auto_config(),
+        )
+        # Tick 2: session still ACTIVE (park is flag-only), re-detected as park
+        # candidate — event and push must NOT re-fire.
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-park-once"},
+            config=_auto_config(),
+        )
+
+    events = read_events(
+        consumer="test-park-once",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    matching = [e for e in events if e.payload.get("session_id") == "park-once"]
+    assert len(matching) == 1, (
+        f"SESSION_NEEDS_ATTENTION must fire exactly once but got {len(matching)}"
+    )
+    assert len(push_calls) == 1, (
+        f"fire_push_notification must be called exactly once but got {len(push_calls)}"
+    )
+
+
+def test_idle_park_push_notification_suppressed_on_re_park(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Re-park tick: fire_push_notification not called when session already parked."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="park-push",
+        name="client-a/auto-dev/park-push",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-park-push",
+        started_at=started_at,
+        idle_observation_count=1,
+        # Pre-set last_result to simulate a prior tick having already parked.
+        last_result={"paused_status": _SILENTLY_IDLE_REASON},
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="park-push",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        session_id="park-push",
+        attempts=2,  # at cap
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    push_calls: list[tuple[str, str]] = []
+
+    def _capture_push(name: str, client: str, **_kw: object) -> None:
+        push_calls.append((name, client))
+
+    with patch("cw.reconcile._deps.fire_push_notification", _capture_push):
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-park-push"},
+            config=_auto_config(),
+        )
+
+    assert push_calls == [], (
+        "fire_push_notification must not fire on re-park tick (session already parked)"
+    )
+
+    events = read_events(
+        consumer="test-park-push",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    matching = [e for e in events if e.payload.get("session_id") == "park-push"]
+    assert len(matching) == 0, (
+        "SESSION_NEEDS_ATTENTION must not re-fire on re-park tick"
+    )
+
+
+def test_idle_park_new_session_fires_while_already_parked_suppressed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Mixed: new park fires; already-parked session suppressed in same tick."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    # Fresh session — first park.
+    sess_new = Session(
+        id="park-mix-new",
+        name="client-a/auto-dev/park-mix-new",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-park-mix-new",
+        started_at=started_at,
+        idle_observation_count=1,
+    )
+    # Already-parked session — re-park tick.
+    sess_old = Session(
+        id="park-mix-old",
+        name="client-a/auto-dev/park-mix-old",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-park-mix-old",
+        started_at=started_at,
+        idle_observation_count=1,
+        last_result={"paused_status": _SILENTLY_IDLE_REASON},
+    )
+    state = CwState(sessions=[sess_new, sess_old])
+    save_state(state)
+
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="park-mix-new",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="park-mix-new",
+                    attempts=2,
+                ),
+                TicketTask(
+                    ticket_id="park-mix-old",
+                    client="client-a",
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    session_id="park-mix-old",
+                    attempts=2,
+                ),
+            ]
+        )
+    )
+
+    push_calls: list[str] = []
+
+    def _capture_push(name: str, _client: str, **_kw: object) -> None:
+        push_calls.append(name)
+
+    with patch("cw.reconcile._deps.fire_push_notification", _capture_push):
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-park-mix-new", "live-park-mix-old"},
+            config=_auto_config(),
+        )
+
+    events = read_events(
+        consumer="test-park-mix",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    fired_sids = {e.payload.get("session_id") for e in events}
+    assert "park-mix-new" in fired_sids, "New park must fire SESSION_NEEDS_ATTENTION"
+    assert "park-mix-old" not in fired_sids, (
+        "Already-parked session must NOT re-fire SESSION_NEEDS_ATTENTION"
+    )
+    assert any("park-mix-new" in n for n in push_calls), (
+        "fire_push_notification must fire for new park"
+    )
+    assert all("park-mix-old" not in n for n in push_calls), (
+        "fire_push_notification must not fire for already-parked session"
+    )
 
 
 def test_confirm_before_reap_liveness_recovery_resets_counter(

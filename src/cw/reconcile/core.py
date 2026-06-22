@@ -30,6 +30,7 @@ from cw.reconcile._shared import (
     ReconcileReport,
     _backfill_claude_session_ids,
     _claude_agents_json,
+    _emit_reap_proposed,
     _looks_like_daemon_outage,
     _SalvageCandidate,
     compute_drift,
@@ -40,7 +41,6 @@ from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
-    _emit_reap_proposed,
 )
 from cw.reconcile.salvage import (
     rescue_finalize_blocked_sessions,
@@ -282,7 +282,11 @@ def _reconcile_locked(
         finalize_pr_by_branch=finalize_pr_by_branch,
     )
     # native_live not yet known — stalled sweep is pre-daemon-query.
-    _emit_reap_proposed(state, stalled_candidates, native_live=set(), now=now)
+    # Capture newly_proposed_ids to edge-trigger SESSION_STAGE_TIMED_OUT_RETRIED
+    # only on first detection; re-detect ticks are suppressed. See GitHub #782.
+    stalled_newly_proposed = _emit_reap_proposed(
+        state, stalled_candidates, native_live=set(), now=now
+    )
     stalled_reverted, merged_from_stalled = _act_on_stalled_candidates(
         state,
         stalled_candidates,
@@ -290,6 +294,7 @@ def _reconcile_locked(
         config=orchestrator_config,
         merged_ticket_ids=merged_ticket_ids,
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
+        newly_proposed_ids=stalled_newly_proposed,
     )
 
     try:
