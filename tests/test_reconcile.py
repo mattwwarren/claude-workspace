@@ -4522,6 +4522,84 @@ def test_idle_park_new_session_fires_while_already_parked_suppressed(
     )
 
 
+def test_idle_park_re_fires_after_paused_status_cleared(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Re-park re-fires after paused_status cleared — guard is stateless, not permanent.
+
+    Drives reconcile: idle-park (assert SESSION_NEEDS_ATTENTION + fire_push_notification
+    fire) → clear paused_status → re-park, assert both re-fire. (GitHub #827)
+    """
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="park-refire",
+        name="client-a/auto-dev/park-refire",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-park-refire",
+        started_at=started_at,
+        idle_observation_count=1,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="park-refire",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="park-refire",
+        attempts=2,  # at cap → park path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    push_calls: list[tuple[str, str]] = []
+
+    def _capture_push(name: str, client: str, **_kw: object) -> None:
+        push_calls.append((name, client))
+
+    with patch("cw.reconcile._deps.fire_push_notification", _capture_push):
+        # Tick 1: fresh park — SESSION_NEEDS_ATTENTION and push must fire.
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-park-refire"},
+            config=_auto_config(),
+        )
+        assert sess.last_result == {"paused_status": _SILENTLY_IDLE_REASON}
+        assert len(push_calls) == 1, "fire_push_notification must fire on first park"
+
+        # Clear paused_status — simulate the marker being removed (e.g. operator
+        # intervention or reconcile clearing it).  The guard reads live state each
+        # tick, so clearing the marker must allow re-emission on the next park.
+        sess.last_result = None
+        save_state(state)
+
+        # Tick 2: paused_status cleared → guard must not suppress; both must re-fire.
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-park-refire"},
+            config=_auto_config(),
+        )
+
+    assert len(push_calls) == 2, "fire_push_notification must re-fire after clear"
+    events = read_events(
+        consumer="test-park-refire",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    matching = [e for e in events if e.payload.get("session_id") == "park-refire"]
+    assert len(matching) == 2, "SESSION_NEEDS_ATTENTION must re-fire after clear"
+
+
 def test_confirm_before_reap_liveness_recovery_resets_counter(
     tmp_config_dir: Path,
     tmp_path: Path,
