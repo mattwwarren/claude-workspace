@@ -128,16 +128,24 @@ tasks`. Peek resolves the transcript, parses the last sentinel into
 peek-stop ladder (see the `cw-queue-peek` skill). `att ≥ 3` and
 long-stall-without-PR are already encoded there — don't re-derive them by hand.
 
-**Degraded-signal fallback.** Peek resolves the transcript via the task's
-`claude_session_id` / `surface_ref` (§1). When **both are None** — which can
-persist across attempts before reconcile backfills them (§2 Gotcha 3, and the
-backfill gap tracked by #817) — peek returns null `stage`/`status`/`age`/`idle`
-and a bare `PEEK` ("no transcript timestamps — verify session is alive"). That
-is a **blind** signal, not a stall. Fall back to a direct scan of the worktree's
-claude project dir: the newest `*.jsonl`, whether its line count is still
-growing (liveness), and its last parseable `AUTO_DEV_RESULT` (progress). A blind
-peek row reads identically to a genuine stall today — that is the #817 defect,
-not evidence the worker is stuck.
+**Transcript resolution** (#817). Peek resolves the transcript via the
+session's `worktree_path` (loaded from `CW_STATE`, not the task row — dispatch
+writes `worktree_path` to the Session but not to the TicketTask). This works
+for any `feature_branch_prefix`: dispatch workers whose project dirs are named
+after the worktree path (e.g. `…-dev-817`) are found by
+`claude_project_dir(worktree_path)`, not by the old `auto-dev-{ticket_id}`
+substring match that only matched `auto-dev-` prefix clients. Within the
+project dir, resolution tries (1) exact `claude_session_id` match, (2)
+`surface_ref`-prefix glob with mtime-after-`started_at` stale guard, (3)
+newest `*.jsonl` as a degraded fallback when ids are not yet backfilled.
+
+**Degraded-signal fallback.** When no worktree path is available for the
+session and the heuristic name search also fails, peek returns null
+`stage`/`status`/`age`/`idle` and a bare `PEEK` ("no transcript timestamps —
+verify session is alive"). That is a **blind** signal, not a stall. If you
+encounter it, scan the worktree's claude project dir manually: the newest
+`*.jsonl`, whether its line count is still growing (liveness), and its last
+parseable `AUTO_DEV_RESULT` (progress).
 
 ---
 

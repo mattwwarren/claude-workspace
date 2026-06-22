@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     AutoDevResult,
     extract_block,
@@ -56,33 +57,121 @@ def load_running_tasks(client: str | None) -> list[TicketTask]:
     return [t for t in list_tickets(client) if t.status == QueueItemStatus.RUNNING]
 
 
+def _load_session_refs(session_id: str | None) -> dict[str, Any]:
+    """Load session lookup fields from CW_STATE for a cw session id.
+
+    Returns a dict with ``claude_session_id``, ``surface_ref``,
+    ``started_at``, and ``worktree_path`` (all may be None), or an empty
+    dict when session_id is absent or no match is found. Reads CW_STATE
+    directly so tests can monkeypatch the path without wiring through the
+    full cw.config stack.
+    """
+    if not session_id or not CW_STATE.exists():
+        return {}
+    try:
+        data = json.loads(CW_STATE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    for sess in data.get("sessions", []):
+        if sess.get("id") == session_id:
+            return {
+                "claude_session_id": sess.get("claude_session_id"),
+                "surface_ref": sess.get("surface_ref"),
+                "started_at": sess.get("started_at"),
+                "worktree_path": sess.get("worktree_path"),
+            }
+    return {}
+
+
 def load_claude_session_id(session_id: str | None) -> str | None:
     """Map a cw session id (8-char hex) to the full claude_session_id UUID.
 
     Reads CW_STATE directly so tests can monkeypatch the path without
     wiring through the full cw.config stack.
     """
-    if not session_id or not CW_STATE.exists():
-        return None
-    try:
-        data = json.loads(CW_STATE.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    for sess in data.get("sessions", []):
-        if sess.get("id") == session_id:
-            raw = sess.get("claude_session_id")
-            return str(raw) if raw is not None else None
+    raw = _load_session_refs(session_id).get("claude_session_id")
+    return str(raw) if raw is not None else None
+
+
+def _pick_surface_ref_transcript(
+    project_dir: Path, surface_ref: str, started_at_iso: str | None
+) -> Path | None:
+    """Return the newest surface_ref*.jsonl newer than started_at, or None.
+
+    Scopes strictly to the surface_ref prefix — does NOT fall through to an
+    unscoped glob, which would silently return a stale file from a prior
+    session sharing the same worktree.
+    """
+    started_at: dt.datetime | None = None
+    if started_at_iso:
+        try:
+            started_at = dt.datetime.fromisoformat(started_at_iso)
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=dt.UTC)
+        except ValueError:
+            pass
+    candidates = sorted(
+        project_dir.glob(f"{surface_ref}*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if started_at is None:
+            return candidate
+        mtime = dt.datetime.fromtimestamp(candidate.stat().st_mtime, tz=dt.UTC)
+        if mtime > started_at:
+            return candidate
     return None
 
 
+def _find_transcript_in_project_dir(
+    project_dir: Path,
+    claude_session_id: str | None,
+    surface_ref: str | None,
+    started_at_iso: str | None,
+) -> Path | None:
+    """Find a transcript inside a known Claude project dir.
+
+    Resolution order mirrors reconcile._locate_session_transcript:
+    1. ``claude_session_id`` set → ``<project_dir>/<csid>.jsonl`` (exact match).
+    2. ``surface_ref`` set → newest ``<surface_ref>*.jsonl`` with mtime after
+       ``started_at_iso`` (reused-worktree stale-transcript guard).
+    3. Degraded fallback (both ids None) → newest ``*.jsonl`` in project_dir
+       (best-effort when backfill hasn't fired yet; may include subagent files).
+
+    Returns None when project_dir does not exist or no jsonl is found.
+    """
+    if not project_dir.is_dir():
+        return None
+    try:
+        if claude_session_id:
+            path = project_dir / f"{claude_session_id}.jsonl"
+            if path.is_file():
+                return path
+        if surface_ref:
+            return _pick_surface_ref_transcript(
+                project_dir, surface_ref, started_at_iso
+            )
+        # Degraded fallback: newest *.jsonl — fires only when both csid and
+        # surface_ref are absent (backfill hasn't run yet).
+        all_jsonl = sorted(
+            project_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return all_jsonl[0] if all_jsonl else None
+    except OSError:
+        return None
+
+
 def _matching_project_dirs(ticket_id: str) -> list[Path]:
-    """Return project dirs whose name contains ``auto-dev-{ticket_id}``."""
+    """Return project dirs whose name ends with ``-{ticket_id}``."""
     if not CLAUDE_PROJECTS.exists():
         return []
     return [
         p
         for p in CLAUDE_PROJECTS.iterdir()
-        if p.is_dir() and f"auto-dev-{ticket_id}" in p.name
+        if p.is_dir() and p.name.endswith(f"-{ticket_id}")
     ]
 
 
@@ -124,16 +213,54 @@ def _find_transcript_heuristic(ticket_id: str) -> Path | None:
 
 
 def find_transcript_for_ticket(
-    ticket_id: str, session_id: str | None = None
+    ticket_id: str,
+    session_id: str | None = None,
+    worktree_path: Path | None = None,
 ) -> Path | None:
     """Locate the main /auto-dev transcript jsonl for a ticket.
 
-    If session_id is provided, resolves it to a claude_session_id via
-    CW_STATE and returns the matching jsonl directly (exact match).
-    Falls back to a heuristic that prefers the most recent main-session
-    transcript when no exact match is found.
+    Uses ``claude_project_dir(worktree_path)`` to find the project dir when
+    a worktree path is available — this resolves correctly for dispatch workers
+    whose project dirs are named after the worktree path (e.g.
+    ``-home-u--cw-wt-<hash>-dev-817``) rather than containing
+    ``auto-dev-{ticket_id}`` in the name.
+
+    The effective worktree path is resolved in priority order:
+    1. Explicit ``worktree_path`` parameter (USER-origin sessions that stamp it).
+    2. ``worktree_path`` from the Session in CW_STATE (DAEMON-origin sessions;
+       dispatch writes worktree_path to the Session but not to the TicketTask).
+
+    Within the project dir, resolution order is: (1) exact csid match, (2)
+    surface_ref-prefix glob with mtime guard, (3) newest ``*.jsonl`` (degraded
+    fallback when backfill hasn't fired yet for the session ids).
+
+    Falls back to the legacy heuristic (name-based project dir search) when
+    no worktree path is available or its project dir is not found on disk.
     """
-    claude_id = load_claude_session_id(session_id)
+    refs = _load_session_refs(session_id)
+
+    # Prefer explicit arg; fall back to worktree_path from the Session in CW_STATE.
+    # TicketTask.worktree_path is None for dispatch tasks (dispatch stamps
+    # session_id but not worktree_path); the Session object carries the real path.
+    effective_wt = worktree_path
+    if effective_wt is None:
+        raw_wt = refs.get("worktree_path")
+        if raw_wt is not None:
+            effective_wt = Path(str(raw_wt))
+
+    if effective_wt is not None:
+        project_dir = claude_project_dir(effective_wt)
+        transcript = _find_transcript_in_project_dir(
+            project_dir,
+            refs.get("claude_session_id"),
+            refs.get("surface_ref"),
+            refs.get("started_at"),
+        )
+        if transcript is not None:
+            return transcript
+
+    # Legacy path: search matching project dirs by name, then heuristic.
+    claude_id = refs.get("claude_session_id")
     if claude_id:
         for proj in _matching_project_dirs(ticket_id):
             candidate = proj / f"{claude_id}.jsonl"
@@ -312,7 +439,9 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
     """Enumerate RUNNING tasks and build one report row per task."""
     rows = []
     for t in load_running_tasks(client):
-        transcript = find_transcript_for_ticket(str(t.ticket_id), t.session_id)
+        transcript = find_transcript_for_ticket(
+            str(t.ticket_id), t.session_id, t.worktree_path
+        )
         info = parse_transcript(transcript) if transcript else {}
         rows.append(format_row(t, info, now))
     return rows
