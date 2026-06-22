@@ -9,6 +9,7 @@ helpers. See the package ``__init__`` docstring for the full architecture.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import subprocess
@@ -35,7 +36,7 @@ from cw.config import (
     save_state,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -1128,6 +1129,88 @@ def feature_branch_key(
     client = clients.get(client_name)
     prefix = client.feature_branch_prefix if client is not None else "dev"
     return f"{prefix}/{ticket_id}"
+
+
+_REAP_PROPOSED_ACTIONS: frozenset[ProposedAction] = frozenset(
+    {
+        ProposedAction.REVERT_TASK,
+        ProposedAction.CRASH_COMPLETE,
+        ProposedAction.PARK_BLOCKED_ON_USER,
+    }
+)
+
+
+def _emit_reap_proposed(
+    state: CwState,
+    candidates: list[ReapCandidate],
+    *,
+    native_live: set[str],
+    now: datetime | None = None,
+) -> set[str]:
+    """Emit SESSION_REAP_PROPOSED for reap-shaped candidates before act phase.
+
+    Called from _reconcile_locked after each _detect_* and before the
+    corresponding _act_on_*. Satisfies ADR-0006 invariant 3 (propose before act).
+
+    Only emits for REVERT_TASK, CRASH_COMPLETE, PARK_BLOCKED_ON_USER candidates.
+    Dedup: sessions with reap_proposed_at already set are skipped.
+
+    Returns the set of session_ids newly stamped in this call. Callers use this
+    to gate edge-triggered events (e.g. SESSION_STAGE_TIMED_OUT_RETRIED) so they
+    fire only on first detection, not on every re-detect tick. See GitHub #782.
+
+    save_state is safe under sessions_lock — it is a raw file write, not a
+    reentrant lock acquisition. See existing _act_on_stalled_candidates,
+    _act_on_idle_candidates.
+    """
+    _now = now or datetime.now(UTC)
+    session_by_id = {s.id: s for s in state.sessions}
+    newly_stamped: set[str] = set()
+
+    for candidate in candidates:
+        if candidate.proposed_action not in _REAP_PROPOSED_ACTIONS:
+            continue
+        session = session_by_id.get(candidate.session_id)
+        if session is None or session.reap_proposed_at is not None:
+            continue
+
+        in_roster = (
+            session.surface_ref is not None and session.surface_ref in native_live
+        )
+
+        transcript_age_seconds: float | None = None
+        transcript_path = _locate_session_transcript(session)
+        if transcript_path is not None and transcript_path.exists():
+            with contextlib.suppress(OSError):
+                mtime = transcript_path.stat().st_mtime
+                transcript_age_seconds = _now.timestamp() - mtime
+
+        payload = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "lane": candidate.lane,
+            "proposed_action": candidate.proposed_action.value,
+            "reason": candidate.reap_reason.value if candidate.reap_reason else None,
+            "evidence": {
+                "elapsed_seconds": candidate.elapsed_seconds,
+                "in_roster": in_roster,
+                "transcript_age_seconds": transcript_age_seconds,
+            },
+        }
+        # Stamp before record_event: dedup guard fires on retry if write fails.
+        session.reap_proposed_at = _now
+        newly_stamped.add(candidate.session_id)
+        record_event(
+            OrchestratorEventType.SESSION_REAP_PROPOSED,
+            payload,
+            correlation_id=candidate.ticket_id or candidate.session_id,
+        )
+
+    if newly_stamped:
+        save_state(state)
+    return newly_stamped
 
 
 # Non-underscore aliases for the cross-cutting helpers above, so cluster modules

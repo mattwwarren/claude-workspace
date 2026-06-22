@@ -1929,10 +1929,12 @@ def test_timed_out_retried_not_reemitted_on_second_detect_signal_only(
         lambda _tid, **_kw: (False, True),
     )
 
-    # Tick 1: event fires, reap_proposed_at stamped.
+    # Tick 1: event fires, reap_proposed_at stamped and persisted.
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
 
-    # Tick 2: same stalled session re-detected; event must NOT re-fire.
+    # Tick 2: reload from disk (mirrors _reconcile_locked production flow) to
+    # verify suppression holds across the persistence boundary, not just in-memory.
+    state = load_state()
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
 
     events = read_events(

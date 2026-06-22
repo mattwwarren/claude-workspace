@@ -41,6 +41,7 @@ from cw.reconcile._shared import (
     _apply_queue_mutations,
     _apply_salvaged_completion,
     _cleanup_timed_out_worktree,
+    _emit_reap_proposed,
     _is_headless,
     _queue_status_for_salvaged,
     feature_branch_key,
@@ -49,7 +50,6 @@ from cw.reconcile._shared import (
     resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
-from cw.reconcile.phantom import _emit_reap_proposed
 from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:

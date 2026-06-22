@@ -47,7 +47,7 @@ re-exports. Submodules:
 - ``_shared`` — constants, dataclasses/enums, and cross-cutting leaf helpers.
 - ``stalled`` — wall-clock-budget stalled-headless sweep.
 - ``idle`` — idle-watchdog (silently idle) sweep.
-- ``phantom`` — phantom (dead-surface) sweep and ``_emit_reap_proposed``.
+- ``phantom`` — phantom (dead-surface) sweep.
 - ``salvage`` — git-state salvage post-pass (draft PR / flag).
 - ``tasks`` — dev-queue revert backstops and timed-out-merged completion.
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
@@ -89,6 +89,7 @@ from cw.reconcile._shared import (
     _csid_from_transcript,
     _detect_post_review_clean,
     _detect_usage_limit,
+    _emit_reap_proposed,
     _has_terminal_sentinel,
     _is_headless,
     _locate_session_transcript,
@@ -120,7 +121,6 @@ from cw.reconcile.idle import (
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
-    _emit_reap_proposed,
 )
 from cw.reconcile.salvage import (
     rescue_finalize_blocked_sessions,

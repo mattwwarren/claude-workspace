@@ -30,6 +30,7 @@ from cw.reconcile._shared import (
     ReconcileReport,
     _backfill_claude_session_ids,
     _claude_agents_json,
+    _emit_reap_proposed,
     _looks_like_daemon_outage,
     _SalvageCandidate,
     compute_drift,
@@ -40,7 +41,6 @@ from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
-    _emit_reap_proposed,
 )
 from cw.reconcile.salvage import (
     rescue_finalize_blocked_sessions,
