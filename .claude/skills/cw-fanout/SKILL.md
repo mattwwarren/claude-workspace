@@ -140,7 +140,7 @@ immediately and pause for the operator. Do not silently re-dispatch. When the
 event is `session.timed_out`, check the `branch_state` field: `"absent_no_merged_pr"`
 means the worker died before push (an anomaly worth investigating); absent key
 means the branch is present or the check was unavailable (ordinary slow timeout).
-See [`session-disposition.md §5a`](../../docs/session-disposition.md).
+See [`session-disposition.md §5a`](../../docs/session-disposition.md#5a-branch-absence-anomaly-on-session_timed_out-808).
 
 **c. In-flight health — is a running session stuck?**
 

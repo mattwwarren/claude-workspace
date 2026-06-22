@@ -55,7 +55,7 @@ This mirrors the scope-down discipline of #315 / #793 (no new reason, no synthes
 ## Reuse, don't reinvent
 
 Salvage `branch_exists_on_origin()` from `dev/315 @ f93ea1f`:
-- `src/cw/gh.py`: `branch_exists_on_origin(ticket_id, *, branch, timeout=10) -> tuple[bool | None, bool]` via `gh api repos/{owner}/{repo}/git/refs/heads/{branch}` (HTTP 404 = absent → `(False, True)`, 200 = present → `(True, True)`, transient → `(None, True)`, gh absent → `(None, False)`). Follows the `_fetch_branch_merged_pr` (`gh.py:75`) implementation + return-tuple shape.
+- `src/cw/gh.py`: `branch_exists_on_origin(branch: str, *, timeout: int = 10) -> tuple[bool | None, bool]` via `gh api repos/{owner}/{repo}/git/refs/heads/{branch}` (HTTP 404 = absent → `(False, True)`, 200 = present → `(True, True)`, transient → `(None, True)`, gh absent → `(None, False)`). Follows the `_fetch_branch_merged_pr` (`gh.py:75`) implementation + return-tuple shape.
 - `src/cw/reconcile/_deps.py`: re-export it (import + `__all__` entry).
 
 **Reroute** its result to the event annotation — do **not** wire it into the merged path the way `dev/315` did.
