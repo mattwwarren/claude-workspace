@@ -4591,17 +4591,13 @@ def test_idle_park_re_fires_after_paused_status_cleared(
             config=_auto_config(),
         )
 
-    assert len(push_calls) == 2, (
-        f"fire_push_notification must re-fire after paused_status cleared; got {len(push_calls)} calls"
-    )
+    assert len(push_calls) == 2, "fire_push_notification must re-fire after clear"
     events = read_events(
         consumer="test-park-refire",
         event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
     )
     matching = [e for e in events if e.payload.get("session_id") == "park-refire"]
-    assert len(matching) == 2, (
-        f"SESSION_NEEDS_ATTENTION must re-fire after paused_status cleared but got {len(matching)}"
-    )
+    assert len(matching) == 2, "SESSION_NEEDS_ATTENTION must re-fire after clear"
 
 
 def test_confirm_before_reap_liveness_recovery_resets_counter(
