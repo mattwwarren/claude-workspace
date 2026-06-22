@@ -31,6 +31,7 @@ from cw.dev_queue import (
     save_plan,
     wait_for_terminal,
 )
+from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -38,6 +39,7 @@ from cw.models import (
     DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
     DispatchPlan,
+    DispatchSkipReason,
     OrchestratorConfig,
     QueueItemStatus,
     Stage,
@@ -552,6 +554,288 @@ class TestCLIDevQueueStatus:
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
         assert "[STALE" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# TestStatusFreshnessSubline — freshness block surfaced in dev-queue status (#820)
+# ---------------------------------------------------------------------------
+
+
+class TestStatusFreshnessSubline:
+    def test_non_main_head_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """non_main_head tick shows branch name and fix command."""
+        from pathlib import Path
+
+        from cw.models import ClientConfig
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-100", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
+            blocked_branch="docs/foo",
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        ws = Path("/repo/my-client")
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.get_client",
+            lambda name: ClientConfig(
+                name=name, workspace_path=ws, default_branch="main"
+            ),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "docs/foo" in result.output
+        assert "(not main)" in result.output
+        assert "git -C /repo/my-client checkout main" in result.output
+
+    def test_non_main_head_detached(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """non_main_head with blocked_branch=None shows '(detached)'."""
+        from pathlib import Path
+
+        from cw.models import ClientConfig
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-101", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.get_client",
+            lambda name: ClientConfig(
+                name=name,
+                workspace_path=Path("/repo/my-client"),
+                default_branch="main",
+            ),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "(detached)" in result.output
+
+    def test_non_main_head_get_client_fallback(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Falls back to 'main'/client_name when get_client raises CwError."""
+        from cw.exceptions import CwError
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-200", client="unknown-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
+            blocked_branch="feat/x",
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"unknown-client": tick},
+        )
+        msg = "not found"
+
+        def _raise(_name: str) -> None:
+            raise CwError(msg)
+
+        monkeypatch.setattr("cw.cli.dev_queue.get_client", _raise)
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "feat/x" in result.output
+        # fallback: client_name is used as ws_path, 'main' as default_branch
+        assert "git -C unknown-client checkout main" in result.output
+
+    def test_main_behind_origin_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """main_behind_origin tick shows 'main behind origin' subline."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-102", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_MAIN_BEHIND,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "main behind origin" in result.output
+        assert "auto-ff pending/failed" in result.output
+
+    def test_non_freshness_skip_no_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-FRESHNESS_GATE skip reasons produce no freshness subline."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-103", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason="no_pending",
+            tick_at=now,
+            freshness_detail=None,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "⚠" not in result.output
+
+    def test_json_non_main_head(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json emits dict with skip_reason, freshness_detail, blocked_branch."""
+        from cw.orchestrate import TickSummary
+
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
+            blocked_branch="docs/foo",
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "my-client" in data
+        assert data["my-client"]["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
+        assert data["my-client"]["freshness_detail"] == FRESHNESS_NON_MAIN_HEAD
+        assert data["my-client"]["blocked_branch"] == "docs/foo"
+
+    def test_json_empty_when_no_ticks(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json emits {} when there are no tick events."""
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            dict,
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {}
+
+    def test_json_client_filter_applied(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json respects --client filter, returning only matching client."""
+        from cw.orchestrate import TickSummary
+
+        now = datetime.now(UTC)
+        tick_a = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_NON_MAIN_HEAD,
+            blocked_branch=None,
+        )
+        tick_b = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_MAIN_BEHIND,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"client-a": tick_a, "client-b": tick_b},
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "status", "--json", "--client", "client-a"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert list(data.keys()) == ["client-a"]
+        assert "client-b" not in data
 
 
 # ---------------------------------------------------------------------------

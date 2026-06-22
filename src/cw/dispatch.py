@@ -417,6 +417,7 @@ def _emit_stale_skip(
             "cap": cap,
             "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
             "freshness_detail": freshness_detail,
+            "blocked_branch": non_main_branch,
             "lanes": _lane_stats_for_client(client, queue_snapshot),
         },
     )
