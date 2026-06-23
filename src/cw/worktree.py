@@ -701,6 +701,24 @@ def get_head_branch(client: ClientConfig) -> str | None:
     return result.stdout.strip() or None
 
 
+def is_main_checkout_dirty(client: ClientConfig) -> bool:
+    """Return True if the main checkout has uncommitted tracked changes.
+
+    Uses the same porcelain filter as fast_forward_main — untracked files
+    (``??`` prefix) are ignored because git pull --ff-only is safe with them.
+    Returns False on any git error so transient failures never block dispatch.
+    """
+    git_dir = _git_dir(client)
+    try:
+        status_out = _run_git("status", "--porcelain", cwd=git_dir).stdout
+    except WorktreeError:
+        return False
+    status_lines = [
+        line for line in status_out.splitlines() if line[:2] != _GIT_PORCELAIN_UNTRACKED
+    ]
+    return bool(status_lines)
+
+
 def fast_forward_main(
     client: ClientConfig, *, ignore_untracked: bool = False
 ) -> tuple[str, str]:

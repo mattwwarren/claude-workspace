@@ -25,6 +25,7 @@ from cw.worktree import (
     fast_forward_main,
     fetch_feature_branch,
     is_main_behind_origin,
+    is_main_checkout_dirty,
     remove_worktree,
     resolve_worktree_base,
     slugify_branch,
@@ -1963,6 +1964,63 @@ class TestCheckMainFfSafety:
             self._make_mock(main_is_ancestor=False, origin_is_ancestor=False),
         )
         assert check_main_ff_safety(client) == "diverged"
+
+
+class TestIsMainCheckoutDirty:
+    """is_main_checkout_dirty returns True iff tracked changes exist (#766)."""
+
+    @staticmethod
+    def _make_client(tmp_path: Path) -> ClientConfig:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        return ClientConfig(
+            name="test-client",
+            workspace_path=ws,
+            default_branch="main",
+        )
+
+    def test_returns_true_when_tracked_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Porcelain line without '??' prefix → returns True."""
+        client = self._make_client(tmp_path)
+        result = MagicMock()
+        result.stdout = " M src/cw/dispatch.py\n"
+        monkeypatch.setattr("cw.worktree._run_git", lambda *_a, **_kw: result)
+        assert is_main_checkout_dirty(client) is True
+
+    def test_returns_false_when_only_untracked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only '??' lines in porcelain → returns False (untracked is safe for ff)."""
+        client = self._make_client(tmp_path)
+        result = MagicMock()
+        result.stdout = "?? .claude/scheduled_tasks.lock\n"
+        monkeypatch.setattr("cw.worktree._run_git", lambda *_a, **_kw: result)
+        assert is_main_checkout_dirty(client) is False
+
+    def test_returns_false_when_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty porcelain output → returns False."""
+        client = self._make_client(tmp_path)
+        result = MagicMock()
+        result.stdout = ""
+        monkeypatch.setattr("cw.worktree._run_git", lambda *_a, **_kw: result)
+        assert is_main_checkout_dirty(client) is False
+
+    def test_returns_false_on_git_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WorktreeError from _run_git → returns False; errors don't block dispatch."""
+        client = self._make_client(tmp_path)
+
+        def _boom(*a: object, **kw: object) -> object:
+            msg = "git status failed"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.worktree._run_git", _boom)
+        assert is_main_checkout_dirty(client) is False
 
 
 class TestFetchDefaultBranch:
