@@ -2411,13 +2411,13 @@ class TestMergeGateBlockedWithBlocker:
         p = _merge_gate_payload()
         p["blocker"] = {
             "stage": "stage4a_merge_gate",
-            "reason": "prior_pipeline_pr_open:#776",
-            "details": "PR #776 (dev/315) is open; no file overlap with dev/238",
+            "reason": f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776",
+            "details": "PR #776 (dev/315) shares files: src/cw/finalize.py",
         }
         result = AutoDevResult.model_validate(p)
         assert result.status == "merge_gate_blocked"
         assert result.blocker is not None
-        assert result.blocker.reason == "prior_pipeline_pr_open:#776"
+        assert result.blocker.reason == f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776"
 
     def test_merge_gate_blocked_null_blocker_still_parses(self) -> None:
         p = _merge_gate_payload()
@@ -2440,8 +2440,8 @@ class TestMergeGateBlockedWithBlocker:
         p = _merge_gate_payload()
         p["blocker"] = {
             "stage": "stage4a_merge_gate",
-            "reason": "prior_pipeline_pr_open:#776",
-            "details": "PR #776 open; file overlap detected",
+            "reason": f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776",
+            "details": "PR #776 open; file overlap detected: src/cw/finalize.py",
         }
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
