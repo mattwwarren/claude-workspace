@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.config import save_state
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue, transition_task_status
 from cw.events import record_event
 from cw.models import (
     DEFAULT_LANE,
@@ -409,25 +409,25 @@ def _apply_idle_queue_mutations(
             if task.status != QueueItemStatus.RUNNING:
                 continue
             if task.ticket_id in recovered_ids:
-                task.status = QueueItemStatus.PENDING
+                transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 changed = True
             elif task.ticket_id in merged_tids:
-                task.status = QueueItemStatus.COMPLETED
+                transition_task_status(task, QueueItemStatus.COMPLETED)
                 task.session_id = None
                 merged_completed.append(task.ticket_id)
                 changed = True
             elif task.ticket_id in gh_blocked_tids:
-                task.status = QueueItemStatus.BLOCKED_ON_USER
+                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
                 task.session_id = None
                 changed = True
             elif task.ticket_id in parked_ids:
-                task.status = QueueItemStatus.BLOCKED_ON_USER
+                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
                 blocked.append(task.ticket_id)
                 changed = True
             elif task.ticket_id in salvaged_ticket_ids_set:
                 result = salvaged_result_by_ticket[task.ticket_id]
-                task.status = _queue_status_for_salvaged(result)
+                transition_task_status(task, _queue_status_for_salvaged(result))
                 changed = True
         if changed:
             save_dev_queue(store)

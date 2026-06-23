@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cw.config import load_clients, load_state, save_state
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue, transition_task_status
 from cw.events import record_event
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS
 from cw.models import (
@@ -84,11 +84,11 @@ def _revert_running_tasks_for_sessions(
             if task.session_id not in session_ids:
                 continue
             if task.session_id in dirty:
-                task.status = QueueItemStatus.BLOCKED_ON_USER
+                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
                 if sessions_by_id and task.session_id in sessions_by_id:
                     notify_sessions.append(sessions_by_id[task.session_id])
             else:
-                task.status = QueueItemStatus.PENDING
+                transition_task_status(task, QueueItemStatus.PENDING)
                 reverted.append(task.ticket_id)
             task.session_id = None
             changed = True
@@ -228,7 +228,7 @@ def complete_timed_out_merged_tasks() -> list[str]:
                     task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.PENDING
                 ):
-                    task.status = QueueItemStatus.COMPLETED
+                    transition_task_status(task, QueueItemStatus.COMPLETED)
                     completed_ids.append(ticket_id)
                     changed = True
                     break

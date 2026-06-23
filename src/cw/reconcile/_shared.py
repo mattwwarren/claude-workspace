@@ -36,7 +36,7 @@ from cw.config import (
     get_client,
     save_state,
 )
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue, transition_task_status
 from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.models import (
@@ -654,15 +654,15 @@ def _apply_sentinel_to_task(
             apply_staged_decision(target, sentinel.status, last_result, clients)
         # BlockedResult: sentinel failed to parse or was malformed.
         elif sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
-            target.status = QueueItemStatus.FAILED
+            transition_task_status(target, QueueItemStatus.FAILED)
         elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
             if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
-                target.status = QueueItemStatus.FAILED
+                transition_task_status(target, QueueItemStatus.FAILED)
             else:
-                target.status = QueueItemStatus.PENDING
+                transition_task_status(target, QueueItemStatus.PENDING)
                 target.session_id = None
         elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
-            target.status = QueueItemStatus.PENDING
+            transition_task_status(target, QueueItemStatus.PENDING)
             target.session_id = None
         else:
             # An unparseable/unknown-status sentinel (status_unknown,
@@ -670,7 +670,7 @@ def _apply_sentinel_to_task(
             # signal. Never mark it COMPLETED — that silently retires unshipped
             # work as "shipped" (#750, the #728 loss). Surface as FAILED so the
             # operator sees it instead of a phantom completion.
-            target.status = QueueItemStatus.FAILED
+            transition_task_status(target, QueueItemStatus.FAILED)
 
         save_dev_queue(store)
 
@@ -925,7 +925,7 @@ def _apply_queue_mutations(
                 continue
             if task.ticket_id not in mutations:
                 continue
-            task.status = mutations[task.ticket_id]
+            transition_task_status(task, mutations[task.ticket_id])
             if task.ticket_id in clear_session_id:
                 task.session_id = None
             mutated.append(task.ticket_id)
@@ -1081,7 +1081,7 @@ def _cleanup_timed_out_worktree(
                             task.ticket_id == ticket_id
                             and task.status == QueueItemStatus.PENDING
                         ):
-                            task.status = QueueItemStatus.BLOCKED_ON_USER
+                            transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
                             save_dev_queue(store)
                             break
             return
