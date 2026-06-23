@@ -76,7 +76,36 @@ Options:
 
 **If no open PR from this pipeline:** Proceed immediately.
 
-**Headless:** (Small only — large already exited at S3.) If prior pipeline PR open → EXIT `merge_gate_blocked`. If no open PR → proceed.
+**Headless:** (Small only — large already exited at S3.)
+
+1. Collect the changed-file list for the current candidate branch:
+   ```bash
+   git diff --name-only <fork_point_sha>...HEAD
+   ```
+2. List all other open pipeline PRs:
+   ```bash
+   gh pr list --author @me --state open --json number,headRefName
+   ```
+   Filter for branches matching `<branch-prefix>/*`, excluding the current branch.
+3. For each such PR, collect its changed-file list:
+   ```bash
+   gh pr diff <number> --name-only
+   ```
+   Fallback if unavailable: `git diff --name-only origin/main...origin/<headRefName>`.
+4. Compute the intersection of the candidate file list with each open PR's file list.
+   - **Non-empty intersection** for any open PR → EXIT `merge_gate_blocked` with populated `blocker`:
+     ```json
+     "blocker": {
+       "stage": "stage4a_merge_gate",
+       "reason": "prior_pipeline_pr_open:#<number>",
+       "details": "PR #<number> (<headRefName>) is open and shares files with this branch: <comma-separated overlap list>",
+       "recovery_hint": "Wait for PR #<number> to merge, then re-dispatch this ticket.",
+       "retry_eligible": true,
+       "retry_delay_seconds": null
+     }
+     ```
+     When multiple open PRs overlap, use the lowest PR number in `reason` and list all overlapping PRs in `details`.
+   - **Empty intersection** for ALL open PRs (or no other open pipeline PRs) → proceed to Step 4b. Log: `"All open pipeline PRs are file-disjoint — proceeding to PR creation."`
 
 ### Step 4b: Pipeline-Level PR Approval
 
@@ -468,6 +497,18 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
   "next_actions": []
 }
 AUTO_DEV_RESULT>>>
+```
+
+Note: when `status` is `merge_gate_blocked` due to file overlap with an open pipeline PR, `blocker` may be non-null:
+```json
+"blocker": {
+  "stage": "stage4a_merge_gate",
+  "reason": "prior_pipeline_pr_open:#<N>",
+  "details": "PR #<N> (<branch>) is open and shares files: <list>",
+  "recovery_hint": "Wait for PR #<N> to merge, then re-dispatch this ticket.",
+  "retry_eligible": true,
+  "retry_delay_seconds": null
+}
 ```
 
 The sentinel must be the LAST thing emitted. No trailing prose, no further tool calls. See `auto-dev.md` Appendix for full field reference. Contract: `cw schema stage-output finalize`.

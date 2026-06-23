@@ -486,7 +486,8 @@ class AutoDevResult(BaseModel):
         if self.status == "blocked" and self.blocker is None:
             msg = "blocker must be non-null when status is 'blocked'"
             raise ValueError(msg)
-        if self.status not in {"blocked", "merge_gate_blocked"} and self.blocker is not None:
+        blocker_allowed = self.status in {"blocked", "merge_gate_blocked"}
+        if not blocker_allowed and self.blocker is not None:
             msg = f"blocker must be null when status is {self.status!r}"
             raise ValueError(msg)
 

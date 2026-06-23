@@ -2428,7 +2428,11 @@ class TestMergeGateBlockedWithBlocker:
 
     def test_scope_exceeded_non_null_blocker_still_rejected(self) -> None:
         p = _scope_exceeded_payload()
-        p["blocker"] = {"stage": "stage1_plan", "reason": "scope_too_large", "details": ""}
+        p["blocker"] = {
+            "stage": "stage1_plan",
+            "reason": "scope_too_large",
+            "details": "",
+        }
         with pytest.raises(ValidationError, match="blocker must be null"):
             AutoDevResult.model_validate(p)
 
