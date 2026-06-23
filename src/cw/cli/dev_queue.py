@@ -56,6 +56,27 @@ from cw.reconcile import (
 from cw.session import _is_native_surface_ref
 from cw.worktree import fast_forward_main
 
+# Statuses considered "active" for default filtering in list / status.
+_ACTIVE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    {QueueItemStatus.PENDING, QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER}
+)
+
+_SECS_PER_MINUTE: int = 60
+_SECS_PER_HOUR: int = 3600
+_SECS_PER_DAY: int = 86400
+
+
+def _format_age(dt: datetime, now: datetime) -> str:
+    """Format a datetime as a human-readable age string relative to *now*."""
+    diff = (now - dt).total_seconds()
+    if diff < _SECS_PER_MINUTE:
+        return f"{int(diff)}s ago"
+    if diff < _SECS_PER_HOUR:
+        return f"{int(diff // _SECS_PER_MINUTE)}m ago"
+    if diff < _SECS_PER_DAY:
+        return f"{int(diff // _SECS_PER_HOUR)}h ago"
+    return f"{int(diff // _SECS_PER_DAY)}d ago"
+
 
 @main.group(name="dev-queue")
 def dev_queue() -> None:
@@ -352,8 +373,15 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
 @click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    default=False,
+    help="Include completed/cancelled tickets in the TICKETS column (legacy view).",
+)
 @handle_errors
-def dev_queue_status(client: str | None, output_json: bool) -> None:
+def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> None:
     """Show dev queue status grouped by client."""
     if output_json:
         tick_data = latest_tick_summary_by_client()
@@ -406,7 +434,12 @@ def dev_queue_status(client: str | None, output_json: bool) -> None:
         cancelled_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
         ]
-        ticket_ids = ", ".join(t.ticket_id for t in client_tasks)
+        display_tasks = (
+            client_tasks
+            if show_all
+            else [t for t in client_tasks if t.status in _ACTIVE_STATUSES]
+        )
+        ticket_ids = ", ".join(t.ticket_id for t in display_tasks)
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
             f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
@@ -448,6 +481,87 @@ def dev_queue_status(client: str | None, output_json: bool) -> None:
                         n_pending,
                     )
                 _emit_dev_queue_lane_breakdown(by_client[client_name])
+
+
+_LIST_STATUS_CHOICES = [e.value for e in QueueItemStatus] + ["all"]
+
+
+@dev_queue.command(name="list")
+@click.option("--client", "-c", default=None, help="Filter by client.")
+@click.option(
+    "--status",
+    "status_filter",
+    type=click.Choice(_LIST_STATUS_CHOICES),
+    default=None,
+    help=(
+        "Filter by status. Default: active (pending+running+blocked_on_user). "
+        "Use 'all' to include completed/cancelled."
+    ),
+)
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    default=False,
+    help="Show all statuses (shorthand for --status all).",
+)
+@handle_errors
+def dev_queue_list(
+    client: str | None, status_filter: str | None, show_all: bool
+) -> None:
+    """List dev-queue tickets with per-ticket detail rows.
+
+    Shows ticket, status, session_id, attempts, age, and client per row.
+    Default: active tickets only (pending, running, blocked_on_user).
+    Use --all or --status all to include completed/cancelled.
+    """
+    tasks = list_tickets(client)
+
+    if not tasks:
+        click.echo("Dev queue is empty.")
+        return
+
+    if show_all or status_filter == "all":
+        filtered = tasks
+    elif status_filter is not None:
+        target = QueueItemStatus(status_filter)
+        filtered = [t for t in tasks if t.status == target]
+    else:
+        filtered = [t for t in tasks if t.status in _ACTIVE_STATUSES]
+
+    if not filtered:
+        click.echo("No matching tickets.")
+        return
+
+    headers = [
+        "TICKET",
+        "STATUS",
+        "PRIORITY",
+        "ATTEMPTS",
+        "AGE",
+        "SESSION_ID",
+        "CLIENT",
+    ]
+    col_widths = [10, 16, 8, 8, 9, 12, 20]
+    header_line = "  ".join(
+        f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True)
+    )
+    click.echo(header_line)
+    click.echo("-" * len(header_line))
+
+    now = datetime.now(UTC)
+    for t in filtered:
+        age = _format_age(t.created_at, now)
+        row = [
+            f"#{t.ticket_id}"[:10],
+            t.status.value[:16],
+            str(t.priority)[:8],
+            str(t.attempts)[:8],
+            age[:9],
+            (t.session_id or "-")[:12],
+            t.client[:20],
+        ]
+        click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
 
 
 @dev_queue.command(name="run")
