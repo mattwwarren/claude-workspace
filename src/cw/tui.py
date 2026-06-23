@@ -246,14 +246,75 @@ def _client_panel(
     return Panel(body, title=f"[b]{client}[/b]", title_align="left")
 
 
+class AttentionRow(BaseModel):
+    """One row in the deduped attention digest."""
+
+    key: str
+    session_counts: dict[str, int]  # paused_status -> distinct session count
+
+
+def _aggregate_attention_events(events: list[EventSummary]) -> list[AttentionRow]:
+    """Aggregate SESSION_NEEDS_ATTENTION events into deduped attention rows.
+
+    Dedup key: (session_id, paused_status) — each unique pair counted once.
+    Grouping key: ticket_id when present in payload, else client.
+    Returns one AttentionRow per distinct grouping key, sorted by key.
+    """
+    # group_key -> paused_status -> set of session_ids
+    grouped: dict[str, dict[str, set[str]]] = {}
+
+    for event in events:
+        session_id = event.payload.get("session_id")
+        paused_status = event.payload.get("paused_status")
+        if not session_id or not paused_status:
+            continue
+        ticket_id = event.payload.get("ticket_id")
+        client = event.payload.get("client")
+        group_key = str(ticket_id) if ticket_id else (str(client) if client else "")
+        if not group_key:
+            continue
+        by_status = grouped.setdefault(group_key, {})
+        by_status.setdefault(str(paused_status), set()).add(str(session_id))
+
+    return [
+        AttentionRow(
+            key=k,
+            session_counts={ps: len(sids) for ps, sids in conditions.items()},
+        )
+        for k, conditions in sorted(grouped.items())
+    ]
+
+
 def _events_panel(
     events: list[EventSummary],
     *,
+    attention_events: list[EventSummary] | None = None,
     level: DetailLevel,
 ) -> Panel:
-    """Render the last-N events panel."""
+    """Render the last-N events panel, with attention digest above raw events."""
+    parts: list[RenderableType] = []
+
+    attention_rows = _aggregate_attention_events(attention_events or [])
+    if attention_rows:
+        n = len(attention_rows)
+        attn_lines: list[RenderableType] = [
+            Text.from_markup(f"[b yellow]⚠ Attention ({n})[/b yellow]"),
+        ]
+        for row in attention_rows:
+            segments = " · ".join(
+                f"{count} {status}"
+                for status, count in sorted(row.session_counts.items())
+            )
+            key_part = f"  [yellow]{markup_escape(row.key)}[/yellow]"
+            seg_part = markup_escape(segments)
+            attn_lines.append(
+                Text.from_markup(f"{key_part} ⚠ {seg_part} · needs attention")
+            )
+        parts.append(Group(*attn_lines))
+        parts.append(Text(""))
+
     if not events:
-        body: RenderableType = Text("(no recent events)", style="dim")
+        parts.append(Text("(no recent events)", style="dim"))
     else:
         table = Table(show_edge=False, pad_edge=False, expand=True, show_header=False)
         table.add_column("TIME", width=8, no_wrap=True, style="dim")
@@ -266,7 +327,9 @@ def _events_panel(
             else:
                 payload_text = _summarise_event_payload(event.payload)
             table.add_row(timestamp, event.type, payload_text or "—")
-        body = table
+        parts.append(table)
+
+    body: RenderableType = Group(*parts) if len(parts) > 1 else parts[0]
     title = f"[b]Recent events[/b] ({len(events)})"
     return Panel(body, title=title, title_align="left")
 
@@ -347,7 +410,13 @@ def render_dashboard(
             ),
         )
 
-    panels.append(_events_panel(status.recent_events, level=level))
+    panels.append(
+        _events_panel(
+            status.recent_events,
+            attention_events=status.attention_events,
+            level=level,
+        )
+    )
     return Group(*panels)
 
 

@@ -1593,6 +1593,98 @@ class TestTickSummaryFreshnessFields:
 
 
 # ---------------------------------------------------------------------------
+# TestAttentionEventsInOrchestratorStatus — #537
+# ---------------------------------------------------------------------------
+
+
+class TestAttentionEventsInOrchestratorStatus:
+    def test_attention_events_empty_when_none_emitted(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """attention_events is empty when no SESSION_NEEDS_ATTENTION events exist."""
+        snapshot = orchestrator_status()
+        assert snapshot.attention_events == []
+
+    def test_attention_events_populated_from_needs_attention(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """attention_events includes all SESSION_NEEDS_ATTENTION events."""
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": "abc123",
+                "session_name": "client/impl",
+                "client": "test-client",
+                "paused_status": "dirty_worktree",
+                "ticket_id": "T-1",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert len(snapshot.attention_events) == 1
+        ev = snapshot.attention_events[0]
+        assert ev.type == "session.needs_attention"
+        assert ev.payload["session_id"] == "abc123"
+        assert ev.payload["paused_status"] == "dirty_worktree"
+
+    def test_attention_events_not_capped_by_recent_limit(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """attention_events fetched via dedicated call — not capped at 20-event tail."""
+        # Emit attention event first, then flood with 25 non-attention events
+        # so the attention event falls off the 20-tail.
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": "old-session",
+                "paused_status": "dirty_worktree",
+                "client": "test-client",
+            },
+        )
+        for i in range(25):
+            record_event(
+                OrchestratorEventType.TICKET_ENQUEUED,
+                {"ticket_id": f"GEN-{i}"},
+            )
+        snapshot = orchestrator_status()
+        # recent_events capped at 20 — attention event should be excluded
+        assert all(
+            ev.type != "session.needs_attention" for ev in snapshot.recent_events
+        )
+        # But attention_events must have captured it
+        assert len(snapshot.attention_events) == 1
+        assert snapshot.attention_events[0].payload["session_id"] == "old-session"
+
+    def test_attention_events_excludes_other_event_types(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """attention_events only contains SESSION_NEEDS_ATTENTION events."""
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "c",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {"session_id": "s1", "paused_status": "dirty_worktree", "client": "c"},
+        )
+        snapshot = orchestrator_status()
+        assert all(
+            ev.type == "session.needs_attention" for ev in snapshot.attention_events
+        )
+        assert len(snapshot.attention_events) == 1
+
+
+# ---------------------------------------------------------------------------
 # TestOrchestrateStart — Phase 4b: cw orchestrate start --lane
 # ---------------------------------------------------------------------------
 

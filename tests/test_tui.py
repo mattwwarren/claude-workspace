@@ -1072,3 +1072,258 @@ class TestTicketsTableLane:
         assert "client-b" in clients
         # client-a appears first (more tickets)
         assert clients[0] == "client-a"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _aggregate_attention_events + events panel attention digest (#537)
+# ---------------------------------------------------------------------------
+
+
+def _make_attention_event(
+    *,
+    session_id: str,
+    paused_status: str,
+    ticket_id: str | None = None,
+    client: str | None = None,
+    idx: int = 0,
+) -> EventSummary:
+    payload: dict[str, object] = {
+        "session_id": session_id,
+        "paused_status": paused_status,
+    }
+    if ticket_id is not None:
+        payload["ticket_id"] = ticket_id
+    if client is not None:
+        payload["client"] = client
+    return EventSummary(
+        id=f"attn-{idx}",
+        type="session.needs_attention",
+        payload=payload,
+        correlation_id=None,
+        created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+    )
+
+
+class TestAggregateAttentionEvents:
+    def test_empty_input(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        assert _aggregate_attention_events([]) == []
+
+    def test_single_event_single_row(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        events = [
+            _make_attention_event(
+                session_id="s1",
+                paused_status="dirty_worktree",
+                ticket_id="T-1",
+            )
+        ]
+        rows = _aggregate_attention_events(events)
+        assert len(rows) == 1
+        assert rows[0].key == "T-1"
+        assert rows[0].session_counts == {"dirty_worktree": 1}
+
+    def test_single_refire_collapses_to_one_row(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        events = [
+            _make_attention_event(
+                session_id="s1",
+                paused_status="dirty_worktree",
+                ticket_id="T-1",
+                idx=i,
+            )
+            for i in range(5)
+        ]
+        rows = _aggregate_attention_events(events)
+        assert len(rows) == 1
+        assert rows[0].session_counts == {"dirty_worktree": 1}
+
+    def test_multi_session_thrash_aggregated_count(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        events = [
+            _make_attention_event(
+                session_id=f"s{i}",
+                paused_status="dirty_worktree",
+                ticket_id="T-1",
+                idx=i,
+            )
+            for i in range(3)
+        ]
+        rows = _aggregate_attention_events(events)
+        assert len(rows) == 1
+        assert rows[0].session_counts == {"dirty_worktree": 3}
+
+    def test_mixed_conditions_distinct_rows(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        events = [
+            _make_attention_event(
+                session_id="s1",
+                paused_status="dirty_worktree",
+                ticket_id="T-1",
+                idx=0,
+            ),
+            _make_attention_event(
+                session_id="s1",
+                paused_status="finalize_blocked",
+                ticket_id="T-1",
+                idx=1,
+            ),
+        ]
+        rows = _aggregate_attention_events(events)
+        assert len(rows) == 1
+        assert rows[0].session_counts == {"dirty_worktree": 1, "finalize_blocked": 1}
+
+    def test_missing_session_id_skipped(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        ev = EventSummary(
+            id="bad",
+            type="session.needs_attention",
+            payload={"paused_status": "dirty_worktree", "ticket_id": "T-1"},
+            correlation_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert _aggregate_attention_events([ev]) == []
+
+    def test_missing_paused_status_skipped(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        ev = EventSummary(
+            id="bad",
+            type="session.needs_attention",
+            payload={"session_id": "s1", "ticket_id": "T-1"},
+            correlation_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert _aggregate_attention_events([ev]) == []
+
+    def test_client_fallback_when_no_ticket_id(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        events = [
+            _make_attention_event(
+                session_id="s1",
+                paused_status="dirty_worktree",
+                client="my-client",
+                idx=0,
+            )
+        ]
+        rows = _aggregate_attention_events(events)
+        assert len(rows) == 1
+        assert rows[0].key == "my-client"
+
+    def test_ticket_id_takes_priority_over_client(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        events = [
+            _make_attention_event(
+                session_id="s1",
+                paused_status="dirty_worktree",
+                ticket_id="T-99",
+                client="some-client",
+                idx=0,
+            )
+        ]
+        rows = _aggregate_attention_events(events)
+        assert len(rows) == 1
+        assert rows[0].key == "T-99"
+
+    def test_missing_ticket_and_client_skipped(self) -> None:
+        from cw.tui import _aggregate_attention_events
+
+        ev = EventSummary(
+            id="no-key",
+            type="session.needs_attention",
+            payload={"session_id": "s1", "paused_status": "dirty_worktree"},
+            correlation_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert _aggregate_attention_events([ev]) == []
+
+
+def _render_events_panel(
+    events: list[EventSummary],
+    *,
+    attention_events: list[EventSummary] | None = None,
+    level: DetailLevel = DetailLevel.DEFAULT,
+) -> str:
+    from cw.tui import _events_panel
+
+    buf = StringIO()
+    con = Console(file=buf, width=120, force_terminal=False)
+    con.print(_events_panel(events, attention_events=attention_events, level=level))
+    return buf.getvalue()
+
+
+class TestEventsPanelAttentionDigest:
+    def test_no_attention_events_no_attention_header(
+        self, frozen_now: datetime
+    ) -> None:
+        events = [
+            EventSummary(
+                id="e1",
+                type="session.completed",
+                payload={},
+                correlation_id=None,
+                created_at=frozen_now,
+            )
+        ]
+        output = _render_events_panel(events, attention_events=[])
+        assert "⚠ Attention" not in output
+
+    def test_attention_events_renders_header(self, frozen_now: datetime) -> None:
+        attention = [
+            _make_attention_event(
+                session_id="s1",
+                paused_status="dirty_worktree",
+                ticket_id="T-1",
+                idx=0,
+            )
+        ]
+        output = _render_events_panel([], attention_events=attention)
+        assert "⚠ Attention" in output
+        assert "T-1" in output
+        assert "dirty_worktree" in output
+
+    def test_attention_renders_above_raw_events(self, frozen_now: datetime) -> None:
+        attention = [
+            _make_attention_event(
+                session_id="s1",
+                paused_status="dirty_worktree",
+                ticket_id="T-ABOVE",
+                idx=0,
+            )
+        ]
+        raw = [
+            EventSummary(
+                id="e1",
+                type="session.completed",
+                payload={},
+                correlation_id=None,
+                created_at=frozen_now,
+            )
+        ]
+        output = _render_events_panel(raw, attention_events=attention)
+        attn_pos = output.index("T-ABOVE")
+        raw_pos = output.index("session.completed")
+        assert attn_pos < raw_pos, "attention digest should appear above raw events"
+
+    def test_none_attention_events_no_attention_header(
+        self, frozen_now: datetime
+    ) -> None:
+        events = [
+            EventSummary(
+                id="e1",
+                type="dispatch.tick",
+                payload={},
+                correlation_id=None,
+                created_at=frozen_now,
+            )
+        ]
+        output = _render_events_panel(events, attention_events=None)
+        assert "⚠ Attention" not in output
