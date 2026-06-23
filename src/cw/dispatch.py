@@ -110,10 +110,29 @@ class DispatchTickResult:
     usage_limit_detected: bool = False
 
 
+def _emit_attempt_cap_blocked_event(client_name: str, ticket_id: str) -> None:
+    """Emit a dispatch.tick event when a task is parked at the global attempt ceiling.
+
+    Per-task event (not per-client-per-tick) for operator observability: a quiet
+    loop after several failures should be distinguishable from a healthy idle loop.
+    See GitHub #786.
+    """
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client_name,
+            "claimed": 0,
+            "skip_reason": DispatchSkipReason.ATTEMPT_CAP_BLOCKED,
+            "ticket_id": ticket_id,
+        },
+    )
+
+
 def _claim_next_pending(
     client_name: str,
     *,
     lane: str,
+    config: OrchestratorConfig,
     priority_ticket_ids: list[str] | None = None,
 ) -> TicketTask | None:
     """Atomically claim the next PENDING task for a client in a specific lane.
@@ -128,6 +147,11 @@ def _claim_next_pending(
     by subsequent ticks once the prioritised tasks are exhausted (the
     parameter is intentionally a *preference*, not a filter — see the
     fallback after the priority loop).
+
+    Global attempt ceiling: if task.attempts >= config.global_attempt_ceiling,
+    the task is parked BLOCKED_ON_USER instead of claimed. A dispatch.tick
+    event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
+    observability. See GitHub #786.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -140,6 +164,15 @@ def _claim_next_pending(
                         and task.lane == lane
                         and task.status == QueueItemStatus.PENDING
                     ):
+                        if task.attempts >= config.global_attempt_ceiling:
+                            transition_task_status(
+                                task,
+                                QueueItemStatus.BLOCKED_ON_USER,
+                                disposition="attempt_cap_blocked",
+                            )
+                            save_dev_queue(store)
+                            _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
+                            break
                         transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
                         save_dev_queue(store)
@@ -156,6 +189,15 @@ def _claim_next_pending(
         )
         if pending:
             task = pending[0]
+            if task.attempts >= config.global_attempt_ceiling:
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="attempt_cap_blocked",
+                )
+                save_dev_queue(store)
+                _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
+                return None
             transition_task_status(task, QueueItemStatus.RUNNING)
             task.attempts += 1
             save_dev_queue(store)
@@ -229,6 +271,13 @@ def _revert_claimed_task_to_pending(client_name: str, ticket_id: str) -> None:
     Used by both the usage-limit and broad spawn-error paths: the task was
     claimed to RUNNING by :func:`_claim_next_pending` but spawn never
     succeeded, so it must return to PENDING for a later tick to retry.
+
+    # Why: task.attempts is NOT decremented here. The increment-at-claim
+    # contract is intentional — usage_limit deaths and spawn errors consume
+    # real dispatch budget and must count toward the global_attempt_ceiling
+    # (#786). Decrementing would let churn bypass the backstop. The corollary
+    # (#756 stalled-stage cap) uses the same task.attempts field; both caps
+    # are outer backstops sharing one counter, not parallel counters.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -706,6 +755,7 @@ def _dispatch_client_lanes(
             task: TicketTask | None = _claim_next_pending(
                 client.name,
                 lane=lane_cfg.name,
+                config=config,
                 priority_ticket_ids=priority_ids,
             )
             if task is None:

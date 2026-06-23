@@ -38,6 +38,7 @@ from cw.dispatch import (
 from cw.events import read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
+    DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     ClientConfig,
     CwState,
@@ -1996,6 +1997,154 @@ class TestClaimNextPendingAttempts:
         claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-251-cumulative")
         assert claimed.status == QueueItemStatus.RUNNING
         assert claimed.attempts == 3
+
+
+# ---------------------------------------------------------------------------
+# TestGlobalAttemptCeiling
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalAttemptCeiling:
+    """_claim_next_pending parks tasks at the global attempt ceiling.
+
+    GitHub issue #786: the dispatch loop must not re-spawn tasks indefinitely
+    when workers die without emitting a sentinel (e.g. during a usage-limit
+    window). A global attempt ceiling parks at-ceiling tasks BLOCKED_ON_USER
+    and emits a dispatch.tick with skip_reason=ATTEMPT_CAP_BLOCKED.
+    """
+
+    def _ceiling_config(self, ceiling: int = 3) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            global_attempt_ceiling=ceiling,
+        )
+
+    def test_below_ceiling_claims_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Task below the ceiling is claimed and attempts is incremented."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-below",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=2,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-786-below")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 3
+
+    def test_at_ceiling_parks_task_blocked(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Task at the ceiling is parked BLOCKED_ON_USER; attempts not incremented."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-ceiling",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-ceiling")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        # attempts must NOT be incremented when parking at the ceiling
+        assert parked.attempts == 3
+        # daemon was never invoked
+        assert daemon.spawn_calls == []
+
+    def test_at_ceiling_emits_attempt_cap_blocked_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Ceiling-parked task emits dispatch.tick skip_reason=attempt_cap_blocked."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-event",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-786-cap-event",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        cap_events = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.ATTEMPT_CAP_BLOCKED
+        ]
+        assert len(cap_events) == 1
+        assert cap_events[0].payload["ticket_id"] == "GEN-786-event"
+        assert cap_events[0].payload["client"] == "test-client"
+
+    def test_at_ceiling_priority_path_parks_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Ceiling check also fires on the priority-ticket path."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-pri",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        # Use use_plan=True so the priority-ticket path in _claim_next_pending
+        # is exercised. The plan must reference the task's client so it gets
+        # a non-empty priority_ids list.
+        save_plan(
+            DispatchPlan(
+                tasks=[TicketTask(ticket_id="GEN-786-pri", client="test-client")]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=3), native_daemon=daemon, use_plan=True
+        )
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-pri")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert parked.attempts == 3
+
+    def test_default_ceiling_is_ten(self) -> None:
+        """DEFAULT_GLOBAL_ATTEMPT_CEILING constant value and model default match."""
+        assert DEFAULT_GLOBAL_ATTEMPT_CEILING == 10
+        cfg = OrchestratorConfig()
+        assert cfg.global_attempt_ceiling == DEFAULT_GLOBAL_ATTEMPT_CEILING
 
 
 # ---------------------------------------------------------------------------

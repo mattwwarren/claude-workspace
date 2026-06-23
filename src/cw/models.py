@@ -222,18 +222,27 @@ class OrchestratorEventType(StrEnum):
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
 
 
+# Absolute ceiling on task.attempts across all kill causes (#786).
+# Lives here so OrchestratorConfig.global_attempt_ceiling can reference it
+# directly without a circular import (dispatch.py imports from models.py).
+DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
+
+
 class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
     Precedence (highest first):
     FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > LANE_CAP_BLOCKED
     > SPAWN_ERROR > NO_PENDING > NONE.
+    ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
+    parks a task; it is not part of the per-client-tick precedence chain.
     """
 
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
     CAP_FULL = "cap_full"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
+    ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
     SPAWN_ERROR = "spawn_error"
     NO_PENDING = "no_pending"
     NONE = "none"
@@ -444,6 +453,11 @@ class OrchestratorConfig(BaseModel):
     # Keyed by TicketTask.scope_hint; unknown tiers fall back to
     # DEFAULT_STALLED_RETRY_CAP. See GitHub issue #756.
     stalled_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
+    # Absolute ceiling on task.attempts across ALL kill causes. When a task
+    # reaches this count in _claim_next_pending, it is parked BLOCKED_ON_USER
+    # instead of spawning again. Above the per-stage caps (#756), below the
+    # observed 14-attempt usage-limit churn. See GitHub issue #786.
+    global_attempt_ceiling: int = DEFAULT_GLOBAL_ATTEMPT_CEILING
     # Number of consecutive failed idle-watchdog observations required before a
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.
