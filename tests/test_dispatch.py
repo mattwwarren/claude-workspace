@@ -26,7 +26,6 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
-    FRESHNESS_MAIN_BEHIND,
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
@@ -2558,6 +2557,10 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
         lines: list[str] = []
@@ -2584,6 +2587,10 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
         lines: list[str] = []
@@ -2609,6 +2616,10 @@ class TestRunDispatchLoopVerbose:
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -3608,10 +3619,11 @@ class TestFreshnessGateAutoFF:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """get_head_branch returns default_branch → normal path.
+        """get_head_branch returns default_branch → normal path (not non_main_head).
 
-        When HEAD == default_branch and the repo is stale, dispatch emits
-        freshness_detail="main_behind_origin" (not "non_main_head").
+        When HEAD == default_branch and the repo is stale with diverged safety,
+        dispatch emits freshness_detail="main_diverged_from_origin" — NOT
+        "non_main_head" (which would be wrong when we ARE on the default branch).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(ticket_id="CW-112", client="test-client")
@@ -3641,7 +3653,10 @@ class TestFreshnessGateAutoFF:
         assert (
             tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_BEHIND
+        # Key assertion: not NON_MAIN_HEAD — we ARE on the default branch.
+        # With diverged safety, the new distinct detail is FRESHNESS_MAIN_DIVERGED.
+        assert tick_events[0].payload["freshness_detail"] != FRESHNESS_NON_MAIN_HEAD
+        assert tick_events[0].payload["freshness_detail"] == "main_diverged_from_origin"
 
     def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
         self,
@@ -3722,6 +3737,128 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
         assert len(events) == 1
+
+    def test_auto_ff_ahead_emits_diverged_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='ahead' → freshness_detail='main_diverged_from_origin' (#766).
+
+        When local main is ahead of origin (unpushed commits exist), the
+        dispatch loop should emit a distinct freshness_detail so the operator
+        can distinguish "ahead" from "behind" in the status output.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-120", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "ahead",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-ahead-diverged-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == "main_diverged_from_origin"
+        assert any("diverged" in ln for ln in emitted)
+
+    def test_auto_ff_diverged_emits_diverged_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='diverged' → freshness_detail='main_diverged_from_origin' (#766).
+
+        When local main has diverged from origin (has both local and remote
+        commits), a distinct freshness_detail tells the operator to reconcile
+        rather than just wait for auto-ff.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-121", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "diverged",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-diverged-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == "main_diverged_from_origin"
+        assert any("diverged" in ln for ln in emitted)
+
+    def test_auto_ff_behind_dirty_emits_dirty_checkout_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='behind' + dirty checkout → freshness_detail='main_dirty_checkout'.
+
+        When local main is behind origin but the working tree has uncommitted
+        tracked changes, auto-ff is blocked.  A distinct freshness_detail
+        tells the operator to commit or stash — not wait for auto-ff.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-122", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_checkout_dirty",
+            lambda _client: True,
+            raising=False,
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-dirty-checkout-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == "main_dirty_checkout"
+        assert any("dirty" in ln or "uncommitted" in ln for ln in emitted)
 
 
 # ---------------------------------------------------------------------------

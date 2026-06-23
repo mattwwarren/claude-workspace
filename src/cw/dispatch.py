@@ -72,6 +72,7 @@ from cw.worktree import (
     fast_forward_main,
     get_head_branch,
     is_main_behind_origin,
+    is_main_checkout_dirty,
     remove_worktree,
     worktree_has_unsaved_work,
 )
@@ -338,6 +339,8 @@ def _emit_usage_limit_skip_events(
 
 FRESHNESS_NON_MAIN_HEAD = "non_main_head"
 FRESHNESS_MAIN_BEHIND = "main_behind_origin"
+FRESHNESS_MAIN_DIRTY_CHECKOUT = "main_dirty_checkout"
+FRESHNESS_MAIN_DIVERGED = "main_diverged_from_origin"
 
 
 def _resolve_freshness(
@@ -386,6 +389,10 @@ def _resolve_freshness(
 
     if stale and auto_ff:
         ff_safety = check_main_ff_safety(client)
+        if ff_safety in ("ahead", "diverged"):
+            return (True, FRESHNESS_MAIN_DIVERGED)
+        if ff_safety == "behind" and is_main_checkout_dirty(client):
+            return (True, FRESHNESS_MAIN_DIRTY_CHECKOUT)
         if ff_safety == "behind":
             try:
                 fast_forward_main(client, ignore_untracked=True)
@@ -451,6 +458,19 @@ def _emit_stale_skip(
                         f" expected '{client.default_branch}'"
                         f" — run: git -C {client.workspace_path}"
                         f" checkout {client.default_branch}"
+                    )
+                elif freshness_detail == FRESHNESS_MAIN_DIRTY_CHECKOUT:
+                    emit(
+                        f"WARN {client.name}/{payload['ticket_id']}:"
+                        " main checkout has uncommitted changes, ticket skipped"
+                        f" — commit or stash changes in {client.workspace_path}"
+                    )
+                elif freshness_detail == FRESHNESS_MAIN_DIVERGED:
+                    emit(
+                        f"WARN {client.name}/{payload['ticket_id']}:"
+                        " main has diverged from origin (ahead or diverged),"
+                        " ticket skipped — reconcile with: git -C"
+                        f" {client.workspace_path} pull --rebase"
                     )
                 else:
                     emit(

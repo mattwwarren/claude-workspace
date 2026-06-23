@@ -29,6 +29,8 @@ from cw.dev_queue import (
 )
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     TICK_STALE_SECONDS,
     run_dispatch_loop,
@@ -326,6 +328,16 @@ def _emit_freshness_subline(
         )
     elif tick_freshness_detail == FRESHNESS_MAIN_BEHIND:
         click.echo(f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed")
+    elif tick_freshness_detail == FRESHNESS_MAIN_DIRTY_CHECKOUT:
+        click.echo(
+            f"  ⚠ {client_name}: main checkout dirty — commit or stash changes,"
+            " then auto-ff will retry"
+        )
+    elif tick_freshness_detail == FRESHNESS_MAIN_DIVERGED:
+        click.echo(
+            f"  ⚠ {client_name}: main diverged from origin —"
+            " reconcile with: git -C <workspace> pull --rebase"
+        )
 
 
 def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:

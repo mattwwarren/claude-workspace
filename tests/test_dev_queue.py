@@ -838,6 +838,66 @@ class TestStatusFreshnessSubline:
         assert list(data.keys()) == ["client-a"]
         assert "client-b" not in data
 
+    def test_dirty_checkout_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """freshness_detail='main_dirty_checkout' → subline mentions dirty (#766)."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-110", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail="main_dirty_checkout",
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "dirty" in result.output
+
+    def test_diverged_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """freshness_detail='main_diverged_from_origin' → subline mentions diverged."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-111", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail="main_diverged_from_origin",
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "diverged" in result.output
+
 
 # ---------------------------------------------------------------------------
 # TestDispatchPlanPersistence
