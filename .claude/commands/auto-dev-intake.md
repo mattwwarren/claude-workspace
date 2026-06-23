@@ -186,11 +186,16 @@ cat > .cw/context.json << 'CWCTXEOF'
   "ticket_body": "<body from ticket fetch>",
   "comments": ["<comment 1>", "<comment 2>", "..."],
   "scope_hint": null,
-  "prior_decisions": []
+  "prior_decisions": [],
+  "materialized_by_session": "<session_id from .claude/cw-context.json>"
 }
 CWCTXEOF
 ```
 
-**Idempotency:** if `.cw/context.json` already exists and `ticket_id` matches, skip re-fetch and re-write. Read the existing file and confirm the `ticket_id` field matches before skipping.
+Stamp `materialized_by_session` with the current `session_id` (read it from `.claude/cw-context.json`). This is what makes the idempotency guard below requeue-safe.
+
+**Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST re-fetch the ticket (`gh issue view <n> --json title,body,comments`) and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both `ticket_id` and `materialized_by_session` before deciding to skip.
+
+> **Why:** `requeue` reuses the worktree (`create_worktree(..., allow_dirty_reuse=True)`), so a stale `.cw/context.json` survives across runs. A `ticket_id`-only guard skipped re-fetch on every requeue, so operator resolutions added as comments between requeues never reached the plan stage (GitHub #837). Keying the skip on the writing session re-fetches on requeue while preserving the within-session heavy-fetch-once optimization.
 
 **Note:** `.cw/context.json` is distinct from `.claude/cw-context.json` (written by `cw dispatch`, contains `session_id` and `ticket_id` only). Per-stage files read `.cw/context.json` for full ticket orientation; the `CW_SESSION`/`TICKET` bootstrap reads `.claude/cw-context.json`.
