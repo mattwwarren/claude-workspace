@@ -52,6 +52,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
@@ -4331,3 +4332,84 @@ class TestDispatchLoopExitedEvent:
         daemon = FakeNativeDaemonClient()
         # Should complete without raising despite DISPATCH_LOOP_EXITED emit failing
         run_dispatch_loop(once=True, native_daemon=daemon)
+
+
+# ---------------------------------------------------------------------------
+# TestApplyStagedDecision
+# ---------------------------------------------------------------------------
+
+
+class TestApplyStagedDecision:
+    """apply_staged_decision stamps disposition/pr_url on the task for each branch."""
+
+    def _make_running_task(
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.FINALIZE,
+    ) -> TicketTask:
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def test_shipped_stamps_disposition_and_pr_url(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """shipped at terminal stage → COMPLETED + disposition='shipped' + pr_url."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SHIP-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "shipped",
+            "pr": {"url": "https://github.com/user/repo/pull/42"},
+        }
+        apply_staged_decision(task, "shipped", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "shipped"
+        assert task.pr_url == "https://github.com/user/repo/pull/42"
+
+    def test_no_op_stamps_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """no_op → COMPLETED + disposition='no_op'."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NOOP-1")
+        apply_staged_decision(task, "no_op", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "no_op"
+
+    def test_stage_failure_stamps_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """STAGE_FAILURE status → BLOCKED_ON_USER + disposition=status."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("FAIL-1")
+        apply_staged_decision(task, "blocked", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "blocked"
+
+    def test_none_status_stamps_abandoned(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """None/unparseable status → BLOCKED_ON_USER + disposition='abandoned'."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NONE-1")
+        apply_staged_decision(task, None, None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "abandoned"
