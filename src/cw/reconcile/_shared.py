@@ -659,10 +659,14 @@ def _apply_sentinel_to_task(
             apply_staged_decision(target, sentinel.status, last_result, clients)
         # BlockedResult: sentinel failed to parse or was malformed.
         elif sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
-            transition_task_status(target, QueueItemStatus.FAILED)
+            transition_task_status(
+                target, QueueItemStatus.FAILED, disposition="abandoned"
+            )
         elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
             if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
-                transition_task_status(target, QueueItemStatus.FAILED)
+                transition_task_status(
+                    target, QueueItemStatus.FAILED, disposition="abandoned"
+                )
             else:
                 transition_task_status(target, QueueItemStatus.PENDING)
                 target.session_id = None
@@ -675,7 +679,9 @@ def _apply_sentinel_to_task(
             # signal. Never mark it COMPLETED — that silently retires unshipped
             # work as "shipped" (#750, the #728 loss). Surface as FAILED so the
             # operator sees it instead of a phantom completion.
-            transition_task_status(target, QueueItemStatus.FAILED)
+            transition_task_status(
+                target, QueueItemStatus.FAILED, disposition="abandoned"
+            )
 
         save_dev_queue(store)
 
@@ -1087,7 +1093,9 @@ def _cleanup_timed_out_worktree(
                             and task.status == QueueItemStatus.PENDING
                         ):
                             transition_task_status(
-                                task, QueueItemStatus.BLOCKED_ON_USER
+                                task,
+                                QueueItemStatus.BLOCKED_ON_USER,
+                                disposition="dirty_worktree",
                             )
                             save_dev_queue(store)
                             break

@@ -35,6 +35,8 @@ from cw.config import (
 )
 from cw.dev_queue import (
     _advance_task_pointer,
+    _derive_disposition,
+    _extract_pr_url,
     dev_queue_lock,
     load_dev_queue,
     load_plan,
@@ -491,7 +493,9 @@ def _spawn_claimed_task(
                             and stored_task.status == QueueItemStatus.RUNNING
                         ):
                             transition_task_status(
-                                stored_task, QueueItemStatus.BLOCKED_ON_USER
+                                stored_task,
+                                QueueItemStatus.BLOCKED_ON_USER,
+                                disposition="dirty_worktree",
                             )
                             stored_task.session_id = None
                             break
@@ -1097,7 +1101,13 @@ def _resolve_scope_tier(
     return task.scope_hint
 
 
-def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
+def _stage_advance(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    *,
+    disposition: str | None = None,
+    pr_url: str | None = None,
+) -> None:
     """Advance task to next pipeline stage, or mark COMPLETED at terminal stage.
 
     Precondition: task.status must be RUNNING. Only called from the B2
@@ -1126,7 +1136,9 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
         transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
         return
     if task.stage == stages[-1]:
-        transition_task_status(task, QueueItemStatus.COMPLETED)
+        transition_task_status(
+            task, QueueItemStatus.COMPLETED, disposition=disposition, pr_url=pr_url
+        )
     else:
         _advance_task_pointer(task, stages)
 
@@ -1145,6 +1157,8 @@ def apply_staged_decision(
     path observes the completion first (#698). Precondition: task.status is
     RUNNING. Mutates task in place.
     """
+    disposition = _derive_disposition(status)
+    pr_url = _extract_pr_url(last_result)
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
@@ -1152,29 +1166,39 @@ def apply_staged_decision(
         # task.scope_hint when the sentinel omits it (#696).
         tier = _resolve_scope_tier(last_result, task)
         if tier == SCOPE_TIER_SMALL:
-            _stage_advance(task, clients)
+            _stage_advance(task, clients, disposition=disposition, pr_url=pr_url)
         else:
-            transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+            transition_task_status(
+                task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+            )
     elif status in PAUSED_FOR_USER_INPUT_STATUSES:
         # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
         # premises_pending_verification). Scope-gated statuses caught by Rule 1.
-        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+        )
     elif status in STAGE_SUCCESS_STATUSES:
         # Rule 3: shipped -- advance or complete
-        _stage_advance(task, clients)
+        _stage_advance(task, clients, disposition=disposition, pr_url=pr_url)
     elif status == "no_op":
         # Rule 4: pre-flight already satisfied -- terminal
         # regardless of remaining stages
-        transition_task_status(task, QueueItemStatus.COMPLETED)
+        transition_task_status(
+            task, QueueItemStatus.COMPLETED, disposition="no_op"
+        )
     elif status in STAGE_FAILURE_STATUSES:
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
-        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+        )
     else:
         # Rule 6: None/not dict/missing status -- conservative fallback
         # Why: unparseable sentinel must never silently advance/complete
         # (B2 correctness requirement). Changes pre-B2 behavior which
         # fell through to COMPLETED.
-        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition="abandoned"
+        )
 
 
 def _apply_events_to_store(

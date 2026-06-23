@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 from cw.config import save_state
 from cw.dev_queue import (
+    _derive_disposition,
+    _extract_pr_url,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -395,7 +397,11 @@ def _apply_idle_queue_mutations(
     recovered_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
     merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
     gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
-    parked_ids = {c.ticket_id for c in park_candidates if c.ticket_id}
+    park_disposition_by_tid = {
+        c.ticket_id: c.paused_status
+        for c in park_candidates
+        if c.ticket_id
+    }
     salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
     blocked: list[str] = []
     merged_completed: list[str] = []
@@ -403,7 +409,7 @@ def _apply_idle_queue_mutations(
         recovered_ids
         or merged_tids
         or gh_blocked_tids
-        or parked_ids
+        or park_disposition_by_tid
         or salvaged_ticket_ids_set
     ):
         return blocked, merged_completed
@@ -418,7 +424,10 @@ def _apply_idle_queue_mutations(
                 task.session_id = None
                 changed = True
             elif task.ticket_id in merged_tids:
-                transition_task_status(task, QueueItemStatus.COMPLETED)
+                # Why: PR URL is not in hand here — not worth a second gh call.
+                transition_task_status(
+                    task, QueueItemStatus.COMPLETED, disposition="shipped"
+                )
                 task.session_id = None
                 merged_completed.append(task.ticket_id)
                 changed = True
@@ -426,13 +435,23 @@ def _apply_idle_queue_mutations(
                 transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
                 task.session_id = None
                 changed = True
-            elif task.ticket_id in parked_ids:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+            elif task.ticket_id in park_disposition_by_tid:
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=park_disposition_by_tid[task.ticket_id],
+                )
                 blocked.append(task.ticket_id)
                 changed = True
             elif task.ticket_id in salvaged_ticket_ids_set:
                 result = salvaged_result_by_ticket[task.ticket_id]
-                transition_task_status(task, _queue_status_for_salvaged(result))
+                last_result = result.model_dump(mode="json")
+                transition_task_status(
+                    task,
+                    _queue_status_for_salvaged(result),
+                    disposition=_derive_disposition(result.status),
+                    pr_url=_extract_pr_url(last_result),
+                )
                 changed = True
         if changed:
             save_dev_queue(store)

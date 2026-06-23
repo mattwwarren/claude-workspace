@@ -103,7 +103,8 @@ class Stage(StrEnum):
 CW_STATE_SCHEMA_VERSION = 10
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
-DEV_QUEUE_SCHEMA_VERSION = 4
+# v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
+DEV_QUEUE_SCHEMA_VERSION = 5
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -295,6 +296,16 @@ class TicketTask(BaseModel):
     # RFC 0005 A1 — dormant; no dispatch wiring yet (GitHub #612).
     stage: Stage = DEFAULT_STAGE
     stage_base_ref: str | None = None
+    # Terminal disposition for this ticket — the AutoDevResult status (or a
+    # reconcile reason string) that caused the task to reach COMPLETED,
+    # BLOCKED_ON_USER, or FAILED.  Cleared on PENDING/CANCELLED (requeue/cancel).
+    # None for in-flight or pre-v5 legacy tasks.  GitHub #310.
+    disposition: str | None = None
+    # PR URL for shipped tasks (disposition="shipped").  None otherwise.
+    pr_url: str | None = None
+    # Timestamp when the task reached a terminal status (COMPLETED/BLOCKED_ON_USER/
+    # FAILED).  Cleared on requeue/cancel.  None for in-flight or pre-v5 legacy.
+    completed_at: datetime | None = None
 
 
 class DispatchPlan(BaseModel):
