@@ -430,7 +430,11 @@ def _apply_idle_queue_mutations(
                 merged_completed.append(task.ticket_id)
                 changed = True
             elif task.ticket_id in gh_blocked_tids:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=_GH_CHECK_BLOCKED_REASON,
+                )
                 task.session_id = None
                 changed = True
             elif task.ticket_id in park_disposition_by_tid:
