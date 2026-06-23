@@ -71,8 +71,8 @@ _ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 _DISCLAIMER_REJECTION_PATTERN = "requires accepting the disclaimer first"
 
 
-def _spawn_clean_env() -> dict[str, str]:
-    """Return os.environ with GIT_* vars stripped.
+def _spawn_clean_env(cwd: Path) -> dict[str, str]:
+    """Return os.environ with GIT_* vars stripped and PWD set to cwd.
 
     Prevents the spawned ``claude --bg`` worker from inheriting GIT_DIR,
     GIT_WORK_TREE, or GIT_INDEX_FILE from the orchestrator's environment.
@@ -80,13 +80,22 @@ def _spawn_clean_env() -> dict[str, str]:
     ``.git`` / index file — leaking commits and uncommitted changes into the
     main checkout instead of staying in the worker's worktree (#766).
 
+    ``subprocess.run(cwd=...)`` changes the OS-level CWD but does NOT update
+    the ``$PWD`` environment variable.  If ``$PWD`` still points to the
+    orchestrator's main checkout, the Claude daemon uses it as the project
+    root, causing git ops to commit into the main checkout instead of the
+    worker's worktree (#766).  Explicitly setting ``env["PWD"] = str(cwd)``
+    ensures the worker sees the worktree as its project root.
+
     Mirrors the identical helper in ``spawn.py:_git_clean_env`` and
     ``worktree.py:_run_git``. The duplication is intentional for now:
     importing from ``spawn`` would create a circular import
     (``spawn`` already imports ``native_daemon``). A future shared util
     (e.g. ``cw._git``) can consolidate all three.
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["PWD"] = str(cwd)
+    return env
 
 
 @runtime_checkable
@@ -169,7 +178,7 @@ class RealNativeDaemonClient:
             proc = subprocess.run(
                 cmd,
                 cwd=cwd,
-                env=_spawn_clean_env(),
+                env=_spawn_clean_env(cwd),
                 capture_output=True,
                 text=True,
                 check=True,
