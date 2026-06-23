@@ -181,7 +181,6 @@ def _tickets_table(
 
 
 def _prs_table(prs: list[MonitoredPR], *, level: DetailLevel) -> RenderableType:
-    # Why: ci_status/mergeable surfaced in plain-text path only; TUI deferred
     """Render a table of monitored PRs for one client."""
     if not prs:
         return Text("  (no monitored PRs)", style="dim")
@@ -194,15 +193,25 @@ def _prs_table(prs: list[MonitoredPR], *, level: DetailLevel) -> RenderableType:
     table.add_column("PR", width=10, no_wrap=True)
     table.add_column("ROLE", width=8, no_wrap=True)
     table.add_column("STATUS", overflow="fold")
+    table.add_column("CI", width=10, no_wrap=True)
     if level is DetailLevel.VERBOSE:
+        table.add_column("MERGEABLE", width=10, no_wrap=True)
         table.add_column("UNRESOLVED", width=10, justify="right")
     for pr in sorted(prs, key=lambda p: (p.repo, p.pr_number)):
         row = [
             f"{pr.repo}#{pr.pr_number}",
             pr.role,
             pr.status,
+            pr.ci_status or "—",
         ]
         if level is DetailLevel.VERBOSE:
+            if pr.mergeable is True:
+                mergeable_str = "✓"
+            elif pr.mergeable is False:
+                mergeable_str = "✗"
+            else:
+                mergeable_str = "—"
+            row.append(mergeable_str)
             row.append(str(pr.unresolved_threads))
         table.add_row(*row)
     return table

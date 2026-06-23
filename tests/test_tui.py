@@ -836,6 +836,157 @@ class TestBuildWatchRows:
 
 
 # ---------------------------------------------------------------------------
+# Tests: CI / MERGEABLE columns in _prs_table (issue #834)
+# ---------------------------------------------------------------------------
+
+
+def _render_prs_table(
+    prs: list[MonitoredPR],
+    *,
+    level: DetailLevel,
+) -> str:
+    from cw.tui import _prs_table
+
+    buf = StringIO()
+    con = Console(file=buf, width=120, force_terminal=False)
+    con.print(_prs_table(prs, level=level))
+    return buf.getvalue()
+
+
+class TestPRsTableCIColumn:
+    def test_default_level_shows_ci_column(self) -> None:
+        prs = [
+            MonitoredPR(
+                repo="org/repo",
+                pr_number=1,
+                role="author",
+                status="watching",
+                unresolved_threads=0,
+                ci_status="success",
+                mergeable=True,
+            )
+        ]
+        output = _render_prs_table(prs, level=DetailLevel.DEFAULT)
+        assert "CI" in output
+        assert "success" in output
+
+    def test_default_level_ci_none_renders_dash(self) -> None:
+        prs = [
+            MonitoredPR(
+                repo="org/repo",
+                pr_number=2,
+                role="author",
+                status="watching",
+                unresolved_threads=0,
+                ci_status=None,
+                mergeable=None,
+            )
+        ]
+        output = _render_prs_table(prs, level=DetailLevel.DEFAULT)
+        assert "CI" in output
+        assert "—" in output
+
+    def test_verbose_level_shows_mergeable_column(self) -> None:
+        prs = [
+            MonitoredPR(
+                repo="org/repo",
+                pr_number=3,
+                role="author",
+                status="watching",
+                unresolved_threads=0,
+                ci_status="success",
+                mergeable=True,
+            )
+        ]
+        output = _render_prs_table(prs, level=DetailLevel.VERBOSE)
+        assert "MERGEABLE" in output
+        assert "✓" in output
+
+    def test_verbose_level_mergeable_false_renders_cross(self) -> None:
+        prs = [
+            MonitoredPR(
+                repo="org/repo",
+                pr_number=4,
+                role="author",
+                status="watching",
+                unresolved_threads=0,
+                ci_status="failure",
+                mergeable=False,
+            )
+        ]
+        output = _render_prs_table(prs, level=DetailLevel.VERBOSE)
+        assert "✗" in output
+
+    def test_verbose_level_mergeable_none_renders_dash(self) -> None:
+        prs = [
+            MonitoredPR(
+                repo="org/repo",
+                pr_number=5,
+                role="author",
+                status="watching",
+                unresolved_threads=0,
+                ci_status=None,
+                mergeable=None,
+            )
+        ]
+        output = _render_prs_table(prs, level=DetailLevel.VERBOSE)
+        assert "MERGEABLE" in output
+        assert "—" in output
+
+    def test_compact_level_unchanged(self) -> None:
+        """COMPACT mode shows counts-only; CI/MERGEABLE columns absent."""
+        from io import StringIO
+
+        from cw.orchestrate import OrchestratorStatus
+
+        status = OrchestratorStatus(
+            generated_at=datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC),
+            monitored_prs=[
+                MonitoredPR(
+                    repo="org/repo",
+                    pr_number=6,
+                    role="author",
+                    status="watching",
+                    unresolved_threads=0,
+                    ci_status="success",
+                    mergeable=True,
+                )
+            ],
+        )
+        buf = StringIO()
+        con = Console(file=buf, width=120, force_terminal=False)
+        from cw.tui import render_dashboard
+
+        con.print(
+            render_dashboard(
+                status,
+                level=DetailLevel.COMPACT,
+                now=datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC),
+                home="/home/matthew",
+            )
+        )
+        out = buf.getvalue()
+        assert "CI" not in out
+        assert "MERGEABLE" not in out
+
+    def test_default_level_no_mergeable_column(self) -> None:
+        """MERGEABLE column absent at DEFAULT level."""
+        prs = [
+            MonitoredPR(
+                repo="org/repo",
+                pr_number=7,
+                role="author",
+                status="watching",
+                unresolved_threads=0,
+                ci_status="pending",
+                mergeable=True,
+            )
+        ]
+        output = _render_prs_table(prs, level=DetailLevel.DEFAULT)
+        assert "MERGEABLE" not in output
+
+
+# ---------------------------------------------------------------------------
 # Tests: lane suffix in _tickets_table + _group_by_client (issue #561)
 # ---------------------------------------------------------------------------
 
