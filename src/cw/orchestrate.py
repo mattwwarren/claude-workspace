@@ -600,8 +600,7 @@ def orchestrator_status() -> OrchestratorStatus:
     recent = [_summarise_event(e) for e in tail]
 
     attention_raw = [
-        e for e in all_events
-        if e.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        e for e in all_events if e.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
     ]
     attention = [_summarise_event(e) for e in attention_raw]
 
