@@ -1183,9 +1183,7 @@ def apply_staged_decision(
     elif status == "no_op":
         # Rule 4: pre-flight already satisfied -- terminal
         # regardless of remaining stages
-        transition_task_status(
-            task, QueueItemStatus.COMPLETED, disposition="no_op"
-        )
+        transition_task_status(task, QueueItemStatus.COMPLETED, disposition="no_op")
     elif status in STAGE_FAILURE_STATUSES:
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
         transition_task_status(

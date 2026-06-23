@@ -1670,6 +1670,91 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["stage"] == Stage.IMPL.value
         assert migrated["tasks"][0]["stage_base_ref"] == "abc1234"
 
+    def test_v4_to_v5_fills_disposition_default(self) -> None:
+        """migrate_dev_queue fills disposition=None on tasks missing the key."""
+        raw: dict[str, object] = {
+            "schema_version": 4,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-30",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                    "lane": DEFAULT_LANE,
+                    "stage": DEFAULT_STAGE.value,
+                    "stage_base_ref": None,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["disposition"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_v4_to_v5_fills_pr_url_default(self) -> None:
+        """migrate_dev_queue fills pr_url=None on tasks missing the key."""
+        raw: dict[str, object] = {
+            "schema_version": 4,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-31",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                    "lane": DEFAULT_LANE,
+                    "stage": DEFAULT_STAGE.value,
+                    "stage_base_ref": None,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["pr_url"] is None
+
+    def test_v4_to_v5_fills_completed_at_default(self) -> None:
+        """migrate_dev_queue fills completed_at=None on tasks missing the key."""
+        raw: dict[str, object] = {
+            "schema_version": 4,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-32",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "total_cost_usd": None,
+                    "lane": DEFAULT_LANE,
+                    "stage": DEFAULT_STAGE.value,
+                    "stage_base_ref": None,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["completed_at"] is None
+
+    def test_v5_disposition_preserved_idempotently(self) -> None:
+        """Existing disposition values survive a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 5,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-33",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "completed",
+                    "total_cost_usd": None,
+                    "lane": DEFAULT_LANE,
+                    "stage": DEFAULT_STAGE.value,
+                    "stage_base_ref": None,
+                    "disposition": "shipped",
+                    "pr_url": "https://github.com/foo/bar/pull/1",
+                    "completed_at": "2026-06-23T10:00:00+00:00",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["disposition"] == "shipped"
+        assert migrated["tasks"][0]["pr_url"] == "https://github.com/foo/bar/pull/1"
+
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""
         import json
@@ -2281,6 +2366,8 @@ class TestDevQueueTasks:
             "created_at",
             "total_cost_usd",
             "worktree_path",
+            "disposition",
+            "pr_url",
         }
         assert set(tasks[0].keys()) == expected_fields
 
@@ -2329,6 +2416,8 @@ class TestDevQueueTasks:
         assert "SESSION_ID" in result.output
         assert "ATTEMPTS" in result.output
         assert "LANE" in result.output
+        assert "DISPOSITION" in result.output
+        assert "PR" in result.output
 
     def test_tasks_empty_output(self, tmp_config_dir: Path) -> None:
         save_dev_queue(DevQueueStore(tasks=[]))
@@ -2997,3 +3086,173 @@ class TestTransitionTaskStatus:
         assert new_status == QueueItemStatus.CANCELLED
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.CANCELLED
+
+    def test_terminal_stamps_disposition_and_completed_at(self) -> None:
+        """COMPLETED/BLOCKED_ON_USER/FAILED stamp disposition + completed_at."""
+        for status in (
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.BLOCKED_ON_USER,
+            QueueItemStatus.FAILED,
+        ):
+            task = TicketTask(
+                ticket_id="T-dsp", client="genhealth", status=QueueItemStatus.PENDING
+            )
+            before = datetime.now(UTC)
+            transition_task_status(
+                task, status, disposition="shipped", pr_url="http://x"
+            )
+            after = datetime.now(UTC)
+            assert task.disposition == "shipped"
+            assert task.pr_url == "http://x"
+            assert task.completed_at is not None
+            assert before <= task.completed_at <= after
+
+    def test_terminal_stamps_none_disposition_by_default(self) -> None:
+        """Terminal transition with no disposition kwarg stamps disposition=None."""
+        task = TicketTask(
+            ticket_id="T-dsp2", client="genhealth", status=QueueItemStatus.PENDING
+        )
+        transition_task_status(task, QueueItemStatus.COMPLETED)
+        assert task.disposition is None
+        assert task.pr_url is None
+        assert task.completed_at is not None
+
+    def test_reset_clears_disposition(self) -> None:
+        """PENDING and CANCELLED clear disposition/pr_url/completed_at."""
+        for reset_status in (QueueItemStatus.PENDING, QueueItemStatus.CANCELLED):
+            task = TicketTask(
+                ticket_id="T-reset",
+                client="genhealth",
+                status=QueueItemStatus.COMPLETED,
+                disposition="shipped",
+                pr_url="http://x",
+                completed_at=datetime.now(UTC),
+            )
+            transition_task_status(task, reset_status)
+            assert task.disposition is None, f"expected None after {reset_status}"
+            assert task.pr_url is None
+            assert task.completed_at is None
+
+    def test_running_leaves_disposition_untouched(self) -> None:
+        """RUNNING transition does not modify disposition fields."""
+        ts = datetime.now(UTC)
+        task = TicketTask(
+            ticket_id="T-run",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            disposition="shipped",
+            pr_url="http://x",
+            completed_at=ts,
+        )
+        transition_task_status(task, QueueItemStatus.RUNNING)
+        assert task.disposition == "shipped"
+        assert task.pr_url == "http://x"
+        assert task.completed_at == ts
+
+    def test_requeue_clears_disposition(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Requeued task clears disposition, pr_url, and completed_at."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(ticket_id="GEN-RQ")
+        task.disposition = "dirty_worktree"
+        task.completed_at = datetime.now(UTC)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        requeue_ticket("GEN-RQ", "genhealth")
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.status == QueueItemStatus.PENDING
+        assert requeued.disposition is None
+        assert requeued.completed_at is None
+
+    def test_cancel_clears_disposition(self, tmp_config_dir: Path) -> None:
+        """Stamped task cancelled → disposition/pr_url/completed_at cleared."""
+        task = TicketTask(
+            ticket_id="GEN-CXL",
+            client="claude-workspace",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-cxl",
+            disposition="abandoned",
+            completed_at=datetime.now(UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cancel_task_for_session("sess-cxl")
+        store = load_dev_queue()
+        cancelled = store.tasks[0]
+        assert cancelled.status == QueueItemStatus.CANCELLED
+        assert cancelled.disposition is None
+        assert cancelled.completed_at is None
+
+
+# ---------------------------------------------------------------------------
+# TestDeriveDisposition
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveDisposition:
+    """Unit tests for _derive_disposition."""
+
+    def setup_method(self) -> None:
+        from cw.dev_queue import _derive_disposition
+
+        self._derive = _derive_disposition
+
+    def test_shipped(self) -> None:
+        assert self._derive("shipped") == "shipped"
+
+    def test_stage_complete(self) -> None:
+        assert self._derive("stage_complete") == "stage_complete"
+
+    def test_no_op(self) -> None:
+        assert self._derive("no_op") == "no_op"
+
+    def test_stage_failure_statuses(self) -> None:
+        for s in ("blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"):
+            assert self._derive(s) == s
+
+    def test_paused_for_user_input_statuses(self) -> None:
+        for s in (
+            "ambiguities_pending_resolution",
+            "premises_pending_verification",
+            "plan_pending_approval",
+            "review_pending_approval",
+        ):
+            assert self._derive(s) == s
+
+    def test_none_returns_abandoned(self) -> None:
+        assert self._derive(None) == "abandoned"
+
+    def test_unknown_returns_abandoned(self) -> None:
+        assert self._derive("some_unknown_status") == "abandoned"
+
+
+# ---------------------------------------------------------------------------
+# TestExtractPrUrl
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPrUrl:
+    """Unit tests for _extract_pr_url."""
+
+    def setup_method(self) -> None:
+        from cw.dev_queue import _extract_pr_url
+
+        self._extract = _extract_pr_url
+
+    def test_extracts_url_from_pr_dict(self) -> None:
+        result = {"pr": {"url": "https://github.com/foo/bar/pull/42"}}
+        assert self._extract(result) == "https://github.com/foo/bar/pull/42"
+
+    def test_none_when_no_pr(self) -> None:
+        assert self._extract({"status": "no_op"}) is None
+
+    def test_none_when_pr_is_none(self) -> None:
+        assert self._extract({"pr": None}) is None
+
+    def test_none_for_none_input(self) -> None:
+        assert self._extract(None) is None
+
+    def test_none_when_pr_url_missing(self) -> None:
+        assert self._extract({"pr": {}}) is None

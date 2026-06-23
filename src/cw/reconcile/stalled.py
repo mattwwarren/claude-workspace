@@ -378,9 +378,7 @@ def _apply_stalled_queue_mutations(
     merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
     gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
     park_disposition_by_tid = {
-        c.ticket_id: c.paused_status
-        for c in park_candidates
-        if c.ticket_id
+        c.ticket_id: c.paused_status for c in park_candidates if c.ticket_id
     }
     salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
     reverted: list[str] = []
