@@ -55,6 +55,15 @@ _TERMINAL_STATUSES: frozenset[QueueItemStatus] = frozenset(
 )
 
 
+def transition_task_status(task: TicketTask, new_status: QueueItemStatus) -> None:
+    """Single authority for TicketTask status transitions. Mutates in place.
+
+    Companion field resets (session_id, stage_base_ref) stay at call sites.
+    This seam is the disposition-stamping hook point for #310.
+    """
+    task.status = new_status
+
+
 @contextlib.contextmanager
 def _lock() -> Iterator[None]:
     """Acquire an exclusive file lock for the dev queue."""
@@ -263,7 +272,7 @@ def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
             if task.status == QueueItemStatus.CANCELLED:
                 continue
             cleared.append(task.session_id)
-            task.status = QueueItemStatus.CANCELLED
+            transition_task_status(task, QueueItemStatus.CANCELLED)
             task.session_id = None
             changed = True
         if changed:
@@ -282,7 +291,7 @@ def cancel_task_for_session(session_id: str) -> bool:
         store = load_dev_queue()
         for task in store.tasks:
             if task.session_id == session_id and task.status == QueueItemStatus.RUNNING:
-                task.status = QueueItemStatus.CANCELLED
+                transition_task_status(task, QueueItemStatus.CANCELLED)
                 task.session_id = None
                 save_dev_queue(store)
                 return True
@@ -506,7 +515,7 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     """
     idx = stages.index(task.stage)
     task.stage = stages[idx + 1]
-    task.status = QueueItemStatus.PENDING
+    transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None  # R6: clear session_id on advance
     task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
 
@@ -643,7 +652,7 @@ def requeue_ticket(
                 raise RequeueStageError(msg)
             task.stage = target_stage
 
-        task.status = QueueItemStatus.PENDING
+        transition_task_status(task, QueueItemStatus.PENDING)
         task.session_id = None
         task.stage_base_ref = None
 
@@ -716,7 +725,7 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                     f" {task.status.value!r} concurrently. Re-check and retry."
                 )
                 raise UnblockStateError(msg)
-            task.status = QueueItemStatus.PENDING
+            transition_task_status(task, QueueItemStatus.PENDING)
             task.session_id = None
             task.stage_base_ref = None
             save_dev_queue(store)
