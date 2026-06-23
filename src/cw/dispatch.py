@@ -389,6 +389,10 @@ def _resolve_freshness(
 
     if stale and auto_ff:
         ff_safety = check_main_ff_safety(client)
+        # "ahead" is theoretically unreachable here: stale=True requires
+        # is_main_behind_origin to return behind_count>0, which means local
+        # is behind origin — not ahead. The guard is kept for defensive
+        # completeness (worktree.py:check_main_ff_safety documents this).
         if ff_safety in ("ahead", "diverged"):
             return (True, FRESHNESS_MAIN_DIVERGED)
         if ff_safety == "behind" and is_main_checkout_dirty(client):
@@ -434,7 +438,8 @@ def _emit_stale_skip(
     Records one TICKET_NEEDS_SYNC per pending task (de-duplicating the
     operator WARN via ``warned_stale``), then a single dispatch.tick with
     ``skip_reason=FRESHNESS_GATE`` and ``freshness_detail`` set to the
-    provided value (``"non_main_head"`` or ``"main_behind_origin"``).
+    provided value (``"non_main_head"``, ``"main_behind_origin"``,
+    ``"main_dirty_checkout"``, or ``"main_diverged_from_origin"``).
     """
     stale_tasks = [
         {"ticket_id": t.ticket_id, "client": client.name, "lane": t.lane}

@@ -26,6 +26,8 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
@@ -3656,7 +3658,7 @@ class TestFreshnessGateAutoFF:
         # Key assertion: not NON_MAIN_HEAD — we ARE on the default branch.
         # With diverged safety, the new distinct detail is FRESHNESS_MAIN_DIVERGED.
         assert tick_events[0].payload["freshness_detail"] != FRESHNESS_NON_MAIN_HEAD
-        assert tick_events[0].payload["freshness_detail"] == "main_diverged_from_origin"
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
 
     def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
         self,
@@ -3774,7 +3776,7 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == "main_diverged_from_origin"
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
         assert any("diverged" in ln for ln in emitted)
 
     def test_auto_ff_diverged_emits_diverged_detail(
@@ -3813,7 +3815,7 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == "main_diverged_from_origin"
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
         assert any("diverged" in ln for ln in emitted)
 
     def test_auto_ff_behind_dirty_emits_dirty_checkout_detail(
@@ -3857,7 +3859,9 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == "main_dirty_checkout"
+        assert (
+            tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIRTY_CHECKOUT
+        )
         assert any("dirty" in ln or "uncommitted" in ln for ln in emitted)
 
 

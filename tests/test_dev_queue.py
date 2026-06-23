@@ -32,7 +32,12 @@ from cw.dev_queue import (
     transition_task_status,
     wait_for_terminal,
 )
-from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
+from cw.dispatch import (
+    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
+    FRESHNESS_NON_MAIN_HEAD,
+)
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -856,7 +861,7 @@ class TestStatusFreshnessSubline:
             cap=3,
             skip_reason=DispatchSkipReason.FRESHNESS_GATE,
             tick_at=now,
-            freshness_detail="main_dirty_checkout",
+            freshness_detail=FRESHNESS_MAIN_DIRTY_CHECKOUT,
             blocked_branch=None,
         )
         monkeypatch.setattr(
@@ -886,7 +891,7 @@ class TestStatusFreshnessSubline:
             cap=3,
             skip_reason=DispatchSkipReason.FRESHNESS_GATE,
             tick_at=now,
-            freshness_detail="main_diverged_from_origin",
+            freshness_detail=FRESHNESS_MAIN_DIVERGED,
             blocked_branch=None,
         )
         monkeypatch.setattr(
