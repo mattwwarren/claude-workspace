@@ -35,7 +35,12 @@ from cw.config import (
     sessions_lock,
     state_file,
 )
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    transition_task_status,
+)
 from cw.dispatch import TICK_STALE_SECONDS
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
@@ -782,11 +787,11 @@ def _collapse_blocked_on_user_tasks(
         # Stable sort preserves insertion order for equal created_at values.
         tasks_for_ticket.sort(key=lambda t: t.created_at)
         oldest = tasks_for_ticket[0]
-        oldest.status = QueueItemStatus.PENDING
+        transition_task_status(oldest, QueueItemStatus.PENDING)
         oldest.session_id = None
         changed = True
         for dup in tasks_for_ticket[1:]:
-            dup.status = QueueItemStatus.CANCELLED
+            transition_task_status(dup, QueueItemStatus.CANCELLED)
             changed = True
     return changed
 
@@ -827,7 +832,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
                 task.ticket_id in running_ticket_ids
                 and task.status == QueueItemStatus.RUNNING
             ):
-                task.status = QueueItemStatus.PENDING
+                transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 changed = True
         if blocked_ticket_ids:
@@ -1071,7 +1076,7 @@ def _reap_session_by_selector(
                     task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.RUNNING
                 ):
-                    task.status = QueueItemStatus.PENDING
+                    transition_task_status(task, QueueItemStatus.PENDING)
                     task.session_id = None
                     running_reverted = True
                     break

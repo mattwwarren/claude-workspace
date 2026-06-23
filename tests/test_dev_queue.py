@@ -29,6 +29,7 @@ from cw.dev_queue import (
     resolve_client,
     save_dev_queue,
     save_plan,
+    transition_task_status,
     wait_for_terminal,
 )
 from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
@@ -2946,3 +2947,53 @@ class TestCLIUnblock:
             ["dev-queue", "unblock", "GEN-500", "--client", "genhealth"],
         )
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# TestTransitionTaskStatus
+# ---------------------------------------------------------------------------
+
+
+class TestTransitionTaskStatus:
+    def test_sets_status(self) -> None:
+        """transition_task_status mutates the task's status field in place."""
+        task = TicketTask(
+            ticket_id="T-1", client="genhealth", status=QueueItemStatus.PENDING
+        )
+        transition_task_status(task, QueueItemStatus.COMPLETED)
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_all_valid_statuses(self) -> None:
+        """transition_task_status accepts every QueueItemStatus value."""
+        for status in QueueItemStatus:
+            task = TicketTask(
+                ticket_id="T-2", client="genhealth", status=QueueItemStatus.PENDING
+            )
+            transition_task_status(task, status)
+            assert task.status == status
+
+    def test_cancel_task_for_session_routes_through_seam(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """cancel_task_for_session calls transition_task_status for the status write."""
+        from unittest.mock import patch
+
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-seam-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with patch(
+            "cw.dev_queue.transition_task_status", wraps=transition_task_status
+        ) as spy:
+            result = cancel_task_for_session("sess-seam-1")
+
+        assert result is True
+        assert spy.called
+        new_status = spy.call_args.args[1]
+        assert new_status == QueueItemStatus.CANCELLED
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.CANCELLED

@@ -34,7 +34,12 @@ from cw.config import (
     save_state,
     sessions_lock,
 )
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    transition_task_status,
+)
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import (
@@ -457,7 +462,7 @@ def _record_headless_timeout(
                 task.ticket_id == ticket_id_value
                 and task.status == QueueItemStatus.RUNNING
             ):
-                task.status = QueueItemStatus.PENDING
+                transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 break
         save_dev_queue(store)

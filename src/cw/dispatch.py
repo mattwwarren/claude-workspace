@@ -39,6 +39,7 @@ from cw.dev_queue import (
     load_dev_queue,
     load_plan,
     save_dev_queue,
+    transition_task_status,
 )
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
@@ -137,7 +138,7 @@ def _claim_next_pending(
                         and task.lane == lane
                         and task.status == QueueItemStatus.PENDING
                     ):
-                        task.status = QueueItemStatus.RUNNING
+                        transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
                         save_dev_queue(store)
                         return task
@@ -153,7 +154,7 @@ def _claim_next_pending(
         )
         if pending:
             task = pending[0]
-            task.status = QueueItemStatus.RUNNING
+            transition_task_status(task, QueueItemStatus.RUNNING)
             task.attempts += 1
             save_dev_queue(store)
             return task
@@ -235,7 +236,7 @@ def _revert_claimed_task_to_pending(client_name: str, ticket_id: str) -> None:
                 and stored_task.client == client_name
                 and stored_task.status == QueueItemStatus.RUNNING
             ):
-                stored_task.status = QueueItemStatus.PENDING
+                transition_task_status(stored_task, QueueItemStatus.PENDING)
                 stored_task.session_id = None
                 break
         save_dev_queue(store)
@@ -489,7 +490,9 @@ def _spawn_claimed_task(
                             and stored_task.client == client.name
                             and stored_task.status == QueueItemStatus.RUNNING
                         ):
-                            stored_task.status = QueueItemStatus.BLOCKED_ON_USER
+                            transition_task_status(
+                                stored_task, QueueItemStatus.BLOCKED_ON_USER
+                            )
                             stored_task.session_id = None
                             break
                     save_dev_queue(store)
@@ -1110,7 +1113,7 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
             task.client,
             task.ticket_id,
         )
-        task.status = QueueItemStatus.BLOCKED_ON_USER
+        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
         return
     pipeline = client_cfg.pipeline
     stages = pipeline.stages
@@ -1120,10 +1123,10 @@ def _stage_advance(task: TicketTask, clients: dict[str, ClientConfig]) -> None:
             task.stage,
             task.ticket_id,
         )
-        task.status = QueueItemStatus.BLOCKED_ON_USER
+        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
         return
     if task.stage == stages[-1]:
-        task.status = QueueItemStatus.COMPLETED
+        transition_task_status(task, QueueItemStatus.COMPLETED)
     else:
         _advance_task_pointer(task, stages)
 
@@ -1151,27 +1154,27 @@ def apply_staged_decision(
         if tier == SCOPE_TIER_SMALL:
             _stage_advance(task, clients)
         else:
-            task.status = QueueItemStatus.BLOCKED_ON_USER
+            transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
     elif status in PAUSED_FOR_USER_INPUT_STATUSES:
         # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
         # premises_pending_verification). Scope-gated statuses caught by Rule 1.
-        task.status = QueueItemStatus.BLOCKED_ON_USER
+        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
     elif status in STAGE_SUCCESS_STATUSES:
         # Rule 3: shipped -- advance or complete
         _stage_advance(task, clients)
     elif status == "no_op":
         # Rule 4: pre-flight already satisfied -- terminal
         # regardless of remaining stages
-        task.status = QueueItemStatus.COMPLETED
+        transition_task_status(task, QueueItemStatus.COMPLETED)
     elif status in STAGE_FAILURE_STATUSES:
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
-        task.status = QueueItemStatus.BLOCKED_ON_USER
+        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
     else:
         # Rule 6: None/not dict/missing status -- conservative fallback
         # Why: unparseable sentinel must never silently advance/complete
         # (B2 correctness requirement). Changes pre-B2 behavior which
         # fell through to COMPLETED.
-        task.status = QueueItemStatus.BLOCKED_ON_USER
+        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
 
 
 def _apply_events_to_store(

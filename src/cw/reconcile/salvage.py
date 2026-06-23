@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.config import get_client, load_state, save_state, sessions_lock
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    transition_task_status,
+)
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import pr_exists_for_branch
@@ -207,7 +212,7 @@ def _salvage_high_path(
                     task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.RUNNING
                 ):
-                    task.status = QueueItemStatus.COMPLETED
+                    transition_task_status(task, QueueItemStatus.COMPLETED)
                     save_dev_queue(store)
                     completed_ticket_ids.append(ticket_id)
                     break
@@ -277,7 +282,7 @@ def _salvage_low_path(
                     task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.RUNNING
                 ):
-                    task.status = QueueItemStatus.BLOCKED_ON_USER
+                    transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
                     save_dev_queue(store)
                     break
 
@@ -392,7 +397,7 @@ def _rescue_complete(
                     task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.BLOCKED_ON_USER
                 ):
-                    task.status = QueueItemStatus.COMPLETED
+                    transition_task_status(task, QueueItemStatus.COMPLETED)
                     save_dev_queue(store)
                     rescued_ticket_ids.append(ticket_id)
                     break
