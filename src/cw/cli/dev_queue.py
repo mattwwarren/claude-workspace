@@ -56,6 +56,11 @@ from cw.reconcile import (
 from cw.session import _is_native_surface_ref
 from cw.worktree import fast_forward_main
 
+# Statuses considered "active" for default filtering in list / status.
+_ACTIVE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    {QueueItemStatus.PENDING, QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER}
+)
+
 
 @main.group(name="dev-queue")
 def dev_queue() -> None:
@@ -352,8 +357,15 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
 @click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    default=False,
+    help="Include completed/cancelled tickets in the TICKETS column (legacy view).",
+)
 @handle_errors
-def dev_queue_status(client: str | None, output_json: bool) -> None:
+def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> None:
     """Show dev queue status grouped by client."""
     if output_json:
         tick_data = latest_tick_summary_by_client()
@@ -406,7 +418,12 @@ def dev_queue_status(client: str | None, output_json: bool) -> None:
         cancelled_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
         ]
-        ticket_ids = ", ".join(t.ticket_id for t in client_tasks)
+        display_tasks = (
+            client_tasks
+            if show_all
+            else [t for t in client_tasks if t.status in _ACTIVE_STATUSES]
+        )
+        ticket_ids = ", ".join(t.ticket_id for t in display_tasks) or "—"
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
             f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"

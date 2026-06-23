@@ -5806,6 +5806,98 @@ class TestDevQueueStatusWithTick:
                 assert parts[4] == "0", f"COMPLETED should be 0: {line!r}"
                 break
 
+    def test_dev_queue_status_completed_hidden_by_default(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Completed tickets are omitted from TICKETS column by default. See #308."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-200",
+                client="filter-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-201",
+                client="filter-client",
+                status=QueueItemStatus.COMPLETED,
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "filter-client" in result.output
+        assert "GEN-200" in result.output
+        assert "GEN-201" not in result.output
+
+    def test_dev_queue_status_all_shows_completed(self, tmp_config_dir: Path) -> None:
+        """--all restores legacy full-ticket display including completed. See #308."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-202",
+                client="filter-client",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-203",
+                client="filter-client",
+                status=QueueItemStatus.COMPLETED,
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status", "--all"])
+        assert result.exit_code == 0, result.output
+        assert "GEN-202" in result.output
+        assert "GEN-203" in result.output
+
+    def test_dev_queue_status_blocked_on_user_shown_by_default(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """BLOCKED_ON_USER tickets appear in the default TICKETS column. See #308."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-210",
+                client="filter-client",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "GEN-210" in result.output
+
+    def test_dev_queue_status_em_dash_when_all_tickets_terminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Active-only filter renders em dash when no active tickets exist. See #308."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-220",
+                client="filter-client",
+                status=QueueItemStatus.CANCELLED,
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "GEN-220" not in result.output
+        assert "—" in result.output
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueWait (GitHub issue #474)
