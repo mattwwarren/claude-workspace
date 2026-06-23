@@ -50,7 +50,7 @@ from cw.orchestrate import latest_tick_summary_by_client
 from cw.plan import run_planner
 from cw.reconcile import (
     _csid_from_transcript,
-    _locate_session_transcript,
+    _transcript_age_seconds,
     resolve_idle_watchdog_budget,
 )
 from cw.session import _is_native_surface_ref
@@ -812,26 +812,6 @@ def _emit_wait_timeout(
         )
     else:
         click.echo(f"Timeout waiting for {ticket_id} (>{timeout_seconds:.0f}s)")
-
-
-def _transcript_age_seconds(
-    session: Session,
-    now: datetime,
-) -> float | None:
-    """Return seconds since the session's transcript was last written, or None.
-
-    Returns None when the transcript file cannot be located.  Uses
-    :func:`~cw.reconcile._locate_session_transcript` for precise per-session
-    lookup (surface_ref-prefix glob, #541).
-    """
-    try:
-        transcript = _locate_session_transcript(session)
-        if transcript is None:
-            return None
-        mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
-        return (now - mtime).total_seconds()
-    except OSError:
-        return None
 
 
 def _run_plan_impl(
