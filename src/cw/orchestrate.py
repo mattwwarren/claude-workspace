@@ -599,9 +599,10 @@ def orchestrator_status() -> OrchestratorStatus:
     tail = all_events[-_RECENT_EVENTS_LIMIT:]
     recent = [_summarise_event(e) for e in tail]
 
-    attention_raw = read_events(
-        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-    )
+    attention_raw = [
+        e for e in all_events
+        if e.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+    ]
     attention = [_summarise_event(e) for e in attention_raw]
 
     total_cost: dict[str, float] = {}
