@@ -158,6 +158,28 @@ hardened, resolutions posted, ready to enqueue."
   during planning (the sweep cuts the count, it doesn't zero it). Treat those
   the same way: resolve the technical ones, escalate the real forks, append to
   the resolution comment, re-dispatch.
+- **Front-load resolutions; don't rely on between-requeue addendums.** The
+  worker plans from the ticket context materialized at dispatch (body + the
+  comments present then). Put your resolutions where they will be in that
+  context — the first-dispatch comment, or better, the ticket **body**.
+  Resolutions appended as comments *after* dispatch only reach a re-plan because
+  requeue now re-fetches comments (#837 fixed the stale-context bug that
+  silently dropped them); if a ticket keeps bouncing on questions you already
+  answered, suspect the worker never saw the answer — verify it's in the
+  materialized context, don't just append again. When in doubt, fold the
+  resolutions into the body and re-dispatch fresh.
+- **For migration-style tickets, give a deriving grep, not a hand-list.** When
+  the change is "route all N call sites through helper X" / "rename every Y" /
+  "add a field at every Z", do NOT enumerate the sites by hand in the
+  resolution — hand-lists repeatedly miss sites (indirect assignments like
+  `x.status = lookup[k]`, variants under a different variable name, sites added
+  since you last looked), and each miss is another plan bounce. Instead give the
+  worker the exact `grep -rEn '<pattern>' src/` that *derives* the full set,
+  plus an explicit exclusion rule (e.g. "every match except `queue.py` — that's
+  a different model") and a callout for any site the grep structurally cannot
+  show. Make the acceptance criterion that same grep returning only the helper
+  body. The inventory stays correct as the tree changes; your enumeration error
+  stops being a failure mode.
 - **Ground the sweep on `main`, not your worktree.** The worker gets a clean
   worktree off current `main`, so review `main` itself: ensure the dependency
   PRs are merged and `main` is fast-forwarded, then point the sweep at it. Tell

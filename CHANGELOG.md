@@ -6,6 +6,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-06-23
+
+The **live work dashboard** sprint: `cw orchestrate watch` gains the signals it
+was missing, on top of a single audited status-transition seam (ADR-0010,
+ADR-0011). Plus a dev-queue queue-view cleanup, the reaper's branch-absence
+diagnostic (ADR-0009), and a fix to requeue context staleness.
+
+### Added
+
+- **Storm-deduped attention indicator** on `orchestrate watch` (#537): repeated
+  `session.needs_attention` collapse into one actionable row per
+  `(session, condition)` with an affected-session count — readable during a
+  reconcile storm.
+- **Heartbeat + sentinel columns** on the sessions table (#833):
+  transcript-freshness age and the session's paused/sentinel status.
+- **CI / mergeable column** on the monitored-PRs table (#834).
+- **Terminal disposition column** on `cw dev-queue tasks` (#310): `shipped` /
+  `no_op` / blocker reason per terminal row, via new `TicketTask.disposition` /
+  `pr_url` / `completed_at` fields (dev-queue schema v4 → v5).
+- **`transition_task_status` seam** (#835): the single authority for every
+  `TicketTask` status change (ADR-0011).
+- **Branch-absence diagnostic** on `SESSION_TIMED_OUT` (#808): a nullable
+  `branch_state` annotation; never inferred as completion (ADR-0009).
+
+### Changed
+
+- **`cw dev-queue status` defaults to active-only** (#308): the TICKETS column
+  shows PENDING/RUNNING/BLOCKED_ON_USER by default; `--all` restores the full
+  list. Counts are unchanged.
+
+### Fixed
+
+- **Requeue context staleness** (#837): `requeue` reused the worktree's
+  `.cw/context.json` materialized at first dispatch, so operator resolutions
+  added between requeues never reached the worker. Intake now stamps
+  `materialized_by_session` and re-fetches the ticket on a new session.
+- **gh-blocked park disposition** (#842): the gh-blocked idle-park branch now
+  stamps its disposition like its siblings, plus added stamping test coverage.
+
 ## [1.3.2] — 2026-06-20
 
 A **hotfix** release closing the root cause of the dispatch worktree-leak
