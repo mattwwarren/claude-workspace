@@ -5859,260 +5859,44 @@ class TestDevQueueStatusWithTick:
         assert "GEN-202" in result.output
         assert "GEN-203" in result.output
 
-
-# ---------------------------------------------------------------------------
-# TestDevQueueList (GitHub issue #308)
-# ---------------------------------------------------------------------------
-
-
-class TestDevQueueList:
-    """Tests for ``cw dev-queue list``."""
-
-    def test_dev_queue_list_active_only_default(self, tmp_config_dir: Path) -> None:
-        """Default shows only active tickets (pending, running, blocked_on_user)."""
-        from cw.dev_queue import add_ticket
-        from cw.models import QueueItemStatus, TicketTask
-
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-10",
-                client="list-client",
-                status=QueueItemStatus.PENDING,
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-11",
-                client="list-client",
-                status=QueueItemStatus.RUNNING,
-                session_id="abc12345",
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-12",
-                client="list-client",
-                status=QueueItemStatus.COMPLETED,
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-13",
-                client="list-client",
-                status=QueueItemStatus.CANCELLED,
-            )
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list"])
-        assert result.exit_code == 0, result.output
-        assert "#GEN-10" in result.output
-        assert "#GEN-11" in result.output
-        assert "abc12345" in result.output
-        assert "GEN-12" not in result.output
-        assert "GEN-13" not in result.output
-
-    def test_dev_queue_list_blocked_on_user_shown_by_default(
+    def test_dev_queue_status_blocked_on_user_shown_by_default(
         self, tmp_config_dir: Path
     ) -> None:
-        """BLOCKED_ON_USER tickets appear in the default active view. See #308."""
+        """BLOCKED_ON_USER tickets appear in the default TICKETS column. See #308."""
         from cw.dev_queue import add_ticket
         from cw.models import QueueItemStatus, TicketTask
 
         add_ticket(
             TicketTask(
-                ticket_id="GEN-20",
-                client="list-client",
+                ticket_id="GEN-210",
+                client="filter-client",
                 status=QueueItemStatus.BLOCKED_ON_USER,
             )
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list"])
+        result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
-        assert "#GEN-20" in result.output
+        assert "GEN-210" in result.output
 
-    def test_dev_queue_list_client_filter(self, tmp_config_dir: Path) -> None:
-        """``-c`` filters to a single client."""
+    def test_dev_queue_status_em_dash_when_all_tickets_terminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Active-only filter renders em dash when no active tickets exist. See #308."""
         from cw.dev_queue import add_ticket
         from cw.models import QueueItemStatus, TicketTask
 
         add_ticket(
             TicketTask(
-                ticket_id="GEN-30",
-                client="client-a",
-                status=QueueItemStatus.PENDING,
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-31",
-                client="client-b",
-                status=QueueItemStatus.PENDING,
-            )
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list", "-c", "client-a"])
-        assert result.exit_code == 0, result.output
-        assert "#GEN-30" in result.output
-        assert "GEN-31" not in result.output
-
-    def test_dev_queue_list_status_completed(self, tmp_config_dir: Path) -> None:
-        """``--status completed`` shows only completed tickets."""
-        from cw.dev_queue import add_ticket
-        from cw.models import QueueItemStatus, TicketTask
-
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-40",
-                client="list-client",
-                status=QueueItemStatus.PENDING,
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-41",
-                client="list-client",
-                status=QueueItemStatus.COMPLETED,
-            )
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list", "--status", "completed"])
-        assert result.exit_code == 0, result.output
-        assert "GEN-40" not in result.output
-        assert "#GEN-41" in result.output
-
-    def test_dev_queue_list_all_flag(self, tmp_config_dir: Path) -> None:
-        """``--all`` shows tickets of every status."""
-        from cw.dev_queue import add_ticket
-        from cw.models import QueueItemStatus, TicketTask
-
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-50",
-                client="list-client",
-                status=QueueItemStatus.PENDING,
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-51",
-                client="list-client",
-                status=QueueItemStatus.COMPLETED,
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-52",
-                client="list-client",
+                ticket_id="GEN-220",
+                client="filter-client",
                 status=QueueItemStatus.CANCELLED,
             )
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list", "--all"])
+        result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
-        assert "#GEN-50" in result.output
-        assert "#GEN-51" in result.output
-        assert "#GEN-52" in result.output
-
-    def test_dev_queue_list_empty_queue(self, tmp_config_dir: Path) -> None:
-        """Empty queue prints a helpful message."""
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list"])
-        assert result.exit_code == 0, result.output
-        assert "Dev queue is empty." in result.output
-
-    def test_dev_queue_list_no_matching_tickets(self, tmp_config_dir: Path) -> None:
-        """Active filter with only completed tickets prints a helpful message."""
-        from cw.dev_queue import add_ticket
-        from cw.models import QueueItemStatus, TicketTask
-
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-60",
-                client="list-client",
-                status=QueueItemStatus.COMPLETED,
-            )
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list"])
-        assert result.exit_code == 0, result.output
-        assert "No matching tickets." in result.output
-
-    def test_dev_queue_list_shows_header_columns(self, tmp_config_dir: Path) -> None:
-        """Output includes expected column headers."""
-        from cw.dev_queue import add_ticket
-        from cw.models import QueueItemStatus, TicketTask
-
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-70",
-                client="list-client",
-                status=QueueItemStatus.PENDING,
-            )
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list"])
-        assert result.exit_code == 0, result.output
-        assert "TICKET" in result.output
-        assert "STATUS" in result.output
-        assert "SESSION_ID" in result.output
-        assert "CLIENT" in result.output
-        assert "AGE" in result.output
-
-    def test_dev_queue_list_status_all_choice(self, tmp_config_dir: Path) -> None:
-        """``--status all`` is equivalent to ``--all``."""
-        from cw.dev_queue import add_ticket
-        from cw.models import QueueItemStatus, TicketTask
-
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-80",
-                client="list-client",
-                status=QueueItemStatus.COMPLETED,
-            )
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list", "--status", "all"])
-        assert result.exit_code == 0, result.output
-        assert "#GEN-80" in result.output
-
-    def test_dev_queue_list_age_formatting(self, tmp_config_dir: Path) -> None:
-        """AGE column renders m/h/d suffixes for older tickets."""
-        from datetime import UTC, datetime, timedelta
-
-        from cw.dev_queue import add_ticket
-        from cw.models import QueueItemStatus, TicketTask
-
-        now = datetime.now(UTC)
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-90",
-                client="age-client",
-                status=QueueItemStatus.PENDING,
-                created_at=now - timedelta(minutes=5),
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-91",
-                client="age-client",
-                status=QueueItemStatus.PENDING,
-                created_at=now - timedelta(hours=3),
-            )
-        )
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-92",
-                client="age-client",
-                status=QueueItemStatus.PENDING,
-                created_at=now - timedelta(days=2),
-            )
-        )
-        runner = CliRunner()
-        result = runner.invoke(main, ["dev-queue", "list"])
-        assert result.exit_code == 0, result.output
-        assert "m ago" in result.output
-        assert "h ago" in result.output
-        assert "d ago" in result.output
+        assert "GEN-220" not in result.output
+        assert "—" in result.output
 
 
 # ---------------------------------------------------------------------------
