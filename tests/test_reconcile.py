@@ -16866,3 +16866,153 @@ class TestFinalizeBlocked:
 
         assert "finalize" in _RESCUE_PR_BODY_TEMPLATE.lower()
         assert "{ticket_id}" in _RESCUE_PR_BODY_TEMPLATE
+
+
+# ---------------------------------------------------------------------------
+# _apply_idle_queue_mutations disposition stamping
+# ---------------------------------------------------------------------------
+
+
+def _mk_running_task(ticket_id: str, client: str = "client-a") -> TicketTask:
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client=client,
+        status=QueueItemStatus.RUNNING,
+        session_id=ticket_id,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    return task
+
+
+def test_idle_queue_mutations_gh_blocked_stamps_disposition(
+    tmp_config_dir: Path,
+) -> None:
+    """gh_blocked_revert_candidates → BLOCKED_ON_USER + disposition='gh_check_blocked'.
+
+    Regression for the bug fixed in this PR: the branch previously omitted
+    disposition, causing parked rows to render '—'.
+    """
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.idle import _apply_idle_queue_mutations
+
+    _mk_running_task("idle-gh-disp-1")
+
+    candidate = ReapCandidate(
+        session_id="idle-gh-disp-1",
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id="idle-gh-disp-1",
+    )
+
+    _apply_idle_queue_mutations([], [], [candidate], [], [], {})
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-gh-disp-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    assert t.disposition == "gh_check_blocked"
+
+
+def test_idle_queue_mutations_merged_stamps_shipped(
+    tmp_config_dir: Path,
+) -> None:
+    """merged_revert_candidates → COMPLETED + disposition='shipped'."""
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.idle import _apply_idle_queue_mutations
+
+    _mk_running_task("idle-merged-disp-1")
+
+    candidate = ReapCandidate(
+        session_id="idle-merged-disp-1",
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id="idle-merged-disp-1",
+    )
+
+    _apply_idle_queue_mutations([], [candidate], [], [], [], {})
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-merged-disp-1")
+    assert t.status == QueueItemStatus.COMPLETED
+    assert t.disposition == "shipped"
+
+
+def test_idle_queue_mutations_park_stamps_paused_status(
+    tmp_config_dir: Path,
+) -> None:
+    """park_candidates → BLOCKED_ON_USER + disposition stamped from paused_status."""
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.idle import _apply_idle_queue_mutations
+
+    _mk_running_task("idle-park-disp-1")
+
+    candidate = ReapCandidate(
+        session_id="idle-park-disp-1",
+        proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+        ticket_id="idle-park-disp-1",
+        paused_status="dirty_worktree",
+    )
+
+    _apply_idle_queue_mutations([], [], [], [candidate], [], {})
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-park-disp-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    assert t.disposition == "dirty_worktree"
+
+
+def test_idle_queue_mutations_salvage_stamps_disposition(
+    tmp_config_dir: Path,
+) -> None:
+    """salvage_candidates with shipped result → COMPLETED + disposition='shipped'."""
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.idle import _apply_idle_queue_mutations
+
+    _mk_running_task("idle-salv-disp-1")
+
+    result = AutoDevResult.model_validate(
+        {
+            "schema_version": 4,
+            "ticket_id": "idle-salv-disp-1",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "scope": {
+                "tier": "small",
+                "files": 1,
+                "lines_estimate": 10,
+                "lines_actual": 10,
+                "forbidden_touched": False,
+            },
+            "plan_source": "github_issue_existing",
+            "branch": "dev/idle-salv-disp-1",
+            "worktree_path": None,
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": {
+                "number": 1,
+                "url": "https://github.com/user/repo/pull/1",
+                "auto_merge": False,
+                "base": "main",
+            },
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": None,
+            "next_actions": ["wait_for_ci"],
+        }
+    )
+
+    candidate = ReapCandidate(
+        session_id="idle-salv-disp-1",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="idle-salv-disp-1",
+        salvage_result=result,
+    )
+
+    salvaged_result_by_ticket = {"idle-salv-disp-1": result}
+    _apply_idle_queue_mutations([], [], [], [], [candidate], salvaged_result_by_ticket)
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-salv-disp-1")
+    assert t.status == QueueItemStatus.COMPLETED
+    assert t.disposition == "shipped"
