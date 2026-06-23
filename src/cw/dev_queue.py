@@ -6,9 +6,15 @@ import contextlib
 import fcntl
 import json
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cw.atomic import atomic_write_text
+from cw.auto_dev_result import (
+    PAUSED_FOR_USER_INPUT_STATUSES,
+    STAGE_FAILURE_STATUSES,
+    STAGE_SUCCESS_STATUSES,
+)
 from cw.config import (
     dev_plan_file,
     dev_plan_lock,
@@ -54,14 +60,77 @@ _TERMINAL_STATUSES: frozenset[QueueItemStatus] = frozenset(
     ]
 )
 
+# Statuses that should stamp disposition/pr_url/completed_at on the task.
+_TERMINAL_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [
+        QueueItemStatus.COMPLETED,
+        QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.FAILED,
+    ]
+)
 
-def transition_task_status(task: TicketTask, new_status: QueueItemStatus) -> None:
+# Statuses that should clear disposition/pr_url/completed_at (requeue/cancel).
+_RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [
+        QueueItemStatus.PENDING,
+        QueueItemStatus.CANCELLED,
+    ]
+)
+
+
+def transition_task_status(
+    task: TicketTask,
+    new_status: QueueItemStatus,
+    *,
+    disposition: str | None = None,
+    pr_url: str | None = None,
+) -> None:
     """Single authority for TicketTask status transitions. Mutates in place.
 
-    Companion field resets (session_id, stage_base_ref) stay at call sites.
-    This seam is the disposition-stamping hook point for #310.
+    Stamps disposition/pr_url/completed_at on terminal transitions
+    (COMPLETED/BLOCKED_ON_USER/FAILED); clears them on PENDING/CANCELLED
+    (requeue/cancel).  Companion field resets (session_id, stage_base_ref)
+    stay at call sites.  GitHub #310.
     """
     task.status = new_status
+    if new_status in _TERMINAL_DISPOSITION_STATUSES:
+        task.disposition = disposition
+        task.pr_url = pr_url
+        task.completed_at = datetime.now(UTC)
+    elif new_status in _RESET_DISPOSITION_STATUSES:
+        task.disposition = None
+        task.pr_url = None
+        task.completed_at = None
+
+
+def _derive_disposition(status: str | None) -> str | None:
+    """Map an AutoDevResult status to the task-level disposition string.
+
+    Used alongside transition_task_status at terminal call sites to record
+    the sentinel status verbatim (for operator-visible batch health).  GitHub #310.
+    """
+    if status is None:
+        return "abandoned"
+    if status in STAGE_SUCCESS_STATUSES:
+        return status  # "shipped" or "stage_complete"
+    if status == "no_op":
+        return "no_op"
+    if status in STAGE_FAILURE_STATUSES:
+        return status  # "blocked", "merge_gate_blocked", etc.
+    if status in PAUSED_FOR_USER_INPUT_STATUSES:
+        return status  # "ambiguities_pending_resolution", etc.
+    return "abandoned"
+
+
+def _extract_pr_url(last_result: dict[str, object] | None) -> str | None:
+    """Extract the PR URL from an AutoDevResult dict, or None if absent."""
+    if last_result is None:
+        return None
+    pr = last_result.get("pr")
+    if isinstance(pr, dict):
+        url = pr.get("url")
+        return str(url) if url is not None else None
+    return None
 
 
 @contextlib.contextmanager
@@ -153,6 +222,24 @@ def _fill_task_stage_base_ref_default(task_raw: dict[str, Any]) -> None:
         task_raw["stage_base_ref"] = None
 
 
+def _fill_disposition_default(task_raw: dict[str, Any]) -> None:
+    """Fill disposition introduced in dev-queue schema v5 (GitHub #310). Idempotent."""
+    if "disposition" not in task_raw:
+        task_raw["disposition"] = None
+
+
+def _fill_pr_url_default(task_raw: dict[str, Any]) -> None:
+    """Fill pr_url introduced in dev-queue schema v5 (GitHub #310). Idempotent."""
+    if "pr_url" not in task_raw:
+        task_raw["pr_url"] = None
+
+
+def _fill_task_completed_at_default(task_raw: dict[str, Any]) -> None:
+    """Fill completed_at introduced in dev-queue schema v5 (GitHub #310). Idempotent."""
+    if "completed_at" not in task_raw:
+        task_raw["completed_at"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -163,6 +250,9 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_lane_default(task_raw)
                 _fill_task_stage_default(task_raw)
                 _fill_task_stage_base_ref_default(task_raw)
+                _fill_disposition_default(task_raw)
+                _fill_pr_url_default(task_raw)
+                _fill_task_completed_at_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 

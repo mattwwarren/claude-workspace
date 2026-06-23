@@ -1056,6 +1056,8 @@ def _task_to_dict(task: TicketTask) -> dict[str, object]:
         "created_at": task.created_at.isoformat(),
         "total_cost_usd": task.total_cost_usd,
         "worktree_path": str(task.worktree_path) if task.worktree_path else None,
+        "disposition": task.disposition,
+        "pr_url": task.pr_url,
     }
 
 
@@ -1063,8 +1065,17 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
     if not tasks:
         click.echo("No tasks found.")
         return
-    headers = ["TICKET_ID", "CLIENT", "STATUS", "SESSION_ID", "ATTEMPTS", "LANE"]
-    col_widths = [12, 16, 16, 12, 8, 12]
+    headers = [
+        "TICKET_ID",
+        "CLIENT",
+        "STATUS",
+        "SESSION_ID",
+        "ATTEMPTS",
+        "LANE",
+        "DISPOSITION",
+        "PR",
+    ]
+    col_widths = [12, 16, 16, 12, 8, 12, 20, 10]
     header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
     click.echo(header)
     click.echo("-" * len(header))
@@ -1076,6 +1087,8 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             (t.session_id or "-")[:12],
             str(t.attempts)[:8],
             t.lane[:12],
+            (t.disposition or "—")[:20],
+            (t.pr_url or "—")[:10],
         ]
         click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
 

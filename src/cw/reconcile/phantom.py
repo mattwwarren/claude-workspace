@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import (
+    _derive_disposition,
+    _extract_pr_url,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -412,14 +414,21 @@ def _apply_phantom_queue_mutations(
                 continue
             if task.ticket_id in revert_set:
                 if task.ticket_id in dirty_ticket_ids:
-                    transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                    transition_task_status(
+                        task,
+                        QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="dirty_worktree",
+                    )
                 else:
                     transition_task_status(task, QueueItemStatus.PENDING)
                     ticket_ids_to_revert.append(task.ticket_id)
                 task.session_id = None
                 changed = True
             elif task.ticket_id in merged_crash_tids:
-                transition_task_status(task, QueueItemStatus.COMPLETED)
+                # Why: PR URL is not in hand here — not worth a second gh call.
+                transition_task_status(
+                    task, QueueItemStatus.COMPLETED, disposition="shipped"
+                )
                 task.session_id = None
                 merged_completed_ids.append(task.ticket_id)
                 changed = True
@@ -429,8 +438,12 @@ def _apply_phantom_queue_mutations(
                 changed = True
             elif task.ticket_id in salvaged_set:
                 salvaged_result = salvaged_result_by_ticket[task.ticket_id]
+                last_result = salvaged_result.model_dump(mode="json")
                 transition_task_status(
-                    task, _queue_status_for_salvaged(salvaged_result)
+                    task,
+                    _queue_status_for_salvaged(salvaged_result),
+                    disposition=_derive_disposition(salvaged_result.status),
+                    pr_url=_extract_pr_url(last_result),
                 )
                 changed = True
         if changed:

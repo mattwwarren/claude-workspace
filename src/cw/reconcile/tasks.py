@@ -89,7 +89,11 @@ def _revert_running_tasks_for_sessions(
             if task.session_id not in session_ids:
                 continue
             if task.session_id in dirty:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="dirty_worktree",
+                )
                 if sessions_by_id and task.session_id in sessions_by_id:
                     notify_sessions.append(sessions_by_id[task.session_id])
             else:
@@ -233,7 +237,12 @@ def complete_timed_out_merged_tasks() -> list[str]:
                     task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.PENDING
                 ):
-                    transition_task_status(task, QueueItemStatus.COMPLETED)
+                    # Why: PR URL is not retrieved here — a second gh call is
+                    # disproportionate for this recovery path; disposition alone
+                    # is enough for the operator to identify these as shipped.
+                    transition_task_status(
+                        task, QueueItemStatus.COMPLETED, disposition="shipped"
+                    )
                     completed_ids.append(ticket_id)
                     changed = True
                     break
