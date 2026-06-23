@@ -10,7 +10,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.config import save_state
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue, transition_task_status
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    transition_task_status,
+)
 from cw.events import record_event
 from cw.models import (
     DEFAULT_LANE,

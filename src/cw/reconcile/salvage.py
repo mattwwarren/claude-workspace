@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.config import get_client, load_state, save_state, sessions_lock
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue, transition_task_status
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    transition_task_status,
+)
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import pr_exists_for_branch

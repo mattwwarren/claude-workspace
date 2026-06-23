@@ -11,7 +11,12 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cw.config import load_clients, load_state, save_state
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue, transition_task_status
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    transition_task_status,
+)
 from cw.events import record_event
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS
 from cw.models import (
