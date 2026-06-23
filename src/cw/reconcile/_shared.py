@@ -36,7 +36,12 @@ from cw.config import (
     get_client,
     save_state,
 )
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue, transition_task_status
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+    transition_task_status,
+)
 from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.models import (
@@ -1081,7 +1086,9 @@ def _cleanup_timed_out_worktree(
                             task.ticket_id == ticket_id
                             and task.status == QueueItemStatus.PENDING
                         ):
-                            transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                            transition_task_status(
+                                task, QueueItemStatus.BLOCKED_ON_USER
+                            )
                             save_dev_queue(store)
                             break
             return

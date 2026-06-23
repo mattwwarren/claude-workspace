@@ -490,7 +490,9 @@ def _spawn_claimed_task(
                             and stored_task.client == client.name
                             and stored_task.status == QueueItemStatus.RUNNING
                         ):
-                            transition_task_status(stored_task, QueueItemStatus.BLOCKED_ON_USER)
+                            transition_task_status(
+                                stored_task, QueueItemStatus.BLOCKED_ON_USER
+                            )
                             stored_task.session_id = None
                             break
                     save_dev_queue(store)
