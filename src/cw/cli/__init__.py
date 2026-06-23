@@ -36,7 +36,6 @@ from cw.cli.dev_queue import (
     _WAIT_EXIT_BLOCKED,
     _WAIT_EXIT_FAILED,
     _WAIT_EXIT_TIMEOUT,
-    _transcript_age_seconds,
 )
 from cw.cli.orchestrate import (
     _ORCHESTRATOR_AGENT,
@@ -52,6 +51,7 @@ from cw.cli.spawn import (
     _spawn_create_impl,
 )
 from cw.reconcile import _apply_sentinel_to_task
+from cw.reconcile._shared import _transcript_age_seconds
 from cw.result import result as result_group
 
 # Result command group is defined in cw.result; attach it to the root group.

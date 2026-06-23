@@ -7025,6 +7025,35 @@ class TestDevQueueWaitSentinelAware:
         result = _transcript_age_seconds(session, datetime.now(UTC))
         assert result is None
 
+    def test_transcript_age_seconds_oserror_returns_none(
+        self, tmp_path: Path, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_transcript_age_seconds returns None when stat() raises OSError."""
+        from cw.cli import _transcript_age_seconds
+
+        worktree = tmp_path / "wt" / "oserr"
+        worktree.mkdir(parents=True)
+
+        session = Session(
+            id="test-age-5",
+            name="c/impl",
+            client="c",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=worktree,
+            worktree_path=worktree,
+            claude_session_id="fake-csid",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+        fake_path = worktree / "fake.jsonl"
+        monkeypatch.setattr(
+            "cw.reconcile._shared._locate_session_transcript",
+            lambda *_a, **_kw: fake_path,
+        )
+
+        result = _transcript_age_seconds(session, datetime.now(UTC))
+        assert result is None
+
     def test_spawn_window_session_not_in_state_polls_then_times_out(
         self,
         tmp_config_dir: Path,
