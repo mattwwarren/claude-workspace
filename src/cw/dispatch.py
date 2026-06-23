@@ -93,11 +93,6 @@ if TYPE_CHECKING:
 _DISPATCH_CONSUMER = "dispatch"
 _log = logging.getLogger(__name__)
 
-# Absolute ceiling on task.attempts. When _claim_next_pending finds a task at
-# this count, it parks the task BLOCKED_ON_USER instead of spawning again.
-# Overridable via OrchestratorConfig.global_attempt_ceiling. See GitHub #786.
-DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
-
 
 @dataclass(frozen=True)
 class DispatchTickResult:
@@ -171,11 +166,13 @@ def _claim_next_pending(
                     ):
                         if task.attempts >= config.global_attempt_ceiling:
                             transition_task_status(
-                                task, QueueItemStatus.BLOCKED_ON_USER
+                                task,
+                                QueueItemStatus.BLOCKED_ON_USER,
+                                disposition="attempt_cap_blocked",
                             )
                             save_dev_queue(store)
                             _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                            return None
+                            break
                         transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
                         save_dev_queue(store)
@@ -193,7 +190,11 @@ def _claim_next_pending(
         if pending:
             task = pending[0]
             if task.attempts >= config.global_attempt_ceiling:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="attempt_cap_blocked",
+                )
                 save_dev_queue(store)
                 _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
                 return None

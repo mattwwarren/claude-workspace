@@ -222,6 +222,12 @@ class OrchestratorEventType(StrEnum):
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
 
 
+# Absolute ceiling on task.attempts across all kill causes (#786).
+# Lives here so OrchestratorConfig.global_attempt_ceiling can reference it
+# directly without a circular import (dispatch.py imports from models.py).
+DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
+
+
 class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
@@ -451,7 +457,7 @@ class OrchestratorConfig(BaseModel):
     # reaches this count in _claim_next_pending, it is parked BLOCKED_ON_USER
     # instead of spawning again. Above the per-stage caps (#756), below the
     # observed 14-attempt usage-limit churn. See GitHub issue #786.
-    global_attempt_ceiling: int = 10
+    global_attempt_ceiling: int = DEFAULT_GLOBAL_ATTEMPT_CEILING
     # Number of consecutive failed idle-watchdog observations required before a
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.

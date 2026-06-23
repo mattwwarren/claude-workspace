@@ -26,7 +26,6 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
-    DEFAULT_GLOBAL_ATTEMPT_CEILING,
     FRESHNESS_MAIN_BEHIND,
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
@@ -39,6 +38,7 @@ from cw.dispatch import (
 from cw.events import read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
+    DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     ClientConfig,
     CwState,
@@ -2066,6 +2066,7 @@ class TestGlobalAttemptCeiling:
         queue = load_dev_queue()
         parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-ceiling")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
         # attempts must NOT be incremented when parking at the ceiling
         assert parked.attempts == 3
         # daemon was never invoked
@@ -2136,6 +2137,7 @@ class TestGlobalAttemptCeiling:
         queue = load_dev_queue()
         parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-pri")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
         assert parked.attempts == 3
 
     def test_default_ceiling_is_ten(self) -> None:
