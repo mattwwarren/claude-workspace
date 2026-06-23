@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from cw.auto_dev_result import (
+    BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_SMALL,
@@ -2395,6 +2396,61 @@ class TestCase3MergeGateBlockedLargeTierCoerce:
         # shipped+large is valid (no tier constraint on shipped)
         result = AutoDevResult.model_validate(p)
         assert result.status == "shipped"
+
+
+# ---------------------------------------------------------------------------
+# Issue #777 — merge_gate_blocked may carry a non-null blocker to surface the
+# reason (prior_pipeline_pr_open:#<N>) for file-overlap detection.
+# ---------------------------------------------------------------------------
+
+
+class TestMergeGateBlockedWithBlocker:
+    """merge_gate_blocked may carry a non-null blocker (issue #777)."""
+
+    def test_merge_gate_blocked_with_blocker_parses(self) -> None:
+        p = _merge_gate_payload()
+        p["blocker"] = {
+            "stage": "stage4a_merge_gate",
+            "reason": f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776",
+            "details": "PR #776 (dev/315) shares files: src/cw/finalize.py",
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "merge_gate_blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776"
+
+    def test_merge_gate_blocked_null_blocker_still_parses(self) -> None:
+        p = _merge_gate_payload()
+        assert p["blocker"] is None
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "merge_gate_blocked"
+        assert result.blocker is None
+
+    def test_scope_exceeded_non_null_blocker_still_rejected(self) -> None:
+        p = _scope_exceeded_payload()
+        p["blocker"] = {
+            "stage": "stage1_plan",
+            "reason": "scope_too_large",
+            "details": "",
+        }
+        with pytest.raises(ValidationError, match="blocker must be null"):
+            AutoDevResult.model_validate(p)
+
+    def test_merge_gate_blocked_with_blocker_via_parse_stdout(self) -> None:
+        p = _merge_gate_payload()
+        p["blocker"] = {
+            "stage": "stage4a_merge_gate",
+            "reason": f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776",
+            "details": "PR #776 open; file overlap detected: src/cw/finalize.py",
+        }
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "merge_gate_blocked"
+        assert result.blocker is not None
+        assert BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN in result.blocker.reason
+
+    def test_blocker_reason_constant_value(self) -> None:
+        assert BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN == "prior_pipeline_pr_open"
 
 
 # ---------------------------------------------------------------------------
