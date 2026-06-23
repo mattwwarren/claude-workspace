@@ -51,6 +51,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.reconcile._shared import _transcript_age_seconds
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -352,6 +353,8 @@ class SessionSummary(BaseModel):
     surface_ref: str | None = None
     worktree_path: Path | None = None
     last_stage: str | None = None
+    transcript_age_seconds: float | None = None
+    paused_status: str | None = None
 
 
 class TicketSummary(BaseModel):
@@ -423,7 +426,14 @@ def _summarise_session(
     sess: Session,
     *,
     last_stage: str | None = None,
+    now: datetime | None = None,
 ) -> SessionSummary:
+    _now = now if now is not None else datetime.now(UTC)
+    paused_status = (
+        sess.last_result.get("paused_status")
+        if isinstance(sess.last_result, dict)
+        else None
+    )
     return SessionSummary(
         id=sess.id,
         name=sess.name,
@@ -434,6 +444,8 @@ def _summarise_session(
         surface_ref=sess.surface_ref,
         worktree_path=sess.worktree_path,
         last_stage=last_stage,
+        transcript_age_seconds=_transcript_age_seconds(sess, _now),
+        paused_status=paused_status if isinstance(paused_status, str) else None,
     )
 
 
@@ -587,9 +599,10 @@ def orchestrator_status() -> OrchestratorStatus:
     last_stage_by_session = _derive_last_stage_by_session(all_events)
     last_tick = _latest_tick_by_client(all_events)
 
+    now = datetime.now(UTC)
     state = load_state()
     running = [
-        _summarise_session(s, last_stage=last_stage_by_session.get(s.id))
+        _summarise_session(s, last_stage=last_stage_by_session.get(s.id), now=now)
         for s in state.sessions
         if s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
     ]

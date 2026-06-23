@@ -796,6 +796,26 @@ def _transcript_recently_active(
         return False
 
 
+def _transcript_age_seconds(
+    session: Session,
+    now: datetime,
+) -> float | None:
+    """Return seconds since the session's transcript was last written, or None.
+
+    Returns None when the transcript file cannot be located.  Uses
+    :func:`_locate_session_transcript` for precise per-session lookup
+    (surface_ref-prefix glob, #541).
+    """
+    try:
+        transcript = _locate_session_transcript(session)
+        if transcript is None:
+            return None
+        mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
+        return (now - mtime).total_seconds()
+    except OSError:
+        return None
+
+
 def _awaiting_subagent(session: Session, now: datetime) -> bool:
     """Return True if the worker is mid-tool/subagent (parent tail pending).
 

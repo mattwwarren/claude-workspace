@@ -214,8 +214,9 @@ class TestRenderDashboard:
         frozen_now: datetime,
     ) -> None:
         output = _render(sample_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
-        # /home/matthew/... is collapsed to ~/...
-        assert "~/workspace/personal/wt/abc" in output
+        # /home/matthew/... is collapsed to ~/... (path may wrap in wide tables)
+        assert "~/workspace/" in output
+        assert "/home/matthew/" not in output
 
 
 class TestWatch:
@@ -318,6 +319,136 @@ class TestSessionsTableStageColumn:
         output = _render(stage_status, DetailLevel.COMPACT, frozen_now=frozen_now)
         assert "STAGE" not in output
         assert "s2_impl_started" not in output
+
+
+@pytest.fixture
+def heartbeat_status(frozen_now: datetime) -> OrchestratorStatus:
+    """Status with one session with a known transcript age and one without."""
+    return OrchestratorStatus(
+        generated_at=frozen_now,
+        running_sessions=[
+            SessionSummary(
+                id="withage1",
+                name="personal/impl",
+                client="personal",
+                status="active",
+                purpose="impl",
+                started_at=datetime(2026, 4, 18, 11, 55, 0, tzinfo=UTC),
+                worktree_path=Path("/home/matthew/workspace/personal/wt/abc"),
+                transcript_age_seconds=90.0,
+            ),
+            SessionSummary(
+                id="noage001",
+                name="personal/idea",
+                client="personal",
+                status="active",
+                purpose="idea",
+                started_at=datetime(2026, 4, 18, 10, 0, 0, tzinfo=UTC),
+                worktree_path=None,
+                transcript_age_seconds=None,
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def sentinel_status(frozen_now: datetime) -> OrchestratorStatus:
+    """Status with one parked session and one without a sentinel."""
+    return OrchestratorStatus(
+        generated_at=frozen_now,
+        running_sessions=[
+            SessionSummary(
+                id="parked01",
+                name="personal/impl",
+                client="personal",
+                status="active",
+                purpose="impl",
+                started_at=datetime(2026, 4, 18, 11, 55, 0, tzinfo=UTC),
+                worktree_path=Path("/home/matthew/workspace/personal/wt/abc"),
+                paused_status="dirty_worktree",
+            ),
+            SessionSummary(
+                id="running1",
+                name="personal/idea",
+                client="personal",
+                status="active",
+                purpose="idea",
+                started_at=datetime(2026, 4, 18, 10, 0, 0, tzinfo=UTC),
+                worktree_path=None,
+                paused_status=None,
+            ),
+        ],
+    )
+
+
+class TestSessionsTableHeartbeatColumn:
+    def test_default_shows_heartbeat_header(
+        self,
+        heartbeat_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        output = _render(heartbeat_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        assert "HEARTBEAT" in output
+
+    def test_default_renders_age_when_present(
+        self,
+        heartbeat_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        """90s transcript age renders as '1m30s' (via _format_elapsed)."""
+        output = _render(heartbeat_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        assert "1m30s" in output
+
+    def test_default_renders_dash_when_age_absent(
+        self,
+        heartbeat_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        output = _render(heartbeat_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        assert "—" in output
+
+    def test_compact_omits_heartbeat_column(
+        self,
+        heartbeat_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        output = _render(heartbeat_status, DetailLevel.COMPACT, frozen_now=frozen_now)
+        assert "HEARTBEAT" not in output
+
+
+class TestSessionsTableSentinelColumn:
+    def test_default_shows_sentinel_header(
+        self,
+        sentinel_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        output = _render(sentinel_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        assert "SENTINEL" in output
+
+    def test_default_renders_paused_status_when_present(
+        self,
+        sentinel_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        output = _render(sentinel_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        assert "dirty_worktree" in output
+
+    def test_default_renders_dash_when_no_paused_status(
+        self,
+        sentinel_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        output = _render(sentinel_status, DetailLevel.DEFAULT, frozen_now=frozen_now)
+        assert "—" in output
+
+    def test_compact_omits_sentinel_column(
+        self,
+        sentinel_status: OrchestratorStatus,
+        frozen_now: datetime,
+    ) -> None:
+        output = _render(sentinel_status, DetailLevel.COMPACT, frozen_now=frozen_now)
+        assert "SENTINEL" not in output
+        assert "dirty_worktree" not in output
 
 
 # ── watch flat helpers ────────────────────────────────────────────────────────

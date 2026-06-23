@@ -23,7 +23,7 @@ import termios
 import threading
 import time
 import tty
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -131,6 +131,8 @@ def _sessions_table(
     if level is DetailLevel.VERBOSE:
         table.add_column("SURFACE", width=12, no_wrap=True)
     table.add_column("ELAPSED", width=8, justify="right", no_wrap=True)
+    table.add_column("HEARTBEAT", width=10, justify="right", no_wrap=True)
+    table.add_column("SENTINEL", width=22, no_wrap=True)
     for sess in sorted(sessions, key=lambda s: s.started_at):
         row: list[str] = [
             sess.id,
@@ -141,6 +143,12 @@ def _sessions_table(
         if level is DetailLevel.VERBOSE:
             row.append(sess.surface_ref or "—")
         row.append(_format_elapsed(sess.started_at, now))
+        if sess.transcript_age_seconds is not None:
+            fake_start = now - timedelta(seconds=sess.transcript_age_seconds)
+            row.append(_format_elapsed(fake_start, now))
+        else:
+            row.append("—")
+        row.append(sess.paused_status or "—")
         table.add_row(*row)
     return table
 
