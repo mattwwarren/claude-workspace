@@ -100,6 +100,33 @@ The default concurrency cap is `OrchestratorConfig.default_max_parallel`
 (default: `1`). Per-client overrides live in `per_client_max_parallel` in
 `orchestrator.yaml`.
 
+### Self-healing dispatch (`cw dev-queue serve`)
+
+`cw dev-queue run` exits when the dispatch loop returns or crashes. For
+unattended, long-running pipelines use `serve` instead — it wraps `run` in
+a supervisor that restarts on crash with exponential backoff:
+
+```bash
+# Self-healing dispatch (runs until Ctrl-C or a clean stop)
+cw dev-queue serve
+
+# Limit to 5 automatic restarts, then give up
+cw dev-queue serve --max-restarts 5
+
+# All run options are also available on serve
+cw dev-queue serve --max-parallel 2 --client my-client --quiet
+```
+
+Restart behaviour:
+
+- **Clean exit / Ctrl-C**: supervisor exits without restarting.
+- **Crash**: supervisor waits (5s → 10s → 20s → 40s → 60s cap) then
+  restarts the loop. Backoff resets to 5s after a healthy run (≥ 60s).
+- **Crash window cap**: ≥ 5 crashes within 300s → `sys.exit(1)` with a
+  CRITICAL log. Use `cw doctor` to investigate the underlying cause.
+- `serve` does **not** accept `--once`; use `run --once` for single-tick
+  dry-runs.
+
 ### Lane serialization — cli.py and other shared files
 
 Tickets that touch the same file conflict at merge. `cli.py` is the

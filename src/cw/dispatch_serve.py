@@ -10,10 +10,12 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cw.dispatch import run_dispatch_loop
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -66,28 +68,26 @@ def run_dispatch_serve(
     crash_times: list[float] = []
     restart_count: int = 0
     backoff: float = _SERVE_INITIAL_BACKOFF_SECONDS
-    kwargs: dict[str, Any] = dict(
-        max_parallel=max_parallel,
-        use_plan=use_plan,
-        parent=parent,
-        emit=emit,
-        auto_ff=auto_ff,
-        client=client,
-    )
+    kwargs: dict[str, Any] = {
+        "max_parallel": max_parallel,
+        "use_plan": use_plan,
+        "parent": parent,
+        "emit": emit,
+        "auto_ff": auto_ff,
+        "client": client,
+    }
 
     while True:
         run_start = time.monotonic()
         try:
             run_dispatch_loop(**kwargs)
-            # Clean return — operator stop or normal completion.
-            return
         except KeyboardInterrupt:
             # Ctrl-C — clean stop; do not restart.
             return
         except SystemExit:
             # Propagate clean shutdowns initiated by the loop itself.
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001
             run_duration = time.monotonic() - run_start
             now = time.time()
             crash_times.append(now)
@@ -126,3 +126,6 @@ def run_dispatch_serve(
                 backoff = _SERVE_INITIAL_BACKOFF_SECONDS
             else:
                 backoff = min(backoff * 2, _SERVE_BACKOFF_CAP_SECONDS)
+        else:
+            # Clean return — operator stop or normal completion.
+            return

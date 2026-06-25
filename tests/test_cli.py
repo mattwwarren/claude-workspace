@@ -5421,6 +5421,186 @@ class TestDevQueueRunClientFilter:
 
 
 # ---------------------------------------------------------------------------
+# TestDevQueueServe
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueServe:
+    """Tests for ``cw dev-queue serve`` CLI command."""
+
+    def _fake_serve(self) -> tuple[list[dict[str, object]], object]:
+        """Return a (captured_calls, fake_fn) pair for monkeypatching."""
+        captured: list[dict[str, object]] = []
+
+        def _fn(**kwargs: object) -> None:
+            captured.append(dict(kwargs))
+
+        return captured, _fn
+
+    def test_serve_invokes_run_dispatch_serve(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Basic invocation calls run_dispatch_serve."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve"])
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+
+    def test_default_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default flag values: max_parallel=None, use_plan=False, max_restarts=-1."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve"])
+        assert result.exit_code == 0, result.output
+        kw = captured[0]
+        assert kw["max_parallel"] is None
+        assert kw["use_plan"] is False
+        assert kw["auto_ff"] is True
+        assert kw["max_restarts"] == -1
+        assert kw["client"] is None
+
+    def test_quiet_flag_passes_emit_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--quiet passes emit=None to run_dispatch_serve."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve", "--quiet"])
+        assert result.exit_code == 0, result.output
+        assert captured[0]["emit"] is None
+
+    def test_verbose_emit_is_callable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without --quiet, emit is a callable."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve"])
+        assert result.exit_code == 0, result.output
+        assert callable(captured[0]["emit"])
+
+    def test_max_restarts_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--max-restarts N is forwarded to run_dispatch_serve."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve", "--max-restarts", "3"])
+        assert result.exit_code == 0, result.output
+        assert captured[0]["max_restarts"] == 3
+
+    def test_use_plan_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--use-plan is forwarded to run_dispatch_serve."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve", "--use-plan"])
+        assert result.exit_code == 0, result.output
+        assert captured[0]["use_plan"] is True
+
+    def test_no_auto_ff_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--no-auto-ff passes auto_ff=False."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve", "--no-auto-ff"])
+        assert result.exit_code == 0, result.output
+        assert captured[0]["auto_ff"] is False
+
+    def test_client_flag_validated(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--client is validated; unknown client produces non-zero exit."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "serve", "--client", "unknown-client"]
+        )
+        assert result.exit_code != 0
+        assert len(captured) == 0
+
+    def test_client_flag_forwarded(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--client MY-CLIENT is forwarded to run_dispatch_serve."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve", "--client", "my-client"])
+        assert result.exit_code == 0, result.output
+        assert captured[0]["client"] == "my-client"
+
+    def test_parent_flag_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--parent is forwarded to run_dispatch_serve."""
+        from cw.cli import dev_queue as cli_module
+        from cw.cli import main
+
+        captured, fake_fn = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve", "--parent", "sess-xyz"])
+        assert result.exit_code == 0, result.output
+        assert captured[0]["parent"] == "sess-xyz"
+
+    def test_no_once_flag(self) -> None:
+        """serve does not accept --once; run is the one-shot command."""
+        from cw.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "serve", "--once"])
+        assert result.exit_code != 0
+        assert "no such option" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
 # Tests: _format_status_human
 # ---------------------------------------------------------------------------
 

@@ -17,7 +17,6 @@ from cw.dispatch_serve import (
     run_dispatch_serve,
 )
 
-
 # ---------------------------------------------------------------------------
 # TestRunDispatchServeConstants
 # ---------------------------------------------------------------------------
@@ -116,9 +115,11 @@ class TestRunDispatchServeCleanExit:
         def _fake_loop(**_kwargs: object) -> None:
             raise SystemExit(42)
 
-        with patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop):
-            with pytest.raises(SystemExit) as exc_info:
-                run_dispatch_serve()
+        with (
+            pytest.raises(SystemExit) as exc_info,
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+        ):
+            run_dispatch_serve()
 
         assert exc_info.value.code == 42
 
@@ -163,7 +164,8 @@ class TestRunDispatchServeCrashRestart:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise RuntimeError("boom")
+                msg = "boom"
+                raise RuntimeError(msg)
             # Second call returns cleanly.
 
         with (
@@ -181,14 +183,15 @@ class TestRunDispatchServeCrashRestart:
         def _fake_loop(**_kwargs: object) -> None:
             nonlocal call_count
             call_count += 1
-            raise RuntimeError("bang")
+            msg = "bang"
+            raise RuntimeError(msg)
 
         with (
+            pytest.raises(SystemExit) as exc_info,
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
         ):
-            with pytest.raises(SystemExit) as exc_info:
-                run_dispatch_serve(max_restarts=0)
+            run_dispatch_serve(max_restarts=0)
 
         assert exc_info.value.code == 1
         assert call_count == 1
@@ -200,14 +203,15 @@ class TestRunDispatchServeCrashRestart:
         def _fake_loop(**_kwargs: object) -> None:
             nonlocal call_count
             call_count += 1
-            raise RuntimeError("crash")
+            msg = "crash"
+            raise RuntimeError(msg)
 
         with (
+            pytest.raises(SystemExit) as exc_info,
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
         ):
-            with pytest.raises(SystemExit) as exc_info:
-                run_dispatch_serve(max_restarts=1)
+            run_dispatch_serve(max_restarts=1)
 
         assert exc_info.value.code == 1
         assert call_count == 2
@@ -220,7 +224,8 @@ class TestRunDispatchServeCrashRestart:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise RuntimeError("oops")
+                msg = "oops"
+                raise RuntimeError(msg)
 
         with (
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
@@ -247,7 +252,8 @@ class TestRunDispatchServeBackoff:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise RuntimeError("first crash")
+                msg = "first crash"
+                raise RuntimeError(msg)
 
         with (
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
@@ -267,7 +273,8 @@ class TestRunDispatchServeBackoff:
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
-                raise RuntimeError("crash")
+                msg = "crash"
+                raise RuntimeError(msg)
 
         with (
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
@@ -291,7 +298,8 @@ class TestRunDispatchServeBackoff:
             # Crash until we've recorded enough sleeps to reach the cap.
             # With initial=5, doublings: 5, 10, 20, 40, 60, 60...
             if call_count <= 6:
-                raise RuntimeError("crash")
+                msg = "crash"
+                raise RuntimeError(msg)
 
         with (
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
@@ -316,9 +324,12 @@ class TestRunDispatchServeBackoff:
         # Call 2: healthy crash (70s) → sleep 10s, backoff resets → 5s
         # Call 3: clean return → exit
         monotonic_times = [
-            0.0,   0.5,   # call 1: 0.5s run → crash
-            0.0,  70.0,   # call 2: 70s run → crash (healthy)
-            0.0,   0.0,   # call 3: clean return
+            0.0,
+            0.5,  # call 1: 0.5s run → crash
+            0.0,
+            70.0,  # call 2: 70s run → crash (healthy)
+            0.0,
+            0.0,  # call 3: clean return
         ]
         monotonic_iter = iter(monotonic_times)
 
@@ -326,7 +337,8 @@ class TestRunDispatchServeBackoff:
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
-                raise RuntimeError("crash")
+                msg = "crash"
+                raise RuntimeError(msg)
             # Call 3 returns cleanly
 
         with (
@@ -355,9 +367,12 @@ class TestRunDispatchServeBackoff:
         sleep_calls: list[float] = []
         call_count = 0
         monotonic_times = [
-            0.0,  0.1,   # call 1: 0.1s run → crash
-            0.0, 59.9,   # call 2: 59.9s run → crash (just below healthy threshold)
-            0.0,  0.0,   # call 3: clean exit
+            0.0,
+            0.1,  # call 1: 0.1s run → crash
+            0.0,
+            59.9,  # call 2: 59.9s run → crash (just below healthy threshold)
+            0.0,
+            0.0,  # call 3: clean exit
         ]
         monotonic_iter = iter(monotonic_times)
 
@@ -365,7 +380,8 @@ class TestRunDispatchServeBackoff:
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
-                raise RuntimeError("crash")
+                msg = "crash"
+                raise RuntimeError(msg)
 
         with (
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
@@ -401,16 +417,17 @@ class TestRunDispatchServeCrashCap:
         def _fake_loop(**_kwargs: object) -> None:
             nonlocal call_count
             call_count += 1
-            raise RuntimeError("crash")
+            msg = "crash"
+            raise RuntimeError(msg)
 
         with (
+            pytest.raises(SystemExit) as exc_info,
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
             patch("cw.dispatch_serve.time.time", side_effect=time_iter),
             patch("cw.dispatch_serve.time.monotonic", return_value=0.0),
         ):
-            with pytest.raises(SystemExit) as exc_info:
-                run_dispatch_serve()
+            run_dispatch_serve()
 
         assert exc_info.value.code == 1
         assert call_count == _SERVE_MAX_CRASHES
@@ -429,7 +446,8 @@ class TestRunDispatchServeCrashCap:
             call_count += 1
             if call_count <= 3:
                 current_time += 400.0  # well outside the window
-                raise RuntimeError("crash")
+                msg = "crash"
+                raise RuntimeError(msg)
             # 4th call returns cleanly
 
         with (
@@ -442,9 +460,7 @@ class TestRunDispatchServeCrashCap:
 
         assert call_count == 4
 
-    def test_critical_log_on_crash_cap(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_critical_log_on_crash_cap(self, caplog: pytest.LogCaptureFixture) -> None:
         """CRITICAL log is emitted when the crash cap is hit."""
         call_count = 0
         real_times = [float(i) for i in range(20)]
@@ -453,17 +469,18 @@ class TestRunDispatchServeCrashCap:
         def _fake_loop(**_kwargs: object) -> None:
             nonlocal call_count
             call_count += 1
-            raise RuntimeError("crash")
+            msg = "crash"
+            raise RuntimeError(msg)
 
         with (
+            pytest.raises(SystemExit),
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
             patch("cw.dispatch_serve.time.time", side_effect=time_iter),
             patch("cw.dispatch_serve.time.monotonic", return_value=0.0),
             caplog.at_level(logging.CRITICAL, logger="cw.dispatch_serve"),
         ):
-            with pytest.raises(SystemExit):
-                run_dispatch_serve()
+            run_dispatch_serve()
 
         assert any("giving up" in r.message for r in caplog.records)
 
@@ -473,16 +490,17 @@ class TestRunDispatchServeCrashCap:
         """CRITICAL log is emitted when max_restarts is exhausted."""
 
         def _fake_loop(**_kwargs: object) -> None:
-            raise RuntimeError("crash")
+            msg = "crash"
+            raise RuntimeError(msg)
 
         with (
+            pytest.raises(SystemExit),
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
             patch("cw.dispatch_serve.time.time", return_value=0.0),
             patch("cw.dispatch_serve.time.monotonic", return_value=0.0),
             caplog.at_level(logging.CRITICAL, logger="cw.dispatch_serve"),
         ):
-            with pytest.raises(SystemExit):
-                run_dispatch_serve(max_restarts=0)
+            run_dispatch_serve(max_restarts=0)
 
         assert any("max_restarts" in r.message for r in caplog.records)
