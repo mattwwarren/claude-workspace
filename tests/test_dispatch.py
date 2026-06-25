@@ -4807,3 +4807,40 @@ class TestApplyStagedDecision:
         apply_staged_decision(task, "blocked", None, self._clients(tmp_path))
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_blocked_at_finalize_regress_emits_ticket_requeued_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked at FINALIZE with regress reason emits TICKET_REQUEUED (#770)."""
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.TICKET_REQUEUED:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("EVT-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["ticket_id"] == "EVT-1"
+        assert payload["from_stage"] == Stage.FINALIZE
+        assert payload["to_stage"] == Stage.IMPL
+        assert payload["reason"] == "finalize_regress"
+        assert payload["blocker_reason"] == "agent_block"

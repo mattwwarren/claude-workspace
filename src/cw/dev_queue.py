@@ -240,6 +240,12 @@ def _fill_task_completed_at_default(task_raw: dict[str, Any]) -> None:
         task_raw["completed_at"] = None
 
 
+def _fill_regress_attempts_default(task_raw: dict[str, Any]) -> None:
+    """Fill regress_attempts introduced in schema v6 (GitHub #770). Idempotent."""
+    if "regress_attempts" not in task_raw:
+        task_raw["regress_attempts"] = 0
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -253,6 +259,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_disposition_default(task_raw)
                 _fill_pr_url_default(task_raw)
                 _fill_task_completed_at_default(task_raw)
+                _fill_regress_attempts_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 
@@ -761,6 +768,7 @@ def requeue_ticket(
         transition_task_status(task, QueueItemStatus.PENDING)
         task.session_id = None
         task.stage_base_ref = None
+        task.regress_attempts = 0
 
         to_stage = task.stage
         save_dev_queue(store)

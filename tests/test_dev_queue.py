@@ -3331,13 +3331,15 @@ class TestExtractPrUrl:
 class TestStageRegress:
     """Unit tests for _stage_regress (GitHub #770)."""
 
-    def _make_task(self, stage: Stage = Stage.FINALIZE, **kwargs: object) -> TicketTask:
+    def _make_task(
+        self, stage: Stage = Stage.FINALIZE, worktree_path: Path | None = None
+    ) -> TicketTask:
         return TicketTask(
             ticket_id="REGRESS-1",
             client="test-client",
             status=QueueItemStatus.RUNNING,
             stage=stage,
-            **kwargs,  # type: ignore[arg-type]
+            worktree_path=worktree_path,
         )
 
     def test_sets_target_stage(self) -> None:

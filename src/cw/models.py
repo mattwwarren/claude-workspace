@@ -104,7 +104,8 @@ CW_STATE_SCHEMA_VERSION = 10
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
-DEV_QUEUE_SCHEMA_VERSION = 5
+# v6: added TicketTask.regress_attempts (GitHub #770).
+DEV_QUEUE_SCHEMA_VERSION = 6
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
