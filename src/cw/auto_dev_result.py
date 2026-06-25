@@ -105,6 +105,14 @@ STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped", "stage_complete"}
 STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
     {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
 )
+# Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
+# "agent_block" covers prep-pr gate failures (diff-cover, etc.) that a fresh
+# impl session can fix by adding missing tests. Reasons absent here (e.g.
+# "no_result_emitted") stay BLOCKED_ON_USER. Open enum per §4.2 — add reasons
+# as the producer skill evolves. See GitHub #770.
+FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
+# Max automatic FINALIZE→IMPL regressions per ticket; prevents ping-pong.
+FINALIZE_REGRESS_CAP: int = 2
 SCOPE_TIER_SMALL: Literal["small"] = "small"
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should

@@ -610,6 +610,22 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
 
 
+def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
+    """Regress task to a prior pipeline stage for self-heal.
+
+    Mutates task in-place: sets stage to target_stage, increments
+    regress_attempts, reverts status to PENDING, and clears session anchors.
+    worktree_path is preserved so the next impl session resumes the branch.
+    Caller is responsible for stage selection and regress-cap enforcement.
+    See GitHub #770.
+    """
+    task.stage = target_stage
+    task.regress_attempts += 1
+    transition_task_status(task, QueueItemStatus.PENDING)
+    task.session_id = None
+    task.stage_base_ref = None
+
+
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
     """Approve a plan_pending_approval or review_pending_approval gate.
 
