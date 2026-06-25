@@ -15,6 +15,8 @@ import pydantic
 import yaml
 
 from cw.auto_dev_result import (
+    FINALIZE_REGRESS_BLOCKER_REASONS,
+    FINALIZE_REGRESS_CAP,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_SMALL,
@@ -37,6 +39,7 @@ from cw.dev_queue import (
     _advance_task_pointer,
     _derive_disposition,
     _extract_pr_url,
+    _stage_regress,
     dev_queue_lock,
     load_dev_queue,
     load_plan,
@@ -58,6 +61,7 @@ from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
+    Stage,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
@@ -1261,6 +1265,41 @@ def apply_staged_decision(
         transition_task_status(task, QueueItemStatus.COMPLETED, disposition="no_op")
     elif status in STAGE_FAILURE_STATUSES:
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
+        # Sub-rule 5a: "blocked" at FINALIZE with a regress-eligible blocker
+        # reason and attempts below cap → regress to IMPL for self-heal (#770).
+        # scope_exceeded/forbidden_area/merge_gate_blocked have no blocker field
+        # (validator enforces this) so they always fall through to BLOCKED_ON_USER.
+        if status == "blocked" and task.stage == Stage.FINALIZE:
+            blocker = (
+                last_result.get("blocker") if isinstance(last_result, dict) else None
+            )
+            if (
+                isinstance(blocker, dict)
+                and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
+                and task.regress_attempts < FINALIZE_REGRESS_CAP
+            ):
+                _log.info(
+                    "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
+                    " (regress attempt %d/%d)",
+                    blocker.get("reason"),
+                    task.ticket_id,
+                    task.regress_attempts + 1,
+                    FINALIZE_REGRESS_CAP,
+                )
+                _stage_regress(task, Stage.IMPL)
+                record_event(
+                    OrchestratorEventType.TICKET_REQUEUED,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": task.client,
+                        "from_stage": Stage.FINALIZE,
+                        "to_stage": Stage.IMPL,
+                        "reason": "finalize_regress",
+                        "blocker_reason": blocker.get("reason"),
+                        "regress_attempt": task.regress_attempts,
+                    },
+                )
+                return
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )

@@ -3321,3 +3321,74 @@ class TestExtractPrUrl:
 
     def test_none_when_pr_url_missing(self) -> None:
         assert self._extract({"pr": {}}) is None
+
+
+# ---------------------------------------------------------------------------
+# TestStageRegress
+# ---------------------------------------------------------------------------
+
+
+class TestStageRegress:
+    """Unit tests for _stage_regress (GitHub #770)."""
+
+    def _make_task(
+        self, stage: Stage = Stage.FINALIZE, worktree_path: Path | None = None
+    ) -> TicketTask:
+        return TicketTask(
+            ticket_id="REGRESS-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+            worktree_path=worktree_path,
+        )
+
+    def test_sets_target_stage(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task(stage=Stage.FINALIZE)
+        _stage_regress(task, Stage.IMPL)
+        assert task.stage == Stage.IMPL
+
+    def test_increments_regress_attempts(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        assert task.regress_attempts == 0
+        _stage_regress(task, Stage.IMPL)
+        assert task.regress_attempts == 1
+        task.status = QueueItemStatus.RUNNING
+        _stage_regress(task, Stage.IMPL)
+        assert task.regress_attempts == 2
+
+    def test_sets_pending(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        _stage_regress(task, Stage.IMPL)
+        assert task.status == QueueItemStatus.PENDING
+
+    def test_clears_session_id(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        task.session_id = "abc123"
+        _stage_regress(task, Stage.IMPL)
+        assert task.session_id is None
+
+    def test_clears_stage_base_ref(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        task.stage_base_ref = "deadbeef"
+        _stage_regress(task, Stage.IMPL)
+        assert task.stage_base_ref is None
+
+    def test_preserves_worktree_path(self) -> None:
+        from pathlib import Path
+
+        from cw.dev_queue import _stage_regress
+
+        wt = Path("/some/worktree/path")
+        task = self._make_task(worktree_path=wt)
+        _stage_regress(task, Stage.IMPL)
+        assert task.worktree_path == wt

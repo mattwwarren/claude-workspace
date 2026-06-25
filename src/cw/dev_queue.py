@@ -240,6 +240,12 @@ def _fill_task_completed_at_default(task_raw: dict[str, Any]) -> None:
         task_raw["completed_at"] = None
 
 
+def _fill_regress_attempts_default(task_raw: dict[str, Any]) -> None:
+    """Fill regress_attempts introduced in schema v6 (GitHub #770). Idempotent."""
+    if "regress_attempts" not in task_raw:
+        task_raw["regress_attempts"] = 0
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -253,6 +259,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_disposition_default(task_raw)
                 _fill_pr_url_default(task_raw)
                 _fill_task_completed_at_default(task_raw)
+                _fill_regress_attempts_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 
@@ -610,6 +617,22 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
 
 
+def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
+    """Regress task to a prior pipeline stage for self-heal.
+
+    Mutates task in-place: sets stage to target_stage, increments
+    regress_attempts, reverts status to PENDING, and clears session anchors.
+    worktree_path is preserved so the next impl session resumes the branch.
+    Caller is responsible for stage selection and regress-cap enforcement.
+    See GitHub #770.
+    """
+    task.stage = target_stage
+    task.regress_attempts += 1
+    transition_task_status(task, QueueItemStatus.PENDING)
+    task.session_id = None
+    task.stage_base_ref = None
+
+
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
     """Approve a plan_pending_approval or review_pending_approval gate.
 
@@ -745,6 +768,7 @@ def requeue_ticket(
         transition_task_status(task, QueueItemStatus.PENDING)
         task.session_id = None
         task.stage_base_ref = None
+        task.regress_attempts = 0
 
         to_stage = task.stage
         save_dev_queue(store)
