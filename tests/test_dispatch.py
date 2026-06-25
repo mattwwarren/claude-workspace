@@ -4413,3 +4413,107 @@ class TestApplyStagedDecision:
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "abandoned"
+
+    def test_blocked_at_finalize_with_regress_reason_regresses_to_impl(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with agent_block → Stage.IMPL PENDING (#770)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("REGRESS-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 1
+        assert task.session_id is None
+
+    def test_blocked_at_finalize_regress_increments_counter(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Each regress increments regress_attempts."""
+        from cw.dispatch import apply_staged_decision
+
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+
+        # First regress
+        task = self._make_running_task("REGRESS-2", stage=Stage.FINALIZE)
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+        assert task.regress_attempts == 1
+
+        # Simulate re-run: back at FINALIZE, still below cap
+        task.status = QueueItemStatus.RUNNING
+        task.stage = Stage.FINALIZE
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+        assert task.regress_attempts == 2
+        assert task.status == QueueItemStatus.PENDING
+
+    def test_blocked_at_finalize_cap_exceeded_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with regress_attempts >= cap → BLOCKED_ON_USER."""
+        from cw.auto_dev_result import FINALIZE_REGRESS_CAP
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("CAP-1", stage=Stage.FINALIZE)
+        task.regress_attempts = FINALIZE_REGRESS_CAP
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "blocked"
+        assert task.regress_attempts == FINALIZE_REGRESS_CAP  # unchanged
+
+    def test_blocked_at_finalize_non_regress_reason_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with non-eligible reason → BLOCKED_ON_USER."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NR-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "no_result_emitted"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.FINALIZE
+
+    def test_blocked_not_at_finalize_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at non-FINALIZE stage → BLOCKED_ON_USER (no regress)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NF-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s2_impl", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.IMPL
+
+    def test_blocked_at_finalize_no_blocker_in_result_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with no blocker dict → BLOCKED_ON_USER (defensive)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NB-1", stage=Stage.FINALIZE)
+        apply_staged_decision(task, "blocked", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
