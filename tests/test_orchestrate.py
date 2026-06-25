@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from freezegun import freeze_time
 
 from cw.cli import main
 from cw.config import load_state, save_state
@@ -1609,8 +1610,10 @@ class TestAttentionEventsInOrchestratorStatus:
     def test_attention_events_populated_from_needs_attention(
         self,
         tmp_orchestrate_dirs: Path,
+        workspace: Path,
     ) -> None:
-        """attention_events includes all SESSION_NEEDS_ATTENTION events."""
+        """Recent attention flags for a session still in state are surfaced."""
+        save_state(CwState(sessions=[_make_session("abc123", workspace)]))
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -1631,10 +1634,12 @@ class TestAttentionEventsInOrchestratorStatus:
     def test_attention_events_not_capped_by_recent_limit(
         self,
         tmp_orchestrate_dirs: Path,
+        workspace: Path,
     ) -> None:
         """attention_events fetched via dedicated call — not capped at 20-event tail."""
         # Emit attention event first, then flood with 25 non-attention events
         # so the attention event falls off the 20-tail.
+        save_state(CwState(sessions=[_make_session("old-session", workspace)]))
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -1657,11 +1662,58 @@ class TestAttentionEventsInOrchestratorStatus:
         assert len(snapshot.attention_events) == 1
         assert snapshot.attention_events[0].payload["session_id"] == "old-session"
 
-    def test_attention_events_excludes_other_event_types(
+    def test_attention_events_excludes_sessions_not_in_state(
         self,
         tmp_orchestrate_dirs: Path,
     ) -> None:
+        """A recent attention flag for a session no longer in state is dropped.
+
+        Without the live-session bound the panel replays flags for long-reaped
+        sessions forever (#854).
+        """
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": "reaped-session",
+                "paused_status": "silently_idle",
+                "client": "test-client",
+                "ticket_id": "T-9",
+            },
+        )
+        snapshot = orchestrator_status()
+        assert snapshot.attention_events == []
+
+    def test_attention_events_excludes_events_older_than_window(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """An attention flag older than the window is dropped even for a live session.
+
+        Without the recency bound the panel replays the entire history; there is
+        no "attention resolved" event to net flags out (#854).
+        """
+        save_state(CwState(sessions=[_make_session("stale-flag", workspace)]))
+        with freeze_time(datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)):
+            record_event(
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                {
+                    "session_id": "stale-flag",
+                    "paused_status": "dirty_worktree",
+                    "client": "test-client",
+                },
+            )
+        # orchestrator_status() runs at real "now" — far beyond _ATTENTION_WINDOW.
+        snapshot = orchestrator_status()
+        assert snapshot.attention_events == []
+
+    def test_attention_events_excludes_other_event_types(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
         """attention_events only contains SESSION_NEEDS_ATTENTION events."""
+        save_state(CwState(sessions=[_make_session("s1", workspace)]))
         record_event(
             OrchestratorEventType.DISPATCH_TICK,
             {
