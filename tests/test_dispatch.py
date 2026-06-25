@@ -26,7 +26,8 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
-    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
@@ -38,6 +39,7 @@ from cw.dispatch import (
 from cw.events import read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
+    DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     ClientConfig,
     CwState,
@@ -1999,6 +2001,154 @@ class TestClaimNextPendingAttempts:
 
 
 # ---------------------------------------------------------------------------
+# TestGlobalAttemptCeiling
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalAttemptCeiling:
+    """_claim_next_pending parks tasks at the global attempt ceiling.
+
+    GitHub issue #786: the dispatch loop must not re-spawn tasks indefinitely
+    when workers die without emitting a sentinel (e.g. during a usage-limit
+    window). A global attempt ceiling parks at-ceiling tasks BLOCKED_ON_USER
+    and emits a dispatch.tick with skip_reason=ATTEMPT_CAP_BLOCKED.
+    """
+
+    def _ceiling_config(self, ceiling: int = 3) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            global_attempt_ceiling=ceiling,
+        )
+
+    def test_below_ceiling_claims_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Task below the ceiling is claimed and attempts is incremented."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-below",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=2,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-786-below")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 3
+
+    def test_at_ceiling_parks_task_blocked(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Task at the ceiling is parked BLOCKED_ON_USER; attempts not incremented."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-ceiling",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-ceiling")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        # attempts must NOT be incremented when parking at the ceiling
+        assert parked.attempts == 3
+        # daemon was never invoked
+        assert daemon.spawn_calls == []
+
+    def test_at_ceiling_emits_attempt_cap_blocked_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Ceiling-parked task emits dispatch.tick skip_reason=attempt_cap_blocked."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-event",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-786-cap-event",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        cap_events = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.ATTEMPT_CAP_BLOCKED
+        ]
+        assert len(cap_events) == 1
+        assert cap_events[0].payload["ticket_id"] == "GEN-786-event"
+        assert cap_events[0].payload["client"] == "test-client"
+
+    def test_at_ceiling_priority_path_parks_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Ceiling check also fires on the priority-ticket path."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-pri",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        # Use use_plan=True so the priority-ticket path in _claim_next_pending
+        # is exercised. The plan must reference the task's client so it gets
+        # a non-empty priority_ids list.
+        save_plan(
+            DispatchPlan(
+                tasks=[TicketTask(ticket_id="GEN-786-pri", client="test-client")]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=3), native_daemon=daemon, use_plan=True
+        )
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-pri")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert parked.attempts == 3
+
+    def test_default_ceiling_is_ten(self) -> None:
+        """DEFAULT_GLOBAL_ATTEMPT_CEILING constant value and model default match."""
+        assert DEFAULT_GLOBAL_ATTEMPT_CEILING == 10
+        cfg = OrchestratorConfig()
+        assert cfg.global_attempt_ceiling == DEFAULT_GLOBAL_ATTEMPT_CEILING
+
+
+# ---------------------------------------------------------------------------
 # TestClaimNextPendingPriority
 # ---------------------------------------------------------------------------
 
@@ -2409,6 +2559,10 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
         lines: list[str] = []
@@ -2435,6 +2589,10 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
         lines: list[str] = []
@@ -2460,6 +2618,10 @@ class TestRunDispatchLoopVerbose:
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -3459,10 +3621,11 @@ class TestFreshnessGateAutoFF:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """get_head_branch returns default_branch → normal path.
+        """get_head_branch returns default_branch → normal path (not non_main_head).
 
-        When HEAD == default_branch and the repo is stale, dispatch emits
-        freshness_detail="main_behind_origin" (not "non_main_head").
+        When HEAD == default_branch and the repo is stale with diverged safety,
+        dispatch emits freshness_detail="main_diverged_from_origin" — NOT
+        "non_main_head" (which would be wrong when we ARE on the default branch).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(ticket_id="CW-112", client="test-client")
@@ -3492,7 +3655,10 @@ class TestFreshnessGateAutoFF:
         assert (
             tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_BEHIND
+        # Key assertion: not NON_MAIN_HEAD — we ARE on the default branch.
+        # With diverged safety, the new distinct detail is FRESHNESS_MAIN_DIVERGED.
+        assert tick_events[0].payload["freshness_detail"] != FRESHNESS_NON_MAIN_HEAD
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
 
     def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
         self,
@@ -3573,6 +3739,130 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
         assert len(events) == 1
+
+    def test_auto_ff_ahead_emits_diverged_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='ahead' → freshness_detail='main_diverged_from_origin' (#766).
+
+        When local main is ahead of origin (unpushed commits exist), the
+        dispatch loop should emit a distinct freshness_detail so the operator
+        can distinguish "ahead" from "behind" in the status output.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-120", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "ahead",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-ahead-diverged-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
+        assert any("diverged" in ln for ln in emitted)
+
+    def test_auto_ff_diverged_emits_diverged_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='diverged' → freshness_detail='main_diverged_from_origin' (#766).
+
+        When local main has diverged from origin (has both local and remote
+        commits), a distinct freshness_detail tells the operator to reconcile
+        rather than just wait for auto-ff.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-121", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "diverged",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-diverged-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
+        assert any("diverged" in ln for ln in emitted)
+
+    def test_auto_ff_behind_dirty_emits_dirty_checkout_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='behind' + dirty checkout → freshness_detail='main_dirty_checkout'.
+
+        When local main is behind origin but the working tree has uncommitted
+        tracked changes, auto-ff is blocked.  A distinct freshness_detail
+        tells the operator to commit or stash — not wait for auto-ff.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-122", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_checkout_dirty",
+            lambda _client: True,
+            raising=False,
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-dirty-checkout-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert (
+            tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIRTY_CHECKOUT
+        )
+        assert any("dirty" in ln or "uncommitted" in ln for ln in emitted)
 
 
 # ---------------------------------------------------------------------------

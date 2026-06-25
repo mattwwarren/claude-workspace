@@ -152,6 +152,7 @@ INTERMEDIATE_ADVANCE_STATUSES: frozenset[str] = (
 # (e.g. cli.py) can reference them without duplicating the literal strings.
 BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS = "multiple_result_blocks"
 BLOCKER_REASON_NO_RESULT_EMITTED = "no_result_emitted"
+BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN = "prior_pipeline_pr_open"
 BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED = "schema_version_unsupported"
 BLOCKER_REASON_STATUS_UNKNOWN = "status_unknown"
 BLOCKER_REASON_VALIDATION_FAILED = "validation_failed"
@@ -487,10 +488,14 @@ class AutoDevResult(BaseModel):
             raise ValueError(msg)
 
         # §3.3 blocker: non-null iff status == blocked
+        # Exception (issue #777): merge_gate_blocked may optionally carry a
+        # non-null blocker to surface prior_pipeline_pr_open reason — backward
+        # compat preserved since blocker=null is still accepted for this status.
         if self.status == "blocked" and self.blocker is None:
             msg = "blocker must be non-null when status is 'blocked'"
             raise ValueError(msg)
-        if self.status != "blocked" and self.blocker is not None:
+        blocker_allowed = self.status in {"blocked", "merge_gate_blocked"}
+        if not blocker_allowed and self.blocker is not None:
             msg = f"blocker must be null when status is {self.status!r}"
             raise ValueError(msg)
 

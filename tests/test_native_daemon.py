@@ -63,6 +63,37 @@ class TestRealNativeDaemonClientSpawnGitEnv:
         assert not git_keys, f"GIT_* vars must be stripped; found: {git_keys}"
         assert "PATH" in env, "non-GIT env vars must be preserved (PATH missing)"
 
+    def test_pwd_overridden_with_worktree_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """env["PWD"] must equal str(cwd) passed to spawn_bg.
+
+        subprocess.run(cwd=...) changes the child OS CWD but does NOT update
+        $PWD.  Without the fix, $PWD still points to the orchestrator's main
+        checkout; the Claude daemon uses $PWD as the project root, causing
+        git ops to leak into the main checkout instead of the worker worktree
+        (#766).
+        """
+        captured: dict[str, object] = {}
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            captured.update(kwargs)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        monkeypatch.setenv("PWD", "/some/other/checkout")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        client = RealNativeDaemonClient()
+        client.spawn_bg(cwd=worktree, prompt="x")
+
+        env = captured.get("env")
+        assert isinstance(env, dict)
+        assert env["PWD"] == str(worktree), (
+            f"PWD must be overridden to str(cwd); got {env.get('PWD')!r}"
+        )
+
 
 class TestRealNativeDaemonClientSpawn:
     """spawn_bg shells out to claude --bg and parses the short id."""
