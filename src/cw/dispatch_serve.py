@@ -8,11 +8,11 @@ without hot-looping during sustained outages.
 from __future__ import annotations
 
 import logging
-import sys
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from cw.dispatch import run_dispatch_loop
+from cw.exceptions import DispatchServeError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -63,24 +63,23 @@ def run_dispatch_serve(
         client: Forwarded to ``run_dispatch_loop``.
         max_restarts: Maximum number of restarts.  -1 means unlimited.
             When the crash count hits this limit the supervisor logs a
-            critical message and exits with code 1.
+            critical message and raises :exc:`DispatchServeGaveUp`.
     """
     crash_times: list[float] = []
     restart_count: int = 0
     backoff: float = _SERVE_INITIAL_BACKOFF_SECONDS
-    kwargs: dict[str, Any] = {
-        "max_parallel": max_parallel,
-        "use_plan": use_plan,
-        "parent": parent,
-        "emit": emit,
-        "auto_ff": auto_ff,
-        "client": client,
-    }
 
     while True:
         run_start = time.monotonic()
         try:
-            run_dispatch_loop(**kwargs)
+            run_dispatch_loop(
+                max_parallel=max_parallel,
+                use_plan=use_plan,
+                parent=parent,
+                emit=emit,
+                auto_ff=auto_ff,
+                client=client,
+            )
         except KeyboardInterrupt:
             # Ctrl-C — clean stop; do not restart.
             return
@@ -107,7 +106,11 @@ def run_dispatch_serve(
                     len(crash_times),
                     _SERVE_CRASH_WINDOW_SECONDS,
                 )
-                sys.exit(1)
+                msg = (
+                    f"dispatch supervisor gave up: {len(crash_times)} crashes"
+                    f" in {_SERVE_CRASH_WINDOW_SECONDS}s window"
+                )
+                raise DispatchServeError(msg) from None
 
             # Max-restarts cap.
             if max_restarts >= 0 and restart_count > max_restarts:
@@ -115,7 +118,11 @@ def run_dispatch_serve(
                     "dispatch_serve: max_restarts=%d exhausted — giving up",
                     max_restarts,
                 )
-                sys.exit(1)
+                msg = (
+                    "dispatch supervisor gave up:"
+                    f" max_restarts={max_restarts} exhausted"
+                )
+                raise DispatchServeError(msg) from None
 
             _log.info("dispatch_serve: restarting in %.1fs", backoff)
             time.sleep(backoff)

@@ -150,3 +150,14 @@ class UnblockStateError(CwError):
     """Raised when a ticket cannot be unblocked because it is not park-marked."""
 
     __slots__ = ()
+
+
+class DispatchServeError(CwError):
+    """Raised when the dispatch supervisor exhausts its restart budget.
+
+    Raised instead of ``sys.exit`` so the CLI boundary (``handle_errors``)
+    owns the process-exit decision and programmatic callers get a catchable
+    signal rather than a hard process kill.
+    """
+
+    __slots__ = ()

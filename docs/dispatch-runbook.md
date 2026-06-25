@@ -126,6 +126,10 @@ Restart behaviour:
   CRITICAL log. Use `cw doctor` to investigate the underlying cause.
 - `serve` does **not** accept `--once`; use `run --once` for single-tick
   dry-runs.
+- **Single-instance**: `serve` provides no pidfile or lock. Running two
+  `serve` processes simultaneously creates two competing dispatch loops.
+  The operator is responsible for ensuring exactly one `serve` is running
+  (same responsibility as the existing `run` command).
 
 ### Lane serialization — cli.py and other shared files
 

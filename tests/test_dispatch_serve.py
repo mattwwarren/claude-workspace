@@ -16,6 +16,7 @@ from cw.dispatch_serve import (
     _prune_crash_window,
     run_dispatch_serve,
 )
+from cw.exceptions import DispatchServeError
 
 # ---------------------------------------------------------------------------
 # TestRunDispatchServeConstants
@@ -61,7 +62,7 @@ class TestPruneCrashWindow:
         assert result == []
 
     def test_boundary_exclusive(self) -> None:
-        # cutoff = now - 300; exact-cutoff entry is excluded
+        # cutoff = now - 300; exact-cutoff entry is kept (>= is inclusive)
         now = 1000.0
         cutoff = now - _SERVE_CRASH_WINDOW_SECONDS  # 700.0
         times = [cutoff - 1, cutoff, cutoff + 1]
@@ -187,13 +188,12 @@ class TestRunDispatchServeCrashRestart:
             raise RuntimeError(msg)
 
         with (
-            pytest.raises(SystemExit) as exc_info,
+            pytest.raises(DispatchServeError),
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
         ):
             run_dispatch_serve(max_restarts=0)
 
-        assert exc_info.value.code == 1
         assert call_count == 1
 
     def test_max_restarts_one_allows_one_restart(self) -> None:
@@ -207,13 +207,12 @@ class TestRunDispatchServeCrashRestart:
             raise RuntimeError(msg)
 
         with (
-            pytest.raises(SystemExit) as exc_info,
+            pytest.raises(DispatchServeError),
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
         ):
             run_dispatch_serve(max_restarts=1)
 
-        assert exc_info.value.code == 1
         assert call_count == 2
 
     def test_error_logged_on_crash(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -322,24 +321,27 @@ class TestRunDispatchServeBackoff:
         call_count = 0
         # Call 1: short crash (0.5s) → sleep initial (5s), backoff → 10s
         # Call 2: healthy crash (70s) → sleep 10s, backoff resets → 5s
-        # Call 3: clean return → exit
+        # Call 3: short crash (0.5s) → sleep 5s (reset confirmed), backoff → 10s
+        # Call 4: clean return → exit
         monotonic_times = [
             0.0,
-            0.5,  # call 1: 0.5s run → crash
+            0.5,   # call 1: 0.5s run → crash
             0.0,
-            70.0,  # call 2: 70s run → crash (healthy)
+            70.0,  # call 2: 70s run → crash (healthy, resets backoff)
             0.0,
-            0.0,  # call 3: clean return
+            0.5,   # call 3: 0.5s run → crash (backoff should be 5s after reset)
+            0.0,
+            0.0,   # call 4: clean return
         ]
         monotonic_iter = iter(monotonic_times)
 
         def _fake_loop(**_kwargs: object) -> None:
             nonlocal call_count
             call_count += 1
-            if call_count <= 2:
+            if call_count <= 3:
                 msg = "crash"
                 raise RuntimeError(msg)
-            # Call 3 returns cleanly
+            # Call 4 returns cleanly
 
         with (
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
@@ -356,11 +358,13 @@ class TestRunDispatchServeBackoff:
         ):
             run_dispatch_serve()
 
-        # crash 1 (short): sleep initial=5.0, backoff → 10.0
-        # crash 2 (healthy 70s): sleep 10.0, backoff resets → 5.0
-        assert len(sleep_calls) == 2
+        # crash 1 (short 0.5s):   sleep initial=5.0, backoff → 10.0
+        # crash 2 (healthy 70s):  sleep 10.0,        backoff resets → 5.0
+        # crash 3 (short 0.5s):   sleep 5.0 (reset), backoff → 10.0
+        assert len(sleep_calls) == 3
         assert sleep_calls[0] == pytest.approx(_SERVE_INITIAL_BACKOFF_SECONDS)
         assert sleep_calls[1] == pytest.approx(_SERVE_INITIAL_BACKOFF_SECONDS * 2)
+        assert sleep_calls[2] == pytest.approx(_SERVE_INITIAL_BACKOFF_SECONDS)
 
     def test_no_backoff_reset_below_healthy_threshold(self) -> None:
         """Runs shorter than _SERVE_HEALTHY_RUN_SECONDS do NOT reset backoff."""
@@ -421,7 +425,7 @@ class TestRunDispatchServeCrashCap:
             raise RuntimeError(msg)
 
         with (
-            pytest.raises(SystemExit) as exc_info,
+            pytest.raises(DispatchServeError),
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
             patch("cw.dispatch_serve.time.time", side_effect=time_iter),
@@ -429,7 +433,6 @@ class TestRunDispatchServeCrashCap:
         ):
             run_dispatch_serve()
 
-        assert exc_info.value.code == 1
         assert call_count == _SERVE_MAX_CRASHES
 
     def test_crash_outside_window_does_not_count(self) -> None:
@@ -473,7 +476,7 @@ class TestRunDispatchServeCrashCap:
             raise RuntimeError(msg)
 
         with (
-            pytest.raises(SystemExit),
+            pytest.raises(DispatchServeError),
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
             patch("cw.dispatch_serve.time.time", side_effect=time_iter),
@@ -494,7 +497,7 @@ class TestRunDispatchServeCrashCap:
             raise RuntimeError(msg)
 
         with (
-            pytest.raises(SystemExit),
+            pytest.raises(DispatchServeError),
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
             patch("cw.dispatch_serve.time.time", return_value=0.0),
