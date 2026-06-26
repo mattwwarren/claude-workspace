@@ -121,7 +121,27 @@ Exit 0 / `"terminal": true` when every wave ticket is terminal
 (`completed` / `failed` / `cancelled` / `blocked_on_user`, or removed from the
 queue). `"in_flight"` lists the tickets still `pending`/`running`;
 `"needs_attention"` lists `blocked_on_user` tickets (a session paused for the
-operator). Loop the rest of Step 4 until this reports terminal.
+operator).
+
+The monitoring loop continues until `wave_status.py` reports `terminal=true AND
+needs_attention is empty`. A `terminal=true` report with non-empty
+`needs_attention` does NOT exit the loop — it means all remaining in-flight
+tickets are `blocked_on_user` for gate resolution. Proceed immediately to Step
+4b to close those gates, then re-evaluate.
+
+The loop control logic is:
+
+```
+LOOP:
+  report = wave_status.py <WAVE> --client <C> --json
+  if report.terminal and report.needs_attention is empty:
+    EXIT LOOP → proceed to Step 5
+  for each ticket in report.needs_attention:
+    process gate (Step 4b)
+  tail event bus (Step 4b, attention signals)
+  run peek-stop ladder (Step 4c)
+  sleep/checkpoint
+```
 
 **b. Attention signals — does anything need me now?**
 
@@ -141,6 +161,7 @@ event is `session.timed_out`, check the `branch_state` field: `"absent_no_merged
 means the worker died before push (an anomaly worth investigating); absent key
 means the branch is present or the check was unavailable (ordinary slow timeout).
 See [`session-disposition.md §5a`](../../docs/session-disposition.md#5a-branch-absence-anomaly-on-session_timed_out-808).
+Resume the monitoring loop.
 
 **c. In-flight health — is a running session stuck?**
 
