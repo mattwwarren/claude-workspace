@@ -2638,6 +2638,7 @@ class TestRunDispatchLoopVerbose:
             emit: Callable[[str], None] | None = None,
             warned_stale: set[tuple[str, str]] | None = None,
             warned_fetch_fail: set[str] | None = None,
+            warned_collision: set[frozenset[str]] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -2652,6 +2653,7 @@ class TestRunDispatchLoopVerbose:
                 emit=emit,
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
+                warned_collision=warned_collision,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -4844,3 +4846,135 @@ class TestApplyStagedDecision:
         assert payload["to_stage"] == Stage.IMPL
         assert payload["reason"] == "finalize_regress"
         assert payload["blocker_reason"] == "agent_block"
+
+
+# ---------------------------------------------------------------------------
+# TestWaveCollisionDetection
+# ---------------------------------------------------------------------------
+
+
+class TestWaveCollisionDetection:
+    """Verify dispatch_tick wires warned_collision to collision detection (#784).
+
+    Covers: kwarg acceptance, run_dispatch_loop initialization, and end-to-end
+    collision event emission for two RUNNING tasks sharing touched files.
+    """
+
+    def test_dispatch_tick_accepts_warned_collision_kwarg(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """dispatch_tick must accept warned_collision without raising TypeError."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (False, "abc", "abc", 0),
+        )
+
+        warned: set[frozenset[str]] = set()
+        # Should not raise even when no tasks are queued
+        result = dispatch_tick(
+            simple_config,
+            native_daemon=FakeNativeDaemonClient(),
+            warned_collision=warned,
+        )
+        assert isinstance(result, DispatchTickResult)
+
+    def test_run_dispatch_loop_initializes_warned_collision(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop must pass warned_collision to each dispatch_tick call."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        captured_collision_sets: list[object] = []
+
+        original = dispatch_tick
+
+        def _spy(
+            config: OrchestratorConfig,
+            *,
+            warned_collision: set[frozenset[str]] | None = None,
+            **kwargs: object,
+        ) -> DispatchTickResult:
+            captured_collision_sets.append(warned_collision)
+            return original(config, **kwargs)
+
+        monkeypatch.setattr("cw.dispatch.dispatch_tick", _spy)
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (False, "abc", "abc", 0),
+        )
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+        assert len(captured_collision_sets) == 1
+        assert isinstance(captured_collision_sets[0], set)
+
+    def test_collision_detection_fires_for_running_tasks_sharing_files(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two RUNNING tasks sharing a file → WAVE_COLLISION event emitted."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Pre-populate two RUNNING tasks on the same client with worktrees
+        wt1 = tmp_dispatch_dirs / "wt1"
+        wt2 = tmp_dispatch_dirs / "wt2"
+        wt1.mkdir(parents=True)
+        wt2.mkdir(parents=True)
+
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks = [
+                TicketTask(
+                    ticket_id="COL-1",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    worktree_path=wt1,
+                    stage_base_ref="abc123",
+                ),
+                TicketTask(
+                    ticket_id="COL-2",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    worktree_path=wt2,
+                    stage_base_ref="abc123",
+                ),
+            ]
+            save_dev_queue(store)
+
+        monkeypatch.setattr(
+            "cw.collision._git_changed_files",
+            lambda _path, _base_ref: frozenset({"src/shared.py"}),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (False, "abc", "abc", 0),
+        )
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+
+        warned: set[frozenset[str]] = set()
+        dispatch_tick(
+            simple_config,
+            native_daemon=FakeNativeDaemonClient(),
+            warned_collision=warned,
+        )
+
+        events = read_events(
+            consumer="test-dispatch-collision",
+            event_types=[OrchestratorEventType.WAVE_COLLISION],
+        )
+        assert len(events) == 1
+        assert set(events[0].payload["ticket_ids"]) == {"COL-1", "COL-2"}

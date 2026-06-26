@@ -25,6 +25,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     parse_stdout,
 )
+from cw.collision import detect_wave_collisions
 from cw.config import (
     load_clients,
     load_effective_clients,
@@ -935,6 +936,7 @@ def dispatch_tick(
     emit: Callable[[str], None] | None = None,
     warned_stale: set[tuple[str, str]] | None = None,
     warned_fetch_fail: set[str] | None = None,
+    warned_collision: set[frozenset[str]] | None = None,
     usage_limited_until: datetime | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
@@ -1010,6 +1012,16 @@ def dispatch_tick(
     if any_usage_limit_detected:
         _emit_usage_limit_skip_events(clients, config, state)
         return DispatchTickResult(spawned=0, usage_limit_detected=True)
+
+    # Wave file-collision detection: check all RUNNING tasks for overlapping
+    # touch-sets and warn operators before merge-time conflicts arise (#784).
+    with dev_queue_lock():
+        _collision_snapshot = load_dev_queue()
+    detect_wave_collisions(
+        _collision_snapshot.tasks,
+        warned_collision=warned_collision,
+        emit=emit,
+    )
 
     # Tier-1: optionally cap how many clients are eligible per tick.
     # max_parallel_clients=None preserves the original behaviour (all clients).
@@ -1515,6 +1527,9 @@ def run_dispatch_loop(
     warned_stale: set[tuple[str, str]] = set()
     # Track fetch-fail-warn deduplication for persistently unreachable remotes.
     warned_fetch_fail: set[str] = set()
+    # Track wave-collision pairs already warned; prevents duplicate events
+    # for long-running in-flight task pairs across multiple ticks (#784).
+    warned_collision: set[frozenset[str]] = set()
     # Back-off window: loaded from the persisted sidecar so a loop restart after
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
@@ -1542,6 +1557,7 @@ def run_dispatch_loop(
                 emit=emit,
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
+                warned_collision=warned_collision,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client,
