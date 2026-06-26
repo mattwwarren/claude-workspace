@@ -166,24 +166,25 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
 `ambiguities_pending_resolution`, `premises_pending_verification`:
 
 1. Run `/cw-followup --ticket-id <T>` inline so the operator resolves the gate.
-2. Re-check status after followup:
-   ```bash
-   STATUS=$(cw dev-queue tasks --ticket <T> -c <CLIENT> --json \
-     | jq -r '.[0].status')
-   ```
-3. If `STATUS` is still `blocked_on_user`:
-   - `plan_pending_approval` / `review_pending_approval` →
-     `cw dev-queue approve <T> -c <CLIENT>` (fallback auto-approve; if session
-     not found, falls back to `cw dev-queue requeue <T> -c <CLIENT>`)
-   - `ambiguities_pending_resolution` / `premises_pending_verification` →
-     `cw dev-queue requeue <T> -c <CLIENT>`
-4. Check if the operator removed the ticket from the queue:
+2. Check if the operator removed the ticket from the queue (do this before any
+   approve/requeue attempt to avoid spurious errors):
    ```bash
    cw dev-queue tasks --ticket <T> -c <CLIENT> --json | jq length
    ```
    If the result is `0` (ticket no longer in queue): print
    `gate abandoned: #<T> (<GATE>) → operator removed ticket; wave continues`
-   and skip step 5 (no re-dispatch needed).
+   and skip sub-step 5 below (no re-dispatch needed).
+3. Re-check status after followup:
+   ```bash
+   STATUS=$(cw dev-queue tasks --ticket <T> -c <CLIENT> --json \
+     | jq -r '.[0].status')
+   ```
+4. If `STATUS` is still `blocked_on_user`:
+   - `plan_pending_approval` / `review_pending_approval` →
+     `cw dev-queue approve <T> -c <CLIENT>` (fallback auto-approve; if session
+     not found, falls back to `cw dev-queue requeue <T> -c <CLIENT>`)
+   - `ambiguities_pending_resolution` / `premises_pending_verification` →
+     `cw dev-queue requeue <T> -c <CLIENT>`
 5. On successful re-dispatch: print
    `gate closed: #<T> (<GATE>) → re-dispatched, watching` — resume the loop.
 
@@ -269,9 +270,9 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
   ambiguity across a batch). For known gate types, the inline loop calls
   `/cw-followup` per gate ticket in sequence — if multiple tickets share the
   same ambiguity, the operator provides the same answer on each invocation.
-  For non-gate blocked tickets, disposition one via
-  `/cw-followup`, then re-dispatch the rest with the same decision rather than
-  answering each separately.
+  For non-gate blocked tickets, disposition one via `/cw-followup`, then
+  `cw dev-queue requeue <T>` each remaining ticket with the same decision rather
+  than answering each separately.
 
 ## Out of scope
 
