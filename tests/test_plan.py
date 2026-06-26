@@ -235,10 +235,13 @@ class TestRunPlanner:
         assert result.plan is not None
         prompt_text = result.prompt_path.read_text()
 
-        # Planning fields must appear in the prompt
+        # Planning fields must appear in the prompt (keys + values where non-default)
         assert "GEN-1" in prompt_text
         assert "planner-client" in prompt_text
         assert "small" in prompt_text
+        assert '"priority"' in prompt_text
+        assert '"lane"' in prompt_text
+        assert '"stage"' in prompt_text
 
         # Runtime-state fields must NOT appear in the prompt
         assert "abc-session-123" not in prompt_text  # session_id value

@@ -32,7 +32,7 @@ _COMPACT_FIELDS: set[str] = {
     "priority",
     "scope_hint",
     "lane",
-    "stage",
+    "stage",  # Why: enables correct handling of mixed-stage queues
 }
 
 
