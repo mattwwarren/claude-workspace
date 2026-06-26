@@ -188,11 +188,7 @@ class TestDetectWaveCollisions:
     def test_missing_worktree_no_crash(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        called = False
-
         def _mock_files(path: Path, base_ref: str) -> frozenset[str]:
-            nonlocal called
-            called = True
             return frozenset()
 
         monkeypatch.setattr("cw.collision._git_changed_files", _mock_files)
@@ -200,7 +196,11 @@ class TestDetectWaveCollisions:
         task = self._make_running("T-6", worktree=tmp_path / "missing-wt")
         warned: set[frozenset[str]] = set()
         detect_wave_collisions([task], warned_collision=warned)
-        # No crash; no collision emitted
+        events = read_events(
+            consumer="test-missing-wt",
+            event_types=[OrchestratorEventType.WAVE_COLLISION],
+        )
+        assert events == []
 
     def test_no_intersection_no_event(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

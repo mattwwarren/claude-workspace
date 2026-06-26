@@ -71,8 +71,8 @@ def detect_wave_collisions(
     a WAVE_COLLISION event and (if *emit* is not None) a warning line.
 
     Args:
-        tasks: All tasks to consider — typically all RUNNING tasks from the
-            current queue snapshot. Tasks without ``stage_base_ref`` or
+        tasks: All tasks in the current queue snapshot; non-RUNNING tasks,
+            tasks without ``stage_base_ref``, and tasks without
             ``worktree_path`` are skipped silently.
         warned_collision: Mutable set of ``frozenset({ticket_id_a, ticket_id_b})``
             pairs already warned this loop run. When ``None``, dedup is skipped
@@ -121,10 +121,10 @@ def detect_wave_collisions(
 
         if emit is not None:
             ids_str = " ↔ ".join(sorted_ids)
-            n = _EMIT_FILES_PREVIEW_COUNT
-            files_preview = ", ".join(sorted_files[:n])
-            if len(sorted_files) > n:
-                files_preview += f" (+{len(sorted_files) - n} more)"
+            preview_limit = _EMIT_FILES_PREVIEW_COUNT
+            files_preview = ", ".join(sorted_files[:preview_limit])
+            if len(sorted_files) > preview_limit:
+                files_preview += f" (+{len(sorted_files) - preview_limit} more)"
             emit(
                 f"COLLISION [{task_a.client}] {ids_str} share"
                 f" {len(sorted_files)} file(s): {files_preview}"

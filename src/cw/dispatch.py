@@ -967,6 +967,11 @@ def dispatch_tick(
             received a fetch-failure WARNING during this dispatcher run.
             Suppresses repeated WARNINGs for persistently unreachable
             remotes.  Caller owns the set; mutated in-place.
+        warned_collision: Mutable set of ``frozenset({ticket_id_a,
+            ticket_id_b})`` pairs already warned this loop run. Prevents
+            duplicate WAVE_COLLISION events for persistent in-flight
+            collisions across ticks. Caller owns the set; mutated
+            in-place. When None, dedup is skipped (every tick fires).
         usage_limited_until: When set and in the future, all clients are
             skipped with ``skip_reason=USAGE_LIMITED`` and the function
             returns immediately. The back-off window is set by the
@@ -998,6 +1003,18 @@ def dispatch_tick(
 
     plan_order_by_client = _build_plan_order(use_plan=use_plan)
 
+    # Wave file-collision detection runs before usage-limit gates so that
+    # RUNNING tasks are checked even during backoff — they continue running
+    # regardless of whether spawning is paused (#784).
+    # Why: writes WAVE_COLLISION events to inbox.jsonl for each new collision pair.
+    with dev_queue_lock():
+        collision_snapshot = load_dev_queue()
+    detect_wave_collisions(
+        collision_snapshot.tasks,
+        warned_collision=warned_collision,
+        emit=emit,
+    )
+
     # Usage-limit back-off gate: if the window is still active, skip all clients
     # this tick and emit a dispatch.tick event with skip_reason=USAGE_LIMITED.
     if usage_limited_until is not None and datetime.now(UTC) < usage_limited_until:
@@ -1012,16 +1029,6 @@ def dispatch_tick(
     if any_usage_limit_detected:
         _emit_usage_limit_skip_events(clients, config, state)
         return DispatchTickResult(spawned=0, usage_limit_detected=True)
-
-    # Wave file-collision detection: check all RUNNING tasks for overlapping
-    # touch-sets and warn operators before merge-time conflicts arise (#784).
-    with dev_queue_lock():
-        _collision_snapshot = load_dev_queue()
-    detect_wave_collisions(
-        _collision_snapshot.tasks,
-        warned_collision=warned_collision,
-        emit=emit,
-    )
 
     # Tier-1: optionally cap how many clients are eligible per tick.
     # max_parallel_clients=None preserves the original behaviour (all clients).
