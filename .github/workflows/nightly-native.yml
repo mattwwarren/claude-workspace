@@ -46,18 +46,18 @@ jobs:
 
       # Run native-daemon smoke tests that call the real claude CLI.
       # Fails fast with a clear message when ANTHROPIC_API_KEY is not configured.
-      - name: Verify ANTHROPIC_API_KEY is configured
+      - name: Verify ANTHROPIC_CI_KEY is configured
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_CI_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "ERROR: ANTHROPIC_API_KEY secret is not set."
+            echo "ERROR: ANTHROPIC_CI_KEY secret is not set."
             echo "Configure it in Settings → Secrets → Actions before running this workflow."
             exit 1
           fi
 
       - name: Test (native daemon smoke)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_CI_KEY }}
           INTEGRATION_REAL_API: "1"
         run: uv run pytest tests/test_native_smoke.py -v --tb=short -m integration
