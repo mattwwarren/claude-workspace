@@ -183,6 +183,7 @@ ignore = [
     "SLF001",   # private member access is fine in tests
     "PT004",    # fixture doesn't return anything - not always needed
     "TC001",    # app imports used at runtime in test type annotations
+    "TC002",    # third-party imports (pytest) used at runtime in test annotations
     "TC003",    # pathlib.Path annotation at runtime in test signatures is fine
     "TC005",    # empty type-checking blocks during migration are fine
     "S108",     # /tmp socket paths are part of the cmux protocol spec

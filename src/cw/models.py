@@ -221,6 +221,7 @@ class OrchestratorEventType(StrEnum):
     TICKET_REQUEUED = "ticket.requeued"
     TICKET_UNBLOCKED = "ticket.unblocked"
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
+    WAVE_COLLISION = "wave.collision"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
