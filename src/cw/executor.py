@@ -1,4 +1,4 @@
-"""RFC 0005 A2 — StageExecutor seam + ClaudeNativeExecutor (dormant/unwired)."""
+"""RFC 0005 A2/E1 — StageExecutor seam + ClaudeNativeExecutor + executor resolution."""
 
 from __future__ import annotations
 
@@ -19,6 +19,42 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.native_daemon import NativeDaemonClient
+
+
+def resolve_executor_config(
+    stage: Stage,
+    task: TicketTask,
+    client: ClientConfig,
+) -> StageExecutorConfig:
+    """Return the effective StageExecutorConfig for a stage, with lane override (E1).
+
+    Priority: lane.pipeline > client.pipeline > default StageExecutorConfig.
+    """
+    lane_pipeline = None
+    if task.lane:
+        for lane_cfg in client.effective_lanes:
+            if lane_cfg.name == task.lane and lane_cfg.pipeline is not None:
+                lane_pipeline = lane_cfg.pipeline
+                break
+    pipeline = lane_pipeline if lane_pipeline is not None else client.pipeline
+    return pipeline.executors.get(stage, StageExecutorConfig())
+
+
+def resolve_executor(
+    task: TicketTask,
+    client: ClientConfig,
+    *,
+    native_daemon: NativeDaemonClient | None = None,
+) -> StageExecutor:
+    """Return the executor for task.stage, selected by backend (RFC 0005 E1).
+
+    Only "claude-native" is supported until F3 (LocalExecutor) lands.
+    """
+    config = resolve_executor_config(task.stage, task, client)
+    if config.backend != "claude-native":
+        msg = f"unknown executor backend: {config.backend!r}"
+        raise ValueError(msg)
+    return ClaudeNativeExecutor(native_daemon=native_daemon)
 
 
 @runtime_checkable
@@ -64,7 +100,7 @@ class ClaudeNativeExecutor:
         wall_clock_budget_seconds: int | None = None,
         parent: str | None = None,
     ) -> str:
-        stage_config = client.pipeline.executors.get(stage, StageExecutorConfig())
+        stage_config = resolve_executor_config(stage, task, client)
         effective_model = stage_config.model or client.worker_model
         effective_client = client.model_copy(update={"worker_model": effective_model})
         return spawn_create_impl(

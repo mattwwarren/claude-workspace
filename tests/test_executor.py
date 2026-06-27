@@ -10,9 +10,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
-from cw.executor import ClaudeNativeExecutor, StageExecutor
+from cw.executor import (
+    ClaudeNativeExecutor,
+    StageExecutor,
+    resolve_executor,
+    resolve_executor_config,
+)
 from cw.models import (
     ClientConfig,
+    LaneConfig,
     Stage,
     StageExecutorConfig,
     StagePipelineConfig,
@@ -244,3 +250,112 @@ def test_spawn_parent_forwarded(
     )
 
     assert len(mock_native_daemon.spawn_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# RFC 0005 E1 — resolve_executor_config + resolve_executor
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_executor_config_no_lane_pipeline(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """No lane pipeline override → client pipeline executor config returned."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={Stage.IMPL: StageExecutorConfig(model="sonnet")}
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="default")
+    config = resolve_executor_config(Stage.IMPL, task, client)
+    assert config.model == "sonnet"
+    assert config.backend == "claude-native"
+
+
+def test_resolve_executor_config_lane_override(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Lane pipeline.executors wins over client pipeline.executors."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        worker_model="sonnet",
+        pipeline=StagePipelineConfig(
+            executors={Stage.IMPL: StageExecutorConfig(model="sonnet")}
+        ),
+        lanes=[
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    executors={Stage.IMPL: StageExecutorConfig(model="haiku")}
+                ),
+            )
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+    config = resolve_executor_config(Stage.IMPL, task, client)
+    assert config.model == "haiku"
+
+
+def test_resolve_executor_config_lane_override_stage_not_in_lane(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Lane has pipeline but no entry for PLAN → default StageExecutorConfig."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        lanes=[
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    executors={Stage.IMPL: StageExecutorConfig(model="haiku")}
+                ),
+            )
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+    config = resolve_executor_config(Stage.PLAN, task, client)
+    assert config.backend == "claude-native"
+    assert config.model is None
+
+
+def test_resolve_executor_config_no_lane(tmp_config_dir: Path, tmp_path: Path) -> None:
+    """task.lane=None → client pipeline used (no lane lookup)."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={Stage.REVIEW: StageExecutorConfig(model="opus")}
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="test")
+    config = resolve_executor_config(Stage.REVIEW, task, client)
+    assert config.model == "opus"
+
+
+def test_resolve_executor_returns_claude_native(
+    tmp_config_dir: Path, tmp_path: Path, mock_native_daemon: FakeNativeDaemonClient
+) -> None:
+    """resolve_executor returns ClaudeNativeExecutor for default backend."""
+    client = _make_client(tmp_path)
+    task = TicketTask(ticket_id="T-1", client="test")
+    executor = resolve_executor(task, client, native_daemon=mock_native_daemon)
+    assert isinstance(executor, ClaudeNativeExecutor)
+
+
+def test_resolve_executor_unknown_backend_raises(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """resolve_executor raises ValueError for an unrecognised backend."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={Stage.IMPL: StageExecutorConfig(backend="alien")}
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    with pytest.raises(ValueError, match="unknown executor backend"):
+        resolve_executor(task, client)
