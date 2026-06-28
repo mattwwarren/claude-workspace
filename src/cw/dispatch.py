@@ -54,7 +54,7 @@ from cw.exceptions import (
     UsageLimitError,
     WorktreeError,
 )
-from cw.executor import ClaudeNativeExecutor
+from cw.executor import resolve_executor
 from cw.models import (
     ClientConfig,
     DispatchSkipReason,
@@ -591,7 +591,7 @@ def _spawn_claimed_task(
         # implementation could still return the same path.
         check_not_main_checkout(worktree_path, client)
 
-        executor = ClaudeNativeExecutor(native_daemon=resolved_native_daemon)
+        executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         session_id = executor.spawn(
             stage=task.stage,
             task=task,
