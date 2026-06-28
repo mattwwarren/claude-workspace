@@ -291,3 +291,133 @@ Invariants the compact prompt must explicitly state (models respect these):
 | qwen2.5-coder-32b-instruct | compact | 1 | 129.6s | **PASS** |
 | mistralai/devstral-small-2-2512 | compact | 1 | 54.5s | **PASS** |
 | zai-org/glm-4.7-flash | compact | 2 | 300s + 400 | FAIL (CoT mode) |
+
+---
+
+# F3b — Execution-model assessment (#885)
+
+**Date:** 2026-06-28 (session 2)
+**Question:** does the `LocalExecutor` **delegate** to an existing headless
+coding agent pointed at the local model (Path B), or does cw **wrap raw LLM
+calls** in its own tool loop (Path A)? And if delegation, which harness?
+
+## Why the F3 spike did not settle this
+
+The F3 probe (above) made **raw `/chat/completions` calls only** — one model
+turn + a JSON-repair retry. It proved a local model can *emit* a schema-valid
+`AutoDevResult`, but `scope.files` / `commits` / `lines` were model-**asserted
+strings**, not real artifacts. It exercised **no** tool-use loop, file edits,
+test runs, or `git apply`. Critically, `ClaudeNativeExecutor` does **not** make
+raw LLM calls — it spawns `claude --bg`, a full coding **harness**. So the raw
+probe validated a *weaker, structurally different* path than the one it mirrors.
+
+## Decision: **Path B — delegate to a headless coding agent (aider)**
+
+Confirmed by an end-to-end extended spike (below). Rationale:
+
+- **Structural parity with `claude-native`.** That executor spawns a harness
+  (`claude --bg`) that owns the tool loop; the local path should mirror it —
+  spawn a harness, let it own edit/apply/test/commit, cw harvests the result.
+- **Path A reinvents a coding agent.** Owning the tool-use loop (feed files,
+  parse edits, apply, run tests, iterate) inside cw is a large build for no gain
+  over mature OSS agents that already do it against an OpenAI-compatible
+  endpoint.
+- The extended spike showed delegation works **first try** on the same LM Studio
+  endpoint with real edits, a real commit, and passing tests.
+
+## Harness: **aider** (Goose = fallback)
+
+Selected from an adversarially-verified shortlist (criteria: local /
+OpenAI-compatible endpoint · headless one-shot · subprocess-harvestable ·
+agentic file edits · OSS):
+
+- **aider** ⭐ — `OPENAI_API_BASE=<host>/v1 --model openai/<id>`; headless
+  `--message "task" --yes --auto-commits`; harvest via `git log`/`git diff`.
+  Python, MIT. Longest-established headless/CI story; most predictable
+  subprocess behavior. **Passed the extended spike.**
+- **Goose** (Block) — `goose run -t "prompt"`, git-diff harvest; Rust,
+  Apache-2.0. Natural fallback if a given local model's edit quality is weak for
+  aider's SEARCH/REPLACE discipline. *(Not installed on this host; untested.)*
+- **OpenCode** (sst) — `opencode run --format json`; cleanest structured output,
+  but watch TTY/permission-prompt hangs in CI (upstream issue #10411).
+
+**Disqualified:** Codex CLI (drives a *local* endpoint via the Responses API,
+which most local providers don't implement — **note:** does NOT disqualify
+Codex for #627's *hosted* review pass), Continue CLI (autocomplete, not
+agentic), Cline / open-interpreter / RA.Aid (subprocess/harvest behavior
+unverified), Plandex (abandoned), Amp / Sweep (hosted-/proprietary-only).
+
+## Extended-spike run (the proof)
+
+**Setup:** throwaway git repo, one stubbed function (`roman_to_int`, raises
+`NotImplementedError`) + 3 failing pytest cases (subtractive notation).
+**Harness:** `aider 0.86.2`, model `openai/qwen2.5-coder-32b-instruct`,
+endpoint `http://192.168.4.24:1234/v1`.
+
+```
+aider --model openai/qwen2.5-coder-32b-instruct \
+  --message "Implement roman_to_int ... so all tests pass." \
+  --yes --auto-commits --no-auto-lint --no-auto-test \
+  --map-tokens 0 --no-stream roman.py test_roman.py
+```
+
+**Result — full `spawn → handoff → schema-valid sentinel` contract survived:**
+
+- aider applied a real SEARCH/REPLACE edit to `roman.py` (22 insertions,
+  1 deletion) — verified working logic, not a copy of the stub.
+- aider auto-committed it: `7109c11 feat: implement roman_to_int function`.
+- All 3 tests **pass** (correctness, not just edits): `3 passed`.
+- Harvested an `AutoDevResult` from **git facts** (commit hash from `git log`,
+  `branch` from `rev-parse`, `fork_point_sha`, `scope.files`/`lines_actual`
+  from `git diff --stat`) → `cw result validate -` returned **exit 0**.
+- Tokens: 2.6k sent / 352 received (one model turn). Warm latency **149s**.
+
+**Latency caveat (new):** the *cold-load* attempt was killed at 2 min before any
+model turn even started (aider startup + LM Studio cold-load > 2 min). The
+delegation budget must cover **aider start + model cold-load + N model turns**
+(aider may take several turns on a real task) — budget generously (≥600s for a
+32B model on a non-trivial task), well above the raw-call 200–250s figure from
+F3.
+
+## Implications for the #866 backend (PR2) — RESHAPES the F3 draft
+
+The F3-era draft resolutions assumed **Path A** (raw LLM): an `openai`-SDK HTTP
+client in cw, prompt-engineered compact schema, `parse_stdout` on the model's
+own sentinel, `_coerce_local_output` as a *backfill*. Path B changes all of
+that:
+
+- **No in-cw HTTP client / tool loop / `openai` SDK dependency.** cw spawns an
+  **aider subprocess** (parallel to how `spawn.py` launches `claude --bg`).
+- **The model never emits the sentinel.** aider produces a *commit*; cw
+  **synthesizes** the `AutoDevResult` from git state after aider exits. So
+  `_coerce_local_output` is promoted from a backfill shim to the **primary
+  sentinel builder** — it is now the whole sentinel-construction path, not a
+  patch over model output. The compact-schema prompt work from F3 is **not
+  needed** for IMPL under Path B.
+- **`StageExecutorConfig`** still needs `endpoint` + `model`; **plus** aider
+  invocation config (binary path, flag set, per-turn/wall-clock budget).
+- **Tests:** unit = mock the subprocess + a fixture git repo (CI-safe, no model
+  / no endpoint); integration = guarded/skipped in CI behind an env gate (e.g.
+  `INTEGRATION_LOCAL_ENDPOINT`), mirroring the F3 `INTEGRATION_REAL_API`
+  pattern. Reuse the #222 fake-binary seam for the CI dogfood.
+- **Failure modes to handle:** aider exits 0 but makes **no commit** (model
+  refused / produced no applicable edit) → emit `blocked`, not a phantom
+  `stage_complete`; aider timeout (cold-load + turns) → `blocked` with a
+  budget-exceeded reason; CoT-only models (GLM, per F3) still produce no usable
+  output — detect and fail fast.
+
+## Constraints honored
+
+- **LAN-only model, no model in CI** — the extended spike ran against the LAN
+  endpoint; PR2 integration tests stay guarded/skipped in CI.
+- **Serialize calls (`max_parallel=1`)** — LM Studio still serves one model at a
+  time; the delegation path inherits the F3 single-model-concurrency constraint
+  (one lane per endpoint).
+- **Model selectable by config** — harness + model + endpoint are all
+  `StageExecutorConfig` fields, lane-overridable via the E1 (#625) mechanism.
+
+## F3b run log
+
+| harness | model | task | edit? | commit? | tests | sentinel | elapsed |
+|---|---|---|---|---|---|---|---|
+| aider 0.86.2 | qwen2.5-coder-32b-instruct | roman_to_int impl | yes (22+/1-) | `7109c11` | 3 passed | `cw result validate` exit 0 | 149s warm |
