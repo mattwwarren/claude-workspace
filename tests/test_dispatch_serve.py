@@ -325,13 +325,13 @@ class TestRunDispatchServeBackoff:
         # Call 4: clean return → exit
         monotonic_times = [
             0.0,
-            0.5,   # call 1: 0.5s run → crash
+            0.5,  # call 1: 0.5s run → crash
             0.0,
             70.0,  # call 2: 70s run → crash (healthy, resets backoff)
             0.0,
-            0.5,   # call 3: 0.5s run → crash (backoff should be 5s after reset)
+            0.5,  # call 3: 0.5s run → crash (backoff should be 5s after reset)
             0.0,
-            0.0,   # call 4: clean return
+            0.0,  # call 4: clean return
         ]
         monotonic_iter = iter(monotonic_times)
 
