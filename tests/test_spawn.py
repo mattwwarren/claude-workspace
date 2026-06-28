@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
@@ -2691,11 +2691,6 @@ def _seed_completed_session(
     completed_at: datetime | None = None,
 ) -> Session:
     """Seed a TIMED_OUT or COMPLETED session for a given ticket in state."""
-    from datetime import UTC
-    from datetime import datetime as _dt
-
-    from cw.config import load_state, save_state
-
     workspace = tmp_path / "workspace" / client
     workspace.mkdir(parents=True, exist_ok=True)
     sess = Session(
@@ -2706,7 +2701,7 @@ def _seed_completed_session(
         status=status,
         workspace_path=workspace,
         last_result=last_result,
-        completed_at=completed_at or _dt.now(UTC),
+        completed_at=completed_at or datetime.now(UTC),
     )
     state = load_state()
     state.sessions.append(sess)
@@ -2912,8 +2907,6 @@ class TestPriorAttemptsSummary:
         make_git_repo: Callable[[str], Path],
     ) -> None:
         """Multiple prior sessions → sorted chronologically by completed_at."""
-        from datetime import UTC, datetime
-
         from cw.spawn import spawn_create_impl
 
         client = _make_client(tmp_path)
