@@ -50,6 +50,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
 | `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`. |
+| `pipeline` | PipelineConfig \| null | `null` | Per-stage executor configuration (RFC 0005). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
 
@@ -164,6 +165,43 @@ clients:
 Scope: forwarded as `--model <id>` to `claude --bg` from both
 `spawn_create_impl` (initial DAEMON spawn) and `resume_session` (DAEMON-origin
 resume of a dead surface). USER-origin sessions ignore this field.
+
+## Pipeline Configuration — Per-Stage Model Pinning
+
+RFC 0005 adds a `pipeline:` block that lets you assign a different model to each
+pipeline stage (PLAN, IMPL, REVIEW, FINALIZE) for a single client. The `model`
+field is an opaque string — no validation; any value is forwarded as-is to
+`claude --bg --model <value>`.
+
+```yaml
+clients:
+  staged-project:
+    workspace_path: /path/to/repo
+    default_branch: main
+    pipeline:
+      executors:
+        plan:   { backend: claude-native, model: claude-opus-4-8 }
+        impl:   { backend: claude-native, model: claude-sonnet-4-6-20251015 }
+        review: { backend: claude-native, model: claude-sonnet-4-6-20251015 }
+```
+
+`backend` defaults to `claude-native` and can be omitted.
+
+### 4-Level Precedence (highest to lowest)
+
+- **Lane stage model** — `lanes[].pipeline.executors[stage].model`
+- **Client stage model** — `pipeline.executors[stage].model`
+- **`client.worker_model`** — client-level model fallback
+- **Operator logged-in default** — no `--model` flag emitted; inherits the
+  operator's active model
+
+Resolution rule: `stage_config.model or client.worker_model`. If the stage has
+no model configured (`null`) it falls through to `worker_model`. If neither is
+set, no `--model` flag is emitted and the worker inherits the operator default.
+
+**Known gap:** `cw resume` (the interactive USER-origin path) does not forward
+the stage-resolved model. The autonomous pipeline routes through
+`executor.spawn` and is unaffected. See #626 follow-ons.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 

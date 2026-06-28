@@ -27,3 +27,13 @@ clients:
   # my-worktree-project:
   #   repo_path: /path/to/shared/repo
   #   branch: my-feature-branch
+
+  # Staged pipeline — distinct model per stage (RFC 0005)
+  # staged-project:
+  #   workspace_path: /path/to/repo
+  #   default_branch: main
+  #   pipeline:
+  #     executors:
+  #       plan:   { backend: claude-native, model: claude-opus-4-8 }
+  #       impl:   { backend: claude-native, model: claude-sonnet-4-6-20251015 }
+  #       review: { backend: claude-native, model: claude-sonnet-4-6-20251015 }
