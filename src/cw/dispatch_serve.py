@@ -12,7 +12,7 @@ import time
 from typing import TYPE_CHECKING
 
 from cw.dispatch import run_dispatch_loop
-from cw.exceptions import DispatchServeError
+from cw.exceptions import DispatchServeError, VersionDriftError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -86,6 +86,13 @@ def run_dispatch_serve(
         except SystemExit:
             # Propagate clean shutdowns initiated by the loop itself.
             raise
+        except VersionDriftError:
+            # Intentional reload — do NOT count toward crash_times or restart_count.
+            # Return so the external supervisor starts a fresh process with fresh
+            # imports; in-process restart cannot reload module-level globals.
+            _log.info("dispatch_serve: version drift — exiting for fresh reload")
+            time.sleep(_SERVE_INITIAL_BACKOFF_SECONDS)
+            return
         except Exception:  # noqa: BLE001
             run_duration = time.monotonic() - run_start
             now = time.time()

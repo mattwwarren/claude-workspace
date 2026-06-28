@@ -37,7 +37,7 @@ from cw.dispatch import (
     run_dispatch_loop,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import StaleWorktreeError, WorktreeError
+from cw.exceptions import StaleWorktreeError, VersionDriftError, WorktreeError
 from cw.models import (
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
@@ -4623,6 +4623,130 @@ class TestDispatchLoopExitedEvent:
 
         daemon = FakeNativeDaemonClient()
         # Should complete without raising despite DISPATCH_LOOP_EXITED emit failing
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+    def test_version_drift_raises_version_drift_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Drift between loaded and installed version raises VersionDriftError."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.importlib.metadata.version",
+            lambda _name: "0.0.0-fake",
+        )
+        daemon = FakeNativeDaemonClient()
+        with pytest.raises(VersionDriftError):
+            run_dispatch_loop(once=True, native_daemon=daemon)
+
+    def test_version_drift_emits_loop_exited_with_drift_fields(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Drift causes exactly one DISPATCH_LOOP_EXITED event with drift fields."""
+        import cw
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.importlib.metadata.version",
+            lambda _name: "0.0.0-fake",
+        )
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.DISPATCH_LOOP_EXITED:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        daemon = FakeNativeDaemonClient()
+        with contextlib.suppress(VersionDriftError):
+            run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert len(captured) == 1
+        _, evt_payload = captured[0]
+        assert evt_payload["reason"] == "version_drift"
+        assert evt_payload["loaded_version"] == cw.__version__
+        assert evt_payload["installed_version"] == "0.0.0-fake"
+        assert evt_payload["normal"] is False
+        assert evt_payload["exception_type"] == "VersionDriftError"
+
+    def test_version_drift_check_before_dispatch(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Version check fires before dispatch_tick — tick is never called on drift."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr(
+            "cw.dispatch.importlib.metadata.version",
+            lambda _name: "0.0.0-fake",
+        )
+
+        tick_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch.dispatch_tick",
+            lambda *_a, **_kw: tick_calls.append(True),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        with contextlib.suppress(VersionDriftError):
+            run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert tick_calls == [], "dispatch_tick must not be called on version drift"
+
+    def test_resolve_loaded_version_returns_unknown_on_package_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_resolve_loaded_version returns '0.0.0+unknown' when package is absent."""
+        import importlib.metadata
+
+        from cw.dispatch import _resolve_loaded_version
+
+        monkeypatch.setattr(
+            "cw.dispatch.importlib.metadata.version",
+            lambda _name: (_ for _ in ()).throw(
+                importlib.metadata.PackageNotFoundError("cw")
+            ),
+        )
+        assert _resolve_loaded_version() == "0.0.0+unknown"
+
+    def test_version_drift_tick_package_not_found_no_drift_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PackageNotFoundError on installed-version check is treated as 0.0.0+unknown.
+
+        When both loaded and installed versions are unknown, no VersionDriftError
+        is raised — the loop continues normally.
+        """
+        import importlib.metadata
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Pin _LOADED_VERSION to the same sentinel so the comparison is equal.
+        monkeypatch.setattr("cw.dispatch._LOADED_VERSION", "0.0.0+unknown")
+        monkeypatch.setattr(
+            "cw.dispatch.importlib.metadata.version",
+            lambda _name: (_ for _ in ()).throw(
+                importlib.metadata.PackageNotFoundError("cw")
+            ),
+        )
+        daemon = FakeNativeDaemonClient()
+        # Should not raise VersionDriftError — both versions resolve to 0.0.0+unknown.
         run_dispatch_loop(once=True, native_daemon=daemon)
 
 

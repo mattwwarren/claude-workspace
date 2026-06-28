@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import logging
 import subprocess
 import sys
@@ -52,6 +53,7 @@ from cw.exceptions import (
     MissingWorkspaceError,
     StaleWorktreeError,
     UsageLimitError,
+    VersionDriftError,
     WorktreeError,
 )
 from cw.executor import resolve_executor
@@ -100,6 +102,21 @@ _DISPATCH_CONSUMER = "dispatch"
 _log = logging.getLogger(__name__)
 _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS: int = 2
 _SPAWN_ERROR_BACKOFF_CAP_SECONDS: int = 300
+# Duplicated from cw.doctor; importing from there creates a circular dep.
+# A future cw.const cleanup can consolidate these.
+_CW_PACKAGE_NAME: str = "claude-workspace"
+
+
+def _resolve_loaded_version() -> str:
+    """Capture the installed version at import time for drift detection."""
+    try:
+        return importlib.metadata.version(_CW_PACKAGE_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+# Captured at import time; remains the version that was actually loaded.
+_LOADED_VERSION: str = _resolve_loaded_version()
 
 
 @dataclass(frozen=True)
@@ -1609,6 +1626,19 @@ def run_dispatch_loop(
                 _log.warning("dispatch: config reload failed; using last-good config")
 
             consume_completed_sessions()
+            try:
+                _installed = importlib.metadata.version(_CW_PACKAGE_NAME)
+            except importlib.metadata.PackageNotFoundError:
+                _installed = "0.0.0+unknown"
+            if _installed != _LOADED_VERSION:
+                _log.warning(
+                    "dispatch: version drift detected (loaded=%s, installed=%s)"
+                    " — exiting for reload",
+                    _LOADED_VERSION,
+                    _installed,
+                )
+                msg = "version drift detected; exiting for reload"
+                raise VersionDriftError(msg)
             result = dispatch_tick(
                 config,
                 use_plan=use_plan,
@@ -1640,11 +1670,18 @@ def run_dispatch_loop(
     finally:
         _exc = sys.exc_info()[1]
         _normal = _exc is None or isinstance(_exc, KeyboardInterrupt)
+        _payload: dict[str, object] = {
+            "normal": _normal,
+            "exception_type": None if _normal else type(_exc).__name__,
+        }
         with contextlib.suppress(Exception):
+            if isinstance(_exc, VersionDriftError):
+                _payload["reason"] = "version_drift"
+                _payload["loaded_version"] = _LOADED_VERSION
+                _payload["installed_version"] = importlib.metadata.version(
+                    _CW_PACKAGE_NAME
+                )
             record_event(
                 OrchestratorEventType.DISPATCH_LOOP_EXITED,
-                payload={
-                    "normal": _normal,
-                    "exception_type": None if _normal else type(_exc).__name__,
-                },
+                payload=_payload,
             )
