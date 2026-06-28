@@ -364,10 +364,13 @@ class ReapPolicy(StrEnum):
     AUTO = "auto"
 
 
+CLAUDE_NATIVE_BACKEND: str = "claude-native"
+
+
 class StageExecutorConfig(BaseModel):
     """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""
 
-    backend: str = "claude-native"
+    backend: str = CLAUDE_NATIVE_BACKEND
     model: str | None = None
 
 

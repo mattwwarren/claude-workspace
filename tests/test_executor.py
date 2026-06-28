@@ -17,6 +17,7 @@ from cw.executor import (
     resolve_executor_config,
 )
 from cw.models import (
+    CLAUDE_NATIVE_BACKEND,
     ClientConfig,
     LaneConfig,
     Stage,
@@ -260,7 +261,7 @@ def test_spawn_parent_forwarded(
 def test_resolve_executor_config_no_lane_pipeline(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
-    """No lane pipeline override → client pipeline executor config returned."""
+    """Lane exists but has no pipeline → client pipeline executor config returned."""
     client = ClientConfig(
         name="test",
         workspace_path=tmp_path,
@@ -269,15 +270,17 @@ def test_resolve_executor_config_no_lane_pipeline(
         ),
     )
     task = TicketTask(ticket_id="T-1", client="test", lane="default")
+
     config = resolve_executor_config(Stage.IMPL, task, client)
+
     assert config.model == "sonnet"
-    assert config.backend == "claude-native"
+    assert config.backend == CLAUDE_NATIVE_BACKEND
 
 
 def test_resolve_executor_config_lane_override(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
-    """Lane pipeline.executors wins over client pipeline.executors."""
+    """Lane pipeline.executors[stage] wins over client pipeline.executors[stage]."""
     client = ClientConfig(
         name="test",
         workspace_path=tmp_path,
@@ -295,14 +298,46 @@ def test_resolve_executor_config_lane_override(
         ],
     )
     task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
     config = resolve_executor_config(Stage.IMPL, task, client)
+
     assert config.model == "haiku"
 
 
-def test_resolve_executor_config_lane_override_stage_not_in_lane(
+def test_resolve_executor_config_lane_missing_stage_falls_back_to_client(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
-    """Lane has pipeline but no entry for PLAN → default StageExecutorConfig."""
+    """Lane pipeline omits PLAN; client pipeline has PLAN → client fallback fires.
+
+    Exercises level 2 of the three-level cascade: lane.executors[stage] absent,
+    so client.executors[stage] is used rather than the bare default.
+    """
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={Stage.PLAN: StageExecutorConfig(model="opus")}
+        ),
+        lanes=[
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    executors={Stage.IMPL: StageExecutorConfig(model="haiku")}
+                ),
+            )
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
+    config = resolve_executor_config(Stage.PLAN, task, client)
+
+    assert config.model == "opus"
+
+
+def test_resolve_executor_config_lane_override_stage_not_in_lane_or_client(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Lane and client both have no entry for PLAN → default StageExecutorConfig."""
     client = ClientConfig(
         name="test",
         workspace_path=tmp_path,
@@ -316,13 +351,17 @@ def test_resolve_executor_config_lane_override_stage_not_in_lane(
         ],
     )
     task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
     config = resolve_executor_config(Stage.PLAN, task, client)
-    assert config.backend == "claude-native"
+
+    assert config.backend == CLAUDE_NATIVE_BACKEND
     assert config.model is None
 
 
-def test_resolve_executor_config_no_lane(tmp_config_dir: Path, tmp_path: Path) -> None:
-    """task.lane=None → client pipeline used (no lane lookup)."""
+def test_resolve_executor_config_falsy_lane_skips_lookup(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """task.lane='' → lane lookup skipped entirely; client pipeline used."""
     client = ClientConfig(
         name="test",
         workspace_path=tmp_path,
@@ -330,8 +369,10 @@ def test_resolve_executor_config_no_lane(tmp_config_dir: Path, tmp_path: Path) -
             executors={Stage.REVIEW: StageExecutorConfig(model="opus")}
         ),
     )
-    task = TicketTask(ticket_id="T-1", client="test")
+    task = TicketTask(ticket_id="T-1", client="test", lane="")
+
     config = resolve_executor_config(Stage.REVIEW, task, client)
+
     assert config.model == "opus"
 
 
@@ -341,7 +382,9 @@ def test_resolve_executor_returns_claude_native(
     """resolve_executor returns ClaudeNativeExecutor for default backend."""
     client = _make_client(tmp_path)
     task = TicketTask(ticket_id="T-1", client="test")
+
     executor = resolve_executor(task, client, native_daemon=mock_native_daemon)
+
     assert isinstance(executor, ClaudeNativeExecutor)
 
 
@@ -357,5 +400,6 @@ def test_resolve_executor_unknown_backend_raises(
         ),
     )
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
     with pytest.raises(ValueError, match="unknown executor backend"):
         resolve_executor(task, client)

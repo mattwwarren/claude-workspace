@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
 from cw.models import (
+    CLAUDE_NATIVE_BACKEND,
     ClientConfig,
     SessionPurpose,
     Stage,
@@ -28,16 +29,16 @@ def resolve_executor_config(
 ) -> StageExecutorConfig:
     """Return the effective StageExecutorConfig for a stage, with lane override (E1).
 
-    Priority: lane.pipeline > client.pipeline > default StageExecutorConfig.
+    Three-level priority: lane stage config > client stage config > default.
     """
-    lane_pipeline = None
     if task.lane:
         for lane_cfg in client.effective_lanes:
             if lane_cfg.name == task.lane and lane_cfg.pipeline is not None:
-                lane_pipeline = lane_cfg.pipeline
+                lane_stage_config = lane_cfg.pipeline.executors.get(stage)
+                if lane_stage_config is not None:
+                    return lane_stage_config
                 break
-    pipeline = lane_pipeline if lane_pipeline is not None else client.pipeline
-    return pipeline.executors.get(stage, StageExecutorConfig())
+    return client.pipeline.executors.get(stage, StageExecutorConfig())
 
 
 def resolve_executor(
@@ -51,7 +52,7 @@ def resolve_executor(
     Only "claude-native" is supported until F3 (LocalExecutor) lands.
     """
     config = resolve_executor_config(task.stage, task, client)
-    if config.backend != "claude-native":
+    if config.backend != CLAUDE_NATIVE_BACKEND:
         msg = f"unknown executor backend: {config.backend!r}"
         raise ValueError(msg)
     return ClaudeNativeExecutor(native_daemon=native_daemon)
