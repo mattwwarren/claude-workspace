@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
@@ -2673,3 +2674,353 @@ class TestRosterRegistrationVerification:
         from cw.exceptions import CwError, SpawnUnregisteredError
 
         assert issubclass(SpawnUnregisteredError, CwError)
+
+
+# ---------------------------------------------------------------------------
+# Tests for #838: prior_attempts_summary populated on retry
+# ---------------------------------------------------------------------------
+
+
+def _seed_completed_session(
+    tmp_path: Path,
+    tmp_config_dir: Path,
+    ticket_id: str,
+    client: str = "test-client",
+    status: SessionStatus = SessionStatus.TIMED_OUT,
+    last_result: dict[str, object] | None = None,
+    completed_at: datetime | None = None,
+) -> Session:
+    """Seed a TIMED_OUT or COMPLETED session for a given ticket in state."""
+    workspace = tmp_path / "workspace" / client
+    workspace.mkdir(parents=True, exist_ok=True)
+    sess = Session(
+        name=f"{client}/auto-dev/{ticket_id}",
+        client=client,
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=status,
+        workspace_path=workspace,
+        last_result=last_result,
+        completed_at=completed_at or datetime.now(UTC),
+    )
+    state = load_state()
+    state.sessions.append(sess)
+    save_state(state)
+    return sess
+
+
+class TestPriorAttemptsSummary:
+    """Tests for #838: prior_attempts_summary populated on retry."""
+
+    def test_attempts_zero_produces_empty_list(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """attempts=0 → prior_attempts_summary is always []."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-838-zero-attempts")
+        task = _make_pending_task(ticket_id="838-A", attempts=0)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 838-A --headless",
+            label="auto-dev/838-A",
+            native_daemon=daemon,
+            ticket_id="838-A",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["world_state_snapshot"]["prior_attempts_summary"] == []
+
+    def test_no_matching_sessions_in_state(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """attempts=1 but no prior sessions for this ticket → empty list."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-838-no-match")
+        _seed_completed_session(tmp_path, tmp_config_dir, ticket_id="OTHER-99")
+        task = _make_pending_task(ticket_id="838-B", attempts=1)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 838-B --headless",
+            label="auto-dev/838-B",
+            native_daemon=daemon,
+            ticket_id="838-B",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["world_state_snapshot"]["prior_attempts_summary"] == []
+
+    def test_timed_out_session_with_sentinel_produces_summary(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """TIMED_OUT session with last_result → one compact summary entry."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-838-timed-out")
+        last_result = {
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+            "blocker": {"stage": "s2", "reason": "impl_failed", "details": "tests red"},
+            "friction_highlights": ["mypy error in foo.py"],
+        }
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-C",
+            status=SessionStatus.TIMED_OUT,
+            last_result=last_result,
+        )
+        task = _make_pending_task(ticket_id="838-C", attempts=1)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 838-C --headless",
+            label="auto-dev/838-C",
+            native_daemon=daemon,
+            ticket_id="838-C",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s["status"] == "blocked"
+        assert s["stage_reached"] == "stage2_impl"
+        assert s["blocker_reason"] == "impl_failed"
+        assert s["blocker_details"] == "tests red"
+        assert s["friction_highlights"] == ["mypy error in foo.py"]
+
+    def test_completed_session_with_sentinel_produces_summary(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """COMPLETED session with last_result → summary entry included."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-838-completed")
+        last_result = {
+            "status": "blocked",
+            "stage_reached": "stage3_review",
+            "blocker": {"stage": "s3", "reason": "review_blocked", "details": ""},
+            "friction_highlights": [],
+        }
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-D",
+            status=SessionStatus.COMPLETED,
+            last_result=last_result,
+        )
+        task = _make_pending_task(ticket_id="838-D", attempts=1)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 838-D --headless",
+            label="auto-dev/838-D",
+            native_daemon=daemon,
+            ticket_id="838-D",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["status"] == "blocked"
+        assert summaries[0]["stage_reached"] == "stage3_review"
+
+    def test_no_sentinel_produces_no_sentinel_entry(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """TIMED_OUT with last_result=None → entry with status='no_sentinel'."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-838-no-sentinel")
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-E",
+            status=SessionStatus.TIMED_OUT,
+            last_result=None,
+        )
+        task = _make_pending_task(ticket_id="838-E", attempts=1)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 838-E --headless",
+            label="auto-dev/838-E",
+            native_daemon=daemon,
+            ticket_id="838-E",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s["status"] == "no_sentinel"
+        assert s["stage_reached"] is None
+
+    def test_multiple_prior_sessions_sorted_by_completed_at(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Multiple prior sessions → sorted chronologically by completed_at."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-838-sorted")
+
+        earlier = datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC)
+        later = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-F",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage2_impl",
+                "blocker": {"stage": "s2", "reason": "first", "details": ""},
+                "friction_highlights": [],
+            },
+            completed_at=later,
+        )
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-F",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage1_plan",
+                "blocker": {"stage": "s1", "reason": "second", "details": ""},
+                "friction_highlights": [],
+            },
+            completed_at=earlier,
+        )
+        task = _make_pending_task(ticket_id="838-F", attempts=2)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 838-F --headless",
+            label="auto-dev/838-F",
+            native_daemon=daemon,
+            ticket_id="838-F",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 2
+        assert summaries[0]["blocker_reason"] == "second"
+        assert summaries[1]["blocker_reason"] == "first"
+
+    def test_state_read_failure_returns_empty_list(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """load_state() failure → _collect_prior_attempts_summary falls back to []."""
+        import unittest.mock
+
+        from cw.spawn import _collect_prior_attempts_summary
+
+        with unittest.mock.patch(
+            "cw.spawn.load_state", side_effect=OSError("disk full")
+        ):
+            result = _collect_prior_attempts_summary("838-H")
+
+        assert result == []
+
+    def test_blocker_details_truncated_to_500_chars(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """blocker.details > 500 chars is truncated to 500 in the summary."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-838-truncate")
+        long_details = "x" * 600
+        last_result = {
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+            "blocker": {
+                "stage": "s2",
+                "reason": "impl_failed",
+                "details": long_details,
+            },
+            "friction_highlights": [],
+        }
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="838-G",
+            status=SessionStatus.TIMED_OUT,
+            last_result=last_result,
+        )
+        task = _make_pending_task(ticket_id="838-G", attempts=1)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 838-G --headless",
+            label="auto-dev/838-G",
+            native_daemon=daemon,
+            ticket_id="838-G",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 1
+        assert len(summaries[0]["blocker_details"]) == 500
