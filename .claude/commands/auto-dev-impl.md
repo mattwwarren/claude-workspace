@@ -39,7 +39,7 @@ redundant AND it places the impl agent in a position where the main checkout pat
 trivially derivable — causing the #766 leak pattern (worker `cd`s to main checkout and
 commits there).
 
-**Spawn shape depends on mode AND dispatch context:**
+**Spawn shape depends on mode AND dispatch context** (all variants pin `model: "opus"` — real code generation):
 
 - **Interactive mode AND not in a dispatch worktree:** `isolation: "worktree"`,
   `run_in_background: true` (parallel — the parent waits for the next user gate anyway,
