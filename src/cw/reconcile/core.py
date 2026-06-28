@@ -161,13 +161,14 @@ def reconcile() -> ReconcileReport:
     :func:`_looks_like_daemon_outage` matches — a transient daemon hiccup
     must not trigger mass-reaping.
 
-    Partial-failure note: state and the dev queue are separate files. If
-    ``save_state`` succeeds but the subsequent dev-queue update raises,
-    the session will be COMPLETED while its TicketTask stays RUNNING.
-    The next ``reconcile()`` call will not pick this up because the
-    session is no longer ACTIVE/IDLE — so a stranded RUNNING task can
-    only be recovered by explicit operator action. This is an acceptable
-    tradeoff for a file-based, single-user tool.
+    Write-ordering: the phantom-reconcile path (phantom.py) writes the
+    dev-queue first (task → PENDING) then sessions (session → COMPLETED),
+    mirroring ``unblock_ticket`` (dev_queue.py) — the canonical safe-fail
+    ordering.  A crash between the two writes leaves the session ACTIVE/IDLE
+    so phantom detection re-fires on the next tick.  If a session reaches
+    COMPLETED with its TicketTask still RUNNING (residual from an older crash
+    or the dispatch-consumer path), ``revert_completed_silent_tasks()``
+    recovers it within one reconcile tick.  See GitHub #867.
     """
     # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
     # acquiring sessions_lock. gh subprocess must NOT run under the lock

@@ -1447,6 +1447,10 @@ def consume_completed_sessions() -> int:
         if isinstance(session_id, str) and isinstance(stdout, str):
             persist_last_result(session_id, stdout)
 
+    # Gap class (#867, severity=low): persist_last_result writes sessions.json
+    # under sessions_lock; the dev-queue mutation below is a separate file.
+    # A crash here leaves last_result updated but the task RUNNING.  The
+    # un-advanced cursor causes self-healing reprocessing on the next tick.
     with dev_queue_lock():
         store = load_dev_queue()
         clients = load_effective_clients()

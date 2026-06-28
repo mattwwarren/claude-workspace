@@ -636,20 +636,19 @@ def _act_on_phantom_candidates(
         session.reap_reason = ReapReason.PHANTOM_SURFACE
         phantom_names.append(session.name)
 
-    save_state(state)
+    # Write-ordering: queue first (task → PENDING), session second
+    # (session → COMPLETED) — mirrors the canonical ordering in
+    # unblock_ticket() (dev_queue.py).  If a crash occurs between the two
+    # writes, the session stays ACTIVE/IDLE; the next reconcile() tick
+    # re-detects it as a phantom and the queue mutation is a no-op (task
+    # already PENDING, not matched by the RUNNING guard).  #867
+    dirty_ticket_ids = {
+        c.ticket_id
+        for c in crash_candidates
+        if c.ticket_id is not None and c.worktree_dirty
+    }
 
-    for payload in pending_events:
-        record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
-
-    dirty_ticket_ids = _emit_phantom_terminal_events(
-        session_by_id,
-        crash_candidates,
-        merged_crash_candidates,
-        gh_blocked_crash_candidates,
-    )
-    _emit_phantom_routed_events(session_by_id, routed_candidates)
-
-    # Queue mutations.
+    # Queue mutations — written before session state (safe-fail direction).
     _apply_phantom_queue_mutations(
         session_by_id,
         crash_candidates,
@@ -661,6 +660,21 @@ def _act_on_phantom_candidates(
         ticket_ids_to_revert,
         merged_completed_ids,
     )
+
+    save_state(state)
+
+    for payload in pending_events:
+        record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    # Return value pre-computed above as dirty_ticket_ids; call for side
+    # effects only (surface stops and event emission).
+    _emit_phantom_terminal_events(
+        session_by_id,
+        crash_candidates,
+        merged_crash_candidates,
+        gh_blocked_crash_candidates,
+    )
+    _emit_phantom_routed_events(session_by_id, routed_candidates)
 
     return (
         ticket_ids_to_revert,
