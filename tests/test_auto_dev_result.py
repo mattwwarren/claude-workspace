@@ -2400,7 +2400,7 @@ class TestCase3MergeGateBlockedLargeTierCoerce:
 
 # ---------------------------------------------------------------------------
 # Issue #777 — merge_gate_blocked may carry a non-null blocker to surface the
-# reason (prior_pipeline_pr_open:#<N>) for file-overlap detection.
+# reason (prior_pipeline_pr_open) for file-overlap detection.
 # ---------------------------------------------------------------------------
 
 
@@ -2411,13 +2411,13 @@ class TestMergeGateBlockedWithBlocker:
         p = _merge_gate_payload()
         p["blocker"] = {
             "stage": "stage4a_merge_gate",
-            "reason": f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776",
+            "reason": BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
             "details": "PR #776 (dev/315) shares files: src/cw/finalize.py",
         }
         result = AutoDevResult.model_validate(p)
         assert result.status == "merge_gate_blocked"
         assert result.blocker is not None
-        assert result.blocker.reason == f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776"
+        assert result.blocker.reason == BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN
 
     def test_merge_gate_blocked_null_blocker_still_parses(self) -> None:
         p = _merge_gate_payload()
@@ -2440,14 +2440,14 @@ class TestMergeGateBlockedWithBlocker:
         p = _merge_gate_payload()
         p["blocker"] = {
             "stage": "stage4a_merge_gate",
-            "reason": f"{BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN}:#776",
+            "reason": BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
             "details": "PR #776 open; file overlap detected: src/cw/finalize.py",
         }
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.status == "merge_gate_blocked"
         assert result.blocker is not None
-        assert BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN in result.blocker.reason
+        assert result.blocker.reason == BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN
 
     def test_blocker_reason_constant_value(self) -> None:
         assert BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN == "prior_pipeline_pr_open"
