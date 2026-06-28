@@ -133,7 +133,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# .claude/scripts/ is a scripts directory, not a Python package — no __init__.py needed.
+# scripts/ and .claude/scripts/ are plain scripts directories, not Python packages.
+"scripts/*.py" = ["INP001"]
 ".claude/scripts/*.py" = ["INP001"]
 # Operator tooling under .claude/ (PR review/finalize, queue-peek, smoke-test
 # preflight) is linted at the baseline ruff level but exempted from the package
