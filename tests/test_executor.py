@@ -409,13 +409,16 @@ def test_resolve_executor_unknown_backend_raises(
 # RFC 0005 E2 — heterogeneous models end-to-end proof
 # ---------------------------------------------------------------------------
 
+_E2_OPUS_MODEL = "claude-opus-4-8"
+_E2_SONNET_MODEL = "claude-sonnet-4-6-20251015"
+
 
 @pytest.mark.parametrize(
     ("stage", "expected_model"),
     [
-        (Stage.PLAN, "claude-opus-4-8"),
-        (Stage.IMPL, "claude-sonnet-4-6-20251015"),
-        (Stage.REVIEW, "claude-sonnet-4-6-20251015"),
+        (Stage.PLAN, _E2_OPUS_MODEL),
+        (Stage.IMPL, _E2_SONNET_MODEL),
+        (Stage.REVIEW, _E2_SONNET_MODEL),
     ],
 )
 def test_e2_heterogeneous_models_per_stage(
@@ -437,9 +440,9 @@ def test_e2_heterogeneous_models_per_stage(
         workspace_path=worktree,
         pipeline=StagePipelineConfig(
             executors={
-                Stage.PLAN: StageExecutorConfig(model="claude-opus-4-8"),
-                Stage.IMPL: StageExecutorConfig(model="claude-sonnet-4-6-20251015"),
-                Stage.REVIEW: StageExecutorConfig(model="claude-sonnet-4-6-20251015"),
+                Stage.PLAN: StageExecutorConfig(model=_E2_OPUS_MODEL),
+                Stage.IMPL: StageExecutorConfig(model=_E2_SONNET_MODEL),
+                Stage.REVIEW: StageExecutorConfig(model=_E2_SONNET_MODEL),
             }
         ),
     )
