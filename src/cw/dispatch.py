@@ -15,6 +15,8 @@ import pydantic
 import yaml
 
 from cw.auto_dev_result import (
+    FINALIZE_REGRESS_BLOCKER_REASONS,
+    FINALIZE_REGRESS_CAP,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_SMALL,
@@ -23,6 +25,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     parse_stdout,
 )
+from cw.collision import detect_wave_collisions
 from cw.config import (
     load_clients,
     load_effective_clients,
@@ -37,6 +40,7 @@ from cw.dev_queue import (
     _advance_task_pointer,
     _derive_disposition,
     _extract_pr_url,
+    _stage_regress,
     dev_queue_lock,
     load_dev_queue,
     load_plan,
@@ -50,7 +54,7 @@ from cw.exceptions import (
     UsageLimitError,
     WorktreeError,
 )
-from cw.executor import ClaudeNativeExecutor
+from cw.executor import resolve_executor
 from cw.models import (
     ClientConfig,
     DispatchSkipReason,
@@ -58,6 +62,7 @@ from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
+    Stage,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
@@ -72,6 +77,7 @@ from cw.worktree import (
     fast_forward_main,
     get_head_branch,
     is_main_behind_origin,
+    is_main_checkout_dirty,
     remove_worktree,
     worktree_has_unsaved_work,
 )
@@ -110,10 +116,29 @@ class DispatchTickResult:
     usage_limit_detected: bool = False
 
 
+def _emit_attempt_cap_blocked_event(client_name: str, ticket_id: str) -> None:
+    """Emit a dispatch.tick event when a task is parked at the global attempt ceiling.
+
+    Per-task event (not per-client-per-tick) for operator observability: a quiet
+    loop after several failures should be distinguishable from a healthy idle loop.
+    See GitHub #786.
+    """
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client_name,
+            "claimed": 0,
+            "skip_reason": DispatchSkipReason.ATTEMPT_CAP_BLOCKED,
+            "ticket_id": ticket_id,
+        },
+    )
+
+
 def _claim_next_pending(
     client_name: str,
     *,
     lane: str,
+    config: OrchestratorConfig,
     priority_ticket_ids: list[str] | None = None,
 ) -> TicketTask | None:
     """Atomically claim the next PENDING task for a client in a specific lane.
@@ -128,6 +153,11 @@ def _claim_next_pending(
     by subsequent ticks once the prioritised tasks are exhausted (the
     parameter is intentionally a *preference*, not a filter — see the
     fallback after the priority loop).
+
+    Global attempt ceiling: if task.attempts >= config.global_attempt_ceiling,
+    the task is parked BLOCKED_ON_USER instead of claimed. A dispatch.tick
+    event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
+    observability. See GitHub #786.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -140,6 +170,15 @@ def _claim_next_pending(
                         and task.lane == lane
                         and task.status == QueueItemStatus.PENDING
                     ):
+                        if task.attempts >= config.global_attempt_ceiling:
+                            transition_task_status(
+                                task,
+                                QueueItemStatus.BLOCKED_ON_USER,
+                                disposition="attempt_cap_blocked",
+                            )
+                            save_dev_queue(store)
+                            _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
+                            break
                         transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
                         save_dev_queue(store)
@@ -156,6 +195,15 @@ def _claim_next_pending(
         )
         if pending:
             task = pending[0]
+            if task.attempts >= config.global_attempt_ceiling:
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="attempt_cap_blocked",
+                )
+                save_dev_queue(store)
+                _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
+                return None
             transition_task_status(task, QueueItemStatus.RUNNING)
             task.attempts += 1
             save_dev_queue(store)
@@ -229,6 +277,13 @@ def _revert_claimed_task_to_pending(client_name: str, ticket_id: str) -> None:
     Used by both the usage-limit and broad spawn-error paths: the task was
     claimed to RUNNING by :func:`_claim_next_pending` but spawn never
     succeeded, so it must return to PENDING for a later tick to retry.
+
+    # Why: task.attempts is NOT decremented here. The increment-at-claim
+    # contract is intentional — usage_limit deaths and spawn errors consume
+    # real dispatch budget and must count toward the global_attempt_ceiling
+    # (#786). Decrementing would let churn bypass the backstop. The corollary
+    # (#756 stalled-stage cap) uses the same task.attempts field; both caps
+    # are outer backstops sharing one counter, not parallel counters.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -289,6 +344,8 @@ def _emit_usage_limit_skip_events(
 
 FRESHNESS_NON_MAIN_HEAD = "non_main_head"
 FRESHNESS_MAIN_BEHIND = "main_behind_origin"
+FRESHNESS_MAIN_DIRTY_CHECKOUT = "main_dirty_checkout"
+FRESHNESS_MAIN_DIVERGED = "main_diverged_from_origin"
 
 
 def _resolve_freshness(
@@ -337,6 +394,14 @@ def _resolve_freshness(
 
     if stale and auto_ff:
         ff_safety = check_main_ff_safety(client)
+        # "ahead" is theoretically unreachable here: stale=True requires
+        # is_main_behind_origin to return behind_count>0, which means local
+        # is behind origin — not ahead. The guard is kept for defensive
+        # completeness (worktree.py:check_main_ff_safety documents this).
+        if ff_safety in ("ahead", "diverged"):
+            return (True, FRESHNESS_MAIN_DIVERGED)
+        if ff_safety == "behind" and is_main_checkout_dirty(client):
+            return (True, FRESHNESS_MAIN_DIRTY_CHECKOUT)
         if ff_safety == "behind":
             try:
                 fast_forward_main(client, ignore_untracked=True)
@@ -378,7 +443,8 @@ def _emit_stale_skip(
     Records one TICKET_NEEDS_SYNC per pending task (de-duplicating the
     operator WARN via ``warned_stale``), then a single dispatch.tick with
     ``skip_reason=FRESHNESS_GATE`` and ``freshness_detail`` set to the
-    provided value (``"non_main_head"`` or ``"main_behind_origin"``).
+    provided value (``"non_main_head"``, ``"main_behind_origin"``,
+    ``"main_dirty_checkout"``, or ``"main_diverged_from_origin"``).
     """
     stale_tasks = [
         {"ticket_id": t.ticket_id, "client": client.name, "lane": t.lane}
@@ -402,6 +468,19 @@ def _emit_stale_skip(
                         f" expected '{client.default_branch}'"
                         f" — run: git -C {client.workspace_path}"
                         f" checkout {client.default_branch}"
+                    )
+                elif freshness_detail == FRESHNESS_MAIN_DIRTY_CHECKOUT:
+                    emit(
+                        f"WARN {client.name}/{payload['ticket_id']}:"
+                        " main checkout has uncommitted changes, ticket skipped"
+                        f" — commit or stash changes in {client.workspace_path}"
+                    )
+                elif freshness_detail == FRESHNESS_MAIN_DIVERGED:
+                    emit(
+                        f"WARN {client.name}/{payload['ticket_id']}:"
+                        " main has diverged from origin (ahead or diverged),"
+                        " ticket skipped — reconcile with: git -C"
+                        f" {client.workspace_path} pull --rebase"
                     )
                 else:
                     emit(
@@ -512,7 +591,7 @@ def _spawn_claimed_task(
         # implementation could still return the same path.
         check_not_main_checkout(worktree_path, client)
 
-        executor = ClaudeNativeExecutor(native_daemon=resolved_native_daemon)
+        executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         session_id = executor.spawn(
             stage=task.stage,
             task=task,
@@ -706,6 +785,7 @@ def _dispatch_client_lanes(
             task: TicketTask | None = _claim_next_pending(
                 client.name,
                 lane=lane_cfg.name,
+                config=config,
                 priority_ticket_ids=priority_ids,
             )
             if task is None:
@@ -856,6 +936,7 @@ def dispatch_tick(
     emit: Callable[[str], None] | None = None,
     warned_stale: set[tuple[str, str]] | None = None,
     warned_fetch_fail: set[str] | None = None,
+    warned_collision: set[frozenset[str]] | None = None,
     usage_limited_until: datetime | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
@@ -886,6 +967,11 @@ def dispatch_tick(
             received a fetch-failure WARNING during this dispatcher run.
             Suppresses repeated WARNINGs for persistently unreachable
             remotes.  Caller owns the set; mutated in-place.
+        warned_collision: Mutable set of ``frozenset({ticket_id_a,
+            ticket_id_b})`` pairs already warned this loop run. Prevents
+            duplicate WAVE_COLLISION events for persistent in-flight
+            collisions across ticks. Caller owns the set; mutated
+            in-place. When None, dedup is skipped (every tick fires).
         usage_limited_until: When set and in the future, all clients are
             skipped with ``skip_reason=USAGE_LIMITED`` and the function
             returns immediately. The back-off window is set by the
@@ -916,6 +1002,18 @@ def dispatch_tick(
     spawned = 0
 
     plan_order_by_client = _build_plan_order(use_plan=use_plan)
+
+    # Wave file-collision detection runs before usage-limit gates so that
+    # RUNNING tasks are checked even during backoff — they continue running
+    # regardless of whether spawning is paused (#784).
+    # Why: writes WAVE_COLLISION events to inbox.jsonl for each new collision pair.
+    with dev_queue_lock():
+        collision_snapshot = load_dev_queue()
+    detect_wave_collisions(
+        collision_snapshot.tasks,
+        warned_collision=warned_collision,
+        emit=emit,
+    )
 
     # Usage-limit back-off gate: if the window is still active, skip all clients
     # this tick and emit a dispatch.tick event with skip_reason=USAGE_LIMITED.
@@ -1186,6 +1284,41 @@ def apply_staged_decision(
         transition_task_status(task, QueueItemStatus.COMPLETED, disposition="no_op")
     elif status in STAGE_FAILURE_STATUSES:
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
+        # Sub-rule 5a: "blocked" at FINALIZE with a regress-eligible blocker
+        # reason and attempts below cap → regress to IMPL for self-heal (#770).
+        # scope_exceeded/forbidden_area/merge_gate_blocked have no blocker field
+        # (validator enforces this) so they always fall through to BLOCKED_ON_USER.
+        if status == "blocked" and task.stage == Stage.FINALIZE:
+            blocker = (
+                last_result.get("blocker") if isinstance(last_result, dict) else None
+            )
+            if (
+                isinstance(blocker, dict)
+                and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
+                and task.regress_attempts < FINALIZE_REGRESS_CAP
+            ):
+                _log.info(
+                    "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
+                    " (regress attempt %d/%d)",
+                    blocker.get("reason"),
+                    task.ticket_id,
+                    task.regress_attempts + 1,
+                    FINALIZE_REGRESS_CAP,
+                )
+                _stage_regress(task, Stage.IMPL)
+                record_event(
+                    OrchestratorEventType.TICKET_REQUEUED,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": task.client,
+                        "from_stage": Stage.FINALIZE,
+                        "to_stage": Stage.IMPL,
+                        "reason": "finalize_regress",
+                        "blocker_reason": blocker.get("reason"),
+                        "regress_attempt": task.regress_attempts,
+                    },
+                )
+                return
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
@@ -1401,6 +1534,9 @@ def run_dispatch_loop(
     warned_stale: set[tuple[str, str]] = set()
     # Track fetch-fail-warn deduplication for persistently unreachable remotes.
     warned_fetch_fail: set[str] = set()
+    # Track wave-collision pairs already warned; prevents duplicate events
+    # for long-running in-flight task pairs across multiple ticks (#784).
+    warned_collision: set[frozenset[str]] = set()
     # Back-off window: loaded from the persisted sidecar so a loop restart after
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
@@ -1428,6 +1564,7 @@ def run_dispatch_loop(
                 emit=emit,
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
+                warned_collision=warned_collision,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client,

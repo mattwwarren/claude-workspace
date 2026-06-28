@@ -24,7 +24,7 @@ import json
 import logging
 import shutil
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +62,11 @@ logger = logging.getLogger(__name__)
 
 _RETIREMENT_CONSUMER = "orchestrate_retire"
 _RECENT_EVENTS_LIMIT = 20
+# Attention digest only replays SESSION_NEEDS_ATTENTION events from the last
+# _ATTENTION_WINDOW *and* only for sessions still present in state. Without
+# both bounds the panel replays the entire event history (no resolution
+# semantics exist), so resolved/ancient flags accumulate forever. See #854.
+_ATTENTION_WINDOW = timedelta(hours=24)
 _REVIEW_MONITOR_SCRIPT = Path.home() / ".claude" / "scripts" / "review_monitor.py"
 
 
@@ -612,8 +617,17 @@ def orchestrator_status() -> OrchestratorStatus:
     tail = all_events[-_RECENT_EVENTS_LIMIT:]
     recent = [_summarise_event(e) for e in tail]
 
+    # Bound the attention digest: recent window + sessions still in state.
+    # There is no "attention resolved" event, so an unbounded replay surfaces
+    # every flag ever emitted (resolved or for long-reaped sessions). See #854.
+    attention_since = now - _ATTENTION_WINDOW
+    live_session_ids = {s.id for s in state.sessions}
     attention_raw = [
-        e for e in all_events if e.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        e
+        for e in all_events
+        if e.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        and e.created_at >= attention_since
+        and e.payload.get("session_id") in live_session_ids
     ]
     attention = [_summarise_event(e) for e in attention_raw]
 

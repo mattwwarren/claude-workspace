@@ -26,6 +26,14 @@ if TYPE_CHECKING:
 
 _DEFAULT_TIMEOUT_SECONDS = 300
 _POLL_INTERVAL_SECONDS = 1.0
+_COMPACT_FIELDS: set[str] = {
+    "ticket_id",
+    "client",
+    "priority",
+    "scope_hint",
+    "lane",
+    "stage",  # Why: enables correct handling of mixed-stage queues
+}
 
 
 def _format_tickets_prompt(tickets: list[TicketTask], output_path: Path) -> str:
@@ -34,7 +42,9 @@ def _format_tickets_prompt(tickets: list[TicketTask], output_path: Path) -> str:
     The prompt instructs the planner skill where to write its JSON output
     and supplies the pending TicketTasks as JSON for context.
     """
-    ticket_lines: list[str] = [t.model_dump_json() for t in tickets]
+    ticket_lines: list[str] = [
+        t.model_dump_json(include=_COMPACT_FIELDS) for t in tickets
+    ]
     tickets_block = "\n".join(ticket_lines)
     return (
         f"/orchestrate-plan {output_path}\n\n"

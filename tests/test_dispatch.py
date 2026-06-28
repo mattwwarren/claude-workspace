@@ -26,7 +26,8 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
-    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
@@ -38,6 +39,7 @@ from cw.dispatch import (
 from cw.events import read_events, record_event
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
+    DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     ClientConfig,
     CwState,
@@ -1999,6 +2001,154 @@ class TestClaimNextPendingAttempts:
 
 
 # ---------------------------------------------------------------------------
+# TestGlobalAttemptCeiling
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalAttemptCeiling:
+    """_claim_next_pending parks tasks at the global attempt ceiling.
+
+    GitHub issue #786: the dispatch loop must not re-spawn tasks indefinitely
+    when workers die without emitting a sentinel (e.g. during a usage-limit
+    window). A global attempt ceiling parks at-ceiling tasks BLOCKED_ON_USER
+    and emits a dispatch.tick with skip_reason=ATTEMPT_CAP_BLOCKED.
+    """
+
+    def _ceiling_config(self, ceiling: int = 3) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            global_attempt_ceiling=ceiling,
+        )
+
+    def test_below_ceiling_claims_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Task below the ceiling is claimed and attempts is incremented."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-below",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=2,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-786-below")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 3
+
+    def test_at_ceiling_parks_task_blocked(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Task at the ceiling is parked BLOCKED_ON_USER; attempts not incremented."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-ceiling",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-ceiling")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        # attempts must NOT be incremented when parking at the ceiling
+        assert parked.attempts == 3
+        # daemon was never invoked
+        assert daemon.spawn_calls == []
+
+    def test_at_ceiling_emits_attempt_cap_blocked_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Ceiling-parked task emits dispatch.tick skip_reason=attempt_cap_blocked."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-event",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-786-cap-event",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        cap_events = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.ATTEMPT_CAP_BLOCKED
+        ]
+        assert len(cap_events) == 1
+        assert cap_events[0].payload["ticket_id"] == "GEN-786-event"
+        assert cap_events[0].payload["client"] == "test-client"
+
+    def test_at_ceiling_priority_path_parks_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Ceiling check also fires on the priority-ticket path."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-786-pri",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+        )
+        store = DevQueueStore(tasks=[task])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        # Use use_plan=True so the priority-ticket path in _claim_next_pending
+        # is exercised. The plan must reference the task's client so it gets
+        # a non-empty priority_ids list.
+        save_plan(
+            DispatchPlan(
+                tasks=[TicketTask(ticket_id="GEN-786-pri", client="test-client")]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=3), native_daemon=daemon, use_plan=True
+        )
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-786-pri")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert parked.attempts == 3
+
+    def test_default_ceiling_is_ten(self) -> None:
+        """DEFAULT_GLOBAL_ATTEMPT_CEILING constant value and model default match."""
+        assert DEFAULT_GLOBAL_ATTEMPT_CEILING == 10
+        cfg = OrchestratorConfig()
+        assert cfg.global_attempt_ceiling == DEFAULT_GLOBAL_ATTEMPT_CEILING
+
+
+# ---------------------------------------------------------------------------
 # TestClaimNextPendingPriority
 # ---------------------------------------------------------------------------
 
@@ -2409,6 +2559,10 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
         lines: list[str] = []
@@ -2434,6 +2588,10 @@ class TestRunDispatchLoopVerbose:
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
@@ -2461,6 +2619,10 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
         tick_count = 0
@@ -2476,6 +2638,7 @@ class TestRunDispatchLoopVerbose:
             emit: Callable[[str], None] | None = None,
             warned_stale: set[tuple[str, str]] | None = None,
             warned_fetch_fail: set[str] | None = None,
+            warned_collision: set[frozenset[str]] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -2490,6 +2653,7 @@ class TestRunDispatchLoopVerbose:
                 emit=emit,
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
+                warned_collision=warned_collision,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -3459,10 +3623,11 @@ class TestFreshnessGateAutoFF:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """get_head_branch returns default_branch → normal path.
+        """get_head_branch returns default_branch → normal path (not non_main_head).
 
-        When HEAD == default_branch and the repo is stale, dispatch emits
-        freshness_detail="main_behind_origin" (not "non_main_head").
+        When HEAD == default_branch and the repo is stale with diverged safety,
+        dispatch emits freshness_detail="main_diverged_from_origin" — NOT
+        "non_main_head" (which would be wrong when we ARE on the default branch).
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(ticket_id="CW-112", client="test-client")
@@ -3492,7 +3657,10 @@ class TestFreshnessGateAutoFF:
         assert (
             tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
         )
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_BEHIND
+        # Key assertion: not NON_MAIN_HEAD — we ARE on the default branch.
+        # With diverged safety, the new distinct detail is FRESHNESS_MAIN_DIVERGED.
+        assert tick_events[0].payload["freshness_detail"] != FRESHNESS_NON_MAIN_HEAD
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
 
     def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
         self,
@@ -3573,6 +3741,130 @@ class TestFreshnessGateAutoFF:
             event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
         )
         assert len(events) == 1
+
+    def test_auto_ff_ahead_emits_diverged_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='ahead' → freshness_detail='main_diverged_from_origin' (#766).
+
+        When local main is ahead of origin (unpushed commits exist), the
+        dispatch loop should emit a distinct freshness_detail so the operator
+        can distinguish "ahead" from "behind" in the status output.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-120", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "ahead",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-ahead-diverged-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
+        assert any("diverged" in ln for ln in emitted)
+
+    def test_auto_ff_diverged_emits_diverged_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='diverged' → freshness_detail='main_diverged_from_origin' (#766).
+
+        When local main has diverged from origin (has both local and remote
+        commits), a distinct freshness_detail tells the operator to reconcile
+        rather than just wait for auto-ff.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-121", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "diverged",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-diverged-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
+        assert any("diverged" in ln for ln in emitted)
+
+    def test_auto_ff_behind_dirty_emits_dirty_checkout_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='behind' + dirty checkout → freshness_detail='main_dirty_checkout'.
+
+        When local main is behind origin but the working tree has uncommitted
+        tracked changes, auto-ff is blocked.  A distinct freshness_detail
+        tells the operator to commit or stash — not wait for auto-ff.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-122", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_checkout_dirty",
+            lambda _client: True,
+            raising=False,
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-dirty-checkout-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert (
+            tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIRTY_CHECKOUT
+        )
+        assert any("dirty" in ln or "uncommitted" in ln for ln in emitted)
 
 
 # ---------------------------------------------------------------------------
@@ -4413,3 +4705,276 @@ class TestApplyStagedDecision:
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "abandoned"
+
+    def test_blocked_at_finalize_with_regress_reason_regresses_to_impl(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with agent_block → Stage.IMPL PENDING (#770)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("REGRESS-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 1
+        assert task.session_id is None
+
+    def test_blocked_at_finalize_regress_increments_counter(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Each regress increments regress_attempts."""
+        from cw.dispatch import apply_staged_decision
+
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+
+        # First regress
+        task = self._make_running_task("REGRESS-2", stage=Stage.FINALIZE)
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+        assert task.regress_attempts == 1
+
+        # Simulate re-run: back at FINALIZE, still below cap
+        task.status = QueueItemStatus.RUNNING
+        task.stage = Stage.FINALIZE
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+        assert task.regress_attempts == 2
+        assert task.status == QueueItemStatus.PENDING
+
+    def test_blocked_at_finalize_cap_exceeded_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with regress_attempts >= cap → BLOCKED_ON_USER."""
+        from cw.auto_dev_result import FINALIZE_REGRESS_CAP
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("CAP-1", stage=Stage.FINALIZE)
+        task.regress_attempts = FINALIZE_REGRESS_CAP
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "blocked"
+        assert task.regress_attempts == FINALIZE_REGRESS_CAP  # unchanged
+
+    def test_blocked_at_finalize_non_regress_reason_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with non-eligible reason → BLOCKED_ON_USER."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NR-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "no_result_emitted"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.FINALIZE
+
+    def test_blocked_not_at_finalize_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at non-FINALIZE stage → BLOCKED_ON_USER (no regress)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NF-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s2_impl", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.IMPL
+
+    def test_blocked_at_finalize_no_blocker_in_result_parks_blocked_on_user(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked at FINALIZE with no blocker dict → BLOCKED_ON_USER (defensive)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NB-1", stage=Stage.FINALIZE)
+        apply_staged_decision(task, "blocked", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_blocked_at_finalize_regress_emits_ticket_requeued_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """blocked at FINALIZE with regress reason emits TICKET_REQUEUED (#770)."""
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.TICKET_REQUEUED:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("EVT-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["ticket_id"] == "EVT-1"
+        assert payload["from_stage"] == Stage.FINALIZE
+        assert payload["to_stage"] == Stage.IMPL
+        assert payload["reason"] == "finalize_regress"
+        assert payload["blocker_reason"] == "agent_block"
+
+
+# ---------------------------------------------------------------------------
+# TestWaveCollisionDetection
+# ---------------------------------------------------------------------------
+
+
+class TestWaveCollisionDetection:
+    """Verify dispatch_tick wires warned_collision to collision detection (#784).
+
+    Covers: kwarg acceptance, run_dispatch_loop initialization, and end-to-end
+    collision event emission for two RUNNING tasks sharing touched files.
+    """
+
+    def test_dispatch_tick_accepts_warned_collision_kwarg(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """dispatch_tick must accept warned_collision without raising TypeError."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (False, "abc", "abc", 0),
+        )
+
+        warned: set[frozenset[str]] = set()
+        # Should not raise even when no tasks are queued
+        result = dispatch_tick(
+            simple_config,
+            native_daemon=FakeNativeDaemonClient(),
+            warned_collision=warned,
+        )
+        assert isinstance(result, DispatchTickResult)
+
+    def test_run_dispatch_loop_initializes_warned_collision(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_dispatch_loop must pass warned_collision to each dispatch_tick call."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        captured_collision_sets: list[object] = []
+
+        original = dispatch_tick
+
+        def _spy(
+            config: OrchestratorConfig,
+            *,
+            warned_collision: set[frozenset[str]] | None = None,
+            **kwargs: object,
+        ) -> DispatchTickResult:
+            captured_collision_sets.append(warned_collision)
+            return original(config, **kwargs)
+
+        monkeypatch.setattr("cw.dispatch.dispatch_tick", _spy)
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (False, "abc", "abc", 0),
+        )
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+        assert len(captured_collision_sets) == 1
+        assert isinstance(captured_collision_sets[0], set)
+
+    def test_collision_detection_fires_for_running_tasks_sharing_files(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two RUNNING tasks sharing a file → WAVE_COLLISION event emitted."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # Pre-populate two RUNNING tasks on the same client with worktrees
+        wt1 = tmp_dispatch_dirs / "wt1"
+        wt2 = tmp_dispatch_dirs / "wt2"
+        wt1.mkdir(parents=True)
+        wt2.mkdir(parents=True)
+
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks = [
+                TicketTask(
+                    ticket_id="COL-1",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    worktree_path=wt1,
+                    stage_base_ref="abc123",
+                ),
+                TicketTask(
+                    ticket_id="COL-2",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    worktree_path=wt2,
+                    stage_base_ref="abc123",
+                ),
+            ]
+            save_dev_queue(store)
+
+        monkeypatch.setattr(
+            "cw.collision._git_changed_files",
+            lambda _path, _base_ref: frozenset({"src/shared.py"}),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (False, "abc", "abc", 0),
+        )
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+
+        warned: set[frozenset[str]] = set()
+        dispatch_tick(
+            simple_config,
+            native_daemon=FakeNativeDaemonClient(),
+            warned_collision=warned,
+        )
+
+        events = read_events(
+            consumer="test-dispatch-collision",
+            event_types=[OrchestratorEventType.WAVE_COLLISION],
+        )
+        assert len(events) == 1
+        assert set(events[0].payload["ticket_ids"]) == {"COL-1", "COL-2"}

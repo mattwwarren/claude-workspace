@@ -104,7 +104,8 @@ CW_STATE_SCHEMA_VERSION = 10
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
-DEV_QUEUE_SCHEMA_VERSION = 5
+# v6: added TicketTask.regress_attempts (GitHub #770).
+DEV_QUEUE_SCHEMA_VERSION = 6
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -220,6 +221,13 @@ class OrchestratorEventType(StrEnum):
     TICKET_REQUEUED = "ticket.requeued"
     TICKET_UNBLOCKED = "ticket.unblocked"
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
+    WAVE_COLLISION = "wave.collision"
+
+
+# Absolute ceiling on task.attempts across all kill causes (#786).
+# Lives here so OrchestratorConfig.global_attempt_ceiling can reference it
+# directly without a circular import (dispatch.py imports from models.py).
+DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
 
 
 class DispatchSkipReason(StrEnum):
@@ -228,12 +236,15 @@ class DispatchSkipReason(StrEnum):
     Precedence (highest first):
     FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > LANE_CAP_BLOCKED
     > SPAWN_ERROR > NO_PENDING > NONE.
+    ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
+    parks a task; it is not part of the per-client-tick precedence chain.
     """
 
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
     CAP_FULL = "cap_full"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
+    ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
     SPAWN_ERROR = "spawn_error"
     NO_PENDING = "no_pending"
     NONE = "none"
@@ -271,6 +282,10 @@ class TicketTask(BaseModel):
     # Incremented each time the task is claimed by _claim_next_pending. Used to
     # apply a hard cap on validation_failed retries (see issue #251).
     attempts: int = 0
+    # Number of times the task has been auto-regressed from FINALIZE back to
+    # IMPL for self-heal (e.g. diff-cover gate failures). Bounded by
+    # FINALIZE_REGRESS_CAP in auto_dev_result.py. See GitHub #770.
+    regress_attempts: int = 0
     # Per-ticket wall-clock budget override (seconds). When set, takes precedence
     # over the per-tier default in OrchestratorConfig.headless_timeout_by_tier and
     # the global HEADLESS_TIMEOUT_SECONDS fallback. Set via ``cw dev-queue add
@@ -349,10 +364,13 @@ class ReapPolicy(StrEnum):
     AUTO = "auto"
 
 
+CLAUDE_NATIVE_BACKEND: str = "claude-native"
+
+
 class StageExecutorConfig(BaseModel):
     """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""
 
-    backend: str = "claude-native"
+    backend: str = CLAUDE_NATIVE_BACKEND
     model: str | None = None
 
 
@@ -444,6 +462,11 @@ class OrchestratorConfig(BaseModel):
     # Keyed by TicketTask.scope_hint; unknown tiers fall back to
     # DEFAULT_STALLED_RETRY_CAP. See GitHub issue #756.
     stalled_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
+    # Absolute ceiling on task.attempts across ALL kill causes. When a task
+    # reaches this count in _claim_next_pending, it is parked BLOCKED_ON_USER
+    # instead of spawning again. Above the per-stage caps (#756), below the
+    # observed 14-attempt usage-limit churn. See GitHub issue #786.
+    global_attempt_ceiling: int = DEFAULT_GLOBAL_ATTEMPT_CEILING
     # Number of consecutive failed idle-watchdog observations required before a
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.

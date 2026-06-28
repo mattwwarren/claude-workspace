@@ -203,6 +203,55 @@ class TestRunPlanner:
         assert "timed out" in result.error.lower()
         assert load_plan() is None
 
+    def test_prompt_uses_compact_repr(
+        self,
+        tmp_config_dir: Path,
+        planner_client: ClientConfig,
+    ) -> None:
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1",
+                client="planner-client",
+                scope_hint="small",
+                session_id="abc-session-123",
+                total_cost_usd=9.99,
+                headless_timeout_override=600,
+                regress_attempts=3,
+            )
+        )
+
+        plan_payload = DispatchPlan(
+            tasks=[TicketTask(ticket_id="GEN-1", client="planner-client")]
+        ).model_dump_json()
+        daemon = _ScriptedDaemon(plan_payload)
+
+        result = run_planner(
+            client=planner_client,
+            native_daemon=daemon,
+            timeout_seconds=5,
+            poll_interval=0.05,
+        )
+
+        assert result.plan is not None
+        prompt_text = result.prompt_path.read_text()
+
+        # Planning fields must appear in the prompt (keys + values where non-default)
+        assert "GEN-1" in prompt_text
+        assert "planner-client" in prompt_text
+        assert "small" in prompt_text
+        assert '"priority"' in prompt_text
+        assert '"lane"' in prompt_text
+        assert '"stage"' in prompt_text
+
+        # Runtime-state fields must NOT appear in the prompt
+        assert "abc-session-123" not in prompt_text  # session_id value
+        assert "session_id" not in prompt_text
+        assert "worktree_path" not in prompt_text
+        assert "total_cost_usd" not in prompt_text
+        assert "headless_timeout_override" not in prompt_text
+        assert "regress_attempts" not in prompt_text
+        assert "completed_at" not in prompt_text
+
     def test_client_filter_limits_tickets_in_prompt(
         self,
         tmp_config_dir: Path,

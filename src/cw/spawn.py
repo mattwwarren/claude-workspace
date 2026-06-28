@@ -29,7 +29,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
-from cw.reconcile import _csid_from_transcript
+from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -58,6 +58,12 @@ _LINEAR_MCP_DISALLOW = "mcp__plugin_linear_linear__*"
 # See GitHub issue #733 (regression from #726).
 _LINEAR_MCP_DISALLOW_ARG = f"--disallowed-tools={_LINEAR_MCP_DISALLOW}"
 
+# Max chars kept for blocker.details in prior_attempts_summary entries — long
+# details (tracebacks, test output) would bloat the context injected into the
+# next retry's prompt. 500 chars captures the failure type without dragging in
+# megabytes of pane scrollback.
+_PRIOR_ATTEMPT_DETAILS_MAX_LEN = 500
+
 # Roster-registration verification: after spawn_bg returns a short id, poll
 # roster.json until the id appears. Isolates the silent-spawn flake (#520)
 # where the supervisor accepts the short id without adopting the worker.
@@ -66,6 +72,62 @@ _LINEAR_MCP_DISALLOW_ARG = f"--disallowed-tools={_LINEAR_MCP_DISALLOW}"
 _ROSTER_POLL_INTERVAL_SECS: float = 1.0
 _ROSTER_POLL_TIMEOUT_SECS: float = 10.0
 _SPAWN_FAIL_REASON_UNREGISTERED = "spawn_unregistered"
+
+
+def _collect_prior_attempts_summary(ticket_id: str) -> list[dict[str, object]]:
+    """Return compact failure summaries for prior sessions on *ticket_id*.
+
+    Called only when task.attempts > 0. Scans persisted state for TIMED_OUT or
+    COMPLETED sessions whose name encodes *ticket_id*, builds one entry per
+    session from last_result, sorts by completed_at ascending, and returns the
+    list. Returns [] on any exception so a state-read failure never blocks spawn.
+    """
+    try:
+        state = load_state()
+        terminal = (SessionStatus.TIMED_OUT, SessionStatus.COMPLETED)
+        matching = [
+            s
+            for s in state.sessions
+            if s.status in terminal and ticket_id_for_session(s.name) == ticket_id
+        ]
+        matching.sort(key=lambda s: s.completed_at or s.started_at)
+        summaries: list[dict[str, object]] = []
+        for sess in matching:
+            result = sess.last_result
+            if result is None:
+                summaries.append(
+                    {
+                        "status": "no_sentinel",
+                        "stage_reached": None,
+                        "blocker_reason": None,
+                        "blocker_details": None,
+                        "friction_highlights": [],
+                    }
+                )
+                continue
+            blocker = result.get("blocker") or {}
+            blocker_dict = blocker if isinstance(blocker, dict) else {}
+            raw_details = str(blocker_dict.get("details", ""))
+            details_str = raw_details[:_PRIOR_ATTEMPT_DETAILS_MAX_LEN]
+            summaries.append(
+                {
+                    "status": result.get("status"),
+                    "stage_reached": result.get("stage_reached"),
+                    "blocker_reason": blocker_dict.get("reason"),
+                    "blocker_details": details_str,
+                    "friction_highlights": result.get("friction_highlights") or [],
+                }
+            )
+    except Exception:  # noqa: BLE001 — safety net; spawn must not fail on retry-hints read
+        _log.warning(
+            "prior_attempts_summary: failed to collect for ticket=%r; "
+            "falling back to []",
+            ticket_id,
+            exc_info=True,
+        )
+        return []
+    else:
+        return summaries
 
 
 def _git_clean_env() -> dict[str, str]:
@@ -316,8 +378,11 @@ def _write_hook_context(
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,
                     "origin_main_branch": default_branch,
-                    # Why: reserved for retry context in a future pass; always [] today.
-                    "prior_attempts_summary": [],
+                    "prior_attempts_summary": (
+                        _collect_prior_attempts_summary(ticket_id)
+                        if ticket_id is not None and task.attempts > 0
+                        else []
+                    ),
                 },
             }
         )

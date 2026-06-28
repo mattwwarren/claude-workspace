@@ -32,7 +32,12 @@ from cw.dev_queue import (
     transition_task_status,
     wait_for_terminal,
 )
-from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
+from cw.dispatch import (
+    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
+    FRESHNESS_NON_MAIN_HEAD,
+)
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -837,6 +842,66 @@ class TestStatusFreshnessSubline:
         data = json.loads(result.output)
         assert list(data.keys()) == ["client-a"]
         assert "client-b" not in data
+
+    def test_dirty_checkout_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """freshness_detail='main_dirty_checkout' → subline mentions dirty (#766)."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-110", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_MAIN_DIRTY_CHECKOUT,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "dirty" in result.output
+
+    def test_diverged_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """freshness_detail='main_diverged_from_origin' → subline mentions diverged."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-111", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_MAIN_DIVERGED,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "diverged" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -3256,3 +3321,74 @@ class TestExtractPrUrl:
 
     def test_none_when_pr_url_missing(self) -> None:
         assert self._extract({"pr": {}}) is None
+
+
+# ---------------------------------------------------------------------------
+# TestStageRegress
+# ---------------------------------------------------------------------------
+
+
+class TestStageRegress:
+    """Unit tests for _stage_regress (GitHub #770)."""
+
+    def _make_task(
+        self, stage: Stage = Stage.FINALIZE, worktree_path: Path | None = None
+    ) -> TicketTask:
+        return TicketTask(
+            ticket_id="REGRESS-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+            worktree_path=worktree_path,
+        )
+
+    def test_sets_target_stage(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task(stage=Stage.FINALIZE)
+        _stage_regress(task, Stage.IMPL)
+        assert task.stage == Stage.IMPL
+
+    def test_increments_regress_attempts(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        assert task.regress_attempts == 0
+        _stage_regress(task, Stage.IMPL)
+        assert task.regress_attempts == 1
+        task.status = QueueItemStatus.RUNNING
+        _stage_regress(task, Stage.IMPL)
+        assert task.regress_attempts == 2
+
+    def test_sets_pending(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        _stage_regress(task, Stage.IMPL)
+        assert task.status == QueueItemStatus.PENDING
+
+    def test_clears_session_id(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        task.session_id = "abc123"
+        _stage_regress(task, Stage.IMPL)
+        assert task.session_id is None
+
+    def test_clears_stage_base_ref(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_task()
+        task.stage_base_ref = "deadbeef"
+        _stage_regress(task, Stage.IMPL)
+        assert task.stage_base_ref is None
+
+    def test_preserves_worktree_path(self) -> None:
+        from pathlib import Path
+
+        from cw.dev_queue import _stage_regress
+
+        wt = Path("/some/worktree/path")
+        task = self._make_task(worktree_path=wt)
+        _stage_regress(task, Stage.IMPL)
+        assert task.worktree_path == wt

@@ -29,10 +29,13 @@ from cw.dev_queue import (
 )
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     TICK_STALE_SECONDS,
     run_dispatch_loop,
 )
+from cw.dispatch_serve import run_dispatch_serve
 from cw.events import record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
@@ -326,6 +329,16 @@ def _emit_freshness_subline(
         )
     elif tick_freshness_detail == FRESHNESS_MAIN_BEHIND:
         click.echo(f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed")
+    elif tick_freshness_detail == FRESHNESS_MAIN_DIRTY_CHECKOUT:
+        click.echo(
+            f"  ⚠ {client_name}: main checkout dirty — commit or stash changes,"
+            " then auto-ff will retry"
+        )
+    elif tick_freshness_detail == FRESHNESS_MAIN_DIVERGED:
+        click.echo(
+            f"  ⚠ {client_name}: main diverged from origin —"
+            " reconcile with: git -C <workspace> pull --rebase"
+        )
 
 
 def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
@@ -534,6 +547,84 @@ def dev_queue_run(
         emit=None if quiet else click.echo,
         auto_ff=auto_ff,
         client=client,
+    )
+
+
+@dev_queue.command(name="serve")
+@click.option(
+    "--max-parallel",
+    "-p",
+    default=None,
+    type=int,
+    help="Override per-client concurrency cap.",
+)
+@click.option(
+    "--use-plan",
+    is_flag=True,
+    default=False,
+    help="Respect the persisted DispatchPlan ordering when claiming tasks.",
+)
+@click.option(
+    "--parent",
+    default=None,
+    help=(
+        "Orchestrator session ID. Spawned workers are linked back via "
+        "parent_session_id + worker_session_ids."
+    ),
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress per-tick operator output (for cron/scripted use).",
+)
+@click.option(
+    "--auto-ff/--no-auto-ff",
+    "auto_ff",
+    default=True,
+    help="Disable automatic fast-forward of local main (legacy block-only behavior).",
+)
+@click.option(
+    "--client",
+    "-c",
+    default=None,
+    help="Dispatch only this client's queue.",
+)
+@click.option(
+    "--max-restarts",
+    "max_restarts",
+    type=int,
+    default=-1,
+    show_default=True,
+    help="Maximum number of restarts. -1 = unlimited.",
+)
+@handle_errors
+def dev_queue_serve(
+    max_parallel: int | None,
+    use_plan: bool,
+    parent: str | None,
+    quiet: bool,
+    auto_ff: bool,
+    client: str | None,
+    max_restarts: int,
+) -> None:
+    """Run the dispatch loop with automatic restart on crash.
+
+    Unlike ``run``, ``serve`` restarts the dispatch loop after crashes with
+    exponential backoff. It exits cleanly on Ctrl-C or a normal (non-crash)
+    return from the loop. Use this command in place of ``run`` when you want
+    a self-healing long-running dispatch process.
+    """
+    if client is not None:
+        get_client(client)
+    run_dispatch_serve(
+        max_parallel=max_parallel,
+        use_plan=use_plan,
+        parent=parent,
+        emit=None if quiet else click.echo,
+        auto_ff=auto_ff,
+        client=client,
+        max_restarts=max_restarts,
     )
 
 
