@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -5001,8 +5001,6 @@ class TestSpawnErrorBackoff:
     ) -> None:
         """After a spawn error the task has next_eligible_at in the future and
         spawn_error_count == 1."""
-        from datetime import timedelta
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-868A", client="test-client"))
 
@@ -5027,8 +5025,6 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A task with next_eligible_at in the future is not claimed."""
-        from datetime import timedelta
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         # Pre-seed task with active backoff
         task = TicketTask(
@@ -5037,8 +5033,6 @@ class TestSpawnErrorBackoff:
             spawn_error_count=1,
             next_eligible_at=datetime.now(UTC) + timedelta(hours=1),
         )
-        from cw.dev_queue import save_dev_queue
-
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         daemon = FakeNativeDaemonClient()
@@ -5057,10 +5051,6 @@ class TestSpawnErrorBackoff:
     ) -> None:
         """dispatch.tick event has skip_reason=spawn_error_backoff when all
         pending tasks are in backoff."""
-        from datetime import timedelta
-
-        from cw.dev_queue import save_dev_queue
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(
             ticket_id="GEN-868C",
@@ -5089,8 +5079,6 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Successive spawn errors produce increasing next_eligible_at delays."""
-        from datetime import timedelta
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-868D", client="test-client"))
 
@@ -5105,8 +5093,6 @@ class TestSpawnErrorBackoff:
 
         # Task is in backoff; reset next_eligible_at to past so tick can retry
         q1.tasks[0].next_eligible_at = datetime.now(UTC) - timedelta(seconds=1)
-        from cw.dev_queue import save_dev_queue
-
         save_dev_queue(q1)
 
         # Second error: spawn_error_count=2, delay≈4s (doubles)
@@ -5125,9 +5111,6 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Delay is capped at _SPAWN_ERROR_BACKOFF_CAP_SECONDS regardless of count."""
-        from datetime import timedelta
-
-        from cw.dev_queue import save_dev_queue
         from cw.dispatch import _SPAWN_ERROR_BACKOFF_CAP_SECONDS
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -5158,10 +5141,6 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """After a successful spawn, spawn_error_count and next_eligible_at clear."""
-        from datetime import timedelta
-
-        from cw.dev_queue import save_dev_queue
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         # Pre-seed task that has suffered a prior backoff but the window has elapsed
         task = TicketTask(
@@ -5189,10 +5168,6 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A task whose next_eligible_at has passed is claimed and spawned normally."""
-        from datetime import timedelta
-
-        from cw.dev_queue import save_dev_queue
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         task = TicketTask(
             ticket_id="GEN-868G",
@@ -5216,10 +5191,6 @@ class TestSpawnErrorBackoff:
     ) -> None:
         """Priority-ticket path: a backedoff priority task is skipped (not claimed),
         and a non-priority eligible task is claimed instead (#868 priority loop)."""
-        from datetime import timedelta
-
-        from cw.dev_queue import save_dev_queue, save_plan
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         # Priority task A is in backoff
         task_a = TicketTask(
@@ -5258,10 +5229,6 @@ class TestSpawnErrorBackoff:
     ) -> None:
         """skip-to-next: a backedoff task is skipped; the next eligible task
         is claimed instead."""
-        from datetime import timedelta
-
-        from cw.dev_queue import save_dev_queue
-
         # cap=2 so both tasks could theoretically be claimed
         config = OrchestratorConfig(
             tick_interval_seconds=30,
