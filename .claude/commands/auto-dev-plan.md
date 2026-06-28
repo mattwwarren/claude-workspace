@@ -38,7 +38,7 @@ For each ticket in the queue:
 
 ### Step 1b: Generate Plan (Agent)
 
-Spawn a **Plan** agent (`subagent_type: "Plan"`) synchronously — the orchestrator must consume the plan result (and the `## Ambiguities` section) in Step 1c before continuing, so `run_in_background: true` is intentionally NOT used here. Background dispatch ends the parent's turn and trips Stop-hook session-completion (see issue #151 in claude-workspace), orphaning the plan agent.
+Spawn a **Plan** agent (`subagent_type: "Plan", model: "opus"`) synchronously — the orchestrator must consume the plan result (and the `## Ambiguities` section) in Step 1c before continuing, so `run_in_background: true` is intentionally NOT used here. Background dispatch ends the parent's turn and trips Stop-hook session-completion (see issue #151 in claude-workspace), orphaning the plan agent.
 
 **Prompt must include:**
 - Ticket description / user description
@@ -110,7 +110,7 @@ If you catch yourself drafting prose that explains *why* the agent isn't needed 
 
 1. **Source the ambiguity list.**
    - If the Plan agent ran in Step 1b and emitted a `## Ambiguities` section, use that list directly — do NOT re-spawn an agent. Skip to step 2 below.
-   - Otherwise (plan was extracted from Linear in Step 1a, not generated): you **MUST** spawn a **Product Manager Reviewer** agent in **ambiguity scan** mode. No inline shortcut is permitted regardless of how prescriptive or small the ticket appears.
+   - Otherwise (plan was extracted from Linear in Step 1a, not generated): you **MUST** spawn a **Product Manager Reviewer** agent in **ambiguity scan** mode (`model: "sonnet"`). No inline shortcut is permitted regardless of how prescriptive or small the ticket appears.
      - **Interactive mode:** `subagent_type: "Product Manager Reviewer"`, `run_in_background: true` (parallel — the parent waits for the next user gate anyway).
      - **`--headless` mode:** `subagent_type: "Product Manager Reviewer"`, **synchronous** (omit `run_in_background`). Same orphan-hazard rationale as Step 1b's Plan agent (`750ea77`) and Step 1f.2 — see issues #175 / #176 in claude-workspace.
 
@@ -232,8 +232,8 @@ Dispatch shape depends on mode (see issue #175 / #176 in claude-workspace for th
 - **`--headless` mode:** spawn the stations **serially** (no `run_in_background: true`). Block on each result before dispatching the next, and do NOT end the parent turn between them. Background dispatch in headless trips the cw-side Stop-hook session-completion (the parent's post-wait turn ends with `background_tasks: []` while pipeline work remains), orphaning the run with no sentinel — same failure mode the Step 1b Plan agent was hardened against in `750ea77`. Losing parallelism here is the price of correctness; the two stations combined typically take under 90s.
 
 Stations (whichever Step 1f.1 did not skip):
-- **Plan Reviewer** (`subagent_type: "Plan Reviewer"`) — 4 checks in `agents/plan-reviewer.md`: Contract Specificity, File Enumeration, Test Helper Inventory, Observability Call Inventory. Verdicts: **NO_ISSUES**, **SHOULD_FIX**, **PRINCIPLE**, **MUST_FIX**.
-- **Plan Soundness Reviewer** (`subagent_type: "Plan Soundness Reviewer"`) — two tiers in `agents/plan-soundness-reviewer.md`: Tier 1 codified violations of `ARCHITECTURE.md` §7/§8, Tier 2 Risk Radar shapes. Verdicts: **NO_ISSUES**, **RISK**, **MUST_FIX**.
+- **Plan Reviewer** (`subagent_type: "Plan Reviewer", model: "sonnet"`) — 4 checks in `agents/plan-reviewer.md`: Contract Specificity, File Enumeration, Test Helper Inventory, Observability Call Inventory. Verdicts: **NO_ISSUES**, **SHOULD_FIX**, **PRINCIPLE**, **MUST_FIX**.
+- **Plan Soundness Reviewer** (`subagent_type: "Plan Soundness Reviewer", model: "sonnet"`) — two tiers in `agents/plan-soundness-reviewer.md`: Tier 1 codified violations of `ARCHITECTURE.md` §7/§8, Tier 2 Risk Radar shapes. Verdicts: **NO_ISSUES**, **RISK**, **MUST_FIX**.
 
 **Each prompt must include:** full plan text (with Step 1c ambiguity resolutions merged in), Linear ticket ID + description, target repo path, that station's current marker version, the friction protocol block, the standard health check block.
 
@@ -263,7 +263,7 @@ If revision was performed, a marker reflects the revised plan, not the original.
 
 **Step 1f.4 — Plan revision (when MUST_FIX from either station):**
 
-Re-spawn the **Plan** agent (the same one Step 1b uses) with the current plan, the verbatim findings from *every* station that returned MUST_FIX (and any RISK the user chose to "treat as MUST_FIX"), and an instruction to revise addressing each one. The revision agent returns a new plan text; route back to Step 1f.2, re-running **only the stations that triggered the revision** (a clean station's marker stays valid). Maximum **1 revision cycle** — if a revised plan still has MUST_FIX, exit per the gating rules above. Don't loop; a second failure needs human judgment.
+Re-spawn the **Plan** agent (`model: "sonnet"`) (the same one Step 1b uses) with the current plan, the verbatim findings from *every* station that returned MUST_FIX (and any RISK the user chose to "treat as MUST_FIX"), and an instruction to revise addressing each one. The revision agent returns a new plan text; route back to Step 1f.2, re-running **only the stations that triggered the revision** (a clean station's marker stays valid). Maximum **1 revision cycle** — if a revised plan still has MUST_FIX, exit per the gating rules above. Don't loop; a second failure needs human judgment.
 
 **Headless only — if the 1 revision cycle is exhausted and MUST_FIX persists, emit `stage.errored` before exiting:**
 ```bash

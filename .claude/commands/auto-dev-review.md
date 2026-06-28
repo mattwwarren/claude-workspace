@@ -27,13 +27,13 @@ cw event record stage.entered \
 
 ### Step 3a: Spawn Review Agents
 
-**Small scope:** Spawn these reviewers:
+**Small scope:** Spawn these reviewers (all `model: "sonnet"` — heuristic checks; no novel reasoning):
 - Code Quality Reviewer (`subagent_type: "Code Quality Reviewer"`)
 - SysAdmin Reviewer (`subagent_type: "SysAdmin Reviewer"`)
 - Data Safety Reviewer (`subagent_type: "Data Safety Reviewer"`) — only when the diff mutates persisted state (any DB write, external-system write, or `SENSITIVE_HITS` non-empty); skip on doc/config/style-only diffs
 - Product Manager Reviewer (`subagent_type: "Product Manager Reviewer"`, Mode 2 — spec compliance)
 
-**Large scope:** Spawn full reviewer set based on file categories (per `/review` command patterns):
+**Large scope:** Spawn full reviewer set based on file categories (per `/review` command patterns) (all `model: "sonnet"` — heuristic checks; no novel reasoning):
 - Code Quality (always)
 - Architecture (any code changed)
 - Test Quality (test files changed or testable code without test changes)
@@ -183,7 +183,7 @@ Prerequisite: the implementation branch must already be on origin. Step 2's Impl
    git branch -D <branch-name>  # local only; origin still has it
    ```
 
-2. Spawn the fix agent with `isolation: "worktree"` and `run_in_background: true`. The agent's **first actions** must be:
+2. Spawn the fix agent with `isolation: "worktree"`, `model: "sonnet"`, and `run_in_background: true`. The agent's **first actions** must be:
    ```bash
    git fetch origin
    git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent (cw may pre-provision this branch, #712)

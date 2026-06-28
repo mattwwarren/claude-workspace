@@ -68,7 +68,7 @@ Options:
 - **Wait** → Pause. When user says "continue", re-check PR status. If merged, proceed. If still open, re-ask.
 - **Force** → Proceed with PR creation despite open PR. **Stacked PRs are always created as DRAFTS** so they cannot accidentally merge ahead of the bottom of the stack. `/review-monitor` promotes them to ready when the parent (oldest open pipeline PR) merges. The pipeline will continue to track the new PR for merge gating on subsequent tickets — meaning a stack of 3 still leaves later tickets gated on the bottom PR.
 - **Fix** → Enter fix mode for the prior PR:
-  - If CI failing: spawn agent in that branch's worktree to fix, push
+  - If CI failing: spawn agent (`model: "sonnet"`) in that branch's worktree to fix, push
   - If merge conflicts: fetch main, merge, resolve conflicts, push
   - If changes requested: enter Step 5b feedback handling for that PR
   - After fix, re-check status and re-present options
@@ -131,7 +131,7 @@ Create PR via /prep-pr + /ship-it?
 
 ### Step 4c: Delegate to /prep-pr
 
-Spawn a **general-purpose** agent scoped to the implementation worktree. The agent invokes `/prep-pr` which handles: sync-with-main (+ conflict handling), quality gate detection + re-run, and ship-it delegation (per-project PR creation conventions, branch naming, CI setup).
+Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to the implementation worktree. The agent invokes `/prep-pr` which handles: sync-with-main (+ conflict handling), quality gate detection + re-run, and ship-it delegation (per-project PR creation conventions, branch naming, CI setup).
 
 **Why delegate:**
 - `/prep-pr` delegates to per-project `.claude/commands/ship-it.md` which knows repo-specific PR conventions (template, labels, reviewers, base branch, CI bootstrap) that the pipeline shouldn't hardcode.
@@ -314,7 +314,7 @@ After `/prep-pr` returns with a PR number:
    2. Ship anyway — proceed to auto-merge (you'll attach evidence post-merge)
    3. Hold — leave PR open, do NOT enable auto-merge, exit ticket
    ```
-   - **Capture now** → spawn a `general-purpose` agent (`isolation: "worktree"`, `run_in_background: true`) with the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns. Max 2 capture attempts before falling through to the "Hold" branch.
+   - **Capture now** → spawn a `general-purpose` agent (`isolation: "worktree"`, `model: "haiku"`, `run_in_background: true`) with the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns. Max 2 capture attempts before falling through to the "Hold" branch.
    - **Ship anyway** → continue to step 2 (auto-merge enable). Append `"ui_evidence_missing_user_override"` to `friction_highlights`.
    - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR exists but waits on the human to attach evidence and run `gh pr merge --auto --squash` manually. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]` in the structured output (interactive runs don't emit structured output, but a summary line at end-of-pipeline should mention it).
 
@@ -397,7 +397,7 @@ Options:
 3. Abort — stop pipeline
 ```
 
-- **Fix** → Spawn agent in the worktree to investigate CI failure, apply fix, push to branch. Loop back to Step 5a for the new push. Max 2 fix attempts, then escalate.
+- **Fix** → Spawn agent (`model: "sonnet"`) in the worktree to investigate CI failure, apply fix, push to branch. Loop back to Step 5a for the new push. Max 2 fix attempts, then escalate.
 - **Ignore** → Proceed (user handles CI manually)
 - **Abort** → Stop pipeline
 
@@ -435,7 +435,7 @@ Options:
 3. Discuss — I'll draft reply comments for your review before posting
 ```
 
-- **Address** → Spawn agent in the worktree. Agent reads all review comments, applies fixes, pushes to branch. Post a reply to each addressed comment summarizing the fix. Loop back to Step 5a for CI wait on the new push.
+- **Address** → Spawn agent (`model: "sonnet"`) in the worktree. Agent reads all review comments, applies fixes, pushes to branch. Post a reply to each addressed comment summarizing the fix. Loop back to Step 5a for CI wait on the new push.
 - **Skip** → Proceed to next ticket
 - **Discuss** → Draft reply comments for each piece of feedback. Present drafts to user via AskUserQuestion before posting. Post approved replies via `gh api`.
 
