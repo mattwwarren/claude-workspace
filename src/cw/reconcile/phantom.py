@@ -300,8 +300,9 @@ def _emit_phantom_terminal_events(
 
     Stops surfaces and emits SESSION_COMPLETED for merged phantoms,
     SESSION_NEEDS_ATTENTION for gh-blocked phantoms, and SESSION_PHANTOM_REVERTED
-    for DAEMON-origin crashes. Returns the set of ticket IDs whose worktree was
-    dirty (consumed by the queue mutation to route them to BLOCKED_ON_USER).
+    for DAEMON-origin crashes. Returns the set of dirty-worktree ticket IDs;
+    the return value is pre-computed by the caller (dirty_ticket_ids) and the
+    return is retained for signature compatibility — see #867.
     """
     # SESSION_COMPLETED for merged phantoms (PR already shipped, not CRASHED).
     for candidate in merged_crash_candidates:
@@ -642,6 +643,8 @@ def _act_on_phantom_candidates(
     # writes, the session stays ACTIVE/IDLE; the next reconcile() tick
     # re-detects it as a phantom and the queue mutation is a no-op (task
     # already PENDING, not matched by the RUNNING guard).  #867
+    # Origin filter omitted: _classify_phantom_candidates sets worktree_dirty=False
+    # for all non-DAEMON sessions, so non-DAEMON entries never enter this set.
     dirty_ticket_ids = {
         c.ticket_id
         for c in crash_candidates
