@@ -1,6 +1,6 @@
 ---
 name: cw-fanout
-description: Multi-ticket parallel dispatch with a monitoring handoff — takes a list of tickets, runs pre-flight per ticket, enqueues the batch, starts the cw dispatch loop, then watches the wave via the queue-peek ladder and the session.needs_attention / session.timed_out event bus until every ticket is terminal. Use when the user wants to enqueue several tickets and then monitor the queue in one motion. Triggers on "fan out these tickets", "dispatch a wave", "enqueue these and watch them", "run /auto-dev on N tickets and monitor", "dispatch and babysit the queue".
+description: Multi-ticket parallel dispatch with a monitoring handoff — takes a list of tickets, runs pre-flight per ticket, enqueues the batch, starts the cw dispatch loop, then watches the wave via the queue-peek ladder and the session.needs_attention / session.timed_out event bus, closes gate tickets inline via /cw-followup without operator hand-rolling, and drives the wave to terminal in one orchestrated motion. Use when the user wants to enqueue several tickets and then monitor the queue in one motion. Triggers on "fan out these tickets", "dispatch a wave", "enqueue these and watch them", "run /auto-dev on N tickets and monitor", "dispatch and babysit the queue".
 ---
 
 # cw-fanout
@@ -121,7 +121,27 @@ Exit 0 / `"terminal": true` when every wave ticket is terminal
 (`completed` / `failed` / `cancelled` / `blocked_on_user`, or removed from the
 queue). `"in_flight"` lists the tickets still `pending`/`running`;
 `"needs_attention"` lists `blocked_on_user` tickets (a session paused for the
-operator). Loop the rest of Step 4 until this reports terminal.
+operator).
+
+The monitoring loop continues until `wave_status.py` reports `terminal=true AND
+needs_attention is empty`. A `terminal=true` report with non-empty
+`needs_attention` does NOT exit the loop — it means all remaining in-flight
+tickets are `blocked_on_user` for gate resolution. Proceed immediately to Step
+4b to close those gates, then re-evaluate.
+
+The loop control logic is:
+
+```
+LOOP:
+  report = wave_status.py <T1> <T2> ... --client <C> --json   # <WAVE> = the full ticket set
+  if report.terminal and report.needs_attention is empty:
+    EXIT LOOP → proceed to Step 5
+  for each ticket in report.needs_attention:
+    classify and close gate (Step 4b)
+  tail event bus for new attention signals (Step 4b)
+  run peek-stop ladder (Step 4c)
+  sleep/checkpoint
+```
 
 **b. Attention signals — does anything need me now?**
 
@@ -134,13 +154,51 @@ cw event tail --since fanout-mon \
   --type session.completed --json
 ```
 
-On `session.needs_attention` (paused-for-input, user-directed blocked, or
-exited-without-sentinel) or `session.timed_out`: surface the ticket + session
-immediately and pause for the operator. Do not silently re-dispatch. When the
-event is `session.timed_out`, check the `branch_state` field: `"absent_no_merged_pr"`
-means the worker died before push (an anomaly worth investigating); absent key
-means the branch is present or the check was unavailable (ordinary slow timeout).
+**On `session.needs_attention`**: detect the gate type from the ticket's
+disposition field, then close it inline:
+
+```bash
+GATE=$(cw dev-queue tasks --ticket <T> -c <CLIENT> --json \
+  | jq -r '.[0].disposition // "unknown"')
+```
+
+If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
+`ambiguities_pending_resolution`, `premises_pending_verification`:
+
+1. Run `/cw-followup --ticket-id <T>` inline so the operator resolves the gate.
+2. Check if the operator removed the ticket from the queue (do this before any
+   approve/requeue attempt to avoid spurious errors):
+   ```bash
+   cw dev-queue tasks --ticket <T> -c <CLIENT> --json | jq length
+   ```
+   If the result is `0` (ticket no longer in queue): print
+   `gate abandoned: #<T> (<GATE>) → operator removed ticket; wave continues`
+   and skip sub-step 5 below (no re-dispatch needed).
+3. Re-check status after followup:
+   ```bash
+   STATUS=$(cw dev-queue tasks --ticket <T> -c <CLIENT> --json \
+     | jq -r '.[0].status')
+   ```
+4. If `STATUS` is still `blocked_on_user`:
+   - `plan_pending_approval` / `review_pending_approval` →
+     `cw dev-queue approve <T> -c <CLIENT>` (fallback auto-approve; if session
+     not found, falls back to `cw dev-queue requeue <T> -c <CLIENT>`)
+   - `ambiguities_pending_resolution` / `premises_pending_verification` →
+     `cw dev-queue requeue <T> -c <CLIENT>`
+5. On successful re-dispatch: print
+   `gate closed: #<T> (<GATE>) → re-dispatched, watching` — resume the loop.
+
+If `GATE` is non-gate / unknown, or `session.timed_out` fires without a
+recognized gate disposition: surface the ticket + session immediately and
+pause for the operator. Do not silently re-dispatch.
+
+When the event is `session.timed_out`, check the `branch_state` field:
+`"absent_no_merged_pr"` means the worker died before push (an anomaly worth
+investigating); absent key means the branch is present or the check was
+unavailable (ordinary slow timeout).
 See [`session-disposition.md §5a`](../../docs/session-disposition.md#5a-branch-absence-anomaly-on-session_timed_out-808).
+
+Resume the monitoring loop after handling any attention signal.
 
 **c. In-flight health — is a running session stuck?**
 
@@ -165,7 +223,11 @@ other wave is queued behind it), then print a per-ticket disposition table.
 Suggest the right follow-up per ticket:
 
 - `completed` → `/cw-validate-result --ticket-id <N>` to confirm what shipped.
-- `blocked_on_user` → `/cw-followup --ticket-id <N>` to disposition it.
+- `blocked_on_user` (gate-type — gate was open at wave end and operator chose
+  not to resolve it) → `/cw-followup --ticket-id <N>` to disposition it manually.
+- `blocked_on_user` (non-gate — paused-for-input, user-directed blocked, or
+  exited without sentinel) → surface the ticket to the operator; do not
+  auto-dispatch.
 - `failed` / dropped → surface the reason; let the operator decide.
 
 ## Output shape
@@ -178,6 +240,14 @@ fanout: client=claude-workspace wave=[201,202,203] → 2 shipped, 1 blocked_on_u
 fanout: wave=[210,211] → all shipped; 0 need attention
 ```
 
+Gate-loop resolution mid-wave looks like:
+
+```
+gate closed: #204 (plan_pending_approval) → re-dispatched, watching
+gate closed: #205 (ambiguities_pending_resolution) → re-dispatched, watching
+fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need attention
+```
+
 ## Failure modes
 
 - **Pre-flight drops the whole wave** — print the failing rows; do not enqueue.
@@ -188,9 +258,21 @@ fanout: wave=[210,211] → all shipped; 0 need attention
 - **A ticket sits `pending` forever** — concurrency cap is saturated by other
   clients, or the freshness gate keeps rejecting it (stale `main`). Surface
   `cw dev-queue status` + `cw doctor`; suggest `cw dev-queue refresh-all`.
+- **Gate-abandon** — the operator removes a ticket mid-gate (e.g. closes the
+  issue or manually drops it from the queue). The skill prints
+  `gate abandoned: #<T> (<GATE>) → operator removed ticket; wave continues` and
+  resumes the loop. No re-dispatch is attempted.
+- **Approve-session-not-found** — `cw dev-queue approve <T>` raises
+  `ApproveGateError` when the target session is no longer in the daemon roster
+  (e.g. the session died before the approval). Fall back to
+  `cw dev-queue requeue <T>` to re-enter the ticket via a fresh session.
 - **`needs_attention` storm** — many tickets pause at once (often the same
-  ambiguity across a batch). Disposition one via `/cw-followup`, then re-dispatch
-  the rest with the same decision rather than answering each separately.
+  ambiguity across a batch). For known gate types, the inline loop calls
+  `/cw-followup` per gate ticket in sequence — if multiple tickets share the
+  same ambiguity, the operator provides the same answer on each invocation.
+  For non-gate blocked tickets, disposition one via `/cw-followup`, then
+  `cw dev-queue requeue <T>` each remaining ticket with the same decision rather
+  than answering each separately.
 
 ## Out of scope
 
@@ -204,6 +286,10 @@ fanout: wave=[210,211] → all shipped; 0 need attention
 - `/cw-smoke-test` — single-ticket end-to-end dogfood (the N=1 form of this).
 - `/cw-queue-peek` — in-flight WAIT/PEEK/STOP ladder (Step 4c).
 - `/cw-validate-result` — forensic read on a finished ticket (Step 5).
-- `/cw-followup` — act on a finished/blocked ticket's sentinel (Step 5).
+- `/cw-followup` — act on a finished/blocked ticket's sentinel (Step 4b inline, Step 5).
+- `cw dev-queue approve` — approves a scope-gated ticket by posting the approval
+  sentinel and re-queuing; used as the primary fallback in Step 4b gate closure.
+- `cw dev-queue requeue` — re-enters a `blocked_on_user` ticket as `pending`;
+  used for ambiguity/premises gates and as the approve-session-not-found fallback.
 - `cw event tail --type session.needs_attention --type session.timed_out` —
   the durable attention bus this skill watches in Step 4b.

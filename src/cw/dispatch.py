@@ -15,6 +15,8 @@ import pydantic
 import yaml
 
 from cw.auto_dev_result import (
+    FINALIZE_REGRESS_BLOCKER_REASONS,
+    FINALIZE_REGRESS_CAP,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_SMALL,
@@ -23,6 +25,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     parse_stdout,
 )
+from cw.collision import detect_wave_collisions
 from cw.config import (
     load_clients,
     load_effective_clients,
@@ -37,6 +40,7 @@ from cw.dev_queue import (
     _advance_task_pointer,
     _derive_disposition,
     _extract_pr_url,
+    _stage_regress,
     dev_queue_lock,
     load_dev_queue,
     load_plan,
@@ -58,6 +62,7 @@ from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
+    Stage,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
@@ -931,6 +936,7 @@ def dispatch_tick(
     emit: Callable[[str], None] | None = None,
     warned_stale: set[tuple[str, str]] | None = None,
     warned_fetch_fail: set[str] | None = None,
+    warned_collision: set[frozenset[str]] | None = None,
     usage_limited_until: datetime | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
@@ -961,6 +967,11 @@ def dispatch_tick(
             received a fetch-failure WARNING during this dispatcher run.
             Suppresses repeated WARNINGs for persistently unreachable
             remotes.  Caller owns the set; mutated in-place.
+        warned_collision: Mutable set of ``frozenset({ticket_id_a,
+            ticket_id_b})`` pairs already warned this loop run. Prevents
+            duplicate WAVE_COLLISION events for persistent in-flight
+            collisions across ticks. Caller owns the set; mutated
+            in-place. When None, dedup is skipped (every tick fires).
         usage_limited_until: When set and in the future, all clients are
             skipped with ``skip_reason=USAGE_LIMITED`` and the function
             returns immediately. The back-off window is set by the
@@ -991,6 +1002,18 @@ def dispatch_tick(
     spawned = 0
 
     plan_order_by_client = _build_plan_order(use_plan=use_plan)
+
+    # Wave file-collision detection runs before usage-limit gates so that
+    # RUNNING tasks are checked even during backoff — they continue running
+    # regardless of whether spawning is paused (#784).
+    # Why: writes WAVE_COLLISION events to inbox.jsonl for each new collision pair.
+    with dev_queue_lock():
+        collision_snapshot = load_dev_queue()
+    detect_wave_collisions(
+        collision_snapshot.tasks,
+        warned_collision=warned_collision,
+        emit=emit,
+    )
 
     # Usage-limit back-off gate: if the window is still active, skip all clients
     # this tick and emit a dispatch.tick event with skip_reason=USAGE_LIMITED.
@@ -1261,6 +1284,41 @@ def apply_staged_decision(
         transition_task_status(task, QueueItemStatus.COMPLETED, disposition="no_op")
     elif status in STAGE_FAILURE_STATUSES:
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
+        # Sub-rule 5a: "blocked" at FINALIZE with a regress-eligible blocker
+        # reason and attempts below cap → regress to IMPL for self-heal (#770).
+        # scope_exceeded/forbidden_area/merge_gate_blocked have no blocker field
+        # (validator enforces this) so they always fall through to BLOCKED_ON_USER.
+        if status == "blocked" and task.stage == Stage.FINALIZE:
+            blocker = (
+                last_result.get("blocker") if isinstance(last_result, dict) else None
+            )
+            if (
+                isinstance(blocker, dict)
+                and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
+                and task.regress_attempts < FINALIZE_REGRESS_CAP
+            ):
+                _log.info(
+                    "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
+                    " (regress attempt %d/%d)",
+                    blocker.get("reason"),
+                    task.ticket_id,
+                    task.regress_attempts + 1,
+                    FINALIZE_REGRESS_CAP,
+                )
+                _stage_regress(task, Stage.IMPL)
+                record_event(
+                    OrchestratorEventType.TICKET_REQUEUED,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": task.client,
+                        "from_stage": Stage.FINALIZE,
+                        "to_stage": Stage.IMPL,
+                        "reason": "finalize_regress",
+                        "blocker_reason": blocker.get("reason"),
+                        "regress_attempt": task.regress_attempts,
+                    },
+                )
+                return
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
@@ -1476,6 +1534,9 @@ def run_dispatch_loop(
     warned_stale: set[tuple[str, str]] = set()
     # Track fetch-fail-warn deduplication for persistently unreachable remotes.
     warned_fetch_fail: set[str] = set()
+    # Track wave-collision pairs already warned; prevents duplicate events
+    # for long-running in-flight task pairs across multiple ticks (#784).
+    warned_collision: set[frozenset[str]] = set()
     # Back-off window: loaded from the persisted sidecar so a loop restart after
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
@@ -1503,6 +1564,7 @@ def run_dispatch_loop(
                 emit=emit,
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
+                warned_collision=warned_collision,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client,

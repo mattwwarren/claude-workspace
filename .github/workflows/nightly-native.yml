@@ -1,17 +1,13 @@
 name: Nightly (native daemon integration)
 
 on:
-  schedule:
-    # 09:00 UTC daily (~02:00 PT / ~05:00 ET) — off peak. Starts the
-    # 2-week native-soak clock toward 1.0 (gates #242/#119/#120). The cmux
-    # nightly is de-scheduled in favour of this native path (#119 removes cmux).
-    - cron: "0 9 * * *"
   workflow_dispatch: {}
 
 jobs:
   native-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: CI
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -46,18 +42,18 @@ jobs:
 
       # Run native-daemon smoke tests that call the real claude CLI.
       # Fails fast with a clear message when ANTHROPIC_API_KEY is not configured.
-      - name: Verify ANTHROPIC_API_KEY is configured
+      - name: Verify ANTHROPIC_CI_KEY is configured
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_CI_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "ERROR: ANTHROPIC_API_KEY secret is not set."
+            echo "ERROR: ANTHROPIC_CI_KEY secret is not set."
             echo "Configure it in Settings → Secrets → Actions before running this workflow."
             exit 1
           fi
 
       - name: Test (native daemon smoke)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_CI_KEY }}
           INTEGRATION_REAL_API: "1"
         run: uv run pytest tests/test_native_smoke.py -v --tb=short -m integration
