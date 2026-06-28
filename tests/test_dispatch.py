@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -4978,3 +4978,283 @@ class TestWaveCollisionDetection:
         )
         assert len(events) == 1
         assert set(events[0].payload["ticket_ids"]) == {"COL-1", "COL-2"}
+
+
+# ---------------------------------------------------------------------------
+# TestSpawnErrorBackoff
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnErrorBackoff:
+    """Exponential backoff on spawn_error: re-claim is deferred, not immediate.
+
+    Mirror of TestDispatchUsageLimitBackoff for the generic spawn_error path.
+    No freezegun — timing verified via before/after comparisons and pre-seeded
+    queue state.  See GitHub #868.
+    """
+
+    def test_spawn_error_stamps_next_eligible_at_and_count(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """After a spawn error the task has next_eligible_at in the future and
+        spawn_error_count == 1."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-868A", client="test-client"))
+
+        before = datetime.now(UTC)
+        daemon = _RaisingNativeDaemon(RuntimeError("daemon hiccup"))
+        dispatch_tick(simple_config, native_daemon=daemon)
+        after = datetime.now(UTC) + timedelta(seconds=1)
+
+        queue = load_dev_queue()
+        task = queue.tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.spawn_error_count == 1
+        assert task.next_eligible_at is not None
+        assert task.next_eligible_at > before
+        # delay should be _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS=2 after the revert
+        assert task.next_eligible_at < after + timedelta(seconds=2)
+
+    def test_backedoff_task_not_claimed_on_next_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A task with next_eligible_at in the future is not claimed."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Pre-seed task with active backoff
+        task = TicketTask(
+            ticket_id="GEN-868B",
+            client="test-client",
+            spawn_error_count=1,
+            next_eligible_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        queue = load_dev_queue()
+        assert queue.tasks[0].status == QueueItemStatus.PENDING
+
+    def test_backoff_skip_reason_emitted_in_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """dispatch.tick event has skip_reason=spawn_error_backoff when all
+        pending tasks are in backoff."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-868C",
+            client="test-client",
+            spawn_error_count=1,
+            next_eligible_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-868-backoff-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert (
+            events[0].payload["skip_reason"] == DispatchSkipReason.SPAWN_ERROR_BACKOFF
+        )
+
+    def test_backoff_grows_exponentially_on_repeated_errors(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Successive spawn errors produce increasing next_eligible_at delays."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-868D", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("daemon hiccup"))
+
+        # First error: spawn_error_count=1, delay≈2s
+        dispatch_tick(simple_config, native_daemon=daemon)
+        q1 = load_dev_queue()
+        assert q1.tasks[0].spawn_error_count == 1
+        eligible_after_1 = q1.tasks[0].next_eligible_at
+        assert eligible_after_1 is not None
+
+        # Task is in backoff; reset next_eligible_at to past so tick can retry
+        q1.tasks[0].next_eligible_at = datetime.now(UTC) - timedelta(seconds=1)
+        save_dev_queue(q1)
+
+        # Second error: spawn_error_count=2, delay≈4s (doubles)
+        dispatch_tick(simple_config, native_daemon=daemon)
+        q2 = load_dev_queue()
+        assert q2.tasks[0].spawn_error_count == 2
+        eligible_after_2 = q2.tasks[0].next_eligible_at
+        assert eligible_after_2 is not None
+        # Second window must start later than first
+        assert eligible_after_2 > eligible_after_1
+
+    def test_backoff_capped_at_max(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Delay is capped at _SPAWN_ERROR_BACKOFF_CAP_SECONDS regardless of count."""
+        from cw.dispatch import _SPAWN_ERROR_BACKOFF_CAP_SECONDS
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Pre-seed with very high count so uncapped delay would be enormous
+        task = TicketTask(
+            ticket_id="GEN-868E",
+            client="test-client",
+            spawn_error_count=100,
+            next_eligible_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("daemon hiccup"))
+        before = datetime.now(UTC)
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        queue = load_dev_queue()
+        eligible = queue.tasks[0].next_eligible_at
+        assert eligible is not None
+        delay = (eligible - before).total_seconds()
+        # Should be at most cap + a small epsilon for timing jitter
+        assert delay <= _SPAWN_ERROR_BACKOFF_CAP_SECONDS + 2
+
+    def test_backoff_resets_after_successful_spawn(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """After a successful spawn, spawn_error_count and next_eligible_at clear."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Pre-seed task that has suffered a prior backoff but the window has elapsed
+        task = TicketTask(
+            ticket_id="GEN-868F",
+            client="test-client",
+            spawn_error_count=3,
+            next_eligible_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        queue = load_dev_queue()
+        claimed = queue.tasks[0]
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.spawn_error_count == 0
+        assert claimed.next_eligible_at is None
+
+    def test_expired_backoff_allows_reclaim(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A task whose next_eligible_at has passed is claimed and spawned normally."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-868G",
+            client="test-client",
+            spawn_error_count=1,
+            next_eligible_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        assert len(daemon.spawn_calls) == 1
+
+    def test_priority_task_in_backoff_is_skipped(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Priority-ticket path: a backedoff priority task is skipped (not claimed),
+        and a non-priority eligible task is claimed instead (#868 priority loop)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Priority task A is in backoff
+        task_a = TicketTask(
+            ticket_id="GEN-868-PRIO-A",
+            client="test-client",
+            spawn_error_count=1,
+            next_eligible_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        # Non-priority task B is eligible
+        task_b = TicketTask(ticket_id="GEN-868-PRIO-B", client="test-client")
+        save_dev_queue(DevQueueStore(tasks=[task_a, task_b]))
+        # Plan orders A first (would be claimed first without backoff)
+        save_plan(
+            DispatchPlan(
+                tasks=[
+                    TicketTask(ticket_id="GEN-868-PRIO-A", client="test-client"),
+                    TicketTask(ticket_id="GEN-868-PRIO-B", client="test-client"),
+                ]
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, use_plan=True)
+
+        assert result.spawned == 1
+        queue = load_dev_queue()
+        a = next(t for t in queue.tasks if t.ticket_id == "GEN-868-PRIO-A")
+        b = next(t for t in queue.tasks if t.ticket_id == "GEN-868-PRIO-B")
+        assert a.status == QueueItemStatus.PENDING
+        assert b.status == QueueItemStatus.RUNNING
+
+    def test_skip_to_next_skips_backedoff_claims_other(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """skip-to-next: a backedoff task is skipped; the next eligible task
+        is claimed instead."""
+        # cap=2 so both tasks could theoretically be claimed
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 2},
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Task A is in backoff; task B is eligible (created later, lower priority tie)
+        task_a = TicketTask(
+            ticket_id="GEN-868H-A",
+            client="test-client",
+            spawn_error_count=1,
+            next_eligible_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        task_b = TicketTask(
+            ticket_id="GEN-868H-B",
+            client="test-client",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_a, task_b]))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        queue = load_dev_queue()
+        a = next(t for t in queue.tasks if t.ticket_id == "GEN-868H-A")
+        b = next(t for t in queue.tasks if t.ticket_id == "GEN-868H-B")
+        # B must be RUNNING (spawned); A stays PENDING in backoff
+        assert b.status == QueueItemStatus.RUNNING
+        assert a.status == QueueItemStatus.PENDING

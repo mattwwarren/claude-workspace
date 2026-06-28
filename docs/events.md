@@ -192,7 +192,7 @@ worker may recover and continue. Visible in `cw event tail` and
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "freshness_gate | cap_full | spawn_error | no_pending | none"
+  "skip_reason": "freshness_gate | cap_full | lane_cap_blocked | attempt_cap_blocked | spawn_error_backoff | spawn_error | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
@@ -200,8 +200,11 @@ tasks newly spawned this tick. `pending` is the pre-claim count (read before
 the claim loop). `running` is the count of RUNNING tasks at tick start.
 `skip_reason` follows first-match precedence: `freshness_gate` (local branch
 behind origin, checked before anything else) → `cap_full` (running ≥ cap) →
-`spawn_error` (exception during spawn) → `no_pending` (nothing to claim) →
-`none` (at least one session spawned). `correlation_id` is `None` (per-client
+`usage_limited` (API rate limit) → `lane_cap_blocked` (pending tasks exist but all
+lane slots occupied) → `attempt_cap_blocked` (task parked at attempt ceiling) →
+`spawn_error_backoff` (pending tasks exist but all in exponential backoff after
+spawn_error, next_eligible_at in the future) → `spawn_error` (exception during
+spawn) → `no_pending` (nothing to claim) → `none` (at least one session spawned). `correlation_id` is `None` (per-client
 aggregate, not per-ticket). Consumers MUST tolerate unknown `skip_reason`
 values.
 

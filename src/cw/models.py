@@ -105,7 +105,8 @@ CW_STATE_SCHEMA_VERSION = 10
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
 # v6: added TicketTask.regress_attempts (GitHub #770).
-DEV_QUEUE_SCHEMA_VERSION = 6
+# v7: added TicketTask.spawn_error_count, next_eligible_at (GitHub #868).
+DEV_QUEUE_SCHEMA_VERSION = 7
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -245,6 +246,7 @@ class DispatchSkipReason(StrEnum):
     CAP_FULL = "cap_full"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
+    SPAWN_ERROR_BACKOFF = "spawn_error_backoff"
     SPAWN_ERROR = "spawn_error"
     NO_PENDING = "no_pending"
     NONE = "none"
@@ -321,6 +323,12 @@ class TicketTask(BaseModel):
     # Timestamp when the task reached a terminal status (COMPLETED/BLOCKED_ON_USER/
     # FAILED).  Cleared on requeue/cancel.  None for in-flight or pre-v5 legacy.
     completed_at: datetime | None = None
+    # Exponential backoff state for spawn_error retries (GitHub #868).
+    # spawn_error_count tracks consecutive failures; next_eligible_at is the
+    # earliest timestamp at which _claim_next_pending will re-claim this task.
+    # Both are cleared atomically on a successful spawn.
+    spawn_error_count: int = 0
+    next_eligible_at: datetime | None = None
 
 
 class DispatchPlan(BaseModel):
