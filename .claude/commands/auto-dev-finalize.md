@@ -99,14 +99,14 @@ Options:
      ```json
      "blocker": {
        "stage": "stage4a_merge_gate",
-       "reason": "prior_pipeline_pr_open:#<number>",
+       "reason": "prior_pipeline_pr_open",
        "details": "PR #<number> (<headRefName>) is open and shares files with this branch: <comma-separated overlap list>",
        "recovery_hint": "Wait for PR #<number> to merge, then re-dispatch this ticket.",
        "retry_eligible": true,
        "retry_delay_seconds": null
      }
      ```
-     When multiple open PRs overlap, use the lowest PR number in `reason` and list all overlapping PRs in `details`.
+     When multiple open PRs overlap, list all overlapping PRs in `details`.
    - **Empty intersection** for ALL open PRs (or no other open pipeline PRs) → proceed to Step 4b. Log: `"All open pipeline PRs are file-disjoint — proceeding to PR creation."`
 
 ### Step 4b: Pipeline-Level PR Approval
@@ -505,7 +505,7 @@ Note: when `status` is `merge_gate_blocked` due to file overlap with an open pip
 ```json
 "blocker": {
   "stage": "stage4a_merge_gate",
-  "reason": "prior_pipeline_pr_open:#<N>",
+  "reason": "prior_pipeline_pr_open",
   "details": "PR #<N> (<branch>) is open and shares files: <list>",
   "recovery_hint": "Wait for PR #<N> to merge, then re-dispatch this ticket.",
   "retry_eligible": true,
