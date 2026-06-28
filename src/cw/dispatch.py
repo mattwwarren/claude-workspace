@@ -1626,7 +1626,10 @@ def run_dispatch_loop(
                 _log.warning("dispatch: config reload failed; using last-good config")
 
             consume_completed_sessions()
-            _installed = importlib.metadata.version(_CW_PACKAGE_NAME)
+            try:
+                _installed = importlib.metadata.version(_CW_PACKAGE_NAME)
+            except importlib.metadata.PackageNotFoundError:
+                _installed = "0.0.0+unknown"
             if _installed != _LOADED_VERSION:
                 _log.warning(
                     "dispatch: version drift detected (loaded=%s, installed=%s)"

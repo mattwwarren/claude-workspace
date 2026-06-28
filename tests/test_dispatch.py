@@ -4625,7 +4625,7 @@ class TestDispatchLoopExitedEvent:
         # Should complete without raising despite DISPATCH_LOOP_EXITED emit failing
         run_dispatch_loop(once=True, native_daemon=daemon)
 
-    def test_version_drift_raises_version_drift_exit(
+    def test_version_drift_raises_version_drift_error(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,

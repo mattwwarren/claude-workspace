@@ -515,29 +515,28 @@ class TestRunDispatchServeCrashCap:
 
 
 class TestVersionDriftError:
-    """VersionDriftError is caught and restarted without incrementing crash counter."""
+    """VersionDriftError exits cleanly without incrementing the crash counter."""
 
-    def test_version_drift_exit_restarts_without_crash_count(self) -> None:
-        """Loop raises VersionDriftError first call, returns normally second.
+    def test_version_drift_exits_without_crash_count(self) -> None:
+        """VersionDriftError causes run_dispatch_serve to return, not loop.
 
-        run_dispatch_serve must call the loop twice and not increment the crash
-        counter (crash_times must remain empty throughout).
+        max_restarts=0 means any real crash immediately raises DispatchServeError.
+        Returning cleanly from a VersionDriftError proves the crash counter was
+        never incremented — the external supervisor handles the process restart.
         """
         call_count = 0
 
         def _fake_loop(**_kwargs: object) -> None:
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
-                msg = "version drift"
-                raise VersionDriftError(msg)
-            # Second call: return normally → supervisor exits via else branch.
+            msg = "version drift"
+            raise VersionDriftError(msg)
 
         with (
             patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
             patch("cw.dispatch_serve.time.sleep"),
             patch("cw.dispatch_serve.time.monotonic", return_value=0.0),
         ):
-            run_dispatch_serve()  # must not raise
+            run_dispatch_serve(max_restarts=0)  # must not raise
 
-        assert call_count == 2
+        assert call_count == 1

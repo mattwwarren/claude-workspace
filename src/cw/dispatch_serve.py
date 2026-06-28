@@ -88,9 +88,11 @@ def run_dispatch_serve(
             raise
         except VersionDriftError:
             # Intentional reload — do NOT count toward crash_times or restart_count.
-            _log.info("dispatch_serve: version drift detected — restarting cleanly")
-            backoff = _SERVE_INITIAL_BACKOFF_SECONDS
-            time.sleep(backoff)
+            # Return so the external supervisor starts a fresh process with fresh
+            # imports; in-process restart cannot reload module-level globals.
+            _log.info("dispatch_serve: version drift — exiting for fresh reload")
+            time.sleep(_SERVE_INITIAL_BACKOFF_SECONDS)
+            return
         except Exception:  # noqa: BLE001
             run_duration = time.monotonic() - run_start
             now = time.time()
