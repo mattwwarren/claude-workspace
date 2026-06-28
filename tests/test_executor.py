@@ -403,3 +403,56 @@ def test_resolve_executor_unknown_backend_raises(
 
     with pytest.raises(ValueError, match="unknown executor backend"):
         resolve_executor(task, client)
+
+
+# ---------------------------------------------------------------------------
+# RFC 0005 E2 — heterogeneous models end-to-end proof
+# ---------------------------------------------------------------------------
+
+_E2_OPUS_MODEL = "claude-opus-4-8"
+_E2_SONNET_MODEL = "claude-sonnet-4-6-20251015"
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_model"),
+    [
+        (Stage.PLAN, _E2_OPUS_MODEL),
+        (Stage.IMPL, _E2_SONNET_MODEL),
+        (Stage.REVIEW, _E2_SONNET_MODEL),
+    ],
+)
+def test_e2_heterogeneous_models_per_stage(
+    stage: Stage,
+    expected_model: str,
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Distinct models per stage all resolve and forward --model correctly.
+
+    Pipeline: opus for PLAN, sonnet for IMPL and REVIEW. worker_model is
+    unset so the stage model is the sole source of the flag. Assert that
+    spawn_extra_args carries exactly one --model flag with the right value.
+    """
+    worktree = make_git_repo(f"wt-e2-{stage.value}")
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        pipeline=StagePipelineConfig(
+            executors={
+                Stage.PLAN: StageExecutorConfig(model=_E2_OPUS_MODEL),
+                Stage.IMPL: StageExecutorConfig(model=_E2_SONNET_MODEL),
+                Stage.REVIEW: StageExecutorConfig(model=_E2_SONNET_MODEL),
+            }
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="test")
+    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+
+    executor.spawn(stage=stage, task=task, worktree=worktree, client=client)
+
+    assert len(mock_native_daemon.spawn_extra_args) == 1
+    args = mock_native_daemon.spawn_extra_args[0]
+    assert args is not None
+    assert args.count("--model") == 1
+    assert args[args.index("--model") + 1] == expected_model
