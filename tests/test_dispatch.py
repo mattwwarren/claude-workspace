@@ -4706,6 +4706,49 @@ class TestDispatchLoopExitedEvent:
 
         assert tick_calls == [], "dispatch_tick must not be called on version drift"
 
+    def test_resolve_loaded_version_returns_unknown_on_package_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_resolve_loaded_version returns '0.0.0+unknown' when package is absent."""
+        import importlib.metadata
+
+        from cw.dispatch import _resolve_loaded_version
+
+        monkeypatch.setattr(
+            "cw.dispatch.importlib.metadata.version",
+            lambda _name: (_ for _ in ()).throw(
+                importlib.metadata.PackageNotFoundError("cw")
+            ),
+        )
+        assert _resolve_loaded_version() == "0.0.0+unknown"
+
+    def test_version_drift_tick_package_not_found_no_drift_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PackageNotFoundError on installed-version check is treated as 0.0.0+unknown.
+
+        When both loaded and installed versions are unknown, no VersionDriftError
+        is raised — the loop continues normally.
+        """
+        import importlib.metadata
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        # Pin _LOADED_VERSION to the same sentinel so the comparison is equal.
+        monkeypatch.setattr("cw.dispatch._LOADED_VERSION", "0.0.0+unknown")
+        monkeypatch.setattr(
+            "cw.dispatch.importlib.metadata.version",
+            lambda _name: (_ for _ in ()).throw(
+                importlib.metadata.PackageNotFoundError("cw")
+            ),
+        )
+        daemon = FakeNativeDaemonClient()
+        # Should not raise VersionDriftError — both versions resolve to 0.0.0+unknown.
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
 
 # ---------------------------------------------------------------------------
 # TestApplyStagedDecision
