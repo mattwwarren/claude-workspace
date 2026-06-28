@@ -163,7 +163,7 @@ class DispatchServeError(CwError):
     __slots__ = ()
 
 
-class VersionDriftExit(DispatchServeError):
+class VersionDriftError(DispatchServeError):
     """Raised when the dispatch loop detects it is running stale code.
 
     Caught by :func:`run_dispatch_serve` to trigger a clean restart without

@@ -12,7 +12,7 @@ import time
 from typing import TYPE_CHECKING
 
 from cw.dispatch import run_dispatch_loop
-from cw.exceptions import DispatchServeError, VersionDriftExit
+from cw.exceptions import DispatchServeError, VersionDriftError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -86,7 +86,7 @@ def run_dispatch_serve(
         except SystemExit:
             # Propagate clean shutdowns initiated by the loop itself.
             raise
-        except VersionDriftExit:
+        except VersionDriftError:
             # Intentional reload — do NOT count toward crash_times or restart_count.
             _log.info("dispatch_serve: version drift detected — restarting cleanly")
             backoff = _SERVE_INITIAL_BACKOFF_SECONDS

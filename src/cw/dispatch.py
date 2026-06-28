@@ -53,7 +53,7 @@ from cw.exceptions import (
     MissingWorkspaceError,
     StaleWorktreeError,
     UsageLimitError,
-    VersionDriftExit,
+    VersionDriftError,
     WorktreeError,
 )
 from cw.executor import resolve_executor
@@ -1635,7 +1635,7 @@ def run_dispatch_loop(
                     _installed,
                 )
                 msg = "version drift detected; exiting for reload"
-                raise VersionDriftExit(msg)
+                raise VersionDriftError(msg)
             result = dispatch_tick(
                 config,
                 use_plan=use_plan,
@@ -1672,7 +1672,7 @@ def run_dispatch_loop(
             "exception_type": None if _normal else type(_exc).__name__,
         }
         with contextlib.suppress(Exception):
-            if isinstance(_exc, VersionDriftExit):
+            if isinstance(_exc, VersionDriftError):
                 _payload["reason"] = "version_drift"
                 _payload["loaded_version"] = _LOADED_VERSION
                 _payload["installed_version"] = importlib.metadata.version(
