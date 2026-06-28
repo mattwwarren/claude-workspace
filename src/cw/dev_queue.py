@@ -246,6 +246,16 @@ def _fill_regress_attempts_default(task_raw: dict[str, Any]) -> None:
         task_raw["regress_attempts"] = 0
 
 
+def _fill_spawn_error_backoff_defaults(task_raw: dict[str, Any]) -> None:
+    """Fill spawn_error_count/next_eligible_at introduced in schema v7 (GitHub #868).
+
+    Idempotent."""
+    if "spawn_error_count" not in task_raw:
+        task_raw["spawn_error_count"] = 0
+    if "next_eligible_at" not in task_raw:
+        task_raw["next_eligible_at"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -260,6 +270,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_pr_url_default(task_raw)
                 _fill_task_completed_at_default(task_raw)
                 _fill_regress_attempts_default(task_raw)
+                _fill_spawn_error_backoff_defaults(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 

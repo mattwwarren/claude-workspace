@@ -98,6 +98,8 @@ if TYPE_CHECKING:
 
 _DISPATCH_CONSUMER = "dispatch"
 _log = logging.getLogger(__name__)
+_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS: int = 2
+_SPAWN_ERROR_BACKOFF_CAP_SECONDS: int = 300
 
 
 @dataclass(frozen=True)
@@ -140,12 +142,13 @@ def _claim_next_pending(
     lane: str,
     config: OrchestratorConfig,
     priority_ticket_ids: list[str] | None = None,
-) -> TicketTask | None:
+) -> tuple[TicketTask | None, bool]:
     """Atomically claim the next PENDING task for a client in a specific lane.
 
     Acquires the dev-queue file lock, loads the queue, marks the first
     PENDING task for *client_name* in *lane* as RUNNING, saves, and returns it.
-    Returns None if no pending task exists for the client in the lane.
+    Returns (None, spawn_backoff_skipped) if no pending task exists or all
+    eligible tasks are in spawn_error backoff.
 
     If *priority_ticket_ids* is provided, prefer claiming PENDING tasks in
     that order (only those whose ticket_id appears in the list).  Tasks not
@@ -158,9 +161,15 @@ def _claim_next_pending(
     the task is parked BLOCKED_ON_USER instead of claimed. A dispatch.tick
     event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
     observability. See GitHub #786.
+
+    Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
+    is True when at least one PENDING task was skipped due to active
+    spawn_error backoff (next_eligible_at in the future). See GitHub #868.
     """
+    now = datetime.now(UTC)
     with dev_queue_lock():
         store = load_dev_queue()
+        spawn_backoff_skipped = False
         if priority_ticket_ids:
             for ticket_id in priority_ticket_ids:
                 for task in store.tasks:
@@ -170,6 +179,13 @@ def _claim_next_pending(
                         and task.lane == lane
                         and task.status == QueueItemStatus.PENDING
                     ):
+                        in_backoff = (
+                            task.next_eligible_at is not None
+                            and now < task.next_eligible_at
+                        )
+                        if in_backoff:
+                            spawn_backoff_skipped = True
+                            break
                         if task.attempts >= config.global_attempt_ceiling:
                             transition_task_status(
                                 task,
@@ -182,7 +198,7 @@ def _claim_next_pending(
                         transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
                         save_dev_queue(store)
-                        return task
+                        return task, spawn_backoff_skipped
         pending = sorted(
             [
                 t
@@ -193,8 +209,10 @@ def _claim_next_pending(
             ],
             key=lambda t: (-t.priority, t.created_at),
         )
-        if pending:
-            task = pending[0]
+        for task in pending:
+            if task.next_eligible_at is not None and now < task.next_eligible_at:
+                spawn_backoff_skipped = True
+                continue
             if task.attempts >= config.global_attempt_ceiling:
                 transition_task_status(
                     task,
@@ -203,12 +221,12 @@ def _claim_next_pending(
                 )
                 save_dev_queue(store)
                 _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                return None
+                return None, spawn_backoff_skipped
             transition_task_status(task, QueueItemStatus.RUNNING)
             task.attempts += 1
             save_dev_queue(store)
-            return task
-    return None
+            return task, spawn_backoff_skipped
+    return None, spawn_backoff_skipped
 
 
 def _lane_stats_for_client(
@@ -271,12 +289,19 @@ class _SpawnOutcome:
     spawn_error: bool = False
 
 
-def _revert_claimed_task_to_pending(client_name: str, ticket_id: str) -> None:
+def _revert_claimed_task_to_pending(
+    client_name: str, ticket_id: str, *, stamp_backoff: bool = False
+) -> None:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
 
     Used by both the usage-limit and broad spawn-error paths: the task was
     claimed to RUNNING by :func:`_claim_next_pending` but spawn never
     succeeded, so it must return to PENDING for a later tick to retry.
+
+    When *stamp_backoff* is True (generic spawn_error path only), increments
+    spawn_error_count and sets next_eligible_at to enforce exponential backoff
+    before the task is re-claimed.  The usage-limit path passes stamp_backoff=False
+    because it has its own fleet-wide backoff mechanism.  See GitHub #868.
 
     # Why: task.attempts is NOT decremented here. The increment-at-claim
     # contract is intentional — usage_limit deaths and spawn errors consume
@@ -295,6 +320,16 @@ def _revert_claimed_task_to_pending(client_name: str, ticket_id: str) -> None:
             ):
                 transition_task_status(stored_task, QueueItemStatus.PENDING)
                 stored_task.session_id = None
+                if stamp_backoff:
+                    stored_task.spawn_error_count += 1
+                    delay = min(
+                        _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS
+                        * (2 ** (stored_task.spawn_error_count - 1)),
+                        _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
+                    )
+                    stored_task.next_eligible_at = datetime.now(UTC) + timedelta(
+                        seconds=delay
+                    )
                 break
         save_dev_queue(store)
 
@@ -615,6 +650,8 @@ def _spawn_claimed_task(
                     and stored_task.status == QueueItemStatus.RUNNING
                 ):
                     stored_task.session_id = session_id
+                    stored_task.spawn_error_count = 0
+                    stored_task.next_eligible_at = None
                     # R5: stamp stage_base_ref -- non-fatal on failure
                     try:
                         head_sha = subprocess.check_output(
@@ -691,7 +728,7 @@ def _spawn_claimed_task(
             client.name,
             task.ticket_id,
         )
-        _revert_claimed_task_to_pending(client.name, task.ticket_id)
+        _revert_claimed_task_to_pending(client.name, task.ticket_id, stamp_backoff=True)
         return _SpawnOutcome(spawn_error=True)
 
     return _SpawnOutcome(spawned=True)
@@ -740,6 +777,9 @@ def _dispatch_client_lanes(
     # (RUNNING + BLOCKED_ON_USER >= max_parallel). Distinguishes the
     # previously misleading skip_reason=no_pending case (#588).
     lane_cap_blocked = False
+    # True when at least one PENDING task was skipped due to active
+    # spawn_error backoff (next_eligible_at in the future). See GitHub #868.
+    spawn_backoff_skipped = False
 
     # Tier-1 client slot budget: use the session-based running_count (not
     # the task-based total_running) so pre-existing DAEMON sessions without
@@ -782,12 +822,13 @@ def _dispatch_client_lanes(
             lane_cap_blocked = True
         lane_claimed = 0
         for _ in range(max(0, grant)):
-            task: TicketTask | None = _claim_next_pending(
+            task, backoff_skipped = _claim_next_pending(
                 client.name,
                 lane=lane_cfg.name,
                 config=config,
                 priority_ticket_ids=priority_ids,
             )
+            spawn_backoff_skipped |= backoff_skipped
             if task is None:
                 break
 
@@ -834,6 +875,7 @@ def _dispatch_client_lanes(
         cap_full=cap_full,
         spawn_error=spawn_error,
         lane_cap_blocked=lane_cap_blocked,
+        spawn_backoff_skipped=spawn_backoff_skipped,
         client_spawned=client_spawned,
     )
 
@@ -860,6 +902,7 @@ def _resolve_dispatch_skip_reason(
     cap_full: bool,
     spawn_error: bool,
     lane_cap_blocked: bool,
+    spawn_backoff_skipped: bool,
     client_spawned: int,
 ) -> DispatchSkipReason:
     """Resolve the dispatch.tick skip_reason via first-match precedence.
@@ -870,9 +913,11 @@ def _resolve_dispatch_skip_reason(
     3. cap_full — running_count >= cap before loop entered
     4. lane_cap_blocked — pending>0 but every lane slot is occupied by
        RUNNING or BLOCKED_ON_USER tasks; grant<=0 for all lanes
-    5. spawn_error — exception broke the loop (regardless of client_spawned)
-    6. no_pending — loop exited with zero claims and no spawn error
-    7. none — at least one session spawned
+    5. spawn_error_backoff — pending tasks exist but all are in spawn_error
+       backoff (next_eligible_at in the future); no exception occurred
+    6. spawn_error — exception broke the loop (regardless of client_spawned)
+    7. no_pending — loop exited with zero claims and no spawn error
+    8. none — at least one session spawned
     """
     if usage_limit_detected:
         return DispatchSkipReason.USAGE_LIMITED
@@ -883,7 +928,11 @@ def _resolve_dispatch_skip_reason(
     if spawn_error:
         return DispatchSkipReason.SPAWN_ERROR
     if client_spawned == 0:
-        return DispatchSkipReason.NO_PENDING
+        return (
+            DispatchSkipReason.SPAWN_ERROR_BACKOFF
+            if spawn_backoff_skipped
+            else DispatchSkipReason.NO_PENDING
+        )
     return DispatchSkipReason.NONE
 
 
