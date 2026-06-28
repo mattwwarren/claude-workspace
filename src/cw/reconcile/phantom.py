@@ -300,8 +300,9 @@ def _emit_phantom_terminal_events(
 
     Stops surfaces and emits SESSION_COMPLETED for merged phantoms,
     SESSION_NEEDS_ATTENTION for gh-blocked phantoms, and SESSION_PHANTOM_REVERTED
-    for DAEMON-origin crashes. Returns the set of ticket IDs whose worktree was
-    dirty (consumed by the queue mutation to route them to BLOCKED_ON_USER).
+    for DAEMON-origin crashes. Returns the set of dirty-worktree ticket IDs;
+    the return value is pre-computed by the caller (dirty_ticket_ids) and the
+    return is retained for signature compatibility — see #867.
     """
     # SESSION_COMPLETED for merged phantoms (PR already shipped, not CRASHED).
     for candidate in merged_crash_candidates:
@@ -636,20 +637,21 @@ def _act_on_phantom_candidates(
         session.reap_reason = ReapReason.PHANTOM_SURFACE
         phantom_names.append(session.name)
 
-    save_state(state)
+    # Write-ordering: queue first (task → PENDING), session second
+    # (session → COMPLETED) — mirrors the canonical ordering in
+    # unblock_ticket() (dev_queue.py).  If a crash occurs between the two
+    # writes, the session stays ACTIVE/IDLE; the next reconcile() tick
+    # re-detects it as a phantom and the queue mutation is a no-op (task
+    # already PENDING, not matched by the RUNNING guard).  #867
+    # Origin filter omitted: _classify_phantom_candidates sets worktree_dirty=False
+    # for all non-DAEMON sessions, so non-DAEMON entries never enter this set.
+    dirty_ticket_ids = {
+        c.ticket_id
+        for c in crash_candidates
+        if c.ticket_id is not None and c.worktree_dirty
+    }
 
-    for payload in pending_events:
-        record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
-
-    dirty_ticket_ids = _emit_phantom_terminal_events(
-        session_by_id,
-        crash_candidates,
-        merged_crash_candidates,
-        gh_blocked_crash_candidates,
-    )
-    _emit_phantom_routed_events(session_by_id, routed_candidates)
-
-    # Queue mutations.
+    # Queue mutations — written before session state (safe-fail direction).
     _apply_phantom_queue_mutations(
         session_by_id,
         crash_candidates,
@@ -661,6 +663,21 @@ def _act_on_phantom_candidates(
         ticket_ids_to_revert,
         merged_completed_ids,
     )
+
+    save_state(state)
+
+    for payload in pending_events:
+        record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    # Return value pre-computed above as dirty_ticket_ids; call for side
+    # effects only (surface stops and event emission).
+    _emit_phantom_terminal_events(
+        session_by_id,
+        crash_candidates,
+        merged_crash_candidates,
+        gh_blocked_crash_candidates,
+    )
+    _emit_phantom_routed_events(session_by_id, routed_candidates)
 
     return (
         ticket_ids_to_revert,
