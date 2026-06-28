@@ -3680,6 +3680,39 @@ def test_flag_silently_idle_watchdog_no_double_fire_on_crash_recovery(
     assert len(events) == 0
 
 
+def test_reconcile_converges_completed_daemon_session_running_task(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direction-3 convergence: COMPLETED DAEMON session + RUNNING task → PENDING.
+
+    Constructs the on-disk inconsistency that results from a crash between
+    save_state (session → COMPLETED) and save_dev_queue (task → PENDING).
+    Asserts that a single reconcile() tick converges the task to PENDING
+    via revert_completed_silent_tasks(). See GitHub #867.
+    """
+    sess = _mk_daemon_completed_session("conv-sess-867")
+    sess.name = "client-a/auto-dev/CONV-867"
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="CONV-867",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="conv-sess-867",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+    report = reconcile()
+
+    assert "CONV-867" in report.reverted_ticket_ids
+    store = load_dev_queue()
+    reverted = next(t for t in store.tasks if t.ticket_id == "CONV-867")
+    assert reverted.status == QueueItemStatus.PENDING
+    assert reverted.session_id is None
+
+
 def test_flag_silently_idle_daemon_sessions_leaves_under_budget_alone(
     tmp_config_dir: Path,
     tmp_path: Path,
