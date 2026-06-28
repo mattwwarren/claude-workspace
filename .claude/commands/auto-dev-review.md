@@ -16,6 +16,8 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ---
 
+> **Model selection:** All reviewer and fix-agent spawns in this file use explicit `model: "sonnet"` pins. Do not change any pin to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
+
 ## Stage 3: Review (Agents)
 
 **Headless only — before spawning reviewers, emit `stage.entered` (`s3_review_started`):**
@@ -28,10 +30,10 @@ cw event record stage.entered \
 ### Step 3a: Spawn Review Agents
 
 **Small scope:** Spawn these reviewers (all `model: "sonnet"` — heuristic checks; no novel reasoning):
-- Code Quality Reviewer (`subagent_type: "Code Quality Reviewer"`)
-- SysAdmin Reviewer (`subagent_type: "SysAdmin Reviewer"`)
-- Data Safety Reviewer (`subagent_type: "Data Safety Reviewer"`) — only when the diff mutates persisted state (any DB write, external-system write, or `SENSITIVE_HITS` non-empty); skip on doc/config/style-only diffs
-- Product Manager Reviewer (`subagent_type: "Product Manager Reviewer"`, Mode 2 — spec compliance)
+- Code Quality Reviewer (`subagent_type: "Code Quality Reviewer", model: "sonnet"`)
+- SysAdmin Reviewer (`subagent_type: "SysAdmin Reviewer", model: "sonnet"`)
+- Data Safety Reviewer (`subagent_type: "Data Safety Reviewer", model: "sonnet"`) — only when the diff mutates persisted state (any DB write, external-system write, or `SENSITIVE_HITS` non-empty); skip on doc/config/style-only diffs
+- Product Manager Reviewer (`subagent_type: "Product Manager Reviewer", model: "sonnet"`, Mode 2 — spec compliance)
 
 **Large scope:** Spawn full reviewer set based on file categories (per `/review` command patterns) (all `model: "sonnet"` — heuristic checks; no novel reasoning):
 - Code Quality (always)

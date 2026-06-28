@@ -39,13 +39,21 @@ def test_plan_step1f4_revision_agent_pins_sonnet() -> None:
 
 def test_impl_spawn_heading_announces_opus() -> None:
     """Impl spawn-shape heading must announce model: "opus" for code generation."""
-    assert 'model: "opus"' in _cmd("auto-dev-impl.md")
+    content = _cmd("auto-dev-impl.md")
+    assert 'all variants pin `model: "opus"` — real code generation' in content
+
+
+def test_impl_interactive_variant_pins_opus() -> None:
+    """Interactive-mode impl spawn bullet must include model: "opus" inline."""
+    content = _cmd("auto-dev-impl.md")
+    assert '`isolation: "worktree"`, `model: "opus"`' in content
 
 
 def test_review_small_scope_pins_sonnet() -> None:
-    """Small-scope reviewer heading must carry model: "sonnet" annotation."""
+    """Small-scope heading and individual entries must carry model: "sonnet"."""
     content = _cmd("auto-dev-review.md")
     assert '**Small scope:** Spawn these reviewers (all `model: "sonnet"`' in content
+    assert 'subagent_type: "Code Quality Reviewer", model: "sonnet"' in content
 
 
 def test_review_large_scope_pins_sonnet() -> None:

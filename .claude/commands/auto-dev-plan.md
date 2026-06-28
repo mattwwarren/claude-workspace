@@ -14,6 +14,8 @@ This stage runs as a standalone headless entrypoint (`/auto-dev-plan <ticket-id>
 
 ---
 
+> **Model selection:** All subagent spawns in this file use explicit `model:` pins. Do not change any pin to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
+
 ## Stage 1: Plan
 
 For each ticket in the queue:
@@ -263,7 +265,7 @@ If revision was performed, a marker reflects the revised plan, not the original.
 
 **Step 1f.4 — Plan revision (when MUST_FIX from either station):**
 
-Re-spawn the **Plan** agent (`model: "sonnet"`) (the same one Step 1b uses) with the current plan, the verbatim findings from *every* station that returned MUST_FIX (and any RISK the user chose to "treat as MUST_FIX"), and an instruction to revise addressing each one. The revision agent returns a new plan text; route back to Step 1f.2, re-running **only the stations that triggered the revision** (a clean station's marker stays valid). Maximum **1 revision cycle** — if a revised plan still has MUST_FIX, exit per the gating rules above. Don't loop; a second failure needs human judgment.
+Re-spawn the **Plan** agent (`model: "sonnet"`) — same agent type as Step 1b, but Sonnet suffices here since this is structured feedback application rather than original design — with the current plan, the verbatim findings from *every* station that returned MUST_FIX (and any RISK the user chose to "treat as MUST_FIX"), and an instruction to revise addressing each one. The revision agent returns a new plan text; route back to Step 1f.2, re-running **only the stations that triggered the revision** (a clean station's marker stays valid). Maximum **1 revision cycle** — if a revised plan still has MUST_FIX, exit per the gating rules above. Don't loop; a second failure needs human judgment.
 
 **Headless only — if the 1 revision cycle is exhausted and MUST_FIX persists, emit `stage.errored` before exiting:**
 ```bash

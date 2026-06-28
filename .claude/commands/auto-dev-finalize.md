@@ -14,6 +14,8 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ---
 
+> **Model selection:** All agent spawns in this file use explicit `model:` pins (Sonnet or Haiku). Do not change any pin to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
+
 ## Stage 4: PR Creation (Merge-Gated)
 
 ### Pre-Stage Detector Guard
