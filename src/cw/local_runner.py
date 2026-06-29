@@ -23,6 +23,7 @@ from cw.auto_dev_result import (
     Review,
     Scope,
     ScopeTier,
+    StageReached,
 )
 from cw.gh import fetch_approved_plan_comment
 
@@ -343,7 +344,7 @@ def _git_facts(worktree: Path, default_branch: str) -> _GitFacts:
     )
 
 
-def _resolve_tier(scope_hint: str | None) -> ScopeTier:
+def resolve_tier(scope_hint: str | None) -> ScopeTier:
     """Map task.scope_hint to a valid ScopeTier, defaulting to 'small'."""
     if scope_hint == "large":
         return "large"
@@ -358,19 +359,20 @@ def make_blocked(
     details: str = "",
     retry_eligible: bool | None = None,
     retry_delay_seconds: int | None = None,
+    stage_reached: StageReached = "stage2_impl",
 ) -> AutoDevResult:
     """Return a typed blocked AutoDevResult for any LocalExecutor failure mode."""
     return AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=ticket_id,
         status="blocked",
-        stage_reached="stage2_impl",
+        stage_reached=stage_reached,
         scope=_blocked_scope,
         plan_source="none",
         review=_FIXED_REVIEW,
         health=_FIXED_HEALTH,
         blocker=Blocker(
-            stage="stage2_impl",
+            stage=stage_reached,
             reason=reason,
             details=details,
             retry_eligible=retry_eligible,
@@ -431,7 +433,7 @@ def synthesize_result(
         status="stage_complete",
         stage_reached="stage2_impl",
         scope=Scope(
-            tier=_resolve_tier(task.scope_hint),
+            tier=resolve_tier(task.scope_hint),
             files=facts["files"],
             lines_estimate=0,  # plan/scope_hint line-count mapping is a follow-on
             lines_actual=facts["lines_actual"],
