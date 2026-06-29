@@ -4971,6 +4971,30 @@ class TestApplyStagedDecision:
         assert payload["reason"] == "finalize_regress"
         assert payload["blocker_reason"] == "agent_block"
 
+    def test_merge_pending_routes_to_blocked_on_user_with_pr_url(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """merge_pending → BLOCKED_ON_USER + disposition='merge_pending' + pr_url.
+
+        Regression for #899: FINALIZE created a PR then could not merge (CI
+        pending). The sentinel coerced from blocked+pr to merge_pending must
+        route to BLOCKED_ON_USER (not FAILED) with the PR url preserved.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("MP-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "merge_pending",
+            "pr": {"url": "https://github.com/org/repo/pull/898"},
+        }
+        apply_staged_decision(
+            task, "merge_pending", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "merge_pending"
+        assert task.pr_url == "https://github.com/org/repo/pull/898"
+
 
 # ---------------------------------------------------------------------------
 # TestWaveCollisionDetection
