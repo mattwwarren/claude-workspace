@@ -19,6 +19,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     Blocker,
     Health,
+    PlanSource,
     Review,
     Scope,
     ScopeTier,
@@ -188,11 +189,8 @@ class PlanFetcher(Protocol):
 class GithubIssuePlanFetcher:
     """Fetches the approved plan from a GitHub issue's comments (production)."""
 
-    def __init__(self, *, timeout: int = 30) -> None:
-        self._timeout = timeout
-
     def fetch(self, ticket_id: str) -> str | None:
-        return fetch_approved_plan_comment(ticket_id, timeout=self._timeout)
+        return fetch_approved_plan_comment(ticket_id)
 
 
 class FakePlanFetcher:
@@ -389,6 +387,7 @@ def synthesize_result(
     worktree: Path,
     run_result: AiderRunResult,
     default_branch: str,
+    plan_source: PlanSource = "none",
 ) -> AutoDevResult:
     """Map an AiderRunResult + git state to a typed AutoDevResult.
 
@@ -439,7 +438,7 @@ def synthesize_result(
             # TODO: forbidden-area config for local backend is a follow-on
             forbidden_touched=False,
         ),
-        plan_source="none",
+        plan_source=plan_source,
         branch=facts["branch"],
         fork_point_sha=facts["fork_point"] or None,
         commits=facts["commits"],

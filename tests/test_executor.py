@@ -834,3 +834,46 @@ def test_local_executor_no_tracker_no_plan_is_plan_missing(
     result = AutoDevResult.model_validate(result_raw)
     assert result.blocker is not None
     assert result.blocker.reason == PLAN_MISSING
+
+
+def test_local_executor_sets_plan_source_github_issue_existing(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """plan_source='github_issue_existing' set when plan fetched from tracker."""
+    from typing import Any
+
+    from cw.local_runner import make_blocked
+
+    workspace = make_git_repo("wt-plansrc-workspace")
+    worktree = make_git_repo("wt-plansrc")
+    _write_tracker_config(workspace, "github-issues")
+
+    plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+    captured_kwargs: list[dict[str, Any]] = []
+
+    def _fake_synthesize(**kwargs: Any) -> AutoDevResult:
+        captured_kwargs.append(kwargs)
+        return make_blocked(
+            ticket_id=kwargs["task"].ticket_id,
+            worktree=kwargs["worktree"],
+            reason=PLAN_MISSING,
+        )
+
+    fake_runner = FakeAiderRunner(returncode=0)
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=workspace)
+    task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
+
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/aider"),
+        patch("cw.executor.GithubIssuePlanFetcher.fetch", return_value=plan_body),
+        patch("cw.executor.synthesize_result", side_effect=_fake_synthesize),
+    ):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0]["plan_source"] == "github_issue_existing"

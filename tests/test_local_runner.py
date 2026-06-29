@@ -531,7 +531,7 @@ def test_github_issue_plan_fetcher_delegates_to_gh(tmp_path: Path) -> None:
 
     from cw.local_runner import GithubIssuePlanFetcher
 
-    fetcher = GithubIssuePlanFetcher(timeout=5)
+    fetcher = GithubIssuePlanFetcher()
     expected = "## Plan <!-- plan-spec-reviewed -->"
 
     with patch(
@@ -539,5 +539,35 @@ def test_github_issue_plan_fetcher_delegates_to_gh(tmp_path: Path) -> None:
     ) as mock_fetch:
         result = fetcher.fetch("42")
 
-    mock_fetch.assert_called_once_with("42", timeout=5)
+    mock_fetch.assert_called_once_with("42")
     assert result == expected
+
+
+def test_synthesize_result_threads_plan_source(tmp_path: Path) -> None:
+    """synthesize_result passes plan_source through to AutoDevResult on success path."""
+    from unittest.mock import patch
+
+    from cw.local_runner import AiderRunResult, _GitFacts, synthesize_result
+    from cw.models import Stage, TicketTask
+
+    fake_facts: _GitFacts = {
+        "branch": "dev/test",
+        "fork_point": "abc123",
+        "commits": ["abc123"],
+        "files": 1,
+        "lines_actual": 10,
+    }
+    task = TicketTask(ticket_id="T-1", client="c", stage=Stage.IMPL)
+    run_result = AiderRunResult(returncode=0, stdout="", stderr="", timed_out=False)
+
+    with patch("cw.local_runner._git_facts", return_value=fake_facts):
+        result = synthesize_result(
+            task=task,
+            worktree=tmp_path,
+            run_result=run_result,
+            default_branch="main",
+            plan_source="github_issue_existing",
+        )
+
+    assert result.status == "stage_complete"
+    assert result.plan_source == "github_issue_existing"
