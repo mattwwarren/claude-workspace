@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, PlanSource
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.local_runner import (
@@ -14,6 +14,8 @@ from cw.local_runner import (
     PLAN_MISSING,
     UNEXPECTED_ERROR,
     AiderRunner,
+    GithubIssuePlanFetcher,
+    PlanFetcher,
     RealAiderRunner,
     build_argv,
     build_env,
@@ -36,6 +38,7 @@ from cw.models import (
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.spawn import spawn_create_impl
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -200,6 +203,7 @@ class LocalExecutor:
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
         task_message: str | None = None
+        plan_source: PlanSource = "none"
 
         if self._config.endpoint is None:
             result = make_blocked(
@@ -216,13 +220,23 @@ class LocalExecutor:
                 retry_delay_seconds=0,
             )
         else:
-            task_message = build_task_message(worktree)
+            plan_fetcher: PlanFetcher | None = None
+            if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
+                plan_fetcher = GithubIssuePlanFetcher()
+            plan_was_on_disk = (worktree / ".cw" / "plan.md").exists()
+            task_message = build_task_message(
+                worktree,
+                ticket_id=task.ticket_id,
+                plan_fetcher=plan_fetcher,
+            )
             if task_message is None:
                 result = make_blocked(
                     ticket_id=task.ticket_id,
                     worktree=worktree,
                     reason=PLAN_MISSING,
                 )
+            elif not plan_was_on_disk and plan_fetcher is not None:
+                plan_source = "github_issue_existing"
 
         try:
             if result is None:
@@ -238,6 +252,7 @@ class LocalExecutor:
                     worktree=worktree,
                     run_result=run_result,
                     default_branch=client.default_branch,
+                    plan_source=plan_source,
                 )
 
             # Step 4: Persist result under sessions_lock.

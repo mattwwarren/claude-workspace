@@ -19,10 +19,12 @@ from cw.auto_dev_result import (
     AutoDevResult,
     Blocker,
     Health,
+    PlanSource,
     Review,
     Scope,
     ScopeTier,
 )
+from cw.gh import fetch_approved_plan_comment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -175,17 +177,66 @@ class FakeAiderRunner:
         )
 
 
-def build_task_message(worktree: Path) -> str | None:
+@runtime_checkable
+class PlanFetcher(Protocol):
+    """Testability seam for fetching the approved plan from an external tracker."""
+
+    def fetch(self, ticket_id: str) -> str | None:
+        """Return the approved plan body for *ticket_id*, or None if unavailable."""
+        ...
+
+
+class GithubIssuePlanFetcher:
+    """Fetches the approved plan from a GitHub issue's comments (production)."""
+
+    def fetch(self, ticket_id: str) -> str | None:
+        return fetch_approved_plan_comment(ticket_id)
+
+
+class FakePlanFetcher:
+    """Test double for PlanFetcher.
+
+    Returns a configurable plan body and records all ticket_id arguments
+    passed to fetch(). Mirrors FakeAiderRunner in test-double style.
+    """
+
+    def __init__(self, plan: str | None = None) -> None:
+        self.plan = plan
+        self.calls: list[str] = []
+
+    def fetch(self, ticket_id: str) -> str | None:
+        self.calls.append(ticket_id)
+        return self.plan
+
+
+def build_task_message(
+    worktree: Path,
+    *,
+    ticket_id: str | None = None,
+    plan_fetcher: PlanFetcher | None = None,
+) -> str | None:
     """Build the aider task prompt from .cw/plan.md and optional .cw/context.json.
 
-    Returns None when .cw/plan.md is absent (triggers plan_missing blocker in
-    spawn()). Uses the same context source the claude-native IMPL stage uses:
-    the approved plan posted by the PLAN stage plus the ticket body from the
-    intake context.
+    When .cw/plan.md is absent and both *ticket_id* and *plan_fetcher* are
+    provided, fetches the approved plan from the tracker (GitHub issue comment
+    carrying the ``<!-- plan-spec-reviewed`` marker). On a successful fetch the
+    plan is materialised to .cw/plan.md so subsequent retries do not need to
+    re-fetch.
+
+    Returns None when no plan is available — either .cw/plan.md is absent and
+    the tracker also has no approved plan, or no fetcher/ticket_id was provided.
+    This triggers the plan_missing blocker in spawn().
     """
     plan_path = worktree / ".cw" / "plan.md"
     if not plan_path.exists():
-        return None
+        if ticket_id is None or plan_fetcher is None:
+            return None
+        fetched = plan_fetcher.fetch(ticket_id)
+        if fetched is None:
+            return None
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(fetched, encoding="utf-8")
+
     plan = plan_path.read_text(encoding="utf-8")
 
     header = ""
@@ -336,6 +387,7 @@ def synthesize_result(
     worktree: Path,
     run_result: AiderRunResult,
     default_branch: str,
+    plan_source: PlanSource = "none",
 ) -> AutoDevResult:
     """Map an AiderRunResult + git state to a typed AutoDevResult.
 
@@ -386,7 +438,7 @@ def synthesize_result(
             # TODO: forbidden-area config for local backend is a follow-on
             forbidden_touched=False,
         ),
-        plan_source="none",
+        plan_source=plan_source,
         branch=facts["branch"],
         fork_point_sha=facts["fork_point"] or None,
         commits=facts["commits"],

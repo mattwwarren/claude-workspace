@@ -7,7 +7,12 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-from cw.gh import branch_exists_on_origin, pr_exists_for_branch, pr_is_merged_for_ticket
+from cw.gh import (
+    branch_exists_on_origin,
+    fetch_approved_plan_comment,
+    pr_exists_for_branch,
+    pr_is_merged_for_ticket,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -483,3 +488,117 @@ class TestBranchExistsOnOrigin:
         exists, gh_available = branch_exists_on_origin("dev/808")
         assert exists is None
         assert gh_available is True
+
+
+class TestFetchApprovedPlanComment:
+    """Tests for fetch_approved_plan_comment."""
+
+    def _make_comments_result(self, comments: list[dict[str, str]]) -> Any:
+        return _make_run_result(0, json.dumps({"comments": comments}))
+
+    def test_returns_latest_comment_with_marker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Latest comment carrying <!-- plan-spec-reviewed is returned."""
+        plan_body = (
+            "## Implementation Plan\n\nDo the thing."
+            "\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        )
+        comments = [
+            {"body": "First comment, no marker"},
+            {"body": plan_body},
+        ]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: self._make_comments_result(comments),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result == plan_body
+
+    def test_returns_latest_when_multiple_plan_comments(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Multiple plan comments — latest (last in list) wins."""
+        old_plan = "old plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        new_plan = "new plan <!-- plan-spec-reviewed: 2026-01-02 v2 -->"
+        comments = [
+            {"body": old_plan},
+            {"body": new_plan},
+        ]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: self._make_comments_result(comments),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result == new_plan
+
+    def test_no_matching_comments_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Comments with no plan marker → None."""
+        comments = [{"body": "just a regular comment"}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: self._make_comments_result(comments),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_empty_comments_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Issue with no comments → None."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: self._make_comments_result([]),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_gh_nonzero_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """gh exits non-zero → None."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(1, ""),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_gh_not_found_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """FileNotFoundError (gh absent) → None."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(FileNotFoundError("gh")),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TimeoutExpired → None."""
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise subprocess.TimeoutExpired(["gh"], 30)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_malformed_json_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unparseable JSON response → None."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, "not json"),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_passes_ticket_id_to_gh(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ticket_id is forwarded as the issue number arg to gh."""
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            captured.append(list(args))
+            return self._make_comments_result([])
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        fetch_approved_plan_comment("42")
+        assert len(captured) == 1
+        assert "42" in captured[0]
