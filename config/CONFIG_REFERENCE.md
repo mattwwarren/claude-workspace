@@ -234,6 +234,24 @@ set, no `--model` flag is emitted and the worker inherits the operator default.
 the stage-resolved model. The autonomous pipeline routes through
 `executor.spawn` and is unaffected. See #626 follow-ons.
 
+### Recommended Per-Stage Defaults
+
+Recommended models per stage:
+- **plan/impl/review**: `claude-sonnet-4-6`
+- **finalize**: `claude-haiku-4-5-20251001`
+
+**Cost Rationale**:
+- `haiku` is cheaper than `sonnet` ($0.25/$1.25 vs $3/$15 per 1M tokens (input/output)).
+- `finalize` is mostly mechanical and can handle the reduced quality of `haiku`.
+
+**Watch-finalize-on-haiku caveat**:
+- PR-description synthesis, merge-gate adjudication, CI-failure triage are unhappy-path risks.
+- Bump to `sonnet` if quality degrades.
+
+**Intake Note**:
+- No separate `intake` executor stage — intake (Stage 0) runs within the PLAN session.
+- Dedicated cheap-intake tracked as #895.
+
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
 Controls the autonomous dispatch loop. Created with defaults on first run.

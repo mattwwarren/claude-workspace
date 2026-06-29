@@ -34,6 +34,7 @@ clients:
   #   default_branch: main
   #   pipeline:
   #     executors:
-  #       plan:   { backend: claude-native, model: claude-opus-4-8 }
-  #       impl:   { backend: claude-native, model: claude-sonnet-4-6-20251015 }
-  #       review: { backend: claude-native, model: claude-sonnet-4-6-20251015 }
+  #       plan:     { backend: claude-native, model: claude-sonnet-4-6 }
+  #       impl:     { backend: claude-native, model: claude-sonnet-4-6 }
+  #       review:   { backend: claude-native, model: claude-sonnet-4-6 }
+  #       finalize: { backend: claude-native, model: claude-haiku-4-5-20251001 }
