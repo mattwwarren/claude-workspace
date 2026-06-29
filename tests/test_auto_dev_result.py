@@ -3018,6 +3018,32 @@ class TestMergePending:
         result = AutoDevResult.model_validate(p)
         assert result.status == "blocked"
 
+    def test_blocked_with_pr_downgrade_applied_not_coerced(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """blocked+pr+downgrade_applied=True must skip coercion (§5.1 guard).
+
+        §5.1 rejects downgrade_applied=True with any status other than
+        review_pending_approval. Coercing to merge_pending would swap one
+        validation_failed for another. The guard must skip the coercion,
+        preserving the original error path.
+        """
+        p = _blocked_payload()
+        p["pr"] = {
+            "number": 10,
+            "url": "https://github.com/org/repo/pull/10",
+            "auto_merge": False,
+            "base": "main",
+        }
+        p["health"]["downgrade_applied"] = True
+        stdout = f"<<<AUTO_DEV_RESULT\n{json.dumps(p)}\nAUTO_DEV_RESULT>>>"
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = parse_stdout(stdout)
+        assert not isinstance(result, AutoDevResult), (
+            "blocked+pr+downgrade_applied=True must NOT coerce to merge_pending"
+        )
+        assert any("downgrade_applied" in r.message for r in caplog.records)
+
 
 def test_is_documented_example_returns_true_for_placeholder() -> None:
     """The documented example payload (pr=42, PROJ-1234, dev/proj-1234-...) → True."""

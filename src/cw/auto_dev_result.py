@@ -1041,9 +1041,20 @@ def _coerce_blocked_with_pr(payload: dict[str, Any]) -> None:
     FINALIZE creates a PR then can't merge (CI pending). The producer emits
     status="blocked" with a non-null pr field — rejected by the model validator.
     Coerce to merge_pending to preserve the PR url and avoid recording failed.
-    The blocker field is cleared since merge_pending does not carry a blocker.
+    The blocker and next_actions fields are cleared since merge_pending carries
+    neither.
     """
     if payload.get("pr") is None:
+        return
+    # §5.1: downgrade_applied=True requires status=review_pending_approval.
+    # Coercing to merge_pending would swap one validation failure for another.
+    health = payload.get("health")
+    if isinstance(health, dict) and health.get("downgrade_applied"):
+        _log.warning(
+            "auto-dev: blocked+pr with downgrade_applied=True (ticket=%s); "
+            "skipping merge_pending coerce — §5.1 constraint applies",
+            payload.get("ticket_id", "unknown"),
+        )
         return
     _log.warning(
         "auto-dev: blocked sentinel has non-null pr; coercing to "
@@ -1052,6 +1063,7 @@ def _coerce_blocked_with_pr(payload: dict[str, Any]) -> None:
     )
     payload["status"] = "merge_pending"
     payload["blocker"] = None
+    payload["next_actions"] = []
 
 
 def _coerce_pre_impl_zero_lines(payload: dict[str, Any]) -> None:
