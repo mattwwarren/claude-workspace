@@ -8,6 +8,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
+
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_runner import FakeCodexRunner
 from cw.config import load_state
@@ -19,9 +21,10 @@ from cw.executor import (
     CodexExecutor,
     StageExecutor,
     _build_codex_argv,
+    _post_review_comment,
     resolve_executor,
 )
-from cw.local_runner import make_blocked
+from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     CODEX_BACKEND,
     ClientConfig,
@@ -202,11 +205,58 @@ def test_build_codex_argv_no_model() -> None:
     assert argv == ["codex", "exec", "review", "--base", "main"]
 
 
+def test_codex_executor_stage_sentinel_schema(tmp_path: Path) -> None:
+    """stage_sentinel_schema returns the AutoDevResult JSON schema."""
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config)
+
+    schema = executor.stage_sentinel_schema(Stage.REVIEW)
+
+    assert schema == AutoDevResult.model_json_schema()
+
+
+def test_codex_executor_exception_handler_marks_session_completed(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Uncaught exception in Steps 3-5 → session COMPLETED, exception re-raised."""
+    worktree = make_git_repo("wt-codex-exc-handler")
+    runner = FakeCodexRunner(returncode=0, stdout="findings")
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-exc", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "cw.executor._synthesize_codex_result",
+            side_effect=RuntimeError("git boom"),
+        ),
+        pytest.raises(RuntimeError, match="git boom"),
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    state = load_state()
+    session = next((s for s in state.sessions if s.last_result is not None), None)
+    assert session is not None
+    assert session.status == SessionStatus.COMPLETED
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+
+
+def test_post_review_comment_suppresses_subprocess_errors() -> None:
+    """_post_review_comment swallows OSError from a missing gh binary."""
+    with patch("cw.executor.subprocess.run", side_effect=FileNotFoundError("no gh")):
+        # Must not raise.
+        _post_review_comment("T-1", "findings")
+
+
 def test_make_blocked_backward_compat(tmp_path: Path) -> None:
     """make_blocked without stage_reached defaults to stage2_impl."""
-    result = make_blocked(
-        ticket_id="T-1", worktree=tmp_path, reason="some_reason"
-    )
+    result = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="some_reason")
     assert result.stage_reached == "stage2_impl"
     assert result.blocker is not None
     assert result.blocker.stage == "stage2_impl"
