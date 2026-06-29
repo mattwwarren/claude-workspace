@@ -6,6 +6,80 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-06-29
+
+The **executor infrastructure** sprint (RFC 0005): `cw` gains a pluggable
+`Executor` abstraction so stages can run via aider + a local OpenAI-compatible
+endpoint instead of Claude Code, with per-lane override support. Alongside it:
+spawn-error exponential backoff, an in-process `cw dev-queue serve` supervisor,
+prior-attempt context on retry, and a version-drift self-check exception.
+
+### Added
+
+- **LocalExecutor backend** (RFC 0005 F3, #866): aider-based executor that
+  targets a local OpenAI-compatible endpoint, fully integrated with the
+  per-stage resolution path.
+- **Per-stage executor resolution + lane override** (E1, #874): each dispatch
+  stage resolves its executor independently; lanes can pin a non-default
+  executor via config.
+- **`cw dev-queue serve`** (#871): in-process supervisor that runs the dispatch
+  loop with configurable backoff restart on failure — replaces the bare
+  `dispatch run` call for long-lived operator sessions.
+- **`prior_attempts_summary` on retry** (#872): workers spawned for a retry
+  receive a structured summary of all previous attempts, giving the model
+  context on what was tried before.
+- **`VersionDriftExit` exception** (#880): dispatch loop self-check raises a
+  typed exception when it detects it is running a stale version, allowing the
+  supervisor to restart cleanly.
+- **spawn_error exponential backoff** (#879): failed spawn attempts back off
+  with jitter before retry, preventing tight error loops on model/API outages.
+
+### Changed
+
+- **`merge_gate` blocker reason is now a static constant** (#881): removes the
+  last inline string literal from the finalize path; finding is now
+  grep-able across the codebase.
+- **Subagent models pinned explicitly in `/auto-dev` pipeline** (#877, #220):
+  each stage's spawned subagent declares its model tier rather than inheriting
+  the operator's default, cutting unnecessary Opus fan-out.
+
+## [1.5.0] — 2026-06-26
+
+A **dispatch-hardening** release: a global attempt ceiling kills dead-requeue
+churn, the finalize path gains a regress route for gate failures, and the
+attention digest is scoped to live sessions only. Plus file-overlap merge gate
+and several targeted fixes from the v1.4.0 stability wave.
+
+### Added
+
+- **Global attempt ceiling** (#850, #786): dispatch stops requeueing a ticket
+  once it has hit the configured max-attempts threshold — prevents dead tasks
+  from churning indefinitely.
+- **finalize → IMPL regress path** (#858, #770): when a gate check fails during
+  finalize, the task reverts to IMPL rather than wedging in an unrecoverable
+  state.
+
+### Changed
+
+- **Attention digest scoped to live sessions** (#857): `orchestrate watch`
+  attention column is now bounded to the recent window and live sessions only,
+  eliminating noise from stale/completed sessions.
+- **heartbeat + sentinel promoted to `SessionSummary`** (#845): moved from
+  inline columns to the shared summary model so both `cw status` and
+  `orchestrate watch` render them consistently.
+
+### Fixed
+
+- **File-overlap merge gate** (#849, #777): finalize now blocks on overlapping
+  file edits between the worktree and main, with a null-safe blocker field for
+  the `merge_gate_blocked` case.
+- **cw-fanout blocked_on_user gate loop** (#860): the wave-monitoring loop now
+  closes correctly when a task enters `blocked_on_user` — previously it could
+  spin indefinitely.
+- **gh_blocked disposition** (#846): the gh-blocked idle-park transition now
+  passes its disposition through `transition_task_status` like all other
+  terminal branches.
+
 ## [1.4.0] — 2026-06-23
 
 The **live work dashboard** sprint: `cw orchestrate watch` gains the signals it
