@@ -5,6 +5,7 @@ RFC 0005 A2 / F3.
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -20,9 +21,11 @@ from cw.executor import (
     resolve_executor_config,
 )
 from cw.local_runner import (
+    AIDER_ERROR,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
+    UNEXPECTED_ERROR,
     FakeAiderRunner,
 )
 from cw.models import (
@@ -30,6 +33,7 @@ from cw.models import (
     LOCAL_BACKEND,
     ClientConfig,
     LaneConfig,
+    SessionStatus,
     Stage,
     StageExecutorConfig,
     StagePipelineConfig,
@@ -619,7 +623,7 @@ def test_local_executor_spawn_runner_path(
     # returncode=1 → aider_error blocked
     assert result.status == "blocked"
     assert result.blocker is not None
-    assert result.blocker.reason == "aider_error"
+    assert result.blocker.reason == AIDER_ERROR
 
 
 def test_local_executor_stage_sentinel_schema(tmp_path: Path) -> None:
@@ -637,23 +641,23 @@ def test_local_executor_stage_complete(
     make_git_repo: Callable[[str], Path],
 ) -> None:
     """Happy path: aider exit 0 with new commit → stage_complete persisted."""
-    import subprocess as _sp
-
     worktree = make_git_repo("wt-local-stage-complete")
-    _sp.run(
+    subprocess.run(
         ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
         check=True,
         capture_output=True,
     )
-    _sp.run(
+    subprocess.run(
         ["git", "-C", str(worktree), "fetch", "origin", "main"],
         check=True,
         capture_output=True,
     )
     # Simulate an aider commit above the fork point.
     (worktree / "aider_out.py").write_text("x = 1\n", encoding="utf-8")
-    _sp.run(["git", "-C", str(worktree), "add", "."], check=True, capture_output=True)
-    _sp.run(
+    subprocess.run(
+        ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
+    )
+    subprocess.run(
         ["git", "-C", str(worktree), "commit", "-m", "aider impl"],
         check=True,
         capture_output=True,
@@ -714,10 +718,8 @@ def test_local_executor_exception_handler_marks_session_completed(
     state = load_state()
     session = next((s for s in state.sessions if s.last_result is not None), None)
     assert session is not None
-    from cw.models import SessionStatus
-
     assert session.status == SessionStatus.COMPLETED
     result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
     assert result.blocker is not None
-    assert result.blocker.reason == "unexpected_error"
+    assert result.blocker.reason == UNEXPECTED_ERROR

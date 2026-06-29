@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -191,8 +192,6 @@ def test_build_task_message_reads_plan(tmp_path: Path) -> None:
 
 def test_build_task_message_supplements_context(tmp_path: Path) -> None:
     """build_task_message adds ticket title/body from .cw/context.json when present."""
-    import json
-
     cw_dir = tmp_path / ".cw"
     cw_dir.mkdir()
     (cw_dir / "plan.md").write_text("plan content", encoding="utf-8")

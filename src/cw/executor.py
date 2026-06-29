@@ -12,6 +12,7 @@ from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
+    UNEXPECTED_ERROR,
     AiderRunner,
     RealAiderRunner,
     build_argv,
@@ -271,7 +272,7 @@ class LocalExecutor:
                     target.last_result = make_blocked(
                         ticket_id=task.ticket_id,
                         worktree=worktree,
-                        reason="unexpected_error",
+                        reason=UNEXPECTED_ERROR,
                     ).model_dump(mode="json")
                     target.status = SessionStatus.COMPLETED
                     save_state(state)

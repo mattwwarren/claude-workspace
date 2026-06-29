@@ -40,6 +40,7 @@ PLAN_MISSING = "plan_missing"
 AIDER_NO_OUTPUT = "aider_no_output"
 AIDER_ERROR = "aider_error"
 BUDGET_EXCEEDED = "budget_exceeded"
+UNEXPECTED_ERROR = "unexpected_error"
 
 # --- Shared fixed constants for ALL blocked paths ---
 # scope.tier="small" and lines_actual=0 satisfy the stage2_impl post-impl
