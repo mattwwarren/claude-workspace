@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from cw.auto_dev_result import (
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
     PAUSED_FOR_USER_INPUT_STATUSES,
+    SALVAGE_TERMINAL_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
@@ -2878,6 +2879,144 @@ def _documented_example_payload() -> dict[str, Any]:
         "blocker": None,
         "next_actions": ["wait_for_ci"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Issue #899 — merge_pending status (PR created, awaiting CI/merge gate)
+# ---------------------------------------------------------------------------
+
+
+def _merge_pending_payload() -> dict[str, Any]:
+    """Minimal valid merge_pending payload (issue #899 — PR created, CI pending)."""
+    return {
+        "schema_version": 4,
+        "ticket_id": "GEN-899",
+        "status": "merge_pending",
+        "stage_reached": "stage5_post_create",
+        "scope": {
+            "tier": "small",
+            "files": 3,
+            "lines_estimate": 60,
+            "lines_actual": 58,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": "dev/gen-899",
+        "worktree_path": "/tmp/wt/gen-899",
+        "fork_point_sha": "abc899",
+        "commits": ["sha-x"],
+        "pr": {
+            "number": 101,
+            "url": "https://github.com/org/repo/pull/101",
+            "auto_merge": True,
+            "base": "main",
+        },
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": [],
+    }
+
+
+class TestMergePending:
+    """Issue #899 — merge_pending: PR created but awaiting CI/merge gate."""
+
+    def test_valid_merge_pending_parses(self) -> None:
+        result = AutoDevResult.model_validate(_merge_pending_payload())
+        assert result.status == "merge_pending"
+        assert result.pr is not None
+        assert result.pr.number == 101
+        assert result.blocker is None
+
+    def test_merge_pending_rejects_null_pr(self) -> None:
+        """merge_pending requires a non-null pr — PR must have been created."""
+        p = _merge_pending_payload()
+        p["pr"] = None
+        with pytest.raises(ValidationError, match="pr must be non-null"):
+            AutoDevResult.model_validate(p)
+
+    def test_merge_pending_rejects_nonnull_blocker(self) -> None:
+        """merge_pending must not carry a blocker (not a blocked state)."""
+        p = _merge_pending_payload()
+        p["blocker"] = {"stage": "stage5_post_create", "reason": "ci_pending"}
+        with pytest.raises(ValidationError, match="blocker must be null"):
+            AutoDevResult.model_validate(p)
+
+    def test_merge_pending_in_salvage_terminal_statuses(self) -> None:
+        """Reconciler must not re-dispatch a merge_pending worker (#899)."""
+        assert "merge_pending" in SALVAGE_TERMINAL_STATUSES
+
+    def test_merge_pending_not_in_stage_failure_statuses(self) -> None:
+        """merge_pending is not a failure — it has a valid PR."""
+        assert "merge_pending" not in STAGE_FAILURE_STATUSES
+
+    def test_merge_pending_parse_stdout_roundtrip(self) -> None:
+        p = _merge_pending_payload()
+        stdout = f"<<<AUTO_DEV_RESULT\n{json.dumps(p)}\nAUTO_DEV_RESULT>>>"
+        result = parse_stdout(stdout)
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "merge_pending"
+        assert result.pr is not None
+        assert result.pr.url == "https://github.com/org/repo/pull/101"
+
+    def test_blocked_with_pr_coerces_to_merge_pending(self) -> None:
+        """Parse-boundary coerce: status=blocked + non-null pr → merge_pending.
+
+        This is the regression case from #899: FINALIZE created a PR but then
+        blocked (CI pending). The emitted sentinel had status=blocked+non-null pr
+        which the validator rejected, recording the task as failed even with a
+        green, mergeable PR. After coerce, the result is merge_pending and the
+        PR url is preserved.
+        """
+        p = _blocked_payload()
+        # Inject a non-null pr as FINALIZE would when PR was already created.
+        p["pr"] = {
+            "number": 898,
+            "url": "https://github.com/org/repo/pull/898",
+            "auto_merge": True,
+            "base": "main",
+        }
+        stdout = f"<<<AUTO_DEV_RESULT\n{json.dumps(p)}\nAUTO_DEV_RESULT>>>"
+        result = parse_stdout(stdout)
+        assert isinstance(result, AutoDevResult), (
+            f"Expected AutoDevResult but got {result!r} — "
+            "blocked+pr should coerce to merge_pending, not validation_failed"
+        )
+        assert result.status == "merge_pending"
+        assert result.pr is not None
+        assert result.pr.url == "https://github.com/org/repo/pull/898"
+        assert result.blocker is None
+
+    def test_blocked_with_pr_coerce_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The coerce emits a warning so operators can see the conversion."""
+        p = _blocked_payload()
+        p["pr"] = {
+            "number": 10,
+            "url": "https://github.com/org/repo/pull/10",
+            "auto_merge": False,
+            "base": "main",
+        }
+        stdout = f"<<<AUTO_DEV_RESULT\n{json.dumps(p)}\nAUTO_DEV_RESULT>>>"
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            parse_stdout(stdout)
+        assert any("merge_pending" in r.message for r in caplog.records)
+
+    def test_blocked_without_pr_stays_blocked(self) -> None:
+        """A normal blocked sentinel (null pr) must NOT be coerced to merge_pending."""
+        p = _blocked_payload()
+        assert p["pr"] is None
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "blocked"
 
 
 def test_is_documented_example_returns_true_for_placeholder() -> None:
