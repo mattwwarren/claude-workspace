@@ -373,6 +373,7 @@ class ReapPolicy(StrEnum):
 
 
 CLAUDE_NATIVE_BACKEND: str = "claude-native"
+LOCAL_BACKEND: str = "local"
 
 
 class StageExecutorConfig(BaseModel):
@@ -380,6 +381,7 @@ class StageExecutorConfig(BaseModel):
 
     backend: str = CLAUDE_NATIVE_BACKEND
     model: str | None = None
+    endpoint: str | None = None  # OpenAI-compatible base URL for local backend
 
 
 class StagePipelineConfig(BaseModel):

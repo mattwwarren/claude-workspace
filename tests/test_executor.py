@@ -1,25 +1,39 @@
-"""Tests for cw.executor — StageExecutor Protocol + ClaudeNativeExecutor.
+"""Tests for cw.executor — StageExecutor Protocol, ClaudeNativeExecutor, LocalExecutor.
 
-RFC 0005 A2.
+RFC 0005 A2 / F3.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import subprocess
+from typing import TYPE_CHECKING, cast
+from unittest.mock import patch
 
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
+from cw.config import load_state
 from cw.executor import (
     ClaudeNativeExecutor,
+    LocalExecutor,
     StageExecutor,
     resolve_executor,
     resolve_executor_config,
 )
+from cw.local_runner import (
+    AIDER_ERROR,
+    AIDER_NOT_FOUND,
+    ENDPOINT_NOT_CONFIGURED,
+    PLAN_MISSING,
+    UNEXPECTED_ERROR,
+    FakeAiderRunner,
+)
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
+    LOCAL_BACKEND,
     ClientConfig,
     LaneConfig,
+    SessionStatus,
     Stage,
     StageExecutorConfig,
     StagePipelineConfig,
@@ -456,3 +470,256 @@ def test_e2_heterogeneous_models_per_stage(
     assert args is not None
     assert args.count("--model") == 1
     assert args[args.index("--model") + 1] == expected_model
+
+
+# ---------------------------------------------------------------------------
+# RFC 0005 F3 — LocalExecutor + resolve_executor LOCAL_BACKEND
+# ---------------------------------------------------------------------------
+
+
+def _make_local_client(tmp_path: Path, *, endpoint: str | None = None) -> ClientConfig:
+    return ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={
+                Stage.IMPL: StageExecutorConfig(
+                    backend=LOCAL_BACKEND,
+                    model="qwen2.5-coder:32b",
+                    endpoint=endpoint,
+                )
+            }
+        ),
+    )
+
+
+def test_resolve_executor_returns_local_executor(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """resolve_executor returns LocalExecutor when backend=local."""
+    client = _make_local_client(tmp_path, endpoint="http://localhost:1234/v1")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    executor = resolve_executor(task, client)
+
+    assert isinstance(executor, LocalExecutor)
+    assert isinstance(executor, StageExecutor)
+
+
+def test_local_executor_blocked_endpoint_none(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """endpoint=None → blocked/endpoint_not_configured before runner is called."""
+    worktree = make_git_repo("wt-local-ep-none")
+    fake_runner = FakeAiderRunner(returncode=0)
+    config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    result_raw = next(
+        (s.last_result for s in state.sessions if s.last_result is not None), None
+    )
+    assert result_raw is not None
+    result = AutoDevResult.model_validate(result_raw)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == ENDPOINT_NOT_CONFIGURED
+
+
+def test_local_executor_blocked_aider_not_found(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """shutil.which('aider') is None → blocked/aider_not_found."""
+    worktree = make_git_repo("wt-local-aider-missing")
+    fake_runner = FakeAiderRunner(returncode=0)
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with patch("cw.executor.shutil.which", return_value=None):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    result_raw = next(
+        (s.last_result for s in state.sessions if s.last_result is not None), None
+    )
+    result = AutoDevResult.model_validate(result_raw)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_NOT_FOUND
+    assert result.blocker.retry_eligible is True
+
+
+def test_local_executor_blocked_plan_missing(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Absent .cw/plan.md → blocked/plan_missing."""
+    worktree = make_git_repo("wt-local-plan-missing")
+    fake_runner = FakeAiderRunner(returncode=0)
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/aider"):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    result_raw = next(
+        (s.last_result for s in state.sessions if s.last_result is not None), None
+    )
+    result = AutoDevResult.model_validate(result_raw)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == PLAN_MISSING
+
+
+def test_local_executor_spawn_runner_path(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Happy path: pre-flight passes → runner.run() is called once."""
+    worktree = make_git_repo("wt-local-runner-path")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    fake_runner = FakeAiderRunner(returncode=1, stderr="aider internal error")
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-99", client="test", stage=Stage.IMPL)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/aider"):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 1
+    call = fake_runner.calls[0]
+    argv = cast("list[str]", call["argv"])
+    assert "openai/qwen" in " ".join(argv)
+
+    state = load_state()
+    result_raw = next(
+        (s.last_result for s in state.sessions if s.last_result is not None), None
+    )
+    result = AutoDevResult.model_validate(result_raw)
+    # returncode=1 → aider_error blocked
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_ERROR
+
+
+def test_local_executor_stage_sentinel_schema(tmp_path: Path) -> None:
+    """LocalExecutor.stage_sentinel_schema returns AutoDevResult JSON schema."""
+    config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
+    executor = LocalExecutor(config=config)
+
+    schema = executor.stage_sentinel_schema(Stage.IMPL)
+
+    assert schema == AutoDevResult.model_json_schema()
+
+
+def test_local_executor_stage_complete(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Happy path: aider exit 0 with new commit → stage_complete persisted."""
+    worktree = make_git_repo("wt-local-stage-complete")
+    subprocess.run(
+        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "fetch", "origin", "main"],
+        check=True,
+        capture_output=True,
+    )
+    # Simulate an aider commit above the fork point.
+    (worktree / "aider_out.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-m", "aider impl"],
+        check=True,
+        capture_output=True,
+    )
+
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    fake_runner = FakeAiderRunner(returncode=0)
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-100", client="test", stage=Stage.IMPL)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/aider"):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    state = load_state()
+    result_raw = next(
+        (s.last_result for s in state.sessions if s.last_result is not None), None
+    )
+    assert result_raw is not None
+    result = AutoDevResult.model_validate(result_raw)
+    assert result.status == "stage_complete"
+    assert result.stage_reached == "stage2_impl"
+    assert len(result.commits) >= 1
+    AutoDevResult.model_validate(result.model_dump(mode="json"))
+
+
+def test_local_executor_exception_handler_marks_session_completed(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Uncaught exception in Steps 3-5 → session COMPLETED, exception re-raised."""
+    worktree = make_git_repo("wt-local-exc-handler")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
+
+    fake_runner = FakeAiderRunner(returncode=0)
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-exc", client="test", stage=Stage.IMPL)
+
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/aider"),
+        patch("cw.executor.synthesize_result", side_effect=RuntimeError("git boom")),
+        pytest.raises(RuntimeError, match="git boom"),
+    ):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    state = load_state()
+    session = next((s for s in state.sessions if s.last_result is not None), None)
+    assert session is not None
+    assert session.status == SessionStatus.COMPLETED
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR

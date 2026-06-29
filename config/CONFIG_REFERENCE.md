@@ -187,6 +187,37 @@ clients:
 
 `backend` defaults to `claude-native` and can be omitted.
 
+### Local Backend (aider + LM Studio)
+
+Set `backend: local` to delegate a stage to `aider` running against a local
+OpenAI-compatible endpoint (e.g. LM Studio). The local model never emits a
+sentinel — `cw` synthesises an `AutoDevResult` from git state after aider
+commits.
+
+```yaml
+clients:
+  my-client:
+    workspace_path: /home/user/projects/my-project
+    pipeline:
+      executors:
+        impl:
+          backend: local
+          model: qwen2.5-coder-32b-instruct   # aider model; 'openai/' prefix added automatically
+          endpoint: http://localhost:1234/v1   # LM Studio default
+```
+
+Requirements:
+- `endpoint` must be set — a missing endpoint blocks with `endpoint_not_configured`.
+- `aider` must be on `$PATH` — missing binary blocks with `aider_not_found` (retry-eligible).
+- `.cw/plan.md` must exist in the worktree — absent plan blocks with `plan_missing`.
+- `OPENAI_API_KEY` env var is optional; defaults to `"local"` (LM Studio ignores the value).
+
+Limitations:
+- Synchronous executor: blocks the dispatch tick for the full aider run. Set
+  `max_parallel: 1` on lanes using `local` backend.
+- Suitable for `impl` stage only; not yet validated for `plan`, `review`, or `finalize`.
+- Review and finalize stages continue to use `claude-native` unless configured explicitly.
+
 ### 4-Level Precedence (highest to lowest)
 
 - **Lane stage model** — `lanes[].pipeline.executors[stage].model`
