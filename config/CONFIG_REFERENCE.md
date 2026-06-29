@@ -231,6 +231,8 @@ no model configured (`null`) it falls through to `worker_model`. If neither is
 set, no `--model` flag is emitted and the worker inherits the operator default.
 
 **Known gap:** `cw resume` (the interactive USER-origin path) does not forward
+the stage-resolved model. The autonomous pipeline routes through
+`executor.spawn` and is unaffected. See #626 follow-ons.
 
 ### Recommended Per-Stage Defaults
 
@@ -239,7 +241,7 @@ Recommended models per stage:
 - **finalize**: `claude-haiku-4-5-20251001`
 
 **Cost Rationale**:
-- `haiku` is cheaper than `sonnet` ($0.25 vs $3 per 1k tokens).
+- `haiku` is cheaper than `sonnet` ($0.25/$1.25 vs $3/$15 per 1M tokens (input/output)).
 - `finalize` is mostly mechanical and can handle the reduced quality of `haiku`.
 
 **Watch-finalize-on-haiku caveat**:
@@ -249,8 +251,6 @@ Recommended models per stage:
 **Intake Note**:
 - No separate `intake` executor stage — intake (Stage 0) runs within the PLAN session.
 - Dedicated cheap-intake tracked as #895.
-the stage-resolved model. The autonomous pipeline routes through
-`executor.spawn` and is unaffected. See #626 follow-ons.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
