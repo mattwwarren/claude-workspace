@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import subprocess
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from cw.auto_dev_result import (
     AutoDevResult,
@@ -13,12 +13,12 @@ from cw.auto_dev_result import (
     PlanSource,
     Review,
     Scope,
+    StageReached,
 )
 from cw.codex_runner import CodexRunner, CodexRunResult, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.local_runner import (
-    _SCHEMA_VERSION,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
@@ -62,6 +62,9 @@ CODEX_NOT_FOUND = "codex_not_found"
 CODEX_REVIEW_ONLY = "codex_review_only"
 CODEX_TIMEOUT = "codex_timeout"
 CODEX_ERROR = "codex_error"
+
+_SCHEMA_VERSION: Literal[4] = 4
+STAGE3_REVIEW: StageReached = "stage3_review"
 
 
 def resolve_executor_config(
@@ -377,14 +380,14 @@ class CodexExecutor:
                 ticket_id=task.ticket_id,
                 worktree=worktree,
                 reason=CODEX_REVIEW_ONLY,
-                stage_reached="stage3_review",
+                stage_reached=STAGE3_REVIEW,
             )
         elif shutil.which("codex") is None:
             result = make_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,
                 reason=CODEX_NOT_FOUND,
-                stage_reached="stage3_review",
+                stage_reached=STAGE3_REVIEW,
             )
 
         try:
@@ -396,7 +399,6 @@ class CodexExecutor:
                     task=task,
                     worktree=worktree,
                     run_result=run_result,
-                    ticket_id=task.ticket_id,
                 )
                 # Step 3b: Post raw review findings as an issue comment (best-effort).
                 if (
@@ -439,7 +441,7 @@ class CodexExecutor:
                         ticket_id=task.ticket_id,
                         worktree=worktree,
                         reason=UNEXPECTED_ERROR,
-                        stage_reached="stage3_review",
+                        stage_reached=STAGE3_REVIEW,
                     ).model_dump(mode="json")
                     target.status = SessionStatus.COMPLETED
                     save_state(state)
@@ -464,7 +466,6 @@ def _synthesize_codex_result(
     task: TicketTask,
     worktree: Path,
     run_result: CodexRunResult,
-    ticket_id: str,
 ) -> AutoDevResult:
     """Map a CodexRunResult to a typed AutoDevResult at stage3_review.
 
@@ -475,19 +476,19 @@ def _synthesize_codex_result(
     """
     if run_result.timed_out:
         return make_blocked(
-            ticket_id=ticket_id,
+            ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_TIMEOUT,
             retry_eligible=True,
-            stage_reached="stage3_review",
+            stage_reached=STAGE3_REVIEW,
         )
     if run_result.returncode != 0:
         return make_blocked(
-            ticket_id=ticket_id,
+            ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_ERROR,
             details=run_result.stderr[-2000:],
-            stage_reached="stage3_review",
+            stage_reached=STAGE3_REVIEW,
         )
     branch = subprocess.check_output(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -496,9 +497,9 @@ def _synthesize_codex_result(
     ).strip()
     return AutoDevResult(
         schema_version=_SCHEMA_VERSION,
-        ticket_id=ticket_id,
+        ticket_id=task.ticket_id,
         status="stage_complete",
-        stage_reached="stage3_review",
+        stage_reached=STAGE3_REVIEW,
         scope=Scope(
             tier=resolve_tier(task.scope_hint),
             files=0,

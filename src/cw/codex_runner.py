@@ -73,7 +73,7 @@ class RealCodexRunner:
         return CodexRunResult(
             returncode=proc.returncode,
             stdout=stdout,
-            # Bound stderr to avoid bloating the persisted state file.
+            # Cap in-memory allocation; caller applies a tighter cap before persisting.
             stderr=stderr[-4000:],
             timed_out=False,
         )

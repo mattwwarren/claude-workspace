@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _persisted_result(client_workspace: Path | None = None) -> AutoDevResult:
+def _persisted_result() -> AutoDevResult:
     """Load the single persisted last_result and validate it."""
     state = load_state()
     result_raw = next(
@@ -140,6 +140,8 @@ def test_codex_executor_nonzero_exit(
     assert result.stage_reached == "stage3_review"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_ERROR
+    assert result.blocker.details is not None
+    assert "codex internal error" in result.blocker.details
 
 
 def test_codex_executor_stage_complete(
@@ -161,10 +163,12 @@ def test_codex_executor_stage_complete(
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
 
     assert len(runner.calls) == 1
-    post_mock.assert_called_once()
+    post_mock.assert_called_once_with("T-1", "## Findings\n\nLooks good.")
     result = _persisted_result()
     assert result.status == "stage_complete"
     assert result.stage_reached == "stage3_review"
+    assert result.health.recommendation == "PROCEED"
+    assert result.health.any_incomplete_risk is False
     # Round-trips through the strict validator.
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
@@ -247,10 +251,20 @@ def test_codex_executor_exception_handler_marks_session_completed(
     assert result.blocker.reason == UNEXPECTED_ERROR
 
 
-def test_post_review_comment_suppresses_subprocess_errors() -> None:
+def test_post_review_comment_suppresses_oserror() -> None:
     """_post_review_comment swallows OSError from a missing gh binary."""
     with patch("cw.executor.subprocess.run", side_effect=FileNotFoundError("no gh")):
-        # Must not raise.
+        _post_review_comment("T-1", "findings")
+
+
+def test_post_review_comment_suppresses_timeout() -> None:
+    """_post_review_comment swallows TimeoutExpired when gh hangs."""
+    import subprocess as _subprocess
+
+    with patch(
+        "cw.executor.subprocess.run",
+        side_effect=_subprocess.TimeoutExpired(cmd="gh", timeout=30),
+    ):
         _post_review_comment("T-1", "findings")
 
 
