@@ -1344,6 +1344,15 @@ def apply_staged_decision(
     elif status in STAGE_SUCCESS_STATUSES:
         # Rule 3: shipped -- advance or complete
         _stage_advance(task, clients, disposition=disposition, pr_url=pr_url)
+    elif status == "merge_pending":
+        # Rule 3b: PR created but awaiting CI/merge gate (#899). Not a failure
+        # — preserve pr_url so operator can monitor/merge. Do not re-dispatch.
+        transition_task_status(
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=disposition,
+            pr_url=pr_url,
+        )
     elif status == "no_op":
         # Rule 4: pre-flight already satisfied -- terminal
         # regardless of remaining stages

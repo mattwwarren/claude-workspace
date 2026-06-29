@@ -103,6 +103,14 @@ def transition_task_status(
         task.completed_at = None
 
 
+_VERBATIM_DISPOSITION_STATUSES: frozenset[str] = (
+    STAGE_SUCCESS_STATUSES
+    | frozenset({"no_op", "merge_pending"})
+    | STAGE_FAILURE_STATUSES
+    | PAUSED_FOR_USER_INPUT_STATUSES
+)
+
+
 def _derive_disposition(status: str | None) -> str | None:
     """Map an AutoDevResult status to the task-level disposition string.
 
@@ -111,14 +119,8 @@ def _derive_disposition(status: str | None) -> str | None:
     """
     if status is None:
         return "abandoned"
-    if status in STAGE_SUCCESS_STATUSES:
-        return status  # "shipped" or "stage_complete"
-    if status == "no_op":
-        return "no_op"
-    if status in STAGE_FAILURE_STATUSES:
-        return status  # "blocked", "merge_gate_blocked", etc.
-    if status in PAUSED_FOR_USER_INPUT_STATUSES:
-        return status  # "ambiguities_pending_resolution", etc.
+    if status in _VERBATIM_DISPOSITION_STATUSES:
+        return status
     return "abandoned"
 
 

@@ -70,6 +70,9 @@ Status = Literal[
     "plan_pending_approval",
     "review_pending_approval",
     "merge_gate_blocked",
+    # PR created but awaiting CI / merge gate (#899). Non-null pr required;
+    # parse boundary coerces status=blocked+non-null pr to this status.
+    "merge_pending",
     "scope_exceeded",
     "forbidden_area",
     "blocked",
@@ -130,6 +133,8 @@ SALVAGE_TERMINAL_STATUSES: frozenset[str] = (
             "plan_pending_approval",
             "review_pending_approval",
             "merge_gate_blocked",
+            # PR created, awaiting CI/merge — do not re-dispatch (#899).
+            "merge_pending",
             "scope_exceeded",
             "forbidden_area",
         }
@@ -479,11 +484,12 @@ class AutoDevResult(BaseModel):
         # until the skill bumps. When skill emits v4, this exception can be
         # removed and the _V4_STATUSES gate re-added.
 
-        # §3.3 pr: non-null iff status == shipped
-        if self.status == "shipped" and self.pr is None:
-            msg = "pr must be non-null when status is 'shipped'"
+        # §3.3 pr: non-null iff status in {shipped, merge_pending} (#899)
+        _pr_required_statuses = frozenset({"shipped", "merge_pending"})
+        if self.status in _pr_required_statuses and self.pr is None:
+            msg = f"pr must be non-null when status is {self.status!r}"
             raise ValueError(msg)
-        if self.status != "shipped" and self.pr is not None:
+        if self.status not in _pr_required_statuses and self.pr is not None:
             msg = f"pr must be null when status is {self.status!r}"
             raise ValueError(msg)
 
@@ -753,6 +759,7 @@ _KNOWN_STATUSES: frozenset[str] = frozenset(
         "plan_pending_approval",
         "review_pending_approval",
         "merge_gate_blocked",
+        "merge_pending",
         "scope_exceeded",
         "forbidden_area",
         "blocked",
@@ -1028,6 +1035,25 @@ def _coerce_blocked_next_actions(payload: dict[str, Any]) -> None:
         payload["next_actions"] = []
 
 
+def _coerce_blocked_with_pr(payload: dict[str, Any]) -> None:
+    """Coerce status=blocked+non-null pr to merge_pending (issue #899).
+
+    FINALIZE creates a PR then can't merge (CI pending). The producer emits
+    status="blocked" with a non-null pr field — rejected by the model validator.
+    Coerce to merge_pending to preserve the PR url and avoid recording failed.
+    The blocker field is cleared since merge_pending does not carry a blocker.
+    """
+    if payload.get("pr") is None:
+        return
+    _log.warning(
+        "auto-dev: blocked sentinel has non-null pr; coercing to "
+        "merge_pending to preserve PR url (issue #899, ticket=%s)",
+        payload.get("ticket_id", "unknown"),
+    )
+    payload["status"] = "merge_pending"
+    payload["blocker"] = None
+
+
 def _coerce_pre_impl_zero_lines(payload: dict[str, Any]) -> None:
     """Coerce lines_actual=0 to null on pre-impl stages (issue #416).
 
@@ -1078,7 +1104,9 @@ def _normalize_payload(payload: dict[str, Any], raw_status: str) -> None:
     if raw_status == "premises_pending_verification":
         _coerce_empty_pending_array(payload, "premises", raw_status)
     if raw_status == "blocked":
-        _coerce_blocked_next_actions(payload)
+        _coerce_blocked_with_pr(payload)  # may change status to merge_pending
+        if payload.get("status") == "blocked":
+            _coerce_blocked_next_actions(payload)
     # Status-agnostic: applies regardless of raw_status (distinct from above).
     _coerce_pre_impl_zero_lines(payload)
     if raw_status == "shipped":
