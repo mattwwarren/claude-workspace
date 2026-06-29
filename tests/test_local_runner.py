@@ -19,6 +19,7 @@ from cw.local_runner import (
     PLAN_MISSING,
     AiderRunResult,
     FakeAiderRunner,
+    FakePlanFetcher,
     RealAiderRunner,
     _blocked_scope,
     build_argv,
@@ -418,3 +419,125 @@ def test_constant_values_plan_missing_aider_not_found(tmp_config_dir: Path) -> N
     """PLAN_MISSING and AIDER_NOT_FOUND have the expected reason string values."""
     assert PLAN_MISSING == "plan_missing"
     assert AIDER_NOT_FOUND == "aider_not_found"
+
+
+# ---------------------------------------------------------------------------
+# FakePlanFetcher
+# ---------------------------------------------------------------------------
+
+
+def test_fake_plan_fetcher_records_calls(tmp_path: Path) -> None:
+    """FakePlanFetcher.fetch() records every ticket_id passed to it."""
+    fetcher = FakePlanFetcher(plan="plan text")
+    fetcher.fetch("T-1")
+    fetcher.fetch("T-2")
+    assert fetcher.calls == ["T-1", "T-2"]
+
+
+def test_fake_plan_fetcher_returns_configured_plan() -> None:
+    """FakePlanFetcher returns the plan set at construction."""
+    fetcher = FakePlanFetcher(plan="## my plan")
+    assert fetcher.fetch("T-1") == "## my plan"
+
+
+def test_fake_plan_fetcher_returns_none_when_no_plan() -> None:
+    """FakePlanFetcher(plan=None) returns None from fetch()."""
+    fetcher = FakePlanFetcher(plan=None)
+    assert fetcher.fetch("T-1") is None
+
+
+# ---------------------------------------------------------------------------
+# build_task_message — tracker fallback
+# ---------------------------------------------------------------------------
+
+
+def test_build_task_message_fetches_from_tracker_when_plan_absent(
+    tmp_path: Path,
+) -> None:
+    """build_task_message falls back to tracker when .cw/plan.md is absent."""
+    plan_body = "## Implementation Plan\n\nDo the thing.\n<!-- plan-spec-reviewed -->"
+    fetcher = FakePlanFetcher(plan=plan_body)
+
+    result = build_task_message(tmp_path, ticket_id="896", plan_fetcher=fetcher)
+
+    assert result is not None
+    assert "Do the thing." in result
+    assert fetcher.calls == ["896"]
+
+
+def test_build_task_message_writes_plan_to_disk_after_fetch(
+    tmp_path: Path,
+) -> None:
+    """Fetched plan is materialised to .cw/plan.md so retries skip the fetch."""
+    plan_body = "fetched plan body <!-- plan-spec-reviewed -->"
+    fetcher = FakePlanFetcher(plan=plan_body)
+
+    build_task_message(tmp_path, ticket_id="896", plan_fetcher=fetcher)
+
+    plan_path = tmp_path / ".cw" / "plan.md"
+    assert plan_path.exists()
+    assert plan_path.read_text(encoding="utf-8") == plan_body
+
+
+def test_build_task_message_still_none_when_fetcher_returns_none(
+    tmp_path: Path,
+) -> None:
+    """No plan.md, fetcher returns None (tracker has no plan) → returns None."""
+    fetcher = FakePlanFetcher(plan=None)
+
+    result = build_task_message(tmp_path, ticket_id="896", plan_fetcher=fetcher)
+
+    assert result is None
+
+
+def test_build_task_message_no_fetcher_no_ticket_returns_none(
+    tmp_path: Path,
+) -> None:
+    """No plan.md, no fetcher, no ticket_id → None (unchanged baseline)."""
+    result = build_task_message(tmp_path)
+    assert result is None
+
+
+def test_build_task_message_no_fetcher_with_ticket_returns_none(
+    tmp_path: Path,
+) -> None:
+    """No plan.md, ticket_id provided but no fetcher → None (no fetch attempted)."""
+    result = build_task_message(tmp_path, ticket_id="896")
+    assert result is None
+
+
+def test_build_task_message_plan_on_disk_skips_fetcher(tmp_path: Path) -> None:
+    """When .cw/plan.md exists, fetcher is never called."""
+    cw_dir = tmp_path / ".cw"
+    cw_dir.mkdir()
+    (cw_dir / "plan.md").write_text("existing plan", encoding="utf-8")
+    fetcher = FakePlanFetcher(plan="should not be called")
+
+    result = build_task_message(tmp_path, ticket_id="896", plan_fetcher=fetcher)
+
+    assert result is not None
+    assert "existing plan" in result
+    assert fetcher.calls == []
+
+
+# ---------------------------------------------------------------------------
+# GithubIssuePlanFetcher — delegates to fetch_approved_plan_comment
+# ---------------------------------------------------------------------------
+
+
+def test_github_issue_plan_fetcher_delegates_to_gh(tmp_path: Path) -> None:
+    """GithubIssuePlanFetcher.fetch() delegates to fetch_approved_plan_comment."""
+    from unittest.mock import patch
+
+    from cw.local_runner import GithubIssuePlanFetcher
+
+    fetcher = GithubIssuePlanFetcher(timeout=5)
+    expected = "## Plan <!-- plan-spec-reviewed -->"
+
+    with patch(
+        "cw.local_runner.fetch_approved_plan_comment", return_value=expected
+    ) as mock_fetch:
+        result = fetcher.fetch("42")
+
+    mock_fetch.assert_called_once_with("42", timeout=5)
+    assert result == expected

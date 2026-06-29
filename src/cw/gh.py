@@ -8,6 +8,8 @@ from typing import Any
 
 _GH_PR_STATE_MERGED = "MERGED"
 _PR_EXISTS_TIMEOUT = 10
+_PLAN_MARKER = "<!-- plan-spec-reviewed"
+_FETCH_COMMENTS_TIMEOUT = 30
 
 # Lookback window for timed_out-merged detection, shared by doctor.py and reconcile.py.
 # Lives here (co-located with pr_is_merged_for_ticket) to avoid a circular import:
@@ -230,6 +232,48 @@ def branch_exists_on_origin(
     Fail-open: callers must treat (None, *) as "cannot determine".
     """
     return _fetch_branch_exists_on_origin(branch, timeout)
+
+
+def fetch_approved_plan_comment(
+    ticket_id: str, *, timeout: int = _FETCH_COMMENTS_TIMEOUT
+) -> str | None:
+    """Return the body of the latest approved plan comment on a GitHub issue.
+
+    Scans issue comments in reverse order (newest first) for the first one
+    containing the ``<!-- plan-spec-reviewed`` marker written by auto-dev-plan.
+
+    Returns None when:
+    - gh binary is absent or returns an error
+    - the response cannot be parsed
+    - no comment carries the plan marker (Stage 1 not yet complete)
+    """
+    try:
+        result = _sp.run(
+            ["gh", "issue", "view", ticket_id, "--json", "comments"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data: dict[str, Any] = json.loads(result.stdout)
+        comments: list[dict[str, Any]] = data.get("comments") or []
+    except (ValueError, AttributeError):
+        return None
+
+    for comment in reversed(comments):
+        body = comment.get("body", "")
+        if isinstance(body, str) and _PLAN_MARKER in body:
+            return body
+    return None
 
 
 def pr_exists_for_branch(

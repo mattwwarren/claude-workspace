@@ -14,6 +14,8 @@ from cw.local_runner import (
     PLAN_MISSING,
     UNEXPECTED_ERROR,
     AiderRunner,
+    GithubIssuePlanFetcher,
+    PlanFetcher,
     RealAiderRunner,
     build_argv,
     build_env,
@@ -36,6 +38,7 @@ from cw.models import (
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.spawn import spawn_create_impl
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -216,7 +219,14 @@ class LocalExecutor:
                 retry_delay_seconds=0,
             )
         else:
-            task_message = build_task_message(worktree)
+            plan_fetcher: PlanFetcher | None = None
+            if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
+                plan_fetcher = GithubIssuePlanFetcher()
+            task_message = build_task_message(
+                worktree,
+                ticket_id=task.ticket_id,
+                plan_fetcher=plan_fetcher,
+            )
             if task_message is None:
                 result = make_blocked(
                     ticket_id=task.ticket_id,
