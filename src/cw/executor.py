@@ -5,22 +5,19 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from cw.auto_dev_result import AutoDevResult, Blocker
+from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.local_runner import (
-    _FIXED_HEALTH,
-    _FIXED_NEXT_ACTIONS,
-    _FIXED_REVIEW,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
     AiderRunner,
     RealAiderRunner,
-    _blocked_scope,
     build_argv,
     build_env,
     build_task_message,
+    make_blocked,
     synthesize_result,
 )
 from cw.models import (
@@ -201,15 +198,16 @@ class LocalExecutor:
 
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
+        task_message: str | None = None
 
         if self._config.endpoint is None:
-            result = _make_local_blocked(
+            result = make_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,
                 reason=ENDPOINT_NOT_CONFIGURED,
             )
         elif shutil.which("aider") is None:
-            result = _make_local_blocked(
+            result = make_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,
                 reason=AIDER_NOT_FOUND,
@@ -219,78 +217,67 @@ class LocalExecutor:
         else:
             task_message = build_task_message(worktree)
             if task_message is None:
-                result = _make_local_blocked(
+                result = make_blocked(
                     ticket_id=task.ticket_id,
                     worktree=worktree,
                     reason=PLAN_MISSING,
                 )
 
-        if result is None:
-            # Step 3: Run aider (only reached when all pre-flight checks pass).
-            model = self._config.model or ""
-            task_message = build_task_message(worktree) or ""
-            argv = build_argv(model, task_message)
-            env = build_env(self._config.endpoint or "")
-            run_result = self._runner.run(
-                worktree, argv, env, wall_clock_budget_seconds
-            )
-            result = synthesize_result(
-                task=task,
-                worktree=worktree,
-                run_result=run_result,
-                default_branch=client.default_branch,
-            )
+        try:
+            if result is None:
+                # Step 3: Run aider (only reached when all pre-flight checks pass).
+                model = self._config.model or ""
+                argv = build_argv(model, task_message or "")
+                env = build_env(self._config.endpoint or "")
+                run_result = self._runner.run(
+                    worktree, argv, env, wall_clock_budget_seconds
+                )
+                result = synthesize_result(
+                    task=task,
+                    worktree=worktree,
+                    run_result=run_result,
+                    default_branch=client.default_branch,
+                )
 
-        # Step 4: Persist result under sessions_lock.
-        with sessions_lock():
-            state = load_state()
-            target = next((s for s in state.sessions if s.id == sid), None)
-            if target is not None:
-                target.last_result = result.model_dump(mode="json")
-                target.status = SessionStatus.COMPLETED
-            save_state(state)
+            # Step 4: Persist result under sessions_lock.
+            with sessions_lock():
+                state = load_state()
+                target = next((s for s in state.sessions if s.id == sid), None)
+                if target is not None:
+                    target.last_result = result.model_dump(mode="json")
+                    target.status = SessionStatus.COMPLETED
+                    save_state(state)
 
-        # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch.py skips
-        # persist_last_result and uses the last_result written in Step 4 as-is.
-        _record_orchestrator_event(
-            OrchestratorEventType.SESSION_COMPLETED,
-            {
-                "session_id": sid,
-                "ticket_id": task.ticket_id,
-                "session_name": sess.name,
-            },
-        )
+            # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch.py skips
+            # persist_last_result and uses the last_result written in Step 4 as-is.
+            _record_orchestrator_event(
+                OrchestratorEventType.SESSION_COMPLETED,
+                {
+                    "session_id": sid,
+                    "ticket_id": task.ticket_id,
+                    "session_name": sess.name,
+                },
+            )
+        except Exception:
+            # Ensure session is never left ACTIVE on unexpected errors (e.g. git
+            # CalledProcessError in _git_facts, OSError from Popen). Mark it
+            # COMPLETED with a blocked result so reconcile can clean it up.
+            # SESSION_COMPLETED is NOT emitted; dispatch's exception handler reverts
+            # the task to PENDING, which is the correct recovery path.
+            with sessions_lock():
+                state = load_state()
+                target = next((s for s in state.sessions if s.id == sid), None)
+                if target is not None and target.status != SessionStatus.COMPLETED:
+                    target.last_result = make_blocked(
+                        ticket_id=task.ticket_id,
+                        worktree=worktree,
+                        reason="unexpected_error",
+                    ).model_dump(mode="json")
+                    target.status = SessionStatus.COMPLETED
+                    save_state(state)
+            raise
 
         return sid
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
         return AutoDevResult.model_json_schema()
-
-
-def _make_local_blocked(
-    *,
-    ticket_id: str,
-    worktree: Path,
-    reason: str,
-    retry_eligible: bool | None = None,
-    retry_delay_seconds: int | None = None,
-) -> AutoDevResult:
-    """Construct a blocked AutoDevResult for LocalExecutor pre-flight failures."""
-    return AutoDevResult(
-        schema_version=4,
-        ticket_id=ticket_id,
-        status="blocked",
-        stage_reached="stage2_impl",
-        scope=_blocked_scope,
-        plan_source="none",
-        review=_FIXED_REVIEW,
-        health=_FIXED_HEALTH,
-        blocker=Blocker(
-            stage="stage2_impl",
-            reason=reason,
-            retry_eligible=retry_eligible,
-            retry_delay_seconds=retry_delay_seconds,
-        ),
-        next_actions=_FIXED_NEXT_ACTIONS,
-        worktree_path=str(worktree),
-    )

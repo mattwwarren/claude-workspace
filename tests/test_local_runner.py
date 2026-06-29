@@ -73,9 +73,9 @@ def test_fake_runner_returns_configured_result(tmp_path: Path) -> None:
     assert result.timed_out is False
 
 
-def test_fake_runner_raise_timeout_flag(tmp_path: Path) -> None:
-    """FakeAiderRunner with raise_timeout=True returns timed_out=True."""
-    runner = FakeAiderRunner(raise_timeout=True)
+def test_fake_runner_simulate_timeout_flag(tmp_path: Path) -> None:
+    """FakeAiderRunner with simulate_timeout=True returns timed_out=True."""
+    runner = FakeAiderRunner(simulate_timeout=True)
     result = runner.run(tmp_path, ["aider"], {}, 60)
     assert result.timed_out is True
     assert result.returncode == -1
@@ -93,6 +93,15 @@ def test_run_aider_not_found(tmp_path: Path) -> None:
     assert not result.timed_out
     assert result.returncode == 127
     assert "not found" in result.stderr
+
+
+def test_run_aider_real_success(tmp_path: Path) -> None:
+    """RealAiderRunner.run() returns returncode=0 and captures stdout on success."""
+    runner = RealAiderRunner()
+    result = runner.run(tmp_path, ["echo", "hello"], {}, None)
+    assert result.returncode == 0
+    assert result.timed_out is False
+    assert "hello" in result.stdout
 
 
 def test_run_aider_timeout(tmp_path: Path) -> None:
@@ -198,6 +207,19 @@ def test_build_task_message_supplements_context(tmp_path: Path) -> None:
     assert "My Ticket" in result
     assert "Ticket body" in result
     assert "plan content" in result
+
+
+def test_build_task_message_malformed_context_json(tmp_path: Path) -> None:
+    """build_task_message returns plan-only message when context.json is malformed."""
+    cw_dir = tmp_path / ".cw"
+    cw_dir.mkdir()
+    (cw_dir / "plan.md").write_text("plan text", encoding="utf-8")
+    (cw_dir / "context.json").write_text("{bad json", encoding="utf-8")
+
+    result = build_task_message(tmp_path)
+
+    assert result is not None
+    assert "plan text" in result
 
 
 # ---------------------------------------------------------------------------
@@ -393,10 +415,7 @@ def test_early_exit_scope_health_constants() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_synthesize_result_plan_missing_included_via_blocked(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """PLAN_MISSING constant is the expected reason string (compile-time check)."""
+def test_constant_values_plan_missing_aider_not_found(tmp_config_dir: Path) -> None:
+    """PLAN_MISSING and AIDER_NOT_FOUND have the expected reason string values."""
     assert PLAN_MISSING == "plan_missing"
     assert AIDER_NOT_FOUND == "aider_not_found"

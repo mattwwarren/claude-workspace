@@ -140,13 +140,13 @@ class FakeAiderRunner:
         stdout: str = "",
         stderr: str = "",
         timed_out: bool = False,
-        raise_timeout: bool = False,
+        simulate_timeout: bool = False,
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.timed_out = timed_out
-        self.raise_timeout = raise_timeout
+        self.simulate_timeout = simulate_timeout
         self.calls: list[dict[str, object]] = []
 
     def run(
@@ -164,7 +164,7 @@ class FakeAiderRunner:
                 "timeout": timeout_seconds,
             }
         )
-        if self.raise_timeout:
+        if self.simulate_timeout:
             return AiderRunResult(returncode=-1, stdout="", stderr="", timed_out=True)
         return AiderRunResult(
             returncode=self.returncode,
@@ -298,7 +298,7 @@ def _resolve_tier(scope_hint: str | None) -> ScopeTier:
     return "small"
 
 
-def _make_blocked(
+def make_blocked(
     *,
     ticket_id: str,
     worktree: Path,
@@ -345,7 +345,7 @@ def synthesize_result(
     - exit 0, no commits     → AIDER_NO_OUTPUT (blocked, retry_eligible)
     """
     if run_result.timed_out:
-        return _make_blocked(
+        return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=BUDGET_EXCEEDED,
@@ -354,7 +354,7 @@ def synthesize_result(
 
     if run_result.returncode != 0:
         stderr_tail = run_result.stderr[-2000:] if run_result.stderr else ""
-        return _make_blocked(
+        return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=AIDER_ERROR,
@@ -364,7 +364,7 @@ def synthesize_result(
     facts = _git_facts(worktree, default_branch)
 
     if not facts["commits"]:
-        return _make_blocked(
+        return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=AIDER_NO_OUTPUT,
