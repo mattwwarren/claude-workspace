@@ -5,13 +5,12 @@ from __future__ import annotations
 import contextlib
 import shutil
 import subprocess
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from cw.auto_dev_result import (
     AutoDevResult,
     Health,
     PlanSource,
-    Review,
     Scope,
     StageReached,
 )
@@ -19,6 +18,8 @@ from cw.codex_runner import CodexRunner, CodexRunResult, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.local_runner import (
+    _FIXED_REVIEW,
+    _SCHEMA_VERSION,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
@@ -63,7 +64,6 @@ CODEX_REVIEW_ONLY = "codex_review_only"
 CODEX_TIMEOUT = "codex_timeout"
 CODEX_ERROR = "codex_error"
 
-_SCHEMA_VERSION: Literal[4] = 4
 STAGE3_REVIEW: StageReached = "stage3_review"
 
 
@@ -375,6 +375,7 @@ class CodexExecutor:
 
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
+        run_result: CodexRunResult | None = None
         if stage != Stage.REVIEW:
             result = make_blocked(
                 ticket_id=task.ticket_id,
@@ -400,13 +401,6 @@ class CodexExecutor:
                     worktree=worktree,
                     run_result=run_result,
                 )
-                # Step 3b: Post raw review findings as an issue comment (best-effort).
-                if (
-                    not run_result.timed_out
-                    and run_result.returncode == 0
-                    and run_result.stdout
-                ):
-                    _post_review_comment(task.ticket_id, run_result.stdout)
 
             # Step 4: Persist result under sessions_lock.
             with sessions_lock():
@@ -416,6 +410,17 @@ class CodexExecutor:
                     target.last_result = result.model_dump(mode="json")
                     target.status = SessionStatus.COMPLETED
                     save_state(state)
+
+            # Step 4b: Post raw review findings as an issue comment (best-effort).
+            # Runs after save_state so a retry on save_state failure does not
+            # post a duplicate comment.
+            if (
+                run_result is not None
+                and not run_result.timed_out
+                and run_result.returncode == 0
+                and run_result.stdout
+            ):
+                _post_review_comment(task.ticket_id, run_result.stdout)
 
             # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch skips
             # persist_last_result and uses the last_result written in Step 4.
@@ -511,7 +516,7 @@ def _synthesize_codex_result(
         branch=branch,
         fork_point_sha=None,
         commits=[],
-        review=Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0),
+        review=_FIXED_REVIEW,
         health=Health(
             lowest_agent_confidence="HIGH",
             any_incomplete_risk=False,

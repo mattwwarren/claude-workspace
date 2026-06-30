@@ -249,6 +249,8 @@ def test_codex_executor_exception_handler_marks_session_completed(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == UNEXPECTED_ERROR
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker.stage == "stage3_review"
 
 
 def test_post_review_comment_suppresses_oserror() -> None:
