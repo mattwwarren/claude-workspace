@@ -45,7 +45,7 @@ _CONDITIONAL_FIELDS: dict[str, str] = {
 # schema generation. This prose is the canonical operator/skill reference.
 _AUTODEVRESULT_CONSTRAINTS = (
     "Constraints (from _check_invariants cross-field validators):\n"
-    '  - pr: non-null iff status == "shipped"\n'
+    '  - pr: non-null iff status in {"shipped", "merge_pending"}\n'
     '  - blocker: non-null iff status == "blocked"\n'
     '  - next_actions contains "wait_for_ci" iff status == "shipped"\n'
     "  - scope.tier: required when stage_reached not in"
