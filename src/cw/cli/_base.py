@@ -21,6 +21,12 @@ from click.shell_completion import CompletionItem
 
 from cw import __version__
 from cw.config import get_client, load_clients, load_state
+from cw.dispatch import (
+    FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DIRTY_CHECKOUT,
+    FRESHNESS_MAIN_DIVERGED,
+    FRESHNESS_NON_MAIN_HEAD,
+)
 from cw.exceptions import CwError
 from cw.models import ClientConfig, SessionStatus
 
@@ -140,3 +146,39 @@ def _resolve_client(client_name: str | None) -> ClientConfig:
         msg = "No clients configured. Add one to ~/.config/cw/clients.yaml."
         raise CwError(msg)
     return next(iter(clients.values()))
+
+
+def _emit_freshness_subline(
+    client_name: str,
+    tick_freshness_detail: str | None,
+    tick_blocked_branch: str | None,
+    n_pending: int,
+) -> None:
+    """Print a freshness-block subline under a stale tick entry."""
+    if tick_freshness_detail == FRESHNESS_NON_MAIN_HEAD:
+        try:
+            cc = get_client(client_name)
+            default_br: str = cc.default_branch
+            ws_path: str = str(cc.workspace_path)
+        except CwError:
+            default_br = "main"
+            ws_path = client_name
+        branch_str = tick_blocked_branch or "(detached)"
+        click.echo(
+            f"  ⚠ base checkout HEAD on '{branch_str}'"
+            f" (not {default_br})"
+            f" — {n_pending} pending blocked."
+            f" Fix: git -C {ws_path} checkout {default_br}"
+        )
+    elif tick_freshness_detail == FRESHNESS_MAIN_BEHIND:
+        click.echo(f"  ⚠ {client_name}: main behind origin — auto-ff pending/failed")
+    elif tick_freshness_detail == FRESHNESS_MAIN_DIRTY_CHECKOUT:
+        click.echo(
+            f"  ⚠ {client_name}: main checkout dirty — commit or stash changes,"
+            " then auto-ff will retry"
+        )
+    elif tick_freshness_detail == FRESHNESS_MAIN_DIVERGED:
+        click.echo(
+            f"  ⚠ {client_name}: main diverged from origin —"
+            " reconcile with: git -C <workspace> pull --rebase"
+        )
