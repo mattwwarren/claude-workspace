@@ -17068,11 +17068,6 @@ class TestParseAnySentinelFromTranscript:
     _SURFACE_REF = "surf1234"
     _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
-    def _project_dir(self, home: Path, worktree: Path) -> Path:
-        """Return the project dir for this worktree under home."""
-        encoded = str(worktree).replace("/", "-").replace(".", "-")
-        return home / ".claude" / "projects" / encoded
-
     def _write_sentinel_transcript(
         self, path: Path, status: str, ticket_id: str
     ) -> None:
@@ -17134,7 +17129,7 @@ class TestParseAnySentinelFromTranscript:
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-layer2"
-        project_dir = self._project_dir(home, worktree)
+        project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
 
         # V2: csid transcript (distinct csid — does not match surface_ref glob)
@@ -17168,7 +17163,7 @@ class TestParseAnySentinelFromTranscript:
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-none"
-        project_dir = self._project_dir(home, worktree)
+        project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
 
         v2_csid = "v2-no-sentinel-892"
@@ -17197,7 +17192,7 @@ class TestParseAnySentinelFromTranscript:
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-layer1-wins"
-        project_dir = self._project_dir(home, worktree)
+        project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
 
         # csid transcript has sentinel (plan_pending_approval)
@@ -17231,7 +17226,7 @@ class TestParseAnySentinelFromTranscript:
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-no-csid"
-        project_dir = self._project_dir(home, worktree)
+        project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
 
         v1_path = project_dir / f"{self._SURFACE_REF}-original.jsonl"
