@@ -99,7 +99,7 @@ def resolve_executor(
     if config.backend == CODEX_BACKEND:
         return CodexExecutor(config=config)
     if config.backend == CLAUDE_NATIVE_BACKEND:
-        return ClaudeNativeExecutor(native_daemon=native_daemon)
+        return ClaudeNativeExecutor(config=config, native_daemon=native_daemon)
     msg = f"unknown executor backend: {config.backend!r}"
     raise ValueError(msg)
 
@@ -134,7 +134,13 @@ class ClaudeNativeExecutor:
     # stage_sentinel_schema bridges to AutoDevResult until A3 per-stage schemas.
     """
 
-    def __init__(self, *, native_daemon: NativeDaemonClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        config: StageExecutorConfig,
+        native_daemon: NativeDaemonClient | None = None,
+    ) -> None:
+        self._config = config
         self._native_daemon = native_daemon
 
     def spawn(
@@ -147,8 +153,7 @@ class ClaudeNativeExecutor:
         wall_clock_budget_seconds: int | None = None,
         parent: str | None = None,
     ) -> str:
-        stage_config = resolve_executor_config(stage, task, client)
-        effective_model = stage_config.model or client.worker_model
+        effective_model = self._config.model or client.worker_model
         effective_client = client.model_copy(update={"worker_model": effective_model})
         return spawn_create_impl(
             client=effective_client,
