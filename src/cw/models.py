@@ -374,6 +374,7 @@ class ReapPolicy(StrEnum):
 
 CLAUDE_NATIVE_BACKEND: str = "claude-native"
 LOCAL_BACKEND: str = "local"
+CODEX_BACKEND: str = "codex"
 
 
 class StageExecutorConfig(BaseModel):
