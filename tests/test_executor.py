@@ -552,7 +552,7 @@ def test_local_executor_blocked_aider_not_found(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """shutil.which('aider') is None → blocked/aider_not_found."""
+    """aider_available() is False → blocked/aider_not_found."""
     worktree = make_git_repo("wt-local-aider-missing")
     fake_runner = FakeAiderRunner(returncode=0)
     config = StageExecutorConfig(
@@ -562,7 +562,7 @@ def test_local_executor_blocked_aider_not_found(
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
 
-    with patch("cw.executor.shutil.which", return_value=None):
+    with patch("cw.executor.aider_available", return_value=False):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     assert len(fake_runner.calls) == 0
@@ -591,7 +591,7 @@ def test_local_executor_blocked_plan_missing(
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
 
-    with patch("cw.executor.shutil.which", return_value="/usr/bin/aider"):
+    with patch("cw.executor.aider_available", return_value=True):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     assert len(fake_runner.calls) == 0
@@ -623,7 +623,7 @@ def test_local_executor_spawn_runner_path(
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-99", client="test", stage=Stage.IMPL)
 
-    with patch("cw.executor.shutil.which", return_value="/usr/bin/aider"):
+    with patch("cw.executor.aider_available", return_value=True):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     assert len(fake_runner.calls) == 1
@@ -691,7 +691,7 @@ def test_local_executor_stage_complete(
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-100", client="test", stage=Stage.IMPL)
 
-    with patch("cw.executor.shutil.which", return_value="/usr/bin/aider"):
+    with patch("cw.executor.aider_available", return_value=True):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     state = load_state()
@@ -725,7 +725,7 @@ def test_local_executor_exception_handler_marks_session_completed(
     task = TicketTask(ticket_id="T-exc", client="test", stage=Stage.IMPL)
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/aider"),
+        patch("cw.executor.aider_available", return_value=True),
         patch("cw.executor.synthesize_result", side_effect=RuntimeError("git boom")),
         pytest.raises(RuntimeError, match="git boom"),
     ):
@@ -776,7 +776,7 @@ def test_local_executor_fetches_plan_from_tracker_when_absent(
     task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/aider"),
+        patch("cw.executor.aider_available", return_value=True),
         patch(
             "cw.executor.GithubIssuePlanFetcher.fetch",
             return_value=plan_body,
@@ -806,7 +806,7 @@ def test_local_executor_plan_missing_when_tracker_returns_none(
     task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/aider"),
+        patch("cw.executor.aider_available", return_value=True),
         patch("cw.executor.GithubIssuePlanFetcher.fetch", return_value=None),
     ):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
@@ -839,7 +839,7 @@ def test_local_executor_no_tracker_no_plan_is_plan_missing(
     client = ClientConfig(name="test", workspace_path=workspace)
     task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
-    with patch("cw.executor.shutil.which", return_value="/usr/bin/aider"):
+    with patch("cw.executor.aider_available", return_value=True):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     assert len(fake_runner.calls) == 0
@@ -885,7 +885,7 @@ def test_local_executor_sets_plan_source_github_issue_existing(
     task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
     with (
-        patch("cw.executor.shutil.which", return_value="/usr/bin/aider"),
+        patch("cw.executor.aider_available", return_value=True),
         patch("cw.executor.GithubIssuePlanFetcher.fetch", return_value=plan_body),
         patch("cw.executor.synthesize_result", side_effect=_fake_synthesize),
     ):
