@@ -3685,6 +3685,7 @@ class TestShowStatusFreshness:
         """No freshness section when skip_reason is not freshness_gate."""
         from datetime import UTC, datetime
 
+        from cw.models import DispatchSkipReason
         from cw.orchestrate import TickSummary
 
         tick = TickSummary(
@@ -3692,7 +3693,7 @@ class TestShowStatusFreshness:
             pending=0,
             running=1,
             cap=2,
-            skip_reason="no_pending",
+            skip_reason=DispatchSkipReason.NO_PENDING,
             tick_at=datetime.now(UTC),
         )
         monkeypatch.setattr(
