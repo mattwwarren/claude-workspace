@@ -19,7 +19,7 @@ from cw.doctor import (
 )
 from cw.exceptions import CwError
 from cw.executor import ClaudeNativeExecutor
-from cw.models import Stage
+from cw.models import Stage, StageExecutorConfig
 from cw.onboarding import (
     CW_ALLOWLIST_ENTRY,
     install_claude_md_snippet,
@@ -319,7 +319,7 @@ def schema_stage_output(stage: str) -> None:
         valid = ", ".join(s.value for s in Stage)
         msg = f"Unknown stage {stage!r}. Valid stages: {valid}"
         raise click.UsageError(msg) from exc
-    executor = ClaudeNativeExecutor()
+    executor = ClaudeNativeExecutor(config=StageExecutorConfig())
     schema_dict = executor.stage_sentinel_schema(stage_enum)
     click.echo(json.dumps(schema_dict, indent=2))
 

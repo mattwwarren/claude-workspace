@@ -64,7 +64,9 @@ def test_spawn_no_model(
     worktree = make_git_repo("wt-no-model")
     client = _make_client(worktree, worker_model=None)
     task = TicketTask(ticket_id="T-1", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
 
     executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
@@ -82,7 +84,9 @@ def test_spawn_client_worker_model(
     worktree = make_git_repo("wt-client-model")
     client = _make_client(worktree, worker_model="sonnet")
     task = TicketTask(ticket_id="T-1", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
 
     executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
@@ -111,7 +115,8 @@ def test_spawn_stage_model_wins(
         ),
     )
     task = TicketTask(ticket_id="T-1", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    config = resolve_executor_config(Stage.IMPL, task, client)
+    executor = ClaudeNativeExecutor(config=config, native_daemon=mock_native_daemon)
 
     executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
@@ -126,7 +131,7 @@ def test_stage_sentinel_schema(
     tmp_config_dir: Path,
 ) -> None:
     """stage_sentinel_schema returns AutoDevResult.model_json_schema()."""
-    executor = ClaudeNativeExecutor()
+    executor = ClaudeNativeExecutor(config=StageExecutorConfig())
     schema = executor.stage_sentinel_schema(Stage.IMPL)
     assert schema == AutoDevResult.model_json_schema()
 
@@ -134,8 +139,8 @@ def test_stage_sentinel_schema(
 def test_isinstance_check(
     tmp_config_dir: Path,
 ) -> None:
-    """isinstance(ClaudeNativeExecutor(), StageExecutor) is True."""
-    assert isinstance(ClaudeNativeExecutor(), StageExecutor)
+    """isinstance(ClaudeNativeExecutor(config=...), StageExecutor) is True."""
+    assert isinstance(ClaudeNativeExecutor(config=StageExecutorConfig()), StageExecutor)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +157,9 @@ def test_spawn_prompt_format(
     worktree = make_git_repo("wt-prompt")
     client = _make_client(worktree)
     task = TicketTask(ticket_id="T-42", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
 
     executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
 
@@ -176,7 +183,9 @@ def test_spawn_label_no_stage_suffix(
     worktree = make_git_repo("wt-label")
     client = _make_client(worktree)
     task = TicketTask(ticket_id="T-42", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
 
     executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
@@ -211,7 +220,9 @@ def test_spawn_prompt_per_stage(
     worktree = make_git_repo(f"wt-{stage.value}")
     client = _make_client(worktree)
     task = TicketTask(ticket_id="T-1", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
 
     executor.spawn(stage=stage, task=task, worktree=worktree, client=client)
 
@@ -229,7 +240,9 @@ def test_spawn_wall_clock_budget_forwarded(
     worktree = make_git_repo("wt-budget")
     client = _make_client(worktree)
     task = TicketTask(ticket_id="T-1", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
 
     # If wall_clock_budget_seconds is forwarded, spawn_create_impl writes
     # it into cw-context.json. We just verify no error and spawn called.
@@ -253,7 +266,9 @@ def test_spawn_parent_forwarded(
     worktree = make_git_repo("wt-parent")
     client = _make_client(worktree)
     task = TicketTask(ticket_id="T-1", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
 
     # parent=None is valid (no parent session validation when None)
     executor.spawn(
@@ -461,7 +476,8 @@ def test_e2_heterogeneous_models_per_stage(
         ),
     )
     task = TicketTask(ticket_id="T-1", client="test")
-    executor = ClaudeNativeExecutor(native_daemon=mock_native_daemon)
+    config = resolve_executor_config(stage, task, client)
+    executor = ClaudeNativeExecutor(config=config, native_daemon=mock_native_daemon)
 
     executor.spawn(stage=stage, task=task, worktree=worktree, client=client)
 
