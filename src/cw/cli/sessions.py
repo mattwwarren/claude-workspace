@@ -22,6 +22,7 @@ from cw._util import _iter_assistant_text_blocks, claude_project_dir
 from cw.cli._base import (
     _complete_client,
     _complete_session,
+    _emit_freshness_subline,
     _relative_time,
     handle_errors,
     main,
@@ -46,6 +47,7 @@ from cw.models import (
     WORKER_PURPOSES,
     CompletionReason,
     CwState,
+    DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -54,6 +56,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.orchestrate import latest_tick_summary_by_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
     reconcile,
@@ -276,6 +279,22 @@ def _display_status() -> None:
     click.echo(f"Idle sessions:      {len(idled)}")
     click.echo(f"Backgrounded:       {len(backgrounded)}")
     click.echo()
+
+    tick_data = latest_tick_summary_by_client()
+    gated = {
+        client_name: tick
+        for client_name, tick in tick_data.items()
+        if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE
+    }
+    if gated:
+        click.echo("Freshness gates (action required):")
+        for client_name, tick in gated.items():
+            _emit_freshness_subline(
+                client_name,
+                tick.freshness_detail,
+                tick.blocked_branch,
+                tick.pending,
+            )
 
     if active:
         click.echo("Active:")
