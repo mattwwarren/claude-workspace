@@ -310,12 +310,6 @@ _ENV_ALLOWLIST: frozenset[str] = frozenset(
         "GIT_ASKPASS",
         "SSH_AUTH_SOCK",
         "SSH_AGENT_PID",
-        # aider's own env vars
-        "AIDER_MODEL",
-        "AIDER_WEAK_MODEL",
-        "AIDER_EDITOR_MODEL",
-        "AIDER_VERBOSE",
-        "AIDER_NO_AUTO_COMMITS",
     }
 )
 
@@ -330,7 +324,7 @@ def build_env(endpoint: str) -> dict[str, str]:
     value, so "local" is the documented fallback.
     """
     env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
-    # Also pass through any AIDER_* vars not individually listed
+    # Forward all AIDER_* vars (dynamic; not enumerated in the static allowlist)
     env.update({k: v for k, v in os.environ.items() if k.startswith("AIDER_")})
     env["OPENAI_API_BASE"] = endpoint
     env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "local")
