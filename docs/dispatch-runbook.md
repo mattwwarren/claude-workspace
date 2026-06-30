@@ -303,6 +303,17 @@ tickets that require human judgment at the planning stage.
 
 ### 9.1 Symptom checklist
 
+> **First diagnostic when the dispatcher is up but nothing dispatches.** If
+> `serve`/`run` is alive yet tickets sit `pending` with free slots, check
+> `cw dev-queue status` skip_reason **before** suspecting the monitor, the
+> daemon roster, or lane caps. A healthy dispatcher that emits a fresh
+> per-client tick snapshot (not `[STALE …]`) but claims nothing is almost
+> always gated, not hung. The freshness WARN is emitted **once per ticket**
+> to the `serve` stdout (invisible under `--quiet` + background redirect) and
+> then de-duplicated to silence — so a persistent block leaves no live trace
+> except the `skip_reason` in `cw dev-queue status`. Do not "restart the
+> monitor" reflexively; read the skip_reason first. (See #908.)
+
 `cw dev-queue status` shows `pending > 0` but `claimed = 0` across multiple
 ticks. The per-client footer reads something like:
 
@@ -312,7 +323,11 @@ skip_reason=freshness_gate  claimed=0  running=0
 
 This means `dispatch_tick` is refusing to claim tickets because the local
 `main` branch of the client repo is not clean/current relative to
-`origin/main`. Two root causes — check in order.
+`origin/main`. The gate auto-fast-forwards a **pure-behind** main and clears
+itself; it does **not** auto-resolve `ahead`/`diverged`/dirty/non-main-HEAD —
+those block indefinitely until reconciled by hand. Three root causes — check
+in order (§9.2 dirty checkout, §9.3 worker-diverged, §9.3b release/merge
+artifacts).
 
 ---
 
@@ -404,6 +419,52 @@ loop after the reset.
 
 Related issues: #766 (root cause), #786 (usage-limit re-spawn churn that
 amplifies leak frequency), #787 (diff-cover skipped pre-PR).
+
+---
+
+### 9.3b Release/merge-artifact divergence (not a worker leak)
+
+**What happened.** `main` is `diverged` (ahead AND behind) but **no worker
+leaked** — the local ahead-commits are release-tooling or merge artifacts: a
+local `chore(release): vX.Y.Z` that was superseded by the squash-merged
+release PR on origin, plus stray `Merge branch 'main'` commits. There is **no
+`origin/dev/<ticket>` to diff against** (the §9.3 test does not apply), so the
+worker-leak diagnosis dead-ends here.
+
+**Diagnose.** Confirm the local ahead-commits introduce **no net-new content**
+versus origin — i.e. all real work is already on `origin/main`:
+
+```bash
+# What origin has that local lacks (the real work you must NOT discard):
+git -C <client-repo> log --oneline HEAD..origin/main
+
+# What local adds over origin — should be only release/merge artifacts:
+git -C <client-repo> log --oneline origin/main..HEAD
+
+# The content delta local adds over origin. For a safe reset this should show
+# ONLY version-bump/changelog churn (or be empty) — never unique feature work:
+git -C <client-repo> diff origin/main..HEAD
+```
+
+If the only delta is release/changelog churn (or the diff shows local merely
+*missing* origin's newer commits), the ahead-commits are droppable.
+
+**Fix.** Same destructive reset as §9.3 — **explicit operator approval
+required; auto-mode classifiers will (correctly) block `reset --hard`, so the
+operator runs it by hand**:
+
+```bash
+# Explicit approval required
+git -C <client-repo> reset --hard origin/main
+git -C <client-repo> rev-list --left-right --count HEAD...origin/main   # → 0  0
+```
+
+**Then RESTART `serve`** so the editable install reloads the now-current `main`
+(Python won't hot-reload), and verify a representative merged symbol imports.
+Re-running PRs that auto-merge re-introduce a pure-*behind* state, which the
+gate auto-fast-forwards — keep local `main` ff-pulled between waves so it never
+re-accumulates an `ahead`/`diverged` state. (Recurs every release cycle; see
+#908 for surfacing the block proactively instead of relying on this runbook.)
 
 ---
 
