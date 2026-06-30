@@ -3640,6 +3640,73 @@ class TestShowStatus:
         assert updated.sessions[0].status == SessionStatus.COMPLETED
 
 
+class TestShowStatusFreshness:
+    def test_status_shows_freshness_gate_for_gated_client(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """cw status surfaces freshness-gated client with operator hint."""
+        from datetime import UTC, datetime
+
+        from cw.dispatch import FRESHNESS_MAIN_DIVERGED
+        from cw.models import DispatchSkipReason
+        from cw.orchestrate import TickSummary
+
+        tick = TickSummary(
+            claimed=0,
+            pending=3,
+            running=0,
+            cap=2,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=datetime.now(UTC),
+            freshness_detail=FRESHNESS_MAIN_DIVERGED,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.sessions.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+
+        _display_status()
+
+        output = capsys.readouterr().out
+        assert "Freshness gates (action required):" in output
+        assert "my-client" in output
+        assert "pull --rebase" in output
+
+    def test_status_omits_freshness_section_when_no_gated_clients(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """No freshness section when skip_reason is not freshness_gate."""
+        from datetime import UTC, datetime
+
+        from cw.orchestrate import TickSummary
+
+        tick = TickSummary(
+            claimed=1,
+            pending=0,
+            running=1,
+            cap=2,
+            skip_reason="no_pending",
+            tick_at=datetime.now(UTC),
+        )
+        monkeypatch.setattr(
+            "cw.cli.sessions.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+
+        _display_status()
+
+        output = capsys.readouterr().out
+        assert "Freshness gates (action required):" not in output
+        assert "freshness_gate" not in output
+
+
 class TestBgNotifyCli:
     def test_bg_with_notify(self) -> None:
         runner = CliRunner()
