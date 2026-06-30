@@ -6,6 +6,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-06-30
+
+The **local-model validation** sprint (RFC 0005 executors): the exit bar was
+met — a debt-tier ticket (#889) walked `plan(claude) → impl(local/qwen) →
+review(claude) → merged PR` on a lane pinned to the local backend. Alongside
+the validation, this release hardens dispatch reliability (merge_pending,
+review-gate harvest), adds a Codex review-only runner seam, tightens the aider
+subprocess environment, and makes a silently dispatch-blocked client visible in
+`cw status`.
+
+### Added
+
+- **Codex review-only runner seam** (#627, #904): `CodexRunResult` +
+  `CodexRunner` + `FakeCodexRunner` — the foundation for a review-stage
+  executor backed by the hosted Codex CLI, parallel to `LocalExecutor`.
+- **`merge_pending` status** (#899, #901, #903): a PR-created-but-awaiting-CI
+  run is coerced at the parse boundary (`status=blocked` + non-null `pr` →
+  `merge_pending`) and routed to `BLOCKED_ON_USER` with its PR URL preserved,
+  instead of being recorded `failed`.
+- **Freshness-gate surfacing in `cw status`** (#908, #910): the headline
+  `cw status` now shows a "Freshness gates (action required):" section listing
+  each dispatch-blocked client with the reconcile hint, so a silently gated
+  client is visible without parsing `cw dev-queue status`.
+
+### Changed
+
+- **Constructor-inject `StageExecutorConfig` into `ClaudeNativeExecutor`**
+  (#887, #905): closes the E1 double-resolution — the executor receives its
+  resolved config instead of re-resolving it.
+
+### Fixed
+
+- **Review-gate sentinel harvest** (#892, #907): `_parse_any_sentinel_from_transcript`
+  now falls back to the surface_ref transcript when the csid transcript yields
+  no sentinel, so a `review_pending_approval` emitted by a still-alive worker is
+  harvested instead of being recorded `needs_salvage` (which had blocked
+  `cw dev-queue approve`).
+- **Pipeline model defaults + recommended-defaults docs** (#900).
+
+### Security
+
+- **aider subprocess environment allowlist** (#891, #906): `build_env()` now
+  forwards only an allowlisted set of environment variables to the aider
+  subprocess instead of the entire parent environment (which included secrets);
+  adds an `aider_available()` seam.
+
+### Documentation
+
+- **Dispatch runbook — freshness-gate diagnosis** (#908, #909): §9.1 gains a
+  symptom-first rule ("dispatcher up but nothing dispatching → check
+  `skip_reason` before suspecting the monitor"), and §9.3b documents
+  diverged-main caused by release/merge artifacts rather than a worker leak.
+
 ## [1.6.0] — 2026-06-29
 
 The **executor infrastructure** sprint (RFC 0005): `cw` gains a pluggable
