@@ -17049,3 +17049,194 @@ def test_idle_queue_mutations_salvage_stamps_disposition(
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-salv-disp-1")
     assert t.status == QueueItemStatus.COMPLETED
     assert t.disposition == "shipped"
+
+
+# ---------------------------------------------------------------------------
+# _parse_any_sentinel_from_transcript — two-layer fallthrough (#892)
+# ---------------------------------------------------------------------------
+
+
+class TestParseAnySentinelFromTranscript:
+    """Two-layer transcript search: csid-exact (Layer 1) then surface_ref (Layer 2).
+
+    Regression for GitHub #892: a REVIEW worker that emits review_pending_approval
+    and then spawns fanout subagents gets a new csid (V2) backfilled from the
+    daemon roster.  The sentinel lives in the pre-resume V1 transcript; Layer 2
+    must fall through to find it when V1 does not match the csid-exact path.
+    """
+
+    _SURFACE_REF = "surf1234"
+    _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    def _write_sentinel_transcript(
+        self, path: Path, status: str, ticket_id: str
+    ) -> None:
+        """Write a minimal sentinel-bearing JSONL to path."""
+        payload = _make_terminal_payload(status, ticket_id)
+        body = json.dumps(payload)
+        frame = f"<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": frame}],
+            },
+        }
+        path.write_text(json.dumps(record) + "\n")
+
+    def _write_no_sentinel_transcript(self, path: Path) -> None:
+        """Write a JSONL with no sentinel framing."""
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "narrative only, no sentinel"}],
+            },
+        }
+        path.write_text(json.dumps(record) + "\n")
+
+    def _mk_session(self, worktree: Path, csid: str | None = None) -> Session:
+        return Session(
+            id="892-sess",
+            name="client-a/auto-dev/892",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=worktree,
+            surface_ref=self._SURFACE_REF,
+            claude_session_id=csid,
+            started_at=self._STARTED_AT,
+        )
+
+    def test_v2_csid_no_sentinel_v1_surface_ref_has_sentinel_returns_v1(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Layer 2 fallthrough: csid transcript found but no sentinel; surface_ref
+        transcript (distinct file) carries review_pending_approval → returned.
+
+        Regression for #892: REVIEW worker emits sentinel in V1, then spawns
+        subagents.  Backfill sets claude_session_id to V2 (resumed session).
+        V2 transcript has no sentinel.  Layer 2 must find and return V1.
+        """
+        from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-892-layer2"
+        project_dir = claude_project_dir(worktree)
+        project_dir.mkdir(parents=True)
+
+        # V2: csid transcript (distinct csid — does not match surface_ref glob)
+        v2_csid = "v2-resumed-csid-892"
+        v2_path = project_dir / f"{v2_csid}.jsonl"
+        self._write_no_sentinel_transcript(v2_path)
+
+        # V1: surface_ref transcript (matches "surf1234*.jsonl" glob, has sentinel)
+        v1_path = project_dir / f"{self._SURFACE_REF}-v1original.jsonl"
+        self._write_sentinel_transcript(v1_path, "review_pending_approval", "892")
+
+        sess = self._mk_session(worktree, csid=v2_csid)
+        result = _parse_any_sentinel_from_transcript(sess)
+
+        assert result is not None
+        parsed, csid_stem = result
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.status == "review_pending_approval"
+        assert csid_stem == f"{self._SURFACE_REF}-v1original"
+
+    def test_neither_transcript_has_sentinel_returns_none(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both csid transcript and surface_ref transcript lack a sentinel → None."""
+        from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-892-none"
+        project_dir = claude_project_dir(worktree)
+        project_dir.mkdir(parents=True)
+
+        v2_csid = "v2-no-sentinel-892"
+        v2_path = project_dir / f"{v2_csid}.jsonl"
+        self._write_no_sentinel_transcript(v2_path)
+
+        v1_path = project_dir / f"{self._SURFACE_REF}-v1-also-none.jsonl"
+        self._write_no_sentinel_transcript(v1_path)
+
+        sess = self._mk_session(worktree, csid=v2_csid)
+        result = _parse_any_sentinel_from_transcript(sess)
+
+        assert result is None
+
+    def test_csid_transcript_with_sentinel_wins_over_surface_ref(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: when csid transcript has a sentinel, Layer 1 returns it
+        immediately without consulting surface_ref (Layer 2 never fires)."""
+        from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-892-layer1-wins"
+        project_dir = claude_project_dir(worktree)
+        project_dir.mkdir(parents=True)
+
+        # csid transcript has sentinel (plan_pending_approval)
+        v2_csid = "v2-has-sentinel-892"
+        v2_path = project_dir / f"{v2_csid}.jsonl"
+        self._write_sentinel_transcript(v2_path, "plan_pending_approval", "892-plan")
+
+        # surface_ref transcript also has a sentinel (review_pending) — should NOT win
+        v1_path = project_dir / f"{self._SURFACE_REF}-v1-review.jsonl"
+        self._write_sentinel_transcript(v1_path, "review_pending_approval", "892")
+
+        sess = self._mk_session(worktree, csid=v2_csid)
+        result = _parse_any_sentinel_from_transcript(sess)
+
+        assert result is not None
+        parsed, csid_stem = result
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.status == "plan_pending_approval"
+        assert csid_stem == v2_csid
+
+    def test_csid_absent_surface_ref_only_returns_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No csid set — existing csid=None path still works via Layer 2 only."""
+        from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-892-no-csid"
+        project_dir = claude_project_dir(worktree)
+        project_dir.mkdir(parents=True)
+
+        v1_path = project_dir / f"{self._SURFACE_REF}-original.jsonl"
+        self._write_sentinel_transcript(v1_path, "plan_pending_approval", "892-plan")
+
+        sess = self._mk_session(worktree, csid=None)
+        result = _parse_any_sentinel_from_transcript(sess)
+
+        assert result is not None
+        parsed, csid_stem = result
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.status == "plan_pending_approval"
+        assert csid_stem == f"{self._SURFACE_REF}-original"
