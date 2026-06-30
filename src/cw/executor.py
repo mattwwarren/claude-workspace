@@ -28,6 +28,7 @@ from cw.local_runner import (
     GithubIssuePlanFetcher,
     PlanFetcher,
     RealAiderRunner,
+    aider_available,
     build_argv,
     build_env,
     build_task_message,
@@ -239,7 +240,7 @@ class LocalExecutor:
                 worktree=worktree,
                 reason=ENDPOINT_NOT_CONFIGURED,
             )
-        elif shutil.which("aider") is None:
+        elif not aider_available():
             result = make_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,

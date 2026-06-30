@@ -22,6 +22,7 @@ from cw.local_runner import (
     FakePlanFetcher,
     RealAiderRunner,
     _blocked_scope,
+    aider_available,
     build_argv,
     build_env,
     build_task_message,
@@ -166,6 +167,99 @@ def test_build_env_sets_api_key_fallback() -> None:
         with patch.dict(os.environ, env_without_key, clear=True):
             env = build_env("http://localhost:1234/v1")
     assert env.get("OPENAI_API_KEY") == "local"
+
+
+def test_build_env_does_not_forward_secrets() -> None:
+    """build_env excludes operator shell secrets via the allowlist."""
+    with patch.dict(
+        os.environ,
+        {"AWS_SECRET_ACCESS_KEY": "shhh", "GITHUB_TOKEN": "ghp_xxx"},
+        clear=False,
+    ):
+        env = build_env("http://localhost:1234/v1")
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+
+
+def test_build_env_forwards_aider_vars() -> None:
+    """build_env forwards AIDER_* vars into the subprocess env."""
+    with patch.dict(
+        os.environ,
+        {"AIDER_MODEL": "gpt-4o", "AIDER_SOMETHING_NEW": "1"},
+        clear=False,
+    ):
+        env = build_env("http://localhost:1234/v1")
+    assert env["AIDER_MODEL"] == "gpt-4o"
+    assert env["AIDER_SOMETHING_NEW"] == "1"
+
+
+def test_build_env_always_sets_openai_keys() -> None:
+    """build_env always sets OPENAI_API_BASE and OPENAI_API_KEY."""
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "real-key"}, clear=False):
+        env = build_env("http://localhost:1234/v1")
+    assert env["OPENAI_API_BASE"] == "http://localhost:1234/v1"
+    assert env["OPENAI_API_KEY"] == "real-key"
+
+
+def test_build_env_forwards_git_identity() -> None:
+    """build_env forwards git identity vars required for aider commits."""
+    with patch.dict(
+        os.environ,
+        {
+            "GIT_AUTHOR_NAME": "Alice",
+            "GIT_AUTHOR_EMAIL": "alice@example.com",
+            "GIT_COMMITTER_NAME": "Alice",
+            "GIT_COMMITTER_EMAIL": "alice@example.com",
+        },
+        clear=False,
+    ):
+        env = build_env("http://localhost:1234/v1")
+    assert env["GIT_AUTHOR_NAME"] == "Alice"
+    assert env["GIT_AUTHOR_EMAIL"] == "alice@example.com"
+    assert env["GIT_COMMITTER_NAME"] == "Alice"
+    assert env["GIT_COMMITTER_EMAIL"] == "alice@example.com"
+
+
+def test_build_env_output_bounded_to_allowlist() -> None:
+    """build_env output contains no keys outside allowlist + AIDER_* + OPENAI_*."""
+    from cw.local_runner import _ENV_ALLOWLIST
+
+    controlled_env = {
+        "HOME": "/home/user",
+        "PATH": "/usr/bin",
+        "AIDER_MODEL": "gpt-4o",
+        "AWS_SECRET_ACCESS_KEY": "shhh",
+        "SLACK_BOT_TOKEN": "xoxb-xxx",
+        "NPM_TOKEN": "npm_xxx",
+        "GITHUB_TOKEN": "ghp_xxx",
+    }
+    with patch.dict(os.environ, controlled_env, clear=True):
+        env = build_env("http://localhost:1234/v1")
+    unexpected = {
+        k
+        for k in env
+        if k not in _ENV_ALLOWLIST
+        and not k.startswith("AIDER_")
+        and k not in {"OPENAI_API_BASE", "OPENAI_API_KEY"}
+    }
+    assert not unexpected, f"Unexpected keys leaked into subprocess env: {unexpected}"
+
+
+# ---------------------------------------------------------------------------
+# aider_available
+# ---------------------------------------------------------------------------
+
+
+def test_aider_available_true_when_on_path() -> None:
+    """aider_available returns True when the binary is on PATH."""
+    with patch("cw.local_runner.shutil.which", return_value="/usr/bin/aider"):
+        assert aider_available() is True
+
+
+def test_aider_available_false_when_not_on_path() -> None:
+    """aider_available returns False when the binary is absent."""
+    with patch("cw.local_runner.shutil.which", return_value=None):
+        assert aider_available() is False
 
 
 # ---------------------------------------------------------------------------

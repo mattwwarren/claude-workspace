@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import shutil
 import subprocess
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
 
@@ -63,6 +64,11 @@ _FIXED_HEALTH = Health(
 )
 _FIXED_REVIEW = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
 _FIXED_NEXT_ACTIONS: list[str] = ["user_resolve_local_executor_failure"]
+
+
+def aider_available() -> bool:
+    """Return True if the aider binary is on PATH."""
+    return shutil.which("aider") is not None
 
 
 @dataclasses.dataclass
@@ -280,17 +286,49 @@ def build_argv(model: str, task_message: str) -> list[str]:
     ]
 
 
+# Git identity and core vars aider needs for commits. The subprocess receives
+# only these (plus AIDER_* and the OPENAI_* overrides) — operator shell secrets
+# (AWS_*, tokens, etc.) are excluded by default.
+_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "HOME",
+        "PATH",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        # Git identity — required for aider to commit
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_ASKPASS",
+        "SSH_AUTH_SOCK",
+        "SSH_AGENT_PID",
+    }
+)
+
+
 def build_env(endpoint: str) -> dict[str, str]:
     """Return the subprocess env dict for aider pointing at a local endpoint.
+
+    Passes only an explicit allowlist of env vars plus OPENAI_* overrides.
+    All operator shell secrets (AWS_*, tokens, etc.) are excluded by default.
 
     OPENAI_API_KEY must be set or aider refuses to start; LM Studio ignores its
     value, so "local" is the documented fallback.
     """
-    return {
-        **os.environ,
-        "OPENAI_API_BASE": endpoint,
-        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", "local"),
-    }
+    env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+    # Forward all AIDER_* vars (dynamic; not enumerated in the static allowlist)
+    env.update({k: v for k, v in os.environ.items() if k.startswith("AIDER_")})
+    env["OPENAI_API_BASE"] = endpoint
+    env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "local")
+    return env
 
 
 class _GitFacts(TypedDict):
