@@ -604,19 +604,57 @@ def _parse_any_sentinel_from_transcript(
     framing is present (the no-frame case ``parse_stdout`` reports as
     BLOCKER_REASON_NO_RESULT_EMITTED).
 
+    Uses a two-layer transcript search (mirrors queue_peek's locate logic):
+
+    - Layer 1: csid-exact transcript (``<project_dir>/<csid>.jsonl``).  Returned
+      immediately when a sentinel is found, so the csid transcript always wins
+      when it contains the result.
+    - Layer 2: surface_ref newest-only transcript (``<surface_ref>*.jsonl``).
+      Fires when the csid transcript is absent **or** contains no sentinel — the
+      latter catches the case where a REVIEW worker emitted the sentinel before
+      spawning fanout subagents (the sentinel lives in the pre-resume V1 transcript
+      while backfill has already updated ``claude_session_id`` to the resumed V2
+      session that has no sentinel).  Skipped when Layer 2 would return the same
+      path already tried in Layer 1.
+
     Used by the ROUTE_EMITTED_SENTINEL detection path for sessions where the
-    sentinel was emitted but the Stop hook never fired.  See GitHub #578, #731.
+    sentinel was emitted but the Stop hook never fired.  See GitHub #578, #731,
+    #892.
     """
-    transcript = _locate_session_transcript(session)
-    if transcript is None:
-        return None
-    result = _parse_sentinel_from_blocks(transcript)
-    if result is None or (
-        isinstance(result, BlockedResult)
-        and result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
-    ):
-        return None
-    return result, transcript.stem
+
+    def _try(path: Path) -> tuple[AutoDevResult | BlockedResult, str] | None:
+        result = _parse_sentinel_from_blocks(path)
+        if result is None or (
+            isinstance(result, BlockedResult)
+            and result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+        ):
+            return None
+        return result, path.stem
+
+    project_dir = _session_project_dir(session)
+
+    # Layer 1: csid-exact (does NOT fall through to surface_ref)
+    csid_transcript: Path | None = None
+    if session.claude_session_id is not None and project_dir is not None:
+        csid_transcript = locate_transcript(
+            project_dir=project_dir,
+            claude_session_id=session.claude_session_id,
+            surface_ref=None,
+            started_at=session.started_at,
+        )
+        if csid_transcript is not None:
+            parsed = _try(csid_transcript)
+            if parsed is not None:
+                return parsed
+
+    # Layer 2: surface_ref newest-only — fires when csid transcript absent or
+    # contains no sentinel.  Skip when it resolves to the same path as Layer 1.
+    if session.surface_ref is not None and project_dir is not None:
+        surface_transcript = _newest_surface_ref_transcript(project_dir, session)
+        if surface_transcript is not None and surface_transcript != csid_transcript:
+            return _try(surface_transcript)
+
+    return None
 
 
 def _apply_sentinel_to_task(
