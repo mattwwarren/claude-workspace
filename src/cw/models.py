@@ -100,7 +100,8 @@ class Stage(StrEnum):
 # v8: added Session.reap_proposed_at (GitHub #555).
 # v9: added Session.lane (GitHub #594).
 # v10: added Session.stage (GitHub #612).
-CW_STATE_SCHEMA_VERSION = 10
+# v11: added Session.local_liveness (GitHub #888).
+CW_STATE_SCHEMA_VERSION = 11
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).

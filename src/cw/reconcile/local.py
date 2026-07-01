@@ -15,11 +15,17 @@ save_state, and event emission. See GitHub #888, ADR-0006.
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
 from cw.config import save_state
 from cw.events import record_event
-from cw.local_runner import read_process_start_time_ns, synthesize_git_result
+from cw.local_runner import (
+    UNEXPECTED_ERROR,
+    make_blocked,
+    read_process_start_time_ns,
+    synthesize_git_result,
+)
 from cw.models import (
     DEFAULT_LANE,
     CompletionReason,
@@ -136,12 +142,22 @@ def _act_on_local_harvest_candidates(
                 stage=session.stage or Stage.IMPL,
             )
 
-        sentinel = synthesize_git_result(
-            task=task,
-            worktree=candidate.worktree_path,
-            default_branch=default_branch,
-            plan_source="none",
-        )
+        try:
+            sentinel = synthesize_git_result(
+                task=task,
+                worktree=candidate.worktree_path,
+                default_branch=default_branch,
+                plan_source="none",
+            )
+        except (OSError, subprocess.CalledProcessError):
+            # A git failure on one candidate must not abort the entire harvest
+            # sweep. Record UNEXPECTED_ERROR so the task is advanced/reverted
+            # through the normal blocked path.
+            sentinel = make_blocked(
+                ticket_id=candidate.ticket_id or "",
+                worktree=candidate.worktree_path,
+                reason=UNEXPECTED_ERROR,
+            )
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
         if candidate.ticket_id:

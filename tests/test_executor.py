@@ -736,6 +736,58 @@ def test_local_executor_exception_handler_marks_session_completed(
     assert result.blocker.reason == UNEXPECTED_ERROR
 
 
+def test_local_executor_proc_stat_unreadable_marks_session_completed(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """read_process_start_time_ns returns None → session COMPLETED, no exception.
+
+    When /proc/<pid>/stat is unreadable immediately after launch (process exited
+    before exec or /proc transiently unavailable), storing start_time_ns=0 would
+    make every liveness check return False — triggering premature harvest while
+    aider is still running. Instead the orphan is killed and the session completes
+    synchronously with UNEXPECTED_ERROR so dispatch retries (no liveness handle
+    persisted, no exception propagated).
+    """
+    import contextlib
+
+    worktree = make_git_repo("wt-proc-unreadable")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
+
+    fake_runner = FakeAiderRunner()
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-proc", client="test", stage=Stage.IMPL)
+
+    with (
+        patch("cw.executor.aider_available", return_value=True),
+        patch("cw.executor.read_process_start_time_ns", return_value=None),
+    ):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    # FakeAiderRunner spawned a sleep process; the None path kills it but
+    # suppress in case it already exited.
+    for proc in fake_runner.procs:
+        with contextlib.suppress(OSError):
+            proc.kill()
+            proc.wait()
+
+    state = load_state()
+    session = next((s for s in state.sessions if s.last_result is not None), None)
+    assert session is not None
+    assert session.status == SessionStatus.COMPLETED
+    assert session.local_liveness is None  # no stale handle recorded
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+
+
 # ---------------------------------------------------------------------------
 # RFC 0005 F3 #896 — LocalExecutor fetches plan from GitHub tracker fallback
 # ---------------------------------------------------------------------------

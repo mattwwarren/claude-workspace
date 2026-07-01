@@ -309,20 +309,34 @@ class LocalExecutor:
                 env = build_env(self._config.endpoint or "")
                 proc = self._runner.launch(worktree, argv, env)
                 start_time_ns = read_process_start_time_ns(proc.pid)
-                with sessions_lock():
-                    state = load_state()
-                    target = next((s for s in state.sessions if s.id == sid), None)
-                    if target is not None:
-                        target.local_liveness = LocalLivenessHandle(
-                            pid=proc.pid,
-                            start_time_ns=start_time_ns
-                            if start_time_ns is not None
-                            else 0,
-                        )
-                        save_state(state)
-                return sid
+                if start_time_ns is not None:
+                    with sessions_lock():
+                        state = load_state()
+                        target = next((s for s in state.sessions if s.id == sid), None)
+                        if target is not None:
+                            target.local_liveness = LocalLivenessHandle(
+                                pid=proc.pid,
+                                start_time_ns=start_time_ns,
+                            )
+                            save_state(state)
+                    return sid
+                # /proc/<pid>/stat unreadable immediately after launch — process
+                # may have exited before exec or /proc is unavailable. Storing 0
+                # would make every liveness check return False, triggering
+                # premature harvest while aider is still running. Kill any orphan
+                # and fall through to the blocked completion path so the dispatch
+                # retry path requeues the task (no stale liveness handle stored).
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                    proc.wait()
+                result = make_blocked(
+                    ticket_id=task.ticket_id,
+                    worktree=worktree,
+                    reason=UNEXPECTED_ERROR,
+                )
 
-            # Pre-flight blocked: complete synchronously. Persist the blocked
+            # Pre-flight blocked OR proc stat unreadable: complete synchronously.
+            # Persist the blocked
             # result, mark COMPLETED, and emit SESSION_COMPLETED — no "stdout"
             # key so dispatch skips persist_last_result and uses last_result.
             with sessions_lock():
