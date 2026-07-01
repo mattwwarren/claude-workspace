@@ -9,9 +9,9 @@ a sentinel — cw synthesizes it from git state after aider commits.
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
@@ -42,8 +42,6 @@ ENDPOINT_NOT_CONFIGURED = "endpoint_not_configured"
 AIDER_NOT_FOUND = "aider_not_found"
 PLAN_MISSING = "plan_missing"
 AIDER_NO_OUTPUT = "aider_no_output"
-AIDER_ERROR = "aider_error"
-BUDGET_EXCEEDED = "budget_exceeded"
 UNEXPECTED_ERROR = "unexpected_error"
 
 # --- Shared fixed constants for ALL blocked paths ---
@@ -71,117 +69,100 @@ def aider_available() -> bool:
     return shutil.which("aider") is not None
 
 
-@dataclasses.dataclass
-class AiderRunResult:
-    """Outcome of a single aider subprocess invocation."""
-
-    returncode: int
-    stdout: str
-    stderr: str
-    timed_out: bool = False
-
-
 @runtime_checkable
 class AiderRunner(Protocol):
-    """Testability seam for the aider subprocess invocation."""
+    """Testability seam for the aider subprocess launch (RFC 0005 F3, #888)."""
 
-    def run(
+    def launch(
         self,
         worktree: Path,
         argv: list[str],
         env: dict[str, str],
-        timeout_seconds: int | None,
-    ) -> AiderRunResult:
-        """Spawn the aider process and return its outcome."""
+    ) -> subprocess.Popen[bytes]:
+        """Fire-and-forget spawn of the aider process; return the live Popen.
+
+        The caller does NOT wait — it captures the PID + start-time as a
+        liveness handle and returns immediately. reconcile/local harvest later
+        detects the dead process and synthesizes the git-based completion.
+        """
         ...
 
 
 class RealAiderRunner:
-    """Production implementation: spawns aider as a real subprocess."""
+    """Production implementation: launches aider as a detached subprocess."""
 
-    def run(
+    def launch(
         self,
         worktree: Path,
         argv: list[str],
         env: dict[str, str],
-        timeout_seconds: int | None,
-    ) -> AiderRunResult:
-        try:
-            proc = subprocess.Popen(
-                argv,
-                env=env,
-                cwd=worktree,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except FileNotFoundError:
-            return AiderRunResult(
-                returncode=127,
-                stdout="",
-                stderr=f"{argv[0]}: command not found",
-                timed_out=False,
-            )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            return AiderRunResult(returncode=-1, stdout="", stderr="", timed_out=True)
-        return AiderRunResult(
-            returncode=proc.returncode,
-            stdout=stdout,
-            # Bound stderr to avoid bloating the persisted state file.
-            stderr=stderr[-4000:],
-            timed_out=False,
+    ) -> subprocess.Popen[bytes]:
+        # DEVNULL (never PIPE): a fire-and-forget process whose output nobody
+        # reads would deadlock on a full pipe buffer with no reader draining it.
+        return subprocess.Popen(
+            argv,
+            env=env,
+            cwd=worktree,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
 
 class FakeAiderRunner:
-    """Test double: records invocation details; returns configurable results.
+    """Test double: records the launch call; returns a real live subprocess.
 
-    Mirrors FakeNativeDaemonClient in native_daemon.py.
+    Returns ``Popen(["sleep", "60"])`` rather than a fast-exiting process so the
+    caller's ``read_process_start_time_ns`` read of ``/proc/<pid>/stat`` does not
+    race a just-exited PID. Mirrors FakeNativeDaemonClient in native_daemon.py.
+    Spawned processes are tracked in ``self.procs`` so tests can kill them.
     """
 
-    def __init__(
-        self,
-        *,
-        returncode: int = 0,
-        stdout: str = "",
-        stderr: str = "",
-        timed_out: bool = False,
-        simulate_timeout: bool = False,
-    ) -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        self.timed_out = timed_out
-        self.simulate_timeout = simulate_timeout
+    def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.procs: list[subprocess.Popen[bytes]] = []
 
-    def run(
+    def launch(
         self,
         worktree: Path,
         argv: list[str],
         env: dict[str, str],
-        timeout_seconds: int | None,
-    ) -> AiderRunResult:
+    ) -> subprocess.Popen[bytes]:
         self.calls.append(
             {
                 "argv": list(argv),
                 "cwd": worktree,
                 "env": dict(env),
-                "timeout": timeout_seconds,
             }
         )
-        if self.simulate_timeout:
-            return AiderRunResult(returncode=-1, stdout="", stderr="", timed_out=True)
-        return AiderRunResult(
-            returncode=self.returncode,
-            stdout=self.stdout,
-            stderr=self.stderr,
-            timed_out=self.timed_out,
+        proc = subprocess.Popen(
+            ["sleep", "60"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
+        self.procs.append(proc)
+        return proc
+
+
+def read_process_start_time_ns(pid: int) -> int | None:
+    """Return the process start-time in ns since boot, or None if unreadable.
+
+    Reads field 22 (``starttime``, in clock ticks since boot) from
+    ``/proc/<pid>/stat`` and scales it to nanoseconds via ``SC_CLK_TCK``. Splits
+    on the LAST ``)`` so a process ``comm`` containing spaces or parentheses
+    (fields 2, parenthesised) does not shift the field index. Returns None when
+    the PID is gone or the stat line cannot be parsed — the caller treats None as
+    "process not alive". Linux-only; psutil is intentionally not a dependency.
+    """
+    try:
+        data = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        after_paren = data.rsplit(")", 1)[1]
+        fields = after_paren.split()
+        # Field 22 (1-indexed) is starttime; index 19 after splitting past ')'.
+        starttime_ticks = int(fields[19])
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        return starttime_ticks * 1_000_000_000 // clk_tck
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 @runtime_checkable
@@ -421,39 +402,23 @@ def make_blocked(
     )
 
 
-def synthesize_result(
+def synthesize_git_result(
     *,
     task: TicketTask,
     worktree: Path,
-    run_result: AiderRunResult,
     default_branch: str,
     plan_source: PlanSource = "none",
 ) -> AutoDevResult:
-    """Map an AiderRunResult + git state to a typed AutoDevResult.
+    """Map the worktree's git state to a typed AutoDevResult (RFC 0005 F3, #888).
 
-    Disposition table:
-    - timed_out              → BUDGET_EXCEEDED (blocked, retry_eligible)
-    - returncode != 0        → AIDER_ERROR (blocked, stderr tail in details)
-    - exit 0, commits found  → stage_complete (synthesized from git facts)
-    - exit 0, no commits     → AIDER_NO_OUTPUT (blocked, retry_eligible)
+    Called by reconcile/local harvest AFTER the fire-and-forget aider process
+    has exited. The local model never emits a sentinel — cw synthesizes it from
+    git facts alone (no aider exit code or stdout is available in the harvest
+    path):
+
+    - commits since fork point  → stage_complete (synthesized from git facts)
+    - no commits                → AIDER_NO_OUTPUT (blocked, retry_eligible)
     """
-    if run_result.timed_out:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=BUDGET_EXCEEDED,
-            retry_eligible=True,
-        )
-
-    if run_result.returncode != 0:
-        stderr_tail = run_result.stderr[-2000:] if run_result.stderr else ""
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=AIDER_ERROR,
-            details=stderr_tail,
-        )
-
     facts = _git_facts(worktree, default_branch)
 
     if not facts["commits"]:

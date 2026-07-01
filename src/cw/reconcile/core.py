@@ -38,6 +38,10 @@ from cw.reconcile._shared import (
     ticket_id_for_session,
 )
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
+from cw.reconcile.local import (
+    _act_on_local_harvest_candidates,
+    _detect_local_harvest_candidates,
+)
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
@@ -298,6 +302,20 @@ def _reconcile_locked(
         newly_proposed_ids=stalled_newly_proposed,
     )
 
+    # Harvest fire-and-forget LOCAL aider sessions whose process has exited
+    # (#888). Runs BEFORE the daemon query + outage guard: it depends only on
+    # /proc liveness, not `claude agents --json`, so it must fire even when the
+    # daemon roster is unavailable (a LOCAL session has no surface on the roster).
+    local_harvest_candidates = _detect_local_harvest_candidates(
+        state, task_by_ticket=shared_task_by_ticket
+    )
+    local_harvested = _act_on_local_harvest_candidates(
+        state,
+        local_harvest_candidates,
+        now=now,
+        task_by_ticket=shared_task_by_ticket,
+    )
+
     try:
         # `claude agents --json` returns sessionId as a full UUID
         # (e.g. "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"). cw's surface_ref
@@ -320,7 +338,9 @@ def _reconcile_locked(
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(
             reverted_ticket_ids=stalled_reverted,
-            completed_ticket_ids=merged_from_stalled,
+            completed_ticket_ids=list(
+                dict.fromkeys(merged_from_stalled + local_harvested)
+            ),
         ), []
     _backfill_claude_session_ids(state, surface_to_full)
     _verify_supervisor_session_id(state)
@@ -375,7 +395,7 @@ def _reconcile_locked(
         return ReconcileReport(
             reverted_ticket_ids=all_reverted,
             completed_ticket_ids=list(
-                dict.fromkeys(merged_from_stalled + merged_from_idle)
+                dict.fromkeys(merged_from_stalled + merged_from_idle + local_harvested)
             ),
             usage_limited=watchdog_usage_limited,
         ), salvage_git_candidates
@@ -422,7 +442,12 @@ def _reconcile_locked(
     )
 
     all_merged_completed = list(
-        dict.fromkeys(merged_from_stalled + merged_from_idle + merged_from_phantom)
+        dict.fromkeys(
+            merged_from_stalled
+            + merged_from_idle
+            + merged_from_phantom
+            + local_harvested
+        )
     )
     return (
         ReconcileReport(

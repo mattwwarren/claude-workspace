@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from cw.auto_dev_result import (
     AutoDevResult,
     Health,
-    PlanSource,
     Scope,
     StageReached,
 )
@@ -33,14 +32,15 @@ from cw.local_runner import (
     build_env,
     build_task_message,
     make_blocked,
+    read_process_start_time_ns,
     resolve_tier,
-    synthesize_result,
 )
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
     LOCAL_BACKEND,
     ClientConfig,
+    LocalLivenessHandle,
     OrchestratorEventType,
     Session,
     SessionOrigin,
@@ -107,7 +107,16 @@ def resolve_executor(
 
 @runtime_checkable
 class StageExecutor(Protocol):
-    """Protocol for executing a single pipeline stage (RFC 0005 A2)."""
+    """Protocol for executing a single pipeline stage (RFC 0005 A2).
+
+    # Invariant: a ``StageExecutor.spawn()`` that blocks the calling thread must
+    # not be on the shared ``dispatch_tick`` path unless its session carries a
+    # ``surface_ref``-equivalent liveness handle (bound to process start-time)
+    # that phantom/harvest detection can use for crash recovery. LocalExecutor
+    # satisfies this via ``Session.local_liveness`` (RFC 0005 F3, #888): it
+    # launches aider fire-and-forget, records the handle, and returns without
+    # blocking, so reconcile/local can recover the session if cw dies mid-run.
+    """
 
     def spawn(
         self,
@@ -178,17 +187,71 @@ class ClaudeNativeExecutor:
         return AutoDevResult.model_json_schema()
 
 
+def _local_preflight(
+    config: StageExecutorConfig,
+    task: TicketTask,
+    worktree: Path,
+    client: ClientConfig,
+) -> tuple[AutoDevResult | None, str | None]:
+    """Run LocalExecutor pre-flight checks (endpoint/aider/plan availability).
+
+    Returns ``(blocked_result, task_message)``. ``blocked_result`` is non-None
+    when a check fails (first match wins); when it is None all checks passed and
+    ``task_message`` holds the built aider prompt. Kept synchronous (Addendum 1
+    Alt A): pre-flight failures complete the session inline, before any
+    fire-and-forget launch.
+    """
+    if config.endpoint is None:
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=ENDPOINT_NOT_CONFIGURED,
+        ), None
+    if not aider_available():
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=AIDER_NOT_FOUND,
+            retry_eligible=True,
+            retry_delay_seconds=0,
+        ), None
+    plan_fetcher: PlanFetcher | None = None
+    if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
+        plan_fetcher = GithubIssuePlanFetcher()
+    task_message = build_task_message(
+        worktree,
+        ticket_id=task.ticket_id,
+        plan_fetcher=plan_fetcher,
+    )
+    if task_message is None:
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=PLAN_MISSING,
+        ), None
+    return None, task_message
+
+
 class LocalExecutor:
-    """StageExecutor backed by aider subprocess + git synthesis (RFC 0005 F3).
+    """StageExecutor backed by a fire-and-forget aider subprocess (RFC 0005 F3).
 
-    spawn() is synchronous: blocks for the full aider run, synthesizes an
-    AutoDevResult from git facts, persists it to Session.last_result, and emits
-    SESSION_COMPLETED before returning. Appropriate only for max_parallel=1 lanes.
+    spawn() is non-blocking on the launch path: after synchronous pre-flight
+    checks, it launches aider via ``AiderRunner.launch`` (Popen, no wait),
+    records a ``Session.local_liveness`` handle (PID + /proc start-time), leaves
+    the session ACTIVE, and returns the sid immediately. The aider run completes
+    asynchronously; reconcile/local harvest later detects the dead process,
+    synthesizes an AutoDevResult from git facts, and completes the session. This
+    keeps the shared ``dispatch_tick`` thread from blocking for the full run.
 
-    Result delivery bypasses persist_last_result (no sentinel framing). The
-    SESSION_COMPLETED event carries no 'stdout' key, so dispatch.py:~1513's
-    isinstance(stdout, str) guard is False and persist_last_result is skipped;
-    the last_result written in Step 4 is consumed as-is by consume_completed_sessions.
+    Pre-flight failures (endpoint/aider/plan missing) stay synchronous: they
+    persist a blocked result to Session.last_result, mark the session COMPLETED,
+    and emit SESSION_COMPLETED before returning — the launch never happens.
+
+    Result delivery bypasses persist_last_result (no sentinel framing). Every
+    SESSION_COMPLETED event this class or the harvest path emits carries no
+    'stdout' key, so dispatch.py's isinstance(stdout, str) guard is False and
+    persist_last_result is skipped; the last_result written directly is consumed
+    as-is by consume_completed_sessions.
     """
 
     def __init__(
@@ -210,8 +273,10 @@ class LocalExecutor:
         wall_clock_budget_seconds: int | None = None,
         parent: str | None = None,
     ) -> str:
-        # parent is intentionally unused; aider runs have no parent-session concept.
-        del parent
+        # parent is intentionally unused; aider runs have no parent-session
+        # concept. wall_clock_budget_seconds is unused on the fire-and-forget
+        # launch path — the harvest sweep, not a blocking timeout, bounds the run.
+        del parent, wall_clock_budget_seconds
         # Step 1: Create Session with all required fields.
         sess = Session(
             name=f"{client.name}/{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
@@ -229,62 +294,51 @@ class LocalExecutor:
             state.sessions.append(sess)
             save_state(state)
 
-        # Step 2: Pre-flight checks (first match assigns result).
-        result: AutoDevResult | None = None
-        task_message: str | None = None
-        plan_source: PlanSource = "none"
-
-        if self._config.endpoint is None:
-            result = make_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=ENDPOINT_NOT_CONFIGURED,
-            )
-        elif not aider_available():
-            result = make_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=AIDER_NOT_FOUND,
-                retry_eligible=True,
-                retry_delay_seconds=0,
-            )
-        else:
-            plan_fetcher: PlanFetcher | None = None
-            if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
-                plan_fetcher = GithubIssuePlanFetcher()
-            plan_was_on_disk = (worktree / ".cw" / "plan.md").exists()
-            task_message = build_task_message(
-                worktree,
-                ticket_id=task.ticket_id,
-                plan_fetcher=plan_fetcher,
-            )
-            if task_message is None:
-                result = make_blocked(
-                    ticket_id=task.ticket_id,
-                    worktree=worktree,
-                    reason=PLAN_MISSING,
-                )
-            elif not plan_was_on_disk and plan_fetcher is not None:
-                plan_source = "github_issue_existing"
+        # Step 2: Pre-flight checks (synchronous, Addendum 1 Alt A). result
+        # non-None → a check failed; task_message is set only when all passed.
+        result, task_message = _local_preflight(self._config, task, worktree, client)
 
         try:
             if result is None:
-                # Step 3: Run aider (only reached when all pre-flight checks pass).
+                # Step 3: Launch aider fire-and-forget (pre-flight all passed).
+                # Capture the PID + start-time as a liveness handle, leave the
+                # session ACTIVE, and return — reconcile/local harvest completes
+                # it once the process exits. NEVER block on the run here.
                 model = self._config.model or ""
                 argv = build_argv(model, task_message or "")
                 env = build_env(self._config.endpoint or "")
-                run_result = self._runner.run(
-                    worktree, argv, env, wall_clock_budget_seconds
-                )
-                result = synthesize_result(
-                    task=task,
+                proc = self._runner.launch(worktree, argv, env)
+                start_time_ns = read_process_start_time_ns(proc.pid)
+                if start_time_ns is not None:
+                    with sessions_lock():
+                        state = load_state()
+                        target = next((s for s in state.sessions if s.id == sid), None)
+                        if target is not None:
+                            target.local_liveness = LocalLivenessHandle(
+                                pid=proc.pid,
+                                start_time_ns=start_time_ns,
+                            )
+                            save_state(state)
+                    return sid
+                # /proc/<pid>/stat unreadable immediately after launch — process
+                # may have exited before exec or /proc is unavailable. Storing 0
+                # would make every liveness check return False, triggering
+                # premature harvest while aider is still running. Kill any orphan
+                # and fall through to the blocked completion path so the dispatch
+                # retry path requeues the task (no stale liveness handle stored).
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                    proc.wait()
+                result = make_blocked(
+                    ticket_id=task.ticket_id,
                     worktree=worktree,
-                    run_result=run_result,
-                    default_branch=client.default_branch,
-                    plan_source=plan_source,
+                    reason=UNEXPECTED_ERROR,
                 )
 
-            # Step 4: Persist result under sessions_lock.
+            # Pre-flight blocked OR proc stat unreadable: complete synchronously.
+            # Persist the blocked
+            # result, mark COMPLETED, and emit SESSION_COMPLETED — no "stdout"
+            # key so dispatch skips persist_last_result and uses last_result.
             with sessions_lock():
                 state = load_state()
                 target = next((s for s in state.sessions if s.id == sid), None)
@@ -292,9 +346,6 @@ class LocalExecutor:
                     target.last_result = result.model_dump(mode="json")
                     target.status = SessionStatus.COMPLETED
                     save_state(state)
-
-            # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch.py skips
-            # persist_last_result and uses the last_result written in Step 4 as-is.
             _record_orchestrator_event(
                 OrchestratorEventType.SESSION_COMPLETED,
                 {
@@ -304,11 +355,12 @@ class LocalExecutor:
                 },
             )
         except Exception:
-            # Ensure session is never left ACTIVE on unexpected errors (e.g. git
-            # CalledProcessError in _git_facts, OSError from Popen). Mark it
-            # COMPLETED with a blocked result so reconcile can clean it up.
-            # SESSION_COMPLETED is NOT emitted; dispatch's exception handler reverts
-            # the task to PENDING, which is the correct recovery path.
+            # Ensure the session is never left ACTIVE on unexpected errors during
+            # launch (FileNotFoundError/OSError from Popen despite the
+            # aider_available check, or a save_state failure). Mark it COMPLETED
+            # with a blocked result so reconcile can clean it up. SESSION_COMPLETED
+            # is NOT emitted; dispatch's exception handler reverts the task to
+            # PENDING, which is the correct recovery path.
             with sessions_lock():
                 state = load_state()
                 target = next((s for s in state.sessions if s.id == sid), None)
