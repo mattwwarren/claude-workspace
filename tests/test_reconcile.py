@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17378,6 +17379,11 @@ def test_local_harvest_dead_process_completes_and_advances(
     assert harvest_events[0].payload.get("ticket_id") == "harv-1"
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="/proc-based process start-time is Linux-only; "
+    "cross-platform macOS support tracked in #921",
+)
 def test_local_harvest_live_process_not_harvested(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -17404,6 +17410,11 @@ def test_local_harvest_live_process_not_harvested(
         proc.wait()
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="/proc-based process start-time is Linux-only; "
+    "cross-platform macOS support tracked in #921",
+)
 def test_local_harvest_recycled_pid_start_time_mismatch_is_dead(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
