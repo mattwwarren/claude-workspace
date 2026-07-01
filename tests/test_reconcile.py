@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -49,8 +51,10 @@ from cw.reconcile import (
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+    _act_on_local_harvest_candidates,
     _apply_sentinel_to_task,
     _claude_agents_json,
+    _detect_local_harvest_candidates,
     _has_terminal_sentinel,
     _verify_supervisor_session_id,
     complete_timed_out_merged_tasks,
@@ -17240,3 +17244,343 @@ class TestParseAnySentinelFromTranscript:
         assert isinstance(parsed, AutoDevResult)
         assert parsed.status == "plan_pending_approval"
         assert csid_stem == f"{self._SURFACE_REF}-original"
+
+
+# ---------------------------------------------------------------------------
+# RFC 0005 F3 #888 — LOCAL fire-and-forget harvest (reconcile/local.py)
+# ---------------------------------------------------------------------------
+
+
+def _local_git_worktree(
+    make_git_repo: Callable[[str], Path], name: str, *, with_commit: bool
+) -> Path:
+    """Build a git worktree with an origin/main ref and an optional impl commit.
+
+    origin/main lets synthesize_git_result compute the fork point; with_commit
+    controls whether the git-only synthesis yields stage_complete (commit) or
+    aider_no_output (no commit).
+    """
+    worktree = make_git_repo(name)
+    subprocess.run(
+        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "fetch", "origin", "main"],
+        check=True,
+        capture_output=True,
+    )
+    if with_commit:
+        (worktree / "impl.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(worktree), "commit", "-m", "impl"],
+            check=True,
+            capture_output=True,
+        )
+    return worktree
+
+
+def _mk_local_session(
+    sid: str,
+    worktree: Path,
+    liveness: LocalLivenessHandle,
+    *,
+    started_at: datetime | None = None,
+) -> Session:
+    """Build an ACTIVE, DAEMON-origin LOCAL session with a liveness handle.
+
+    surface_ref is None (LOCAL sessions never register on the daemon roster);
+    local_liveness is what harvest keys off.
+    """
+    return Session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        surface_ref=None,
+        started_at=started_at or datetime(2026, 1, 1, tzinfo=UTC),
+        stage=Stage.IMPL,
+        local_liveness=liveness,
+    )
+
+
+def test_local_harvest_dead_process_completes_and_advances(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Dead PID + commits → candidate → session COMPLETED, task advanced, event."""
+    from cw.reconcile import ProposedAction
+
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-dead", with_commit=True)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    # A PID this high has no /proc entry → read_process_start_time_ns returns
+    # None → the process reads as dead.
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
+    sess = _mk_local_session("harv-1", worktree, liveness)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-1",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.HARVEST_LOCAL_COMPLETE
+    assert candidates[0].session_id == "harv-1"
+
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    harvested = _act_on_local_harvest_candidates(
+        state, candidates, now=now, task_by_ticket=task_by_ticket
+    )
+    assert harvested == ["harv-1"]
+
+    reloaded = next(s for s in load_state().sessions if s.id == "harv-1")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "stage_complete"
+
+    # Advanced via apply_staged_decision (IMPL→REVIEW), not reverted-as-crash.
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "harv-1")
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.PENDING
+
+    # SESSION_COMPLETED emitted with crashed=False and NO stdout key.
+    events = read_events(
+        consumer="test-harvest-dead",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    harvest_events = [e for e in events if e.payload.get("session_id") == "harv-1"]
+    assert len(harvest_events) == 1
+    assert harvest_events[0].payload.get("crashed") is False
+    assert "stdout" not in harvest_events[0].payload
+    assert harvest_events[0].payload.get("ticket_id") == "harv-1"
+
+
+def test_local_harvest_live_process_not_harvested(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A live process with a matching start-time is NOT a harvest candidate."""
+    from cw.local_runner import read_process_start_time_ns
+
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-live", with_commit=True)
+    proc = subprocess.Popen(
+        ["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        start = read_process_start_time_ns(proc.pid)
+        assert start is not None
+        liveness = LocalLivenessHandle(pid=proc.pid, start_time_ns=start)
+        sess = _mk_local_session("harv-live", worktree, liveness)
+        state = CwState(sessions=[sess])
+
+        candidates = _detect_local_harvest_candidates(state, {})
+
+        assert candidates == []
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_local_harvest_recycled_pid_start_time_mismatch_is_dead(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """KEY: same PID but a mismatched start-time (recycled PID) reads as dead.
+
+    Models the recycled-PID hazard: aider's PID was freed and reassigned to an
+    unrelated live process. The PID exists, but its /proc start-time no longer
+    matches the value captured at spawn, so the liveness pin rejects it and the
+    session IS harvested. Without the start-time pin this would be a false
+    "still alive" and the session would leak forever. See GitHub #888.
+    """
+    from cw.local_runner import read_process_start_time_ns
+
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-harvest-recycled", with_commit=True
+    )
+    proc = subprocess.Popen(
+        ["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        real_start = read_process_start_time_ns(proc.pid)
+        assert real_start is not None
+        # Live PID, but a start-time that does NOT match the running process.
+        liveness = LocalLivenessHandle(pid=proc.pid, start_time_ns=real_start + 1)
+        sess = _mk_local_session("harv-recycled", worktree, liveness)
+        state = CwState(sessions=[sess])
+
+        candidates = _detect_local_harvest_candidates(state, {})
+
+        assert len(candidates) == 1
+        assert candidates[0].session_id == "harv-recycled"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_local_harvest_no_commits_synthesizes_aider_no_output(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Dead PID + no commits → git synthesis yields blocked/aider_no_output."""
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-noout", with_commit=False)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1)
+    sess = _mk_local_session("harv-noout", worktree, liveness)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-noout",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-noout",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+
+    _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    reloaded = next(s for s in load_state().sessions if s.id == "harv-noout")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "blocked"
+    assert reloaded.last_result["blocker"]["reason"] == "aider_no_output"
+
+
+def test_local_harvest_skips_session_with_surface_ref(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A session with a surface_ref is daemon-roster tracked, not a local harvest."""
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-harvest-surface", with_commit=True
+    )
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1)
+    sess = _mk_local_session("harv-surface", worktree, liveness)
+    # A surface_ref means the daemon roster owns liveness; harvest must skip it.
+    sess.surface_ref = "some-ref"
+    state = CwState(sessions=[sess])
+
+    assert _detect_local_harvest_candidates(state, {}) == []
+
+
+def test_local_harvest_act_handles_missing_task_and_no_worktree(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Act falls back to a synthetic task when none is queued; skips no-worktree."""
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-notask", with_commit=True)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1)
+    sess = _mk_local_session("harv-notask", worktree, liveness)
+    sess2 = _mk_local_session("harv-noworktree", worktree, liveness)
+    sess2.worktree_path = None  # defensive-skip branch in the act phase
+    state = CwState(sessions=[sess, sess2])
+    save_state(state)
+
+    # No dev-queue task for either ticket → act builds a synthetic TicketTask.
+    candidates = _detect_local_harvest_candidates(state, {})
+    _act_on_local_harvest_candidates(
+        state, candidates, now=datetime(2026, 1, 2, tzinfo=UTC), task_by_ticket={}
+    )
+
+    reloaded = {s.id: s for s in load_state().sessions}
+    assert reloaded["harv-notask"].status == SessionStatus.COMPLETED
+    assert reloaded["harv-notask"].last_result is not None
+    # The worktree-less candidate was skipped and left untouched.
+    assert reloaded["harv-noworktree"].status == SessionStatus.ACTIVE
+
+
+def test_local_harvest_fires_when_daemon_query_errors(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Harvest runs BEFORE the daemon query + outage guard, so it fires anyway.
+
+    reconcile() early-returns when `claude agents --json` errors (outage guard),
+    but the local-harvest detect+act block is placed before that guard, so a dead
+    LOCAL session is still completed even in a daemon outage. See GitHub #888.
+    """
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-outage", with_commit=True)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1)
+    sess = _mk_local_session(
+        "harv-outage", worktree, liveness, started_at=now - timedelta(seconds=60)
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-outage",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-outage",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+
+    def _boom() -> list[dict[str, object]]:
+        raise subprocess.CalledProcessError(1, ["claude", "agents", "--json"])
+
+    def _fake_pr_merged(
+        _tid: str, branch: str | None = None
+    ) -> tuple[bool | None, bool]:
+        del branch
+        return (None, True)
+
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _boom)
+    # Avoid a real gh call in the lockless pre-pass; treat the PR as not merged.
+    monkeypatch.setattr(
+        "cw.reconcile.core._deps.pr_is_merged_for_ticket", _fake_pr_merged
+    )
+
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    reloaded = next(s for s in load_state().sessions if s.id == "harv-outage")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "stage_complete"
+    assert "harv-outage" in report.completed_ticket_ids

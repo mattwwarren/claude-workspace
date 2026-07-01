@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SessionPurpose(StrEnum):
@@ -580,6 +580,22 @@ class EventHookRegistry(BaseModel):
     rules: list[HookRule] = Field(default_factory=list)
 
 
+class LocalLivenessHandle(BaseModel):
+    """Process-liveness handle for a LocalExecutor aider subprocess (RFC 0005 F3).
+
+    Binds a PID to its ``/proc/<pid>/stat`` start-time (nanoseconds since boot)
+    captured at spawn. The start-time pin lets harvest detection reject a
+    recycled PID: a dead aider PID reassigned to an unrelated process re-reads a
+    different start-time, so the session is treated as dead (harvested) rather
+    than falsely observed alive. Frozen — an immutable snapshot. See GitHub #888.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    pid: int
+    start_time_ns: int
+
+
 class Session(BaseModel):
     """A tracked Claude Code session."""
 
@@ -640,6 +656,12 @@ class Session(BaseModel):
     # RFC 0005 A1 — dormant; tracks which pipeline stage spawned this session.
     # None for sessions not spawned by the staged pipeline (GitHub #612).
     stage: Stage | None = None
+    # RFC 0005 F3 — process-liveness handle for a fire-and-forget LocalExecutor
+    # aider subprocess. Set when LocalExecutor.spawn() launches aider and leaves
+    # the session ACTIVE; reconcile/local harvest reads it to detect the dead
+    # process and synthesize the git-based completion. None for every non-LOCAL
+    # session (surface_ref-backed sessions use daemon-roster liveness). See #888.
+    local_liveness: LocalLivenessHandle | None = None
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [

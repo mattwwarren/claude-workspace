@@ -5,7 +5,6 @@ RFC 0005 A2 / F3.
 
 from __future__ import annotations
 
-import subprocess
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -21,7 +20,6 @@ from cw.executor import (
     resolve_executor_config,
 )
 from cw.local_runner import (
-    AIDER_ERROR,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
@@ -33,6 +31,7 @@ from cw.models import (
     LOCAL_BACKEND,
     ClientConfig,
     LaneConfig,
+    LocalLivenessHandle,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -528,7 +527,7 @@ def test_local_executor_blocked_endpoint_none(
 ) -> None:
     """endpoint=None → blocked/endpoint_not_configured before runner is called."""
     worktree = make_git_repo("wt-local-ep-none")
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
     executor = LocalExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
@@ -554,7 +553,7 @@ def test_local_executor_blocked_aider_not_found(
 ) -> None:
     """aider_available() is False → blocked/aider_not_found."""
     worktree = make_git_repo("wt-local-aider-missing")
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -583,7 +582,7 @@ def test_local_executor_blocked_plan_missing(
 ) -> None:
     """Absent .cw/plan.md → blocked/plan_missing."""
     worktree = make_git_repo("wt-local-plan-missing")
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -609,13 +608,18 @@ def test_local_executor_spawn_runner_path(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Happy path: pre-flight passes → runner.run() is called once."""
+    """Happy path: pre-flight passes → launch() called once, session left ACTIVE.
+
+    The fire-and-forget launch records a liveness handle and returns the sid; it
+    does NOT block, synthesize a result, or write last_result — reconcile/local
+    harvest completes the session once the process exits.
+    """
     worktree = make_git_repo("wt-local-runner-path")
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner(returncode=1, stderr="aider internal error")
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -623,23 +627,29 @@ def test_local_executor_spawn_runner_path(
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-99", client="test", stage=Stage.IMPL)
 
-    with patch("cw.executor.aider_available", return_value=True):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    try:
+        with patch("cw.executor.aider_available", return_value=True):
+            sid = executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
 
-    assert len(fake_runner.calls) == 1
-    call = fake_runner.calls[0]
-    argv = cast("list[str]", call["argv"])
-    assert "openai/qwen" in " ".join(argv)
+        assert len(fake_runner.calls) == 1
+        call = fake_runner.calls[0]
+        argv = cast("list[str]", call["argv"])
+        assert "openai/qwen" in " ".join(argv)
 
-    state = load_state()
-    result_raw = next(
-        (s.last_result for s in state.sessions if s.last_result is not None), None
-    )
-    result = AutoDevResult.model_validate(result_raw)
-    # returncode=1 → aider_error blocked
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == AIDER_ERROR
+        state = load_state()
+        session = next((s for s in state.sessions if s.id == sid), None)
+        assert session is not None
+        # Session stays ACTIVE; liveness handle recorded; no result synthesized.
+        assert session.status == SessionStatus.ACTIVE
+        assert isinstance(session.local_liveness, LocalLivenessHandle)
+        assert session.local_liveness.pid == fake_runner.procs[0].pid
+        assert session.last_result is None
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
 
 
 def test_local_executor_stage_sentinel_schema(tmp_path: Path) -> None:
@@ -652,38 +662,17 @@ def test_local_executor_stage_sentinel_schema(tmp_path: Path) -> None:
     assert schema == AutoDevResult.model_json_schema()
 
 
-def test_local_executor_stage_complete(
+def test_local_executor_launch_records_liveness_and_returns_active(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Happy path: aider exit 0 with new commit → stage_complete persisted."""
-    worktree = make_git_repo("wt-local-stage-complete")
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
-    # Simulate an aider commit above the fork point.
-    (worktree / "aider_out.py").write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "commit", "-m", "aider impl"],
-        check=True,
-        capture_output=True,
-    )
-
+    """Pre-flight passes → session ACTIVE with a LocalLivenessHandle; sid returned."""
+    worktree = make_git_repo("wt-local-launch-active")
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -691,32 +680,38 @@ def test_local_executor_stage_complete(
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-100", client="test", stage=Stage.IMPL)
 
-    with patch("cw.executor.aider_available", return_value=True):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    try:
+        with patch("cw.executor.aider_available", return_value=True):
+            sid = executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
 
-    state = load_state()
-    result_raw = next(
-        (s.last_result for s in state.sessions if s.last_result is not None), None
-    )
-    assert result_raw is not None
-    result = AutoDevResult.model_validate(result_raw)
-    assert result.status == "stage_complete"
-    assert result.stage_reached == "stage2_impl"
-    assert len(result.commits) >= 1
-    AutoDevResult.model_validate(result.model_dump(mode="json"))
+        assert isinstance(sid, str)
+        state = load_state()
+        session = next((s for s in state.sessions if s.id == sid), None)
+        assert session is not None
+        assert session.status == SessionStatus.ACTIVE
+        assert isinstance(session.local_liveness, LocalLivenessHandle)
+        # Start-time was captured (live process) — a positive ns value.
+        assert session.local_liveness.start_time_ns > 0
+        assert session.last_result is None
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
 
 
 def test_local_executor_exception_handler_marks_session_completed(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Uncaught exception in Steps 3-5 → session COMPLETED, exception re-raised."""
+    """launch() raises OSError → session COMPLETED + UNEXPECTED_ERROR, re-raised."""
     worktree = make_git_repo("wt-local-exc-handler")
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
 
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
@@ -726,8 +721,8 @@ def test_local_executor_exception_handler_marks_session_completed(
 
     with (
         patch("cw.executor.aider_available", return_value=True),
-        patch("cw.executor.synthesize_result", side_effect=RuntimeError("git boom")),
-        pytest.raises(RuntimeError, match="git boom"),
+        patch.object(fake_runner, "launch", side_effect=OSError("exec boom")),
+        pytest.raises(OSError, match="exec boom"),
     ):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
@@ -767,7 +762,7 @@ def test_local_executor_fetches_plan_from_tracker_when_absent(
 
     plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
 
-    fake_runner = FakeAiderRunner(returncode=1, stderr="aider ran")
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -775,17 +770,24 @@ def test_local_executor_fetches_plan_from_tracker_when_absent(
     client = ClientConfig(name="test", workspace_path=workspace)
     task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
-    with (
-        patch("cw.executor.aider_available", return_value=True),
-        patch(
-            "cw.executor.GithubIssuePlanFetcher.fetch",
-            return_value=plan_body,
-        ),
-    ):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    try:
+        with (
+            patch("cw.executor.aider_available", return_value=True),
+            patch(
+                "cw.executor.GithubIssuePlanFetcher.fetch",
+                return_value=plan_body,
+            ),
+        ):
+            executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
 
-    # Aider was called (pre-flight passed the plan check)
-    assert len(fake_runner.calls) == 1
+        # aider was launched (pre-flight passed the plan check)
+        assert len(fake_runner.calls) == 1
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
 
 
 def test_local_executor_plan_missing_when_tracker_returns_none(
@@ -797,7 +799,7 @@ def test_local_executor_plan_missing_when_tracker_returns_none(
     worktree = make_git_repo("wt-tracker-none")
     _write_tracker_config(workspace, "github-issues")
 
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -831,7 +833,7 @@ def test_local_executor_no_tracker_no_plan_is_plan_missing(
     worktree = make_git_repo("wt-no-tracker")
     # No .claude/project-config.yaml in workspace → resolve_tracker returns None
 
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -852,31 +854,23 @@ def test_local_executor_no_tracker_no_plan_is_plan_missing(
     assert result.blocker.reason == PLAN_MISSING
 
 
-def test_local_executor_sets_plan_source_github_issue_existing(
+def test_local_executor_launch_reached_after_tracker_fetch(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """plan_source='github_issue_existing' set when plan fetched from tracker."""
-    from typing import Any
+    """Plan fetched from tracker → launch() reached and liveness recorded.
 
-    from cw.local_runner import make_blocked
-
+    The fire-and-forget launch no longer synthesizes a result inline, so there
+    is no plan_source threading to assert; the observable contract is that
+    pre-flight passed (aider was launched) and the session carries a handle.
+    """
     workspace = make_git_repo("wt-plansrc-workspace")
     worktree = make_git_repo("wt-plansrc")
     _write_tracker_config(workspace, "github-issues")
 
     plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
-    captured_kwargs: list[dict[str, Any]] = []
 
-    def _fake_synthesize(**kwargs: Any) -> AutoDevResult:
-        captured_kwargs.append(kwargs)
-        return make_blocked(
-            ticket_id=kwargs["task"].ticket_id,
-            worktree=kwargs["worktree"],
-            reason=PLAN_MISSING,
-        )
-
-    fake_runner = FakeAiderRunner(returncode=0)
+    fake_runner = FakeAiderRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
@@ -884,12 +878,21 @@ def test_local_executor_sets_plan_source_github_issue_existing(
     client = ClientConfig(name="test", workspace_path=workspace)
     task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
-    with (
-        patch("cw.executor.aider_available", return_value=True),
-        patch("cw.executor.GithubIssuePlanFetcher.fetch", return_value=plan_body),
-        patch("cw.executor.synthesize_result", side_effect=_fake_synthesize),
-    ):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    try:
+        with (
+            patch("cw.executor.aider_available", return_value=True),
+            patch("cw.executor.GithubIssuePlanFetcher.fetch", return_value=plan_body),
+        ):
+            sid = executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
 
-    assert len(captured_kwargs) == 1
-    assert captured_kwargs[0]["plan_source"] == "github_issue_existing"
+        assert len(fake_runner.calls) == 1
+        state = load_state()
+        session = next((s for s in state.sessions if s.id == sid), None)
+        assert session is not None
+        assert isinstance(session.local_liveness, LocalLivenessHandle)
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()

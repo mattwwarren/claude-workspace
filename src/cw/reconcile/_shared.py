@@ -216,6 +216,9 @@ class ProposedAction(StrEnum):
     # Worktree is preserved; rescue_finalize_blocked_sessions opens the PR.
     # See GitHub #812.
     PARK_FINALIZE_BLOCKED = "park_finalize_blocked"
+    # LOCAL fire-and-forget aider process exited (dead liveness handle); harvest
+    # synthesizes the git-based completion and advances the task. See #888.
+    HARVEST_LOCAL_COMPLETE = "harvest_local_complete"
 
 
 @dataclass(frozen=True)

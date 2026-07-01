@@ -119,6 +119,10 @@ from cw.reconcile.idle import (
     _detect_idle_candidates,
     flag_silently_idle_daemon_sessions,
 )
+from cw.reconcile.local import (
+    _act_on_local_harvest_candidates,
+    _detect_local_harvest_candidates,
+)
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
@@ -163,6 +167,7 @@ __all__ = [
     "ReapCandidate",
     "ReconcileReport",
     "_act_on_idle_candidates",
+    "_act_on_local_harvest_candidates",
     "_act_on_phantom_candidates",
     "_act_on_stalled_candidates",
     "_apply_salvaged_completion",
@@ -174,6 +179,7 @@ __all__ = [
     "_compute_worktree_dirty",
     "_csid_from_transcript",
     "_detect_idle_candidates",
+    "_detect_local_harvest_candidates",
     "_detect_phantom_candidates",
     "_detect_post_review_clean",
     "_detect_stalled_candidates",

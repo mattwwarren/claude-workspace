@@ -12,12 +12,9 @@ from unittest.mock import MagicMock, patch
 from cw.auto_dev_result import AutoDevResult
 from cw.local_runner import (
     _FIXED_HEALTH,
-    AIDER_ERROR,
     AIDER_NO_OUTPUT,
     AIDER_NOT_FOUND,
-    BUDGET_EXCEEDED,
     PLAN_MISSING,
-    AiderRunResult,
     FakeAiderRunner,
     FakePlanFetcher,
     RealAiderRunner,
@@ -26,7 +23,8 @@ from cw.local_runner import (
     build_argv,
     build_env,
     build_task_message,
-    synthesize_result,
+    read_process_start_time_ns,
+    synthesize_git_result,
 )
 
 if TYPE_CHECKING:
@@ -35,7 +33,7 @@ if TYPE_CHECKING:
 
 # ---------------------------------------------------------------------------
 # Fixtures: inherit tmp_config_dir autouse (redirects state paths).
-# make_git_repo creates a real git repo for synthesize_result tests.
+# make_git_repo creates a real git repo for synthesize_git_result tests.
 # ---------------------------------------------------------------------------
 
 
@@ -47,72 +45,87 @@ def _make_task(ticket_id: str = "T-1", scope_hint: str | None = None) -> MagicMo
 
 
 # ---------------------------------------------------------------------------
-# FakeAiderRunner — records argv/env/cwd/timeout
+# FakeAiderRunner — records the launch call; returns a live sleep process
 # ---------------------------------------------------------------------------
 
 
-def test_aider_runner_records_argv(tmp_path: Path) -> None:
-    """FakeAiderRunner.run() records argv, cwd, env, and timeout per call."""
-    runner = FakeAiderRunner(returncode=0, stdout="", stderr="")
+def test_fake_runner_launch_records_call_and_returns_live_proc(tmp_path: Path) -> None:
+    """FakeAiderRunner.launch() records argv/cwd/env and returns a live process."""
+    runner = FakeAiderRunner()
     argv = ["aider", "--model", "openai/test", "--message", "do stuff"]
     env = {"OPENAI_API_BASE": "http://localhost:1234/v1", "OPENAI_API_KEY": "local"}
 
-    runner.run(tmp_path, argv, env, 900)
-
-    assert len(runner.calls) == 1
-    call = runner.calls[0]
-    assert call["argv"] == argv
-    assert call["cwd"] == tmp_path
-    assert call["env"] == env
-    assert call["timeout"] == 900
-
-
-def test_fake_runner_returns_configured_result(tmp_path: Path) -> None:
-    """FakeAiderRunner returns the configured returncode/stdout/stderr."""
-    runner = FakeAiderRunner(returncode=1, stderr="some error")
-    result = runner.run(tmp_path, ["aider"], {}, None)
-    assert result.returncode == 1
-    assert result.stderr == "some error"
-    assert result.timed_out is False
-
-
-def test_fake_runner_simulate_timeout_flag(tmp_path: Path) -> None:
-    """FakeAiderRunner with simulate_timeout=True returns timed_out=True."""
-    runner = FakeAiderRunner(simulate_timeout=True)
-    result = runner.run(tmp_path, ["aider"], {}, 60)
-    assert result.timed_out is True
-    assert result.returncode == -1
+    proc = runner.launch(tmp_path, argv, env)
+    try:
+        assert len(runner.calls) == 1
+        call = runner.calls[0]
+        assert call["argv"] == argv
+        assert call["cwd"] == tmp_path
+        assert call["env"] == env
+        # The returned process is alive (a real 'sleep 60').
+        assert proc.poll() is None
+        assert read_process_start_time_ns(proc.pid) is not None
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 # ---------------------------------------------------------------------------
-# RealAiderRunner — subprocess handling
+# RealAiderRunner — fire-and-forget subprocess launch
 # ---------------------------------------------------------------------------
 
 
-def test_run_aider_not_found(tmp_path: Path) -> None:
-    """RealAiderRunner.run() catches FileNotFoundError when binary is absent."""
+def test_real_runner_launch_returns_live_popen_with_devnull(tmp_path: Path) -> None:
+    """RealAiderRunner.launch() returns a live Popen wired to DEVNULL, no wait."""
     runner = RealAiderRunner()
-    result = runner.run(tmp_path, ["aider-nonexistent-binary-xyz"], {}, None)
-    assert not result.timed_out
-    assert result.returncode == 127
-    assert "not found" in result.stderr
+    proc = runner.launch(tmp_path, ["sleep", "60"], dict(os.environ))
+    try:
+        # Fire-and-forget: the process is running and launch did not block on it.
+        assert proc.poll() is None
+        # stdout/stderr are DEVNULL (not PIPE), so no pipe handles are exposed.
+        assert proc.stdout is None
+        assert proc.stderr is None
+    finally:
+        proc.kill()
+        proc.wait()
 
 
-def test_run_aider_real_success(tmp_path: Path) -> None:
-    """RealAiderRunner.run() returns returncode=0 and captures stdout on success."""
+def test_real_runner_launch_raises_on_missing_binary(tmp_path: Path) -> None:
+    """RealAiderRunner.launch() propagates FileNotFoundError for an absent binary."""
+    import pytest
+
     runner = RealAiderRunner()
-    result = runner.run(tmp_path, ["echo", "hello"], {}, None)
-    assert result.returncode == 0
-    assert result.timed_out is False
-    assert "hello" in result.stdout
+    with pytest.raises(FileNotFoundError):
+        runner.launch(tmp_path, ["aider-nonexistent-binary-xyz"], {})
 
 
-def test_run_aider_timeout(tmp_path: Path) -> None:
-    """RealAiderRunner.run() catches TimeoutExpired and sets timed_out=True."""
-    runner = RealAiderRunner()
-    # "sleep 60" will be killed by a 0-second timeout.
-    result = runner.run(tmp_path, ["sleep", "60"], {}, 0)
-    assert result.timed_out is True
+# ---------------------------------------------------------------------------
+# read_process_start_time_ns
+# ---------------------------------------------------------------------------
+
+
+def test_read_start_time_ns_live_process() -> None:
+    """read_process_start_time_ns returns a positive int for a live process."""
+    proc = subprocess.Popen(
+        ["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        start = read_process_start_time_ns(proc.pid)
+        assert start is not None
+        assert start > 0
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_read_start_time_ns_dead_pid_returns_none() -> None:
+    """read_process_start_time_ns returns None for a PID with no /proc entry."""
+    proc = subprocess.Popen(
+        ["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    proc.wait()
+    # Reap complete; a PID this high is almost certainly free on a test host.
+    assert read_process_start_time_ns(2_000_000_000) is None
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +330,7 @@ def test_build_task_message_malformed_context_json(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# synthesize_result — all disposition paths
+# synthesize_git_result — git-only disposition paths
 # ---------------------------------------------------------------------------
 
 
@@ -344,11 +357,11 @@ def _add_commit(worktree: Path, message: str = "aider commit") -> None:
     )
 
 
-def test_synthesize_result_stage_complete(
+def test_synthesize_git_result_stage_complete(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """aider exit 0 with ≥1 new commit → stage_complete."""
+    """≥1 new commit since fork point → stage_complete."""
     worktree = make_git_repo("wt-complete")
     # Simulate a remote 'origin/main' ref by creating it locally.
     subprocess.run(
@@ -363,13 +376,11 @@ def test_synthesize_result_stage_complete(
     )
     _add_commit(worktree)
 
-    run_result = AiderRunResult(returncode=0, stdout="", stderr="")
     task = _make_task(ticket_id="T-1", scope_hint="small")
 
-    result = synthesize_result(
+    result = synthesize_git_result(
         task=task,
         worktree=worktree,
-        run_result=run_result,
         default_branch="main",
     )
 
@@ -381,11 +392,11 @@ def test_synthesize_result_stage_complete(
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
 
-def test_synthesize_result_blocked_aider_no_output(
+def test_synthesize_git_result_blocked_no_output(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """aider exit 0 with no new commits → blocked/aider_no_output."""
+    """No new commits since fork point → blocked/aider_no_output."""
     worktree = make_git_repo("wt-no-output")
     subprocess.run(
         ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
@@ -397,13 +408,11 @@ def test_synthesize_result_blocked_aider_no_output(
         check=True,
         capture_output=True,
     )
-    run_result = AiderRunResult(returncode=0, stdout="", stderr="")
     task = _make_task()
 
-    result = synthesize_result(
+    result = synthesize_git_result(
         task=task,
         worktree=worktree,
-        run_result=run_result,
         default_branch="main",
     )
 
@@ -414,53 +423,7 @@ def test_synthesize_result_blocked_aider_no_output(
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
 
-def test_synthesize_result_blocked_aider_error(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """aider exit non-zero → blocked/aider_error with stderr tail in details."""
-    worktree = make_git_repo("wt-error")
-    run_result = AiderRunResult(returncode=1, stdout="", stderr="fatal: some error")
-    task = _make_task()
-
-    result = synthesize_result(
-        task=task,
-        worktree=worktree,
-        run_result=run_result,
-        default_branch="main",
-    )
-
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == AIDER_ERROR
-    assert "some error" in result.blocker.details
-    AutoDevResult.model_validate(result.model_dump(mode="json"))
-
-
-def test_synthesize_result_blocked_budget_exceeded(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """timed_out=True → blocked/budget_exceeded with retry_eligible=True."""
-    worktree = make_git_repo("wt-timeout")
-    run_result = AiderRunResult(returncode=-1, stdout="", stderr="", timed_out=True)
-    task = _make_task()
-
-    result = synthesize_result(
-        task=task,
-        worktree=worktree,
-        run_result=run_result,
-        default_branch="main",
-    )
-
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == BUDGET_EXCEEDED
-    assert result.blocker.retry_eligible is True
-    AutoDevResult.model_validate(result.model_dump(mode="json"))
-
-
-def test_synthesize_result_scope_tier_large(
+def test_synthesize_git_result_scope_tier_large(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
@@ -479,12 +442,10 @@ def test_synthesize_result_scope_tier_large(
     _add_commit(worktree)
 
     task = _make_task(scope_hint="large")
-    run_result = AiderRunResult(returncode=0, stdout="", stderr="")
 
-    result = synthesize_result(
+    result = synthesize_git_result(
         task=task,
         worktree=worktree,
-        run_result=run_result,
         default_branch="main",
     )
 
@@ -637,11 +598,11 @@ def test_github_issue_plan_fetcher_delegates_to_gh(tmp_path: Path) -> None:
     assert result == expected
 
 
-def test_synthesize_result_threads_plan_source(tmp_path: Path) -> None:
-    """synthesize_result passes plan_source through to AutoDevResult on success path."""
+def test_synthesize_git_result_threads_plan_source(tmp_path: Path) -> None:
+    """synthesize_git_result passes plan_source through to AutoDevResult."""
     from unittest.mock import patch
 
-    from cw.local_runner import AiderRunResult, _GitFacts, synthesize_result
+    from cw.local_runner import _GitFacts, synthesize_git_result
     from cw.models import Stage, TicketTask
 
     fake_facts: _GitFacts = {
@@ -652,13 +613,11 @@ def test_synthesize_result_threads_plan_source(tmp_path: Path) -> None:
         "lines_actual": 10,
     }
     task = TicketTask(ticket_id="T-1", client="c", stage=Stage.IMPL)
-    run_result = AiderRunResult(returncode=0, stdout="", stderr="", timed_out=False)
 
     with patch("cw.local_runner._git_facts", return_value=fake_facts):
-        result = synthesize_result(
+        result = synthesize_git_result(
             task=task,
             worktree=tmp_path,
-            run_result=run_result,
             default_branch="main",
             plan_source="github_issue_existing",
         )
