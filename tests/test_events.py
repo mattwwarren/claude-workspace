@@ -1358,7 +1358,7 @@ def test_cli_event_tail_client_filter(tmp_events_dir: Path) -> None:
     result = runner.invoke(main, ["event", "tail", "--client", "alpha"])
     assert result.exit_code == 0, result.output
     assert "aaa" in result.output
-    assert "bbb" not in result.output
+    assert "beta" not in result.output  # "beta" has non-hex 't', safe in hex event IDs
 
 
 def test_cli_event_tail_client_filter_multiple(tmp_events_dir: Path) -> None:
@@ -1436,7 +1436,8 @@ def test_cli_event_tail_client_filter_comma_separated(tmp_events_dir: Path) -> N
     assert result.exit_code == 0, result.output
     assert "aaa" in result.output
     assert "bbb" in result.output
-    assert "ccc" not in result.output
+    # "gamma" has non-hex 'g'/'m', safe against hex event ID false positives
+    assert "gamma" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1569,7 +1570,7 @@ def test_cli_event_tail_follow_client_filter(
     result = runner.invoke(main, ["event", "tail", "--follow", "--client", "alpha"])
     assert result.exit_code == 130
     assert "aaa" in result.output
-    assert "bbb" not in result.output
+    assert "beta" not in result.output  # "beta" has non-hex 't', safe in hex event IDs
 
 
 def test_cli_event_tail_client_and_dedup_terminal_compose(
@@ -1641,7 +1642,7 @@ def test_cli_event_tail_client_filter_with_type(tmp_events_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "aaa" in result.output
     assert "session.timed_out" not in result.output
-    assert "bbb" not in result.output
+    assert "beta" not in result.output  # "beta" has non-hex 't', safe in hex event IDs
 
 
 def test_cli_event_tail_client_comma_only_no_events(tmp_events_dir: Path) -> None:
