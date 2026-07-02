@@ -4004,7 +4004,26 @@ class TestInitCli:
         )
         assert result.exit_code == 0, result.output
         assert "Added client 'my-repo'" in result.output
-        assert "cw start my-repo" in result.output
+        assert "cw init my-repo --onboard-only" in result.output
+        assert "will not be runnable" in result.output
+
+    def test_init_no_onboarding_warns(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """--no-onboarding warns the client is not runnable and points to onboard."""
+        repo = make_git_repo("my-repo")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["init", "my-repo", "--path", str(repo), "--no-onboarding"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "will not be runnable" in result.output
+        assert "cw init my-repo --onboard-only" in result.output
+        assert "cw start my-repo" not in result.output
 
     def test_init_with_branch_and_purposes(
         self,
@@ -4235,6 +4254,8 @@ class TestInitCli:
         mock_allow.assert_called_once()
         mock_hook.assert_called_once_with(repo)
         mock_md.assert_called_once_with(repo)
+        assert "cw start my-repo" in result.output
+        assert "will not be runnable" not in result.output
 
 
 class TestQueueNextCli:
