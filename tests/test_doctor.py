@@ -3841,6 +3841,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         ticket_id: str,
         session_id: str | None = "dead-sess-1",
         created_at: datetime | None = None,
+        pr_url: str | None = None,
     ) -> TicketTask:
         from cw.models import QueueItemStatus, TicketTask
 
@@ -3851,12 +3852,14 @@ class TestWedgeDeadSessionBlockedOnUser:
                 status=QueueItemStatus.BLOCKED_ON_USER,
                 session_id=session_id,
                 created_at=created_at,
+                pr_url=pr_url,
             )
         return TicketTask(
             ticket_id=ticket_id,
             client="client-a",
             status=QueueItemStatus.BLOCKED_ON_USER,
             session_id=session_id,
+            pr_url=pr_url,
         )
 
     def test_blocked_on_user_dead_surface_detected_and_reverted(
@@ -3967,17 +3970,15 @@ class TestWedgeDeadSessionBlockedOnUser:
         """Dead-session task with pr_url set → stays BLOCKED_ON_USER (#912)."""
         from cw.config import save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
-        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
-        task = TicketTask(
-            ticket_id="TST-912-A",
-            client="client-a",
-            status=QueueItemStatus.BLOCKED_ON_USER,
+        task = self._make_blocked_task(
+            "TST-912-A",
             session_id=None,
             pr_url="https://github.com/o/r/pull/1",
         )
@@ -3998,25 +3999,21 @@ class TestWedgeDeadSessionBlockedOnUser:
         """Oldest has pr_url, younger sibling none → both stay BLOCKED (#912)."""
         from cw.config import save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
-        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
-        oldest = TicketTask(
-            ticket_id="TST-912-B",
-            client="client-a",
-            status=QueueItemStatus.BLOCKED_ON_USER,
+        oldest = self._make_blocked_task(
+            "TST-912-B",
             session_id=None,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
             pr_url="https://github.com/o/r/pull/2",
         )
-        younger = TicketTask(
-            ticket_id="TST-912-B",
-            client="client-a",
-            status=QueueItemStatus.BLOCKED_ON_USER,
+        younger = self._make_blocked_task(
+            "TST-912-B",
             session_id=None,
             created_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
@@ -4037,20 +4034,14 @@ class TestWedgeDeadSessionBlockedOnUser:
         """pr_url=None → still reverts to PENDING (regression guard for #912)."""
         from cw.config import save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
-        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
-        task = TicketTask(
-            ticket_id="TST-912-C",
-            client="client-a",
-            status=QueueItemStatus.BLOCKED_ON_USER,
-            session_id=None,
-            pr_url=None,
-        )
+        task = self._make_blocked_task("TST-912-C", session_id=None, pr_url=None)
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         run_doctor(reap=True)
