@@ -15407,6 +15407,34 @@ class TestApplySentinelToTaskLateRescue:
         assert t.status == QueueItemStatus.PENDING
         assert t.session_id is None
 
+    def test_running_no_result_emitted_requeues(self, tmp_config_dir: Path) -> None:
+        """RUNNING task + transient no_result_emitted → PENDING, session cleared.
+
+        Regression guard on the extracted _route_blocked_result_to_task helper:
+        the transient parse-failure branch must still re-queue a RUNNING task.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-918-transient", "sess-918-transient"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = parse_stdout("narrative only, no sentinel block emitted\n")
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "no_result_emitted"
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+
 
 class TestVerifySupervisorSessionId:
     """_verify_supervisor_session_id compares stored csid against supervisor state."""
