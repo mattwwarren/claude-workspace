@@ -192,29 +192,39 @@ def _local_preflight(
     task: TicketTask,
     worktree: Path,
     client: ClientConfig,
-) -> tuple[AutoDevResult | None, str | None]:
+) -> tuple[AutoDevResult, None, None] | tuple[None, str, str]:
     """Run LocalExecutor pre-flight checks (endpoint/aider/plan availability).
 
-    Returns ``(blocked_result, task_message)``. ``blocked_result`` is non-None
-    when a check fails (first match wins); when it is None all checks passed and
-    ``task_message`` holds the built aider prompt. Kept synchronous (Addendum 1
-    Alt A): pre-flight failures complete the session inline, before any
-    fire-and-forget launch.
+    Returns a discriminated union: ``(blocked_result, None, None)`` when a check
+    fails (first match wins), or ``(None, task_message, endpoint)`` when all
+    checks pass. The success branch carries both resolved values so the caller can
+    use them directly without ``or ""`` guards — mypy narrows each element to its
+    concrete type. Kept synchronous (Addendum 1 Alt A): pre-flight failures
+    complete the session inline, before any fire-and-forget launch.
     """
     if config.endpoint is None:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=ENDPOINT_NOT_CONFIGURED,
-        ), None
+        return (
+            make_blocked(
+                ticket_id=task.ticket_id,
+                worktree=worktree,
+                reason=ENDPOINT_NOT_CONFIGURED,
+            ),
+            None,
+            None,
+        )
+    endpoint = config.endpoint
     if not aider_available():
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=AIDER_NOT_FOUND,
-            retry_eligible=True,
-            retry_delay_seconds=0,
-        ), None
+        return (
+            make_blocked(
+                ticket_id=task.ticket_id,
+                worktree=worktree,
+                reason=AIDER_NOT_FOUND,
+                retry_eligible=True,
+                retry_delay_seconds=0,
+            ),
+            None,
+            None,
+        )
     plan_fetcher: PlanFetcher | None = None
     if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
         plan_fetcher = GithubIssuePlanFetcher()
@@ -224,12 +234,16 @@ def _local_preflight(
         plan_fetcher=plan_fetcher,
     )
     if task_message is None:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=PLAN_MISSING,
-        ), None
-    return None, task_message
+        return (
+            make_blocked(
+                ticket_id=task.ticket_id,
+                worktree=worktree,
+                reason=PLAN_MISSING,
+            ),
+            None,
+            None,
+        )
+    return None, task_message, endpoint
 
 
 class LocalExecutor:
@@ -294,19 +308,21 @@ class LocalExecutor:
             state.sessions.append(sess)
             save_state(state)
 
-        # Step 2: Pre-flight checks (synchronous, Addendum 1 Alt A). result
-        # non-None → a check failed; task_message is set only when all passed.
-        result, task_message = _local_preflight(self._config, task, worktree, client)
+        # Step 2: Pre-flight checks (synchronous, Addendum 1 Alt A). preflight[0]
+        # non-None → a check failed; task_message/endpoint narrowed when all passed.
+        preflight = _local_preflight(self._config, task, worktree, client)
 
         try:
-            if result is None:
+            if preflight[0] is None:
                 # Step 3: Launch aider fire-and-forget (pre-flight all passed).
                 # Capture the PID + start-time as a liveness handle, leave the
                 # session ACTIVE, and return — reconcile/local harvest completes
                 # it once the process exits. NEVER block on the run here.
+                # preflight narrowed to tuple[None, str, str] — no ``or ""`` guards.
+                _, task_message, endpoint = preflight
                 model = self._config.model or ""
-                argv = build_argv(model, task_message or "")
-                env = build_env(self._config.endpoint or "")
+                argv = build_argv(model, task_message)
+                env = build_env(endpoint)
                 proc = self._runner.launch(worktree, argv, env)
                 start_time_ns = read_process_start_time_ns(proc.pid)
                 if start_time_ns is not None:
@@ -329,11 +345,14 @@ class LocalExecutor:
                 with contextlib.suppress(OSError):
                     proc.kill()
                     proc.wait()
-                result = make_blocked(
+                result: AutoDevResult = make_blocked(
                     ticket_id=task.ticket_id,
                     worktree=worktree,
                     reason=UNEXPECTED_ERROR,
                 )
+            else:
+                # Pre-flight blocked: preflight[0] is AutoDevResult (narrowed).
+                result = preflight[0]
 
             # Pre-flight blocked OR proc stat unreadable: complete synchronously.
             # Persist the blocked

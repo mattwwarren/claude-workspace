@@ -17,6 +17,7 @@ from cw.executor import (
     ClaudeNativeExecutor,
     LocalExecutor,
     StageExecutor,
+    _local_preflight,
     resolve_executor,
     resolve_executor_config,
 )
@@ -964,3 +965,35 @@ def test_local_executor_launch_reached_after_tracker_fetch(
         for proc in fake_runner.procs:
             proc.kill()
             proc.wait()
+
+
+def test_local_preflight_success_returns_endpoint(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """_local_preflight success path returns (None, str, str) — endpoint narrowed.
+
+    The discriminated-union return type lets the caller unpack three values and use
+    endpoint without an ``or ""`` guard. Before the fix this test raises ValueError
+    (cannot unpack 2-tuple into 3 variables); after the fix it passes.
+    """
+    worktree = make_git_repo("wt-preflight-endpoint")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result, task_message, endpoint = _local_preflight(
+            config, task, worktree, client
+        )
+
+    assert result is None
+    assert isinstance(task_message, str)
+    assert len(task_message) > 0
+    assert endpoint == "http://localhost:1234/v1"
