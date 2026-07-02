@@ -182,8 +182,21 @@ def spawn(
 
 @spawn.command(name="close")
 @click.argument("session_id")
+@click.option(
+    "--confirmed-dead",
+    is_flag=True,
+    default=False,
+    help=(
+        "Assert the session is already terminal (no process, no worktree "
+        "activity, no recent events). Purely a permission-system marker — it "
+        "changes no behavior. Place it BEFORE the session id "
+        "(cw spawn close --confirmed-dead <id>) so an allowlist rule like "
+        "Bash(cw spawn close --confirmed-dead*) can match while a bare "
+        "cw spawn close <id> stays gated by the auto-mode classifier."
+    ),
+)
 @handle_errors
-def spawn_close(session_id: str) -> None:
+def spawn_close(session_id: str, confirmed_dead: bool) -> None:
     """Close a spawned session by session ID.
 
     Stops the session via the native daemon and marks it as COMPLETED.
@@ -191,7 +204,9 @@ def spawn_close(session_id: str) -> None:
     \b
     Example:
       cw spawn close abc12345
+      cw spawn close --confirmed-dead abc12345  # flag first for allowlist match
     """
+    del confirmed_dead  # permission-prefix token only; not forwarded to impl
     _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")
 
