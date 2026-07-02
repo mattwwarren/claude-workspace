@@ -138,6 +138,7 @@ from cw.reconcile.stalled import (
 )
 from cw.reconcile.tasks import (
     complete_timed_out_merged_tasks,
+    park_terminal_sibling_tasks,
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
@@ -201,6 +202,7 @@ __all__ = [
     "compute_drift",
     "feature_branch_key",
     "flag_silently_idle_daemon_sessions",
+    "park_terminal_sibling_tasks",
     "reconcile",
     "rescue_finalize_blocked_sessions",
     "resolve_headless_budget",

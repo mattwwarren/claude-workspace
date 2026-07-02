@@ -17595,3 +17595,275 @@ def test_local_harvest_fires_when_daemon_query_errors(
     assert reloaded.last_result is not None
     assert reloaded.last_result["status"] == "stage_complete"
     assert "harv-outage" in report.completed_ticket_ids
+
+
+# ---------------------------------------------------------------------------
+# park_terminal_sibling_tasks
+# ---------------------------------------------------------------------------
+
+
+def test_park_terminal_sibling_tasks_signal_only_parks_pending(
+    tmp_config_dir: Path,
+) -> None:
+    """PENDING task with COMPLETED sibling → BLOCKED_ON_USER under signal_only."""
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    completed = TicketTask(
+        ticket_id="TSB-1",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        created_at=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    pending = TicketTask(
+        ticket_id="TSB-1",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+        created_at=datetime(2026, 5, 2, tzinfo=UTC),  # stale: created after COMPLETED
+    )
+    save_dev_queue(DevQueueStore(tasks=[completed, pending]))
+    save_state(CwState(sessions=[]))
+
+    parked = park_terminal_sibling_tasks()
+
+    assert "TSB-1" in parked
+    store = load_dev_queue()
+    tasks = [t for t in store.tasks if t.ticket_id == "TSB-1"]
+    statuses = {t.status for t in tasks}
+    assert QueueItemStatus.PENDING not in statuses
+    assert QueueItemStatus.BLOCKED_ON_USER in statuses
+
+
+def test_park_terminal_sibling_tasks_auto_policy_cancels_pending(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PENDING task with COMPLETED sibling → CANCELLED under auto policy."""
+    from cw.models import ClientConfig, LaneConfig
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    completed = TicketTask(
+        ticket_id="TSB-AUTO",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        created_at=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    pending = TicketTask(
+        ticket_id="TSB-AUTO",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+        created_at=datetime(2026, 5, 2, tzinfo=UTC),  # stale: created after COMPLETED
+    )
+    save_dev_queue(DevQueueStore(tasks=[completed, pending]))
+    save_state(CwState(sessions=[]))
+
+    # Patch load_clients to return an auto-policy lane config.
+    auto_client = ClientConfig(
+        name="client-a",
+        workspace_path=Path("/tmp/ws"),
+        lanes=[LaneConfig(name="default", max_parallel=1, reap_policy=ReapPolicy.AUTO)],
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_clients", lambda: {"client-a": auto_client}
+    )
+
+    parked = park_terminal_sibling_tasks()
+
+    assert "TSB-AUTO" in parked
+    store = load_dev_queue()
+    parked_task = next(
+        t
+        for t in store.tasks
+        if t.ticket_id == "TSB-AUTO" and t.status != QueueItemStatus.COMPLETED
+    )
+    assert parked_task.status == QueueItemStatus.CANCELLED
+
+
+def test_park_terminal_sibling_tasks_cancelled_sibling_also_parks(
+    tmp_config_dir: Path,
+) -> None:
+    """Stale PENDING newer than CANCELLED sibling → parked (CANCELLED is terminal)."""
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    # Explicit timestamps: stale PENDING is NEWER than the CANCELLED row —
+    # this is the enqueue-dedup-gap pattern, not a doctor's collapse.
+    cancelled = TicketTask(
+        ticket_id="TSB-CXL",
+        client="client-a",
+        status=QueueItemStatus.CANCELLED,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    pending = TicketTask(
+        ticket_id="TSB-CXL",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    save_dev_queue(DevQueueStore(tasks=[cancelled, pending]))
+    save_state(CwState(sessions=[]))
+
+    parked = park_terminal_sibling_tasks()
+
+    assert "TSB-CXL" in parked
+    store = load_dev_queue()
+    tasks = [t for t in store.tasks if t.ticket_id == "TSB-CXL"]
+    statuses = {t.status for t in tasks}
+    assert QueueItemStatus.PENDING not in statuses
+
+
+def test_park_terminal_sibling_tasks_ordering_guard_skips_doctor_collapse(
+    tmp_config_dir: Path,
+) -> None:
+    """PENDING older than CANCELLED siblings → skip (doctor's collapse pattern)."""
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    # Doctor's _collapse_blocked_on_user_tasks pattern:
+    # oldest BLOCKED_ON_USER → PENDING, newer ones → CANCELLED.
+    # The PENDING is the live re-dispatch; newer CANCELLEDs are dedup artifacts.
+    pending = TicketTask(
+        ticket_id="TSB-ORD",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),  # oldest
+    )
+    cancelled1 = TicketTask(
+        ticket_id="TSB-ORD",
+        client="client-a",
+        status=QueueItemStatus.CANCELLED,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),  # newer
+    )
+    cancelled2 = TicketTask(
+        ticket_id="TSB-ORD",
+        client="client-a",
+        status=QueueItemStatus.CANCELLED,
+        created_at=datetime(2026, 1, 3, tzinfo=UTC),  # newest
+    )
+    save_dev_queue(DevQueueStore(tasks=[pending, cancelled1, cancelled2]))
+    save_state(CwState(sessions=[]))
+
+    parked = park_terminal_sibling_tasks()
+
+    assert parked == []
+    store = load_dev_queue()
+    t = next(
+        t
+        for t in store.tasks
+        if t.ticket_id == "TSB-ORD" and t.status == QueueItemStatus.PENDING
+    )
+    assert t.status == QueueItemStatus.PENDING  # untouched
+
+
+def test_park_terminal_sibling_tasks_no_sibling_noop(
+    tmp_config_dir: Path,
+) -> None:
+    """PENDING task with no terminal sibling → no change."""
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    pending = TicketTask(
+        ticket_id="TSB-NONE",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+    )
+    save_dev_queue(DevQueueStore(tasks=[pending]))
+    save_state(CwState(sessions=[]))
+
+    parked = park_terminal_sibling_tasks()
+
+    assert parked == []
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "TSB-NONE")
+    assert t.status == QueueItemStatus.PENDING
+
+
+def test_park_terminal_sibling_tasks_different_client_noop(
+    tmp_config_dir: Path,
+) -> None:
+    """COMPLETED row for different client does not affect the PENDING row."""
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    completed_other = TicketTask(
+        ticket_id="TSB-X",
+        client="client-b",
+        status=QueueItemStatus.COMPLETED,
+    )
+    pending = TicketTask(
+        ticket_id="TSB-X",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+    )
+    save_dev_queue(DevQueueStore(tasks=[completed_other, pending]))
+    save_state(CwState(sessions=[]))
+
+    parked = park_terminal_sibling_tasks()
+
+    assert parked == []
+    store = load_dev_queue()
+    t = next(
+        t for t in store.tasks if t.ticket_id == "TSB-X" and t.client == "client-a"
+    )
+    assert t.status == QueueItemStatus.PENDING
+
+
+def test_park_terminal_sibling_tasks_emits_reap_proposed_event(
+    tmp_config_dir: Path,
+) -> None:
+    """Parks emit SESSION_REAP_PROPOSED(reason='terminal_sibling')."""
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    completed = TicketTask(
+        ticket_id="TSB-EVT",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        created_at=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    pending = TicketTask(
+        ticket_id="TSB-EVT",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+        created_at=datetime(2026, 5, 2, tzinfo=UTC),
+    )
+    save_dev_queue(DevQueueStore(tasks=[completed, pending]))
+    save_state(CwState(sessions=[]))
+
+    park_terminal_sibling_tasks()
+
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "TSB-EVT"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["reason"] == ReapReason.TERMINAL_SIBLING.value
+    assert reap_events[0].payload["proposed_action"] == "terminal_sibling"
+
+
+def test_park_terminal_sibling_tasks_failed_not_terminal(
+    tmp_config_dir: Path,
+) -> None:
+    """FAILED sibling does not trigger parking; COMPLETED/CANCELLED are terminal."""
+    from cw.reconcile import park_terminal_sibling_tasks
+
+    failed = TicketTask(
+        ticket_id="TSB-FAIL",
+        client="client-a",
+        status=QueueItemStatus.FAILED,
+    )
+    pending = TicketTask(
+        ticket_id="TSB-FAIL",
+        client="client-a",
+        status=QueueItemStatus.PENDING,
+    )
+    save_dev_queue(DevQueueStore(tasks=[failed, pending]))
+    save_state(CwState(sessions=[]))
+
+    parked = park_terminal_sibling_tasks()
+
+    assert parked == []
+    store = load_dev_queue()
+    t = next(
+        t
+        for t in store.tasks
+        if t.ticket_id == "TSB-FAIL" and t.status == QueueItemStatus.PENDING
+    )
+    assert t.status == QueueItemStatus.PENDING

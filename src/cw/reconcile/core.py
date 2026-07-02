@@ -56,6 +56,7 @@ from cw.reconcile.stalled import (
 )
 from cw.reconcile.tasks import (
     complete_timed_out_merged_tasks,
+    park_terminal_sibling_tasks,
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
@@ -379,11 +380,13 @@ def _reconcile_locked(
 
     drift = compute_drift(state, native_live, now=now)
     if not drift.phantom_session_ids:
-        # No phantom sessions to reap, but still run the TIMED_OUT and
-        # COMPLETED-silent sweeps so any tasks whose sessions completed or
-        # timed out without reverting their queue task are recovered.
+        # No phantom sessions to reap, but still run the TIMED_OUT,
+        # COMPLETED-silent, and terminal-sibling sweeps so any tasks whose
+        # sessions completed or timed out without reverting their queue task
+        # are recovered, and stale PENDING rows with terminal siblings are parked.
         timed_out_ticket_ids = revert_timed_out_tasks()
         completed_silent_ticket_ids = revert_completed_silent_tasks()
+        park_terminal_sibling_tasks()
         all_reverted = list(
             dict.fromkeys(
                 stalled_reverted
@@ -431,6 +434,8 @@ def _reconcile_locked(
     # the sessions_lock this function runs under).
     timed_out_ticket_ids = revert_timed_out_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
+    # Park stale PENDING rows whose ticket already has a terminal sibling (#876).
+    park_terminal_sibling_tasks()
     all_reverted = list(
         dict.fromkeys(
             stalled_reverted
