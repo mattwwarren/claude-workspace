@@ -239,7 +239,8 @@ without task revert).
 ### `session.needs_attention`
 
 **Emitter:** `flag_silently_idle_daemon_sessions`, `revert_timed_out_tasks`,
-`revert_completed_silent_tasks`, `_salvage_low_path` in `cw.reconcile`
+`revert_completed_silent_tasks`, `_salvage_low_path` in `cw.reconcile`;
+`apply_staged_decision` in `cw.dispatch` (for plan-parked sessions)
 **Payload:**
 ```json
 {
@@ -268,6 +269,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
   BLOCKED_ON_USER instead of being re-dispatched to avoid clobbering in-flight
   work. `breadcrumbs` is the absolute path to the worktree. Operator should
   review, commit or discard the changes, then manually unblock the task.
+- `"plan_parked"` — A headless worker completed its plan stage with open
+  ambiguities or unverified premises (`ambiguities_pending_resolution` or
+  `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
+  Operator should inspect the session result (`cw session result <id>`) and
+  either resolve the ambiguities and re-dispatch, or close the ticket. See #923.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for each emission (via `fire_push_notification`).

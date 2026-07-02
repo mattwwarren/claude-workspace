@@ -762,6 +762,117 @@ class TestConsumeCompletesTasks:
         assert completed == 1
         assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
+    @pytest.mark.parametrize(
+        ("v4_status", "ambiguities", "premises"),
+        [
+            (
+                "ambiguities_pending_resolution",
+                [{"question": "Use X or Y?"}],
+                [],
+            ),
+            (
+                "premises_pending_verification",
+                [],
+                [{"claim": "Module Z exists"}],
+            ),
+        ],
+    )
+    def test_consume_plan_parked_emits_needs_attention(
+        self,
+        v4_status: str,
+        ambiguities: list[dict[str, object]],
+        premises: list[dict[str, object]],
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """V4 plan-parked status emits SESSION_NEEDS_ATTENTION(plan_parked) (#923).
+
+        When a session ends with ambiguities_pending_resolution or
+        premises_pending_verification, consume_completed_sessions must emit a
+        SESSION_NEEDS_ATTENTION event so operators watching that event type
+        receive the park signal. Uses the stdout path (persist_last_result) so
+        the sentinel is parsed before apply_staged_decision reads it.
+        """
+        import json
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="GEN-923",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-923",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # Fresh session: last_result NOT pre-populated — only the event stdout
+        # carries the sentinel, exercising persist-before-decide ordering.
+        sess = Session(
+            id="sess-923",
+            name="test-client/auto-dev/GEN-923",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        sentinel = {
+            "schema_version": 4,
+            "ticket_id": "GEN-923",
+            "status": v4_status,
+            "stage_reached": "stage1_plan",
+            "scope": {
+                "tier": "small",
+                "files": 2,
+                "lines_estimate": 50,
+                "lines_actual": 0,
+                "forbidden_touched": False,
+            },
+            "plan_source": "github_issue_existing",
+            "branch": None,
+            "worktree_path": "/tmp/wt",
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "HIGH",
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "ambiguities": ambiguities,
+            "premises": premises,
+            "blocker": None,
+            "next_actions": ["Resolve open question before proceeding"],
+        }
+        stdout = f"<<<AUTO_DEV_RESULT\n{json.dumps(sentinel)}\nAUTO_DEV_RESULT>>>\n"
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-923", "session_id": "sess-923", "stdout": stdout},
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+        attention = read_events(
+            consumer="test-923-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(attention) == 1
+        payload = attention[0].payload
+        assert payload["paused_status"] == "plan_parked"
+        assert payload["ticket_id"] == "GEN-923"
+        assert payload["client"] == "test-client"
+        assert payload["session_id"] == "sess-923"
+        assert payload["crashed"] is False
+
     def test_consume_non_paused_status_routes_to_completed(
         self,
         tmp_dispatch_dirs: Path,
@@ -4994,6 +5105,91 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "merge_pending"
         assert task.pr_url == "https://github.com/org/repo/pull/898"
+
+    @pytest.mark.parametrize(
+        "v4_status",
+        ["ambiguities_pending_resolution", "premises_pending_verification"],
+    )
+    def test_v4_pause_emits_needs_attention(
+        self,
+        v4_status: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """V4 pause statuses emit SESSION_NEEDS_ATTENTION(plan_parked) (#923).
+
+        apply_staged_decision is shared by the consume path and the reconcile
+        path (_apply_sentinel_to_task); testing it directly confirms both paths
+        emit the attention event without requiring an end-to-end integration setup.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("PK-1", stage=Stage.IMPL)
+        task.session_id = "sess-pk1"
+        task.client = "test-client"
+        apply_staged_decision(task, v4_status, None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["paused_status"] == "plan_parked"
+        assert payload["ticket_id"] == "PK-1"
+        assert payload["client"] == "test-client"
+        assert payload["session_id"] == "sess-pk1"
+        assert payload["crashed"] is False
+
+    @pytest.mark.parametrize(
+        "non_v4_status",
+        ["blocked", "no_op", "shipped", "merge_pending"],
+    )
+    def test_non_v4_status_does_not_emit_plan_parked(
+        self,
+        non_v4_status: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-V4 statuses do not emit SESSION_NEEDS_ATTENTION(plan_parked).
+
+        Guards against false-positive plan_parked emissions for shipped, blocked,
+        no_op, and merge_pending paths in apply_staged_decision.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        attention_events: list[object] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                attention_events.append(event_type)
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        last_result: dict[str, object] = {"status": non_v4_status}
+        if non_v4_status == "merge_pending":
+            last_result["pr"] = {"url": "https://github.com/org/repo/pull/1"}
+        task = self._make_running_task("NPK-1", stage=Stage.FINALIZE)
+        apply_staged_decision(task, non_v4_status, last_result, self._clients(tmp_path))
+
+        assert len(attention_events) == 0
 
 
 # ---------------------------------------------------------------------------
