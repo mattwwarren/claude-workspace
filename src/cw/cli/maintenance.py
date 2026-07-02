@@ -72,6 +72,14 @@ def doctor(reap: bool, session: str | None, as_json: bool) -> None:
       No automatic mutation — inspect and resolve manually.
       Recipe: cw spawn-complete <ticket_id> [--status shipped]
 
+    \b
+    wedge/active-no-daemon-entry
+      ACTIVE/IDLE session has no matching daemon live entry — session crashed
+      without writing a terminal sentinel (e.g. SSH push failure, OOM).
+      Action: mark session COMPLETED, revert queue task to PENDING, release
+      the hook context lock so the worktree can be reused.
+      Recipe: cw doctor --reap
+
     ``--reap`` also reconciles session state against the native daemon
     roster, marking phantom sessions COMPLETED and reverting their tickets
     to PENDING.

@@ -4402,3 +4402,478 @@ def _load_client(name: str) -> ClientConfig:
     from cw.config import load_clients
 
     return load_clients()[name]
+
+
+# ---------------------------------------------------------------------------
+# _check_wedge_active_no_daemon_entry  (#925)
+# ---------------------------------------------------------------------------
+
+
+class TestWedgeActiveNoDaemonEntry:
+    """wedge/active-no-daemon-entry: ACTIVE session absent from daemon live roster."""
+
+    def _make_session(
+        self,
+        sid: str = "phantom-sess-1",
+        *,
+        surface_ref: str = "s:phantom.1",
+        status_active: bool = True,
+        old: bool = True,
+        purpose_orchestrate: bool = False,
+    ) -> Session:
+        from cw.models import (
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        started = (
+            datetime(2026, 1, 1, tzinfo=UTC)
+            if old
+            else datetime(2099, 1, 1, tzinfo=UTC)  # far future → within grace window
+        )
+        status = SessionStatus.ACTIVE if status_active else SessionStatus.IDLE
+        purpose = (
+            SessionPurpose.ORCHESTRATE if purpose_orchestrate else SessionPurpose.IMPL
+        )
+        return Session(
+            id=sid,
+            name=f"client-a/auto-dev/{sid}",
+            client="client-a",
+            purpose=purpose,
+            status=status,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=surface_ref,
+            started_at=started,
+        )
+
+    def _write_roster(self, tmp_path: Path, *, supervisor_pid: int = 12345) -> None:
+        """Write a roster.json with the given supervisorPid."""
+        roster_path = tmp_path / "roster.json"
+        roster_path.write_text(
+            json.dumps({"supervisorPid": supervisor_pid, "workers": {}}),
+            encoding="utf-8",
+        )
+
+    def test_active_no_daemon_entry_detected_and_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ACTIVE session not in live roster → finding present, session COMPLETED."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        # surface_ref NOT in live — phantom
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("phantom-act-1", surface_ref="s:act.1")
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id="phantom-act-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="phantom-act-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "phantom-act-1")
+        from cw.models import SessionStatus
+
+        assert updated.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "phantom-act-1")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_idle_status_also_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """IDLE session (not just ACTIVE) absent from roster → finding + reaped."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session(
+            "idle-sess-1", surface_ref="s:idle.1", status_active=False
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "idle-sess-1")
+        assert updated.status == SessionStatus.COMPLETED
+
+    def test_within_spawn_grace_not_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Session started_at in future (within grace) → no finding, stays ACTIVE."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("grace-sess-1", surface_ref="s:grace.1", old=False)
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "grace-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_live_surface_not_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """surface_ref present in live roster → no finding."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        daemon._live.add("s:live.1")
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("live-sess-1", surface_ref="s:live.1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "live-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_orchestrate_purpose_excluded(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ORCHESTRATE sessions are excluded by compute_drift → no finding."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session(
+            "orch-sess-1", surface_ref="s:orch.1", purpose_orchestrate=True
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "orch-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_no_surface_ref_not_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """surface_ref=None → compute_drift skips it → no finding."""
+        from cw.config import load_state, save_state
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = Session(
+            id="no-ref-sess",
+            name="client-a/auto-dev/no-ref-sess",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "no-ref-sess")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_reap_reverts_running_task_to_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RUNNING TicketTask for the phantom session is reverted to PENDING."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("run-task-sess", surface_ref="s:run.1")
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id="run-task-sess",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="run-task-sess",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "run-task-sess")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+
+    def test_detection_without_reap_does_not_mutate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reap=False → finding present but session stays ACTIVE."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("no-reap-sess", surface_ref="s:noreap.1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "no-reap-sess")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_phantom_with_no_ticket_still_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-auto-dev name (no ticket_id) → still reaped, no queue mutation."""
+        from cw.config import load_state, save_state
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = Session(
+            id="no-ticket-sess",
+            # no auto-dev prefix → ticket_id_for_session returns None
+            name="client-a/impl",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=Path("/tmp/ws"),
+            surface_ref="s:noticket.1",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "no-ticket-sess")
+        assert updated.status == SessionStatus.COMPLETED
+
+    def test_daemon_not_alive_skips_reap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """supervisorPid absent from roster → outage guard fires, no findings."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        roster_path = tmp_path / "roster.json"
+        # Write roster with NO supervisorPid — daemon appears down
+        roster_path.write_text(json.dumps({"workers": {}}), encoding="utf-8")
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        sess = self._make_session("outage-sess", surface_ref="s:outage.1")
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-no-daemon-entry" not in classes
+
+        state = load_state()
+        updated = next(s for s in state.sessions if s.id == "outage-sess")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_reap_releases_hook_context_lock(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: after reap, _write_hook_context does not raise."""
+        import pytest
+
+        from cw.config import save_state
+        from cw.exceptions import HookContextConflictError
+        from cw.models import CwState, SessionOrigin
+        from cw.native_daemon import FakeNativeDaemonClient
+        from cw.spawn import _write_hook_context
+
+        roster_path = tmp_path / "roster.json"
+        self._write_roster(tmp_path)
+        monkeypatch.setattr("cw.doctor._ROSTER_PATH", roster_path)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        # Write a cw-context.json referencing the phantom session
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir()
+        context_path = claude_dir / "cw-context.json"
+        context_path.write_text(
+            json.dumps({"session_id": "lock-sess-1"}), encoding="utf-8"
+        )
+
+        sess = self._make_session("lock-sess-1", surface_ref="s:lock.1")
+        save_state(CwState(sessions=[sess]))
+
+        # Before reap: _write_hook_context raises because session is ACTIVE
+        with pytest.raises(HookContextConflictError):
+            _write_hook_context(
+                worktree,
+                session_id="new-sess",
+                session_name="client-a/auto-dev/new-sess",
+                client="client-a",
+                purpose="impl",
+                ticket_id="new-sess",
+                origin=SessionOrigin.DAEMON,
+            )
+
+        # Reap the phantom
+        run_doctor(reap=True)
+
+        # After reap: _write_hook_context should succeed (session is now COMPLETED)
+        _write_hook_context(
+            worktree,
+            session_id="new-sess-2",
+            session_name="client-a/auto-dev/new-sess-2",
+            client="client-a",
+            purpose="impl",
+            ticket_id="new-sess-2",
+            origin=SessionOrigin.DAEMON,
+        )
