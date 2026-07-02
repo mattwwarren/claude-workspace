@@ -145,6 +145,17 @@ marker `<!-- auto-dev-preflight-resolutions -->`.
 Post it to the issue (`gh issue comment <N> --body-file ...`). The dispatched
 worker reads issue comments, so this is what makes the next plan correct.
 
+**Re-harden (2nd+ round) — supersede, don't append.** On any harden round after
+the first, do NOT append to the prior comment. Post a NEW comment titled
+`## Pre-flight Resolutions (operator) — supersedes all prior` containing the
+FULL consolidated numbered list (every still-valid prior resolution plus the new
+ones), ending with `Proceed.` and the `<!-- auto-dev-preflight-resolutions -->`
+marker. No in-place PATCH or comment-ID plumbing — a fresh superseding comment is
+the single source of truth. Exactly one marker-bearing comment may be present at
+dispatch: the pipeline refuses with `ambiguities_pending_resolution` when it
+finds more than one, so strip the marker from (or delete) the superseded comment
+by hand before re-dispatch.
+
 ### 4. Hand off
 
 Report what you resolved, what the operator decided, and that the ticket is
@@ -156,8 +167,8 @@ hardened, resolutions posted, ready to enqueue."
 
 - **Hardening is not perfect.** A worker may still surface 1–2 new questions
   during planning (the sweep cuts the count, it doesn't zero it). Treat those
-  the same way: resolve the technical ones, escalate the real forks, append to
-  the resolution comment, re-dispatch.
+  the same way: resolve the technical ones, escalate the real forks, post a
+  fresh superseding comment (see Section 3 above), re-dispatch.
 - **Front-load resolutions; don't rely on between-requeue addendums.** The
   worker plans from the ticket context materialized at dispatch (body + the
   comments present then). Put your resolutions where they will be in that

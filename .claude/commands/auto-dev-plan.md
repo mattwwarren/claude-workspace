@@ -40,10 +40,15 @@ For each ticket in the queue:
 
 ### Step 1b: Generate Plan (Agent)
 
+**Step 1b setup — Pre-flight Resolution pre-extraction (orchestrator, before spawning the Plan agent).** Grep the materialized ticket comments for the marker `<!-- auto-dev-preflight-resolutions -->` (the `/harden-ticket` resolution comment). Branch on the count of comments bearing it:
+- **>1 marker comment** → EXIT `ambiguities_pending_resolution` with the message `multiple resolution comments detected — re-run /harden-ticket to consolidate.` (headless: post the message as the ticket comment and include it in the result payload; no branch is created — same EXIT idiom as the Step 1c `ambiguities_pending_resolution` clause). Do NOT build supersession logic here; consolidating multiple resolution comments is `/harden-ticket`'s job.
+- **0 marker comments** → proceed normally; no resolutions section is injected into the plan-agent prompt.
+- **exactly 1 marker comment** → parse its numbered resolution items and inject them into the plan-agent prompt as a dedicated `## Binding Pre-flight Resolutions` numbered list (one line per resolution, preserving the `R<n>` numbering). Instruct the plan agent to treat every item as a **binding constraint** on the plan — not advisory context — and to prove conformance via the `## Pre-flight Resolution Conformance` producer rule below.
+
 Spawn a **Plan** agent (`subagent_type: "Plan", model: "opus"`) synchronously — the orchestrator must consume the plan result (and the `## Ambiguities` section) in Step 1c before continuing, so `run_in_background: true` is intentionally NOT used here. Background dispatch ends the parent's turn and trips Stop-hook session-completion (see issue #151 in claude-workspace), orphaning the plan agent.
 
 **Prompt must include:**
-- Ticket description / user description
+- Ticket description / user description **and ALL ticket comments in chronological order** (via the active tracker's fetch ops — same as Step 1c: `get_issue` + `list_comments` for `linear`, `gh issue view <n> --json title,body,comments` for `github-issues`)
 - Any partial plan context from Step 1a (if applicable)
 - Instruction to read CLAUDE.md and ARCHITECTURE.md
 - Instruction to read actual model/schema definitions — never guess field names
@@ -75,6 +80,7 @@ Spawn a **Plan** agent (`subagent_type: "Plan", model: "opus"`) synchronously �
   - Phase 1: Tests to write/update BEFORE implementation (for larger scope, integration tests run in isolation)
   - Phase 2: Implementation — specific file changes with paths
 - List all files that will be modified with estimated line counts
+- **Pre-flight Resolution Conformance:** When the prompt contains a `## Binding Pre-flight Resolutions` section, the plan MUST include a `## Pre-flight Resolution Conformance` section placed immediately before `## Ambiguities`, one line per item in the format `- R<n>: <short restatement> — <how the plan honors it> [SATISFIED | NOT APPLICABLE]`. An item with no conformance line is MISSING (a plan-review MUST_FIX). **If no `## Binding Pre-flight Resolutions` was injected into this prompt, omit `## Pre-flight Resolution Conformance` entirely — do not emit an empty or `N/A` section.**
 - **Ambiguity pre-flight:** after the plan, append a section titled `## Ambiguities` listing anything in the ticket that you had to interpret without an explicit answer (file naming, behavior on edge cases, scope boundaries, role/auth assumptions, error handling defaults). Format each item exactly as the Product Manager Reviewer agent's Mode 1 output (question, plan's assumption, alternatives, why-it-matters, ticket quote). If you made no interpretive choices, write exactly `NO_AMBIGUITIES`. The main session will route these into Step 1c without re-spawning a separate agent.
 - **Pre-flight verification:** instruction to read the targeted files / artifacts and check whether the requested change is already in the desired state. If ALL targeted changes are already applied (no plan-agent disagreement, no ambiguity), the agent MUST report this clearly under `**Discoveries**` in the friction report with the exact phrase `pre-flight: already satisfied` (verbatim, lowercase, including the colon) plus a per-artifact rundown showing the desired state was found. **The phrase is matched literally by the orchestrator** — paraphrases like "already done", "already in desired state", or "work complete" will NOT trigger the `no_op` exit and the pipeline will instead implement the (possibly empty) plan redundantly. The agent must reproduce the phrase exactly. If the situation is ambiguous or only partially satisfied, the agent must produce a normal plan covering the gap and NOT use the `pre-flight: already satisfied` phrase.
 - The friction protocol block
