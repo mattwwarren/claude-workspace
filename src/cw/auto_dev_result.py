@@ -117,6 +117,7 @@ FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
 # Max automatic FINALIZE→IMPL regressions per ticket; prevents ping-pong.
 FINALIZE_REGRESS_CAP: int = 2
 SCOPE_TIER_SMALL: Literal["small"] = "small"
+SCOPE_TIER_LARGE: Literal["large"] = "large"
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. A phantom or stalled session that emitted one of these

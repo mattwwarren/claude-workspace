@@ -20,6 +20,7 @@ from cw.auto_dev_result import (
     FINALIZE_REGRESS_CAP,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
+    SCOPE_TIER_LARGE,
     SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
@@ -1251,10 +1252,15 @@ def _resolve_scope_tier(
 ) -> str | None:
     """Resolve the effective scope tier for a scope-gated advance decision.
 
-    Precedence mirrors reconcile's tier-unavailable fallback (#314, #696):
-      1. ``last_result.scope.tier`` -- the plan sentinel's own classification.
-      2. ``task.scope_hint`` -- operator/queue hint, used when the sentinel
-         omits the tier.
+    Precedence (escalate-only, #314, #696, #926):
+      0. If either ``task.scope_hint`` or the sentinel's ``scope.tier`` is
+         ``"large"``, the result is ``"large"`` -- an operator hint can only
+         ADD the approval gate, never remove it, and a large sentinel tier is
+         never de-escalated by a smaller hint.
+      1. Otherwise, ``last_result.scope.tier`` -- the plan sentinel's own
+         classification.
+      2. Otherwise, ``task.scope_hint`` -- operator/queue hint, used when the
+         sentinel omits the tier.
 
     Why: a real PLAN-stage sentinel can legitimately carry ``scope.tier=null``
     (``lines_actual`` is unknown pre-impl), so a raw read blocked small tickets
@@ -1263,6 +1269,10 @@ def _resolve_scope_tier(
     """
     scope_val = last_result.get("scope") if last_result is not None else None
     tier = scope_val.get("tier") if isinstance(scope_val, dict) else None
+    # Step 0 of the precedence above. Only the exact string "large" escalates;
+    # unexpected hint values (e.g. "medium") are treated as not-large.
+    if SCOPE_TIER_LARGE in (task.scope_hint, tier):
+        return SCOPE_TIER_LARGE
     if isinstance(tier, str):
         return tier
     return task.scope_hint
@@ -1352,8 +1362,8 @@ def _route_staged_decision(
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
-        # Tier resolves from the sentinel's scope.tier, falling back to
-        # task.scope_hint when the sentinel omits it (#696).
+        # Tier resolution is escalate-only -- see _resolve_scope_tier docstring
+        # (#696, #926).
         tier = _resolve_scope_tier(last_result, task)
         if tier == SCOPE_TIER_SMALL:
             _stage_advance_unchecked(
