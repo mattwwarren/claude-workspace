@@ -2540,11 +2540,12 @@ def _make_blocked_task(
     client: str = "genhealth",
     stage: Stage = Stage.PLAN,
     session_id: str | None = "sess1234",
+    status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
 ) -> TicketTask:
     return TicketTask(
         ticket_id=ticket_id,
         client=client,
-        status=QueueItemStatus.BLOCKED_ON_USER,
+        status=status,
         stage=stage,
         session_id=session_id,
     )
@@ -2829,6 +2830,123 @@ class TestRequeueTicket:
         with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER"):
             requeue_ticket("GEN-500", "genhealth")
 
+    # -- Issue #917: allow_regress backward-regress behavior ----------------
+
+    def test_regress_backward_allowed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """allow_regress=True + backward stage on BLOCKED task succeeds."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess9101")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "impl"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_regress_without_stage_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """allow_regress=True with no stage_override raises RequeueStageError."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess9102")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(
+            RequeueStageError,
+            match="--regress requires a backward --stage target on a blocked task.",
+        ):
+            requeue_ticket("GEN-500", "genhealth", allow_regress=True)
+
+    def test_regress_refused_on_running(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """allow_regress + backward stage on a RUNNING task raises."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess9103",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError):
+            requeue_ticket(
+                "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+            )
+
+    def test_regress_forward_target_is_inert(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """allow_regress + forward/same stage is not an error (inert flag)."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9104")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+
+        assert result["from_stage"] == "plan"
+        assert result["to_stage"] == "impl"
+        assert result["regressed"] is False
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+
+    def test_regress_return_dict_reports_regressed_and_attempts(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Backward regress reports regressed + attempts; forward reports neither."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess9105")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+        assert result["regressed"] is True
+        assert result["regress_attempts"] == 1
+
+        # Forward requeue (no allow_regress): regressed False, attempts 0.
+        task2 = _make_blocked_task(
+            ticket_id="GEN-501", stage=Stage.PLAN, session_id="sess9106"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task2]))
+        result2 = requeue_ticket("GEN-501", "genhealth", stage_override="impl")
+        assert result2["regressed"] is False
+        assert result2["regress_attempts"] == 0
+
+        # Same-stage with allow_regress=True (inert): regressed False, attempts 0.
+        task3 = _make_blocked_task(
+            ticket_id="GEN-502", stage=Stage.IMPL, session_id="sess9107"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task3]))
+        result3 = requeue_ticket(
+            "GEN-502", "genhealth", stage_override="impl", allow_regress=True
+        )
+        assert result3["regressed"] is False
+        assert result3["regress_attempts"] == 0
+
 
 # ---------------------------------------------------------------------------
 # TestUnblockTicket — unblock_ticket() mutation function
@@ -3076,6 +3194,156 @@ class TestCLIRequeue:
             ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
         )
         assert result.exit_code != 0
+
+    # -- Issue #917: --regress flag ----------------------------------------
+
+    def test_requeue_regress_backward_allowed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`--regress --stage impl` from review succeeds and moves backward."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess6101")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--regress",
+                "--stage",
+                "impl",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "review -> impl" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.IMPL
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_regress_refused_on_running(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`--regress` on a RUNNING task exits nonzero."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess6102",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--regress",
+                "--stage",
+                "impl",
+            ],
+        )
+        assert result.exit_code != 0
+
+    def test_requeue_regress_without_stage_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`--regress` without `--stage` exits nonzero."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess6103")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--regress",
+            ],
+        )
+        assert result.exit_code != 0
+
+    def test_requeue_regress_emits_regress_provenance_event(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--regress` emits TICKET_REQUEUED with cli_regress provenance."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess6104")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--regress",
+                "--stage",
+                "impl",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_regress"
+        assert payload["regressed"] is True
+        assert payload["regress_attempts"] == 1
+
+    def test_requeue_ordinary_event_has_no_regress_fields(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plain forward requeue omits the regress_attempts key entirely."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess6105")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--stage",
+                "impl",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue"
+        assert payload["regressed"] is False
+        assert "regress_attempts" not in payload
 
 
 # ---------------------------------------------------------------------------
