@@ -6,6 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-02
+
+The **reliability bug sprint, waves 0–1**: stabilized the CI gate, hardened
+the review stage's sentinel contract, and closed a cluster of dispatch /
+reconcile / doctor correctness gaps found by a full 109-issue triage. Also
+lands the RFC 0005 F3 async LocalExecutor spawn.
+
+### Added
+
+- **Async `LocalExecutor.spawn()` + local-harvest crash recovery** (#888,
+  #920): aider launches fire-and-forget via `Popen`; reconcile's local
+  harvest completes the session when the process exits, including after a
+  cw crash.
+- **`cw spawn close --confirmed-dead`** (#928, #938): flag-distinguished
+  close for provably-dead cross-session workers, so an auto-mode allow rule
+  can authorize cleanup without weakening bare `spawn close`.
+- **argv regression guard for `claude --bg` spawns** (#736, #933): asserts
+  the prompt stays the trailing positional at both spawn chokepoints
+  (`spawn_create_impl`, `resume_session`) — the #716/#731/#733 silent-idle
+  regression class now fails tests instead of burning 30-minute sessions.
+- **`wedge/active-no-daemon-entry` doctor class** (#925, #939): `doctor
+  --reap` detects and clears ACTIVE/IDLE sessions whose daemon entry is gone
+  (crash without sentinel), releasing the hook-context lock.
+
+### Changed
+
+- **Review-stage sentinel hardening** (#916, #932): `scope.tier` carries
+  forward from the plan sentinel (no more small→large flip-flop loops) and a
+  pre-exit dirty-tree invariant stops the review session exiting with
+  uncommitted fix-loop work.
+- **`_local_preflight` returns a discriminated union** (#919, #934):
+  `_PreflightOK` NamedTuple replaces the tuple-with-dead-`or ""`-guards
+  shape; callers narrow via `isinstance`.
+
+### Fixed
+
+- **Flaky `test_cli_event_tail_client_filter_comma_separated`** (#913,
+  #931): hex-compatible session ids in negative assertions made the test
+  order-dependent; the CI gate is deterministic again.
+- **`session.completed` without a PR now emits `session.needs_attention`**
+  (#923, #935): plan-stage parks are no longer invisible to operators.
+- **Stale PENDING dedup** (#876, #937): reconcile parks (auto: cancels) a
+  PENDING task whose ticket already has a globally-terminal sibling row —
+  scoped strictly to `{COMPLETED, CANCELLED}` so multi-stage tickets and
+  legitimate retries are never false-reaped.
+- **Finalize double-fire** (#912, #941): doctor's BLOCKED_ON_USER collapse
+  skips tasks that already carry a `pr_url`, killing the re-dispatch path
+  that produced redundant empty PRs.
+
 ## [1.7.0] — 2026-06-30
 
 The **local-model validation** sprint (RFC 0005 executors): the exit bar was
