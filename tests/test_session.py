@@ -976,6 +976,70 @@ class TestResumeSession:
         assert "--disallowed-tools" not in extra
         assert _LINEAR_MCP_DISALLOW_ARG not in extra
 
+    def test_resume_session_prompt_is_trailing_positional(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """resume_session (dead surface): prompt is the trailing positional in argv.
+
+        Uses the maximally-loaded extra_args set: ``--resume <uuid>``,
+        ``--model``, and ``--disallowed-tools=`` (github-issues tracker).
+        This is the exact argv shape that triggered #733 when the disallow
+        flag was in two-token form — ``--disallowed-tools <pattern>`` would
+        consume the prompt as a second value, leaving the worker promptless.
+        """
+        from cw.native_daemon import _DEFAULT_PERMISSION_MODE, _build_spawn_argv
+
+        claude_dir = sample_client.workspace_path / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "project-config.yaml").write_text(
+            "tracking:\n  primary:\n    system: github-issues\n", encoding="utf-8"
+        )
+        self._write_clients_file(
+            tmp_config_dir,
+            sample_client,
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rargv733a",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    # Dead surface — not in mock's live set — forces re-spawn.
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440099",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        _, received_prompt = mock_native_daemon.spawn_calls[0]
+        extra_args = mock_native_daemon.spawn_extra_args[0]
+        full_argv = _build_spawn_argv(
+            mode=_DEFAULT_PERMISSION_MODE,
+            extra_args=extra_args,
+            prompt=received_prompt,
+        )
+
+        # Prompt must be the final argv token — no variadic flag may consume it.
+        assert full_argv[-1] == received_prompt
+        # Sanity: all three flag types are present, exercising the full #733 shape.
+        assert "--resume" in (extra_args or [])
+        assert "--model" in (extra_args or [])
+        assert _LINEAR_MCP_DISALLOW_ARG in (extra_args or [])
+
     def test_dead_surface_unregistered_raises_spawn_unregistered_error(
         self,
         tmp_config_dir: Path,
