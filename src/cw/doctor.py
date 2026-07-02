@@ -775,9 +775,7 @@ def _daemon_supervisor_alive() -> bool:
     guard is consistent between the health check and the wedge detector.
     """
     try:
-        data: dict[str, object] = json.loads(
-            _ROSTER_PATH.read_text(encoding="utf-8")
-        )
+        data: dict[str, object] = json.loads(_ROSTER_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return False
     pid = data.get("supervisorPid", 0)
@@ -1251,9 +1249,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         report.wedge_findings.extend(
             _check_wedge_dead_session_blocked_on_user(link_state, queue)
         )
-        report.wedge_findings.extend(
-            _check_wedge_active_no_daemon_entry(link_state)
-        )
+        report.wedge_findings.extend(_check_wedge_active_no_daemon_entry(link_state))
         if reap and report.wedge_findings:
             _reap_wedge_findings(report.wedge_findings)
 
