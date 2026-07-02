@@ -517,9 +517,9 @@ def park_terminal_sibling_tasks() -> list[str]:
             )
             orig_session_id = task.session_id
             if policy is ReapPolicy.AUTO:
-                transition_task_status(
-                    task, QueueItemStatus.CANCELLED, disposition="terminal_sibling"
-                )
+                # Why: CANCELLED is in _RESET_DISPOSITION_STATUSES — disposition is
+                # cleared regardless; reason is captured in SESSION_REAP_PROPOSED event.
+                transition_task_status(task, QueueItemStatus.CANCELLED)
             else:
                 transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
             task.session_id = None

@@ -1117,6 +1117,21 @@ class TestAddTicketDedupe:
         store2 = load_dev_queue()
         assert len(store2.tasks) == 1
 
+    def test_allows_different_stage_after_completed(self, tmp_dev_queue: Path) -> None:
+        """COMPLETED PLAN-stage row does NOT block adding an IMPL-stage row (#876)."""
+        completed_plan = TicketTask(
+            ticket_id="GEN-5",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[completed_plan]))
+        impl_task = TicketTask(ticket_id="GEN-5", client="genhealth", stage=Stage.IMPL)
+        result = add_ticket(impl_task)
+        assert result is True
+        store2 = load_dev_queue()
+        assert len(store2.tasks) == 2
+
 
 # ---------------------------------------------------------------------------
 # Shared helper: lane-aware client setup
