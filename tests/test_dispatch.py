@@ -5285,6 +5285,33 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.IMPL
 
+    def test_route_staged_decision_scope_gated_large_parked_restamps(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Non-small-tier scope-gated arm re-stamps a parked task (#918).
+
+        Unlike the small-tier arm (which advances), a large/medium-tier
+        SCOPE_GATED_APPROVAL_STATUSES sentinel calls transition_task_status
+        directly with BLOCKED_ON_USER -- a same-state transition when the
+        target is already parked. Confirms this arm tolerates that call
+        (no assert, disposition re-stamped) and stays parked, not advanced.
+        """
+        from cw.dispatch import _route_staged_decision
+
+        task = self._make_parked_task("PARK-SG-LARGE-1", stage=Stage.PLAN)
+        task.scope_hint = "large"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        _route_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "plan_pending_approval"
+        assert task.stage == Stage.PLAN
+
 
 # ---------------------------------------------------------------------------
 # TestWaveCollisionDetection

@@ -696,6 +696,7 @@ def _apply_sentinel_to_task(
             return False
 
         rescued = False
+        mutated = True
         if isinstance(sentinel, AutoDevResult):
             # Delegate to the shared B2 staged advance decision so both the
             # consume path (_apply_events_to_store) and the reconcile
@@ -721,8 +722,13 @@ def _apply_sentinel_to_task(
             # so leave it parked (never a false FAILED/COMPLETED on a rescue
             # miss, #918/Comment 9).
             _route_blocked_result_to_task(target, sentinel)
+        else:
+            # True no-op: a late BlockedResult against an already-parked task
+            # carries no success signal and must not write (#918).
+            mutated = False
 
-        save_dev_queue(store)
+        if mutated:
+            save_dev_queue(store)
         return rescued
 
 
