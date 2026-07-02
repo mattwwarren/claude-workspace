@@ -299,7 +299,7 @@ git status --porcelain
 ```
 If the output is non-empty (staged or unstaged changes exist), you MUST either:
 - **Commit and push** the staged changes (if they represent completed work), then emit the sentinel as normal, OR
-- **Emit a `blocked` sentinel** with `blocker.reason: "dirty_tree_no_sentinel"` and `blocker.details: "fix loop left staged/unstaged changes but could not commit and push before session end — emitting blocked rather than exiting silently with a dirty index and no sentinel"`
+- **Emit a `blocked` sentinel** with `blocker.reason: "dirty_tree_no_sentinel"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result.py:561-563` rejects null at stage3_review), and `blocker.details: "staged or unstaged changes exist but could not be committed and pushed before session end — emitting blocked rather than exiting silently with a dirty index and no sentinel"`
 
 Never exit with a dirty tree and no sentinel. A session exit with no sentinel looks identical to "never ran" to the dispatcher — it resets the task to the plan stage and discards origin commits, causing an infinite plan→impl→review→silent-exit loop.
 
