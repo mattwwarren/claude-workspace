@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import importlib.metadata
 import json
+import logging
 import shutil
 import subprocess as _sp
 import tomllib
@@ -148,6 +149,8 @@ _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
 # Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
 # failure path that leaves roster absent but session still "active" in cw state).
 _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
+
+_log = logging.getLogger(__name__)
 
 
 def _gh_on_path() -> bool:
@@ -847,6 +850,15 @@ def _collapse_blocked_on_user_tasks(
         # Stable sort preserves insertion order for equal created_at values.
         tasks_for_ticket.sort(key=lambda t: t.created_at)
         oldest = tasks_for_ticket[0]
+        if oldest.pr_url:
+            _log.warning(
+                "Skipping _collapse_blocked_on_user_tasks for ticket %s: "
+                "oldest BLOCKED_ON_USER task has pr_url set (%s). "
+                "Will not revert to PENDING.",
+                ticket_id,
+                oldest.pr_url,
+            )
+            continue
         transition_task_status(oldest, QueueItemStatus.PENDING)
         oldest.session_id = None
         changed = True

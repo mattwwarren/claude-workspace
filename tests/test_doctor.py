@@ -3995,7 +3995,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Oldest has pr_url, younger sibling none → BOTH stay BLOCKED_ON_USER (#912)."""
+        """Oldest has pr_url, younger sibling none → both stay BLOCKED (#912)."""
         from cw.config import save_state
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.models import CwState, DevQueueStore, QueueItemStatus, TicketTask
