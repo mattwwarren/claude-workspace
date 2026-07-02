@@ -278,9 +278,13 @@ cw event record stage.errored \
 
 If either reviewer's friction is **BLOCK** (e.g., couldn't access the repo, plan malformed), treat as `agent_block` per the existing escalation path — do NOT treat agent failure as a clean review.
 
-### Step 1g: Post Plan to Linear
+### Step 1g: Persist Plan + Post to Linear
 
-After plan is approved (or auto-skipped with existing plan) AND Plan Quality Review has passed (Step 1f), post the plan as a comment on the Linear issue (skip for free-text tickets). This documents the implementation approach on the ticket.
+After plan is approved (or auto-skipped with existing plan) AND Plan Quality Review has passed (Step 1f):
+
+**FIRST, persist the plan file (#943 — this is the stage's primary artifact, not optional):** Write the full reviewed plan text verbatim — including both signoff markers below — to `.cw/plan.md` in the worktree, BEFORE posting to the tracker and BEFORE emitting the sentinel. Stage 2 (`auto-dev-impl.md`) hard-requires this file; a plan that exists only as a tracker comment leaves the ticket unimplementable. Verify the write (`test -s .cw/plan.md`) as part of this step.
+
+**THEN** post the same plan as a comment on the Linear issue (skip for free-text tickets — but never skip the `.cw/plan.md` write). This documents the implementation approach on the ticket; the tracker comment is the audit copy, the file is the pipeline artifact.
 
 **Marker requirement:** The plan body posted to Linear MUST include both signoff markers, each on its own line near the top, exactly:
 
