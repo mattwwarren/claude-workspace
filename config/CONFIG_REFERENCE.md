@@ -277,7 +277,7 @@ headless_timeout_by_tier:
 # sentinel. Sessions whose scope_hint is unknown fall back to the global
 # IDLE_WATCHDOG_SECONDS (900s). See GitHub issues #326, #340.
 idle_watchdog_by_tier:
-  large: 1800   # 30 min — large-tier sessions may stall on slow builds
+  large: 3600   # 60 min — above worst-case FINALIZE gate-run (pytest+mypy); #918
 
 # Reap policy: controls whether the reconciler destroys a stalled session
 # or only signals for human intervention (ADR-0006 invariant 4).

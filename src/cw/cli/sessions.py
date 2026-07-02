@@ -544,6 +544,9 @@ def signal_stop() -> None:
         # Recovery, not silent wedge.
         return
 
+    # #918: set True when a late Stop-hook sentinel rescues an idle-parked
+    # (BLOCKED_ON_USER) task; surfaced on the SESSION_COMPLETED payload below.
+    rescued = False
     # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
     # and daemon.stop() network call inside the lock window (criteria 1 and 2).
     with sessions_lock():
@@ -649,7 +652,9 @@ def signal_stop() -> None:
             and parsed_sentinel is not None
             and isinstance(ticket_id_value, str)
         ):
-            _apply_sentinel_to_task(ticket_id_value, session.id, parsed_sentinel)
+            rescued = _apply_sentinel_to_task(
+                ticket_id_value, session.id, parsed_sentinel
+            )
 
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
@@ -665,15 +670,9 @@ def signal_stop() -> None:
             session.last_result = parsed_sentinel.model_dump(mode="json")
         save_state(state)
 
-    payload: dict[str, object] = {
-        "session_id": session.id,
-        "session_name": session.name,
-        "client": context.get("client"),
-        "ticket_id": context.get("ticket_id"),
-        "claude_session_id": claude_session_id,
-        "hook_event": hook_payload.get("hook_event_name"),
-        "crashed": False,
-    }
+    payload = _build_completed_payload(
+        session, context, claude_session_id, hook_payload, rescued=rescued
+    )
     record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
     # Native bg workers stay registered with the Claude daemon as
@@ -684,6 +683,36 @@ def signal_stop() -> None:
     # missing-binary / timeout errors rather than failing the hook.
     if session.origin is SessionOrigin.DAEMON and session.surface_ref is not None:
         get_native_daemon_client().stop(session.surface_ref)
+
+
+def _build_completed_payload(
+    session: Session,
+    context: dict[str, object],
+    claude_session_id: object,
+    hook_payload: dict[str, object],
+    *,
+    rescued: bool,
+) -> dict[str, object]:
+    """Build the SESSION_COMPLETED event payload.
+
+    When *rescued* is True (a late Stop-hook sentinel salvaged an idle-parked
+    task, #918) the payload carries ``rescued``/``rescue_reason``; those keys
+    are omitted otherwise so the common path is unchanged (no new event type).
+    Extracted to keep signal_stop under the branch cap.
+    """
+    payload: dict[str, object] = {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": context.get("client"),
+        "ticket_id": context.get("ticket_id"),
+        "claude_session_id": claude_session_id,
+        "hook_event": hook_payload.get("hook_event_name"),
+        "crashed": False,
+    }
+    if rescued:
+        payload["rescued"] = True
+        payload["rescue_reason"] = "late_sentinel"
+    return payload
 
 
 @main.command(name="daemon")
