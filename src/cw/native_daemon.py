@@ -140,6 +140,26 @@ class NativeDaemonClient(Protocol):
         ...
 
 
+def _build_spawn_argv(
+    *,
+    mode: str,
+    extra_args: list[str] | None,
+    prompt: str,
+) -> list[str]:
+    """Assemble the full ``claude --bg`` argv for a spawn call.
+
+    The prompt is always appended AFTER extra_args so no preceding
+    value-taking or variadic flag can consume it as a value.
+    See GitHub issue #733 (``--disallowed-tools`` variadic regression).
+    """
+    cmd = ["claude", "--bg", "--permission-mode", mode]
+    if extra_args:
+        cmd.extend(extra_args)
+    if prompt:
+        cmd.append(prompt)
+    return cmd
+
+
 class RealNativeDaemonClient:
     """Real client that drives the ``claude`` CLI via subprocess.
 
@@ -169,11 +189,7 @@ class RealNativeDaemonClient:
         to use the default.
         """
         mode = _DEFAULT_PERMISSION_MODE if permission_mode is None else permission_mode
-        cmd = ["claude", "--bg", "--permission-mode", mode]
-        if extra_args:
-            cmd.extend(extra_args)
-        if prompt:
-            cmd.append(prompt)
+        cmd = _build_spawn_argv(mode=mode, extra_args=extra_args, prompt=prompt)
         try:
             proc = subprocess.run(
                 cmd,

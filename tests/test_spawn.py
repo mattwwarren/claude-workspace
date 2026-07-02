@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 import pytest
 from click.testing import CliRunner
@@ -991,9 +991,9 @@ class TestWriteHookContextAtomicAndLiveSession:
         concurrent reader never observes an empty/partial file (no O_TRUNC window).
         """
         import cw.spawn as spawn_mod
+        from cw.atomic import atomic_write_text as real_atomic
 
         calls: list[tuple[Path, str]] = []
-        real_atomic = spawn_mod.atomic_write_text
 
         def tracking_atomic(path: Path, text: str) -> None:
             calls.append((path, text))
@@ -1020,9 +1020,9 @@ class TestWriteHookContextAtomicAndLiveSession:
         every turn) never observes an empty/partial file.
         """
         import cw.spawn as spawn_mod
+        from cw.atomic import atomic_write_text as real_atomic
 
         calls: list[tuple[Path, str]] = []
-        real_atomic = spawn_mod.atomic_write_text
 
         def tracking_atomic(path: Path, text: str) -> None:
             calls.append((path, text))
@@ -1927,22 +1927,21 @@ class TestWriteHookContextOriginShaSuccess:
         """When git rev-parse succeeds, origin_main_sha_at_spawn is the SHA."""
         import subprocess as subprocess_mod
 
-        import cw.spawn as spawn_mod
         from cw.spawn import spawn_create_impl
 
         fake_sha = "abc1234def5678"
         real_run = subprocess_mod.run
 
         def patched_run(
-            cmd: list[str], **kwargs: object
-        ) -> subprocess_mod.CompletedProcess[str]:
+            cmd: list[str], **kwargs: Any
+        ) -> subprocess_mod.CompletedProcess[Any]:
             if "rev-parse" in cmd and "origin/main" in cmd:
                 return subprocess_mod.CompletedProcess(
                     cmd, 0, stdout=fake_sha + "\n", stderr=""
                 )
-            return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+            return real_run(cmd, **kwargs)
 
-        monkeypatch.setattr(spawn_mod.subprocess, "run", patched_run)
+        monkeypatch.setattr(subprocess_mod, "run", patched_run)
 
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
@@ -2482,6 +2481,74 @@ class TestLinearMcpDisallow:
 
 
 # ---------------------------------------------------------------------------
+# Tests for #736: prompt survives as trailing positional in assembled argv
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnArgvPromptPositional:
+    """Regression guard for #733: the worker prompt must be the final token in
+    the assembled ``claude --bg`` argv.
+
+    Bug: ``--disallowed-tools <pattern>`` (two-token, space-separated) let
+    ``claude``'s variadic flag parser consume the prompt as an extra value,
+    leaving the worker promptless.  Fix: use ``--disallowed-tools=<pattern>``
+    (``=``-joined single token) which binds exactly one value.
+
+    These tests verify the fully-assembled argv has the prompt last, covering
+    both spawn chokepoints (spawn_create_impl and resume_session).
+    """
+
+    def test_spawn_create_impl_prompt_is_trailing_positional(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """spawn_create_impl: prompt is the final token of the assembled argv.
+
+        Uses the maximally-loaded extra_args set: ``--model`` (worker_model)
+        then ``--disallowed-tools=`` (github-issues tracker).  This is the
+        exact argv shape that triggered #733 when the disallow flag was in
+        two-token form.
+        """
+        from cw.native_daemon import _DEFAULT_PERMISSION_MODE, _build_spawn_argv
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "gh-argv-create"
+        workspace.mkdir(parents=True)
+        _write_project_config(workspace, "github-issues")
+        client = ClientConfig(
+            name="gh-argv-create",
+            workspace_path=workspace,
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        prompt = "/auto-dev 733 --headless"
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-argv-spawn-create")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt=prompt,
+            label="auto-dev-733",
+            native_daemon=daemon,
+        )
+
+        _, received_prompt = daemon.spawn_calls[0]
+        extra_args = daemon.spawn_extra_args[0]
+        full_argv = _build_spawn_argv(
+            mode=_DEFAULT_PERMISSION_MODE,
+            extra_args=extra_args,
+            prompt=received_prompt,
+        )
+
+        # Prompt must be the final argv token.
+        assert full_argv[-1] == prompt
+        # Extra sanity: the prompt reached spawn_bg unmodified.
+        assert received_prompt == prompt
+
+
+# ---------------------------------------------------------------------------
 # Tests for #520: roster-registration verification after spawn_bg
 # ---------------------------------------------------------------------------
 
@@ -2781,7 +2848,7 @@ class TestPriorAttemptsSummary:
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
         worktree = make_git_repo("wt-838-timed-out")
-        last_result = {
+        last_result: dict[str, object] = {
             "status": "blocked",
             "stage_reached": "stage2_impl",
             "blocker": {"stage": "s2", "reason": "impl_failed", "details": "tests red"},
@@ -2829,7 +2896,7 @@ class TestPriorAttemptsSummary:
         client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
         worktree = make_git_repo("wt-838-completed")
-        last_result = {
+        last_result: dict[str, object] = {
             "status": "blocked",
             "stage_reached": "stage3_review",
             "blocker": {"stage": "s3", "reason": "review_blocked", "details": ""},
@@ -2990,7 +3057,7 @@ class TestPriorAttemptsSummary:
         daemon = FakeNativeDaemonClient()
         worktree = make_git_repo("wt-838-truncate")
         long_details = "x" * 600
-        last_result = {
+        last_result: dict[str, object] = {
             "status": "blocked",
             "stage_reached": "stage2_impl",
             "blocker": {
