@@ -40,6 +40,11 @@ For each ticket in the queue:
 
 ### Step 1b: Generate Plan (Agent)
 
+**Step 1b setup — Pre-flight Resolution pre-extraction (orchestrator, before spawning the Plan agent).** Grep the materialized ticket comments for the marker `<!-- auto-dev-preflight-resolutions -->` (the `/harden-ticket` resolution comment). Branch on the count of comments bearing it:
+- **>1 marker comment** → EXIT `ambiguities_pending_resolution` with the message `multiple resolution comments detected — re-run /harden-ticket to consolidate.` (headless: post the message as the ticket comment and include it in the result payload; no branch is created — same EXIT idiom as the Step 1c `ambiguities_pending_resolution` clause). Do NOT build supersession logic here; consolidating multiple resolution comments is `/harden-ticket`'s job.
+- **0 marker comments** → proceed normally; no resolutions section is injected into the plan-agent prompt.
+- **exactly 1 marker comment** → proceed to spawn (marker-injection handling below).
+
 Spawn a **Plan** agent (`subagent_type: "Plan", model: "opus"`) synchronously — the orchestrator must consume the plan result (and the `## Ambiguities` section) in Step 1c before continuing, so `run_in_background: true` is intentionally NOT used here. Background dispatch ends the parent's turn and trips Stop-hook session-completion (see issue #151 in claude-workspace), orphaning the plan agent.
 
 **Prompt must include:**
