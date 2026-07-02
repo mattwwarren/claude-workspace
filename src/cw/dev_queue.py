@@ -742,8 +742,6 @@ def _apply_requeue_stage(
     stage_override: str | None,
     *,
     allow_regress: bool,
-    client_name: str,
-    ticket_id: str,
 ) -> bool:
     """Resolve a requeue stage_override and mutate ``task``; report regress.
 
@@ -755,6 +753,10 @@ def _apply_requeue_stage(
     is BLOCKED_ON_USER; otherwise a RequeueStageError is raised. This keeps the
     backward-refusal exception type distinct from the forward-path
     RequeueStateError (see #917).
+
+    ``client_name``/``ticket_id`` are read off ``task`` rather than taken as
+    separate params: callers always source ``task`` via ``_find_ticket``,
+    which guarantees ``task.client``/``task.ticket_id`` already match.
     """
     if stage_override is None:
         return False
@@ -763,7 +765,7 @@ def _apply_requeue_stage(
     if target_stage not in stages:
         msg = (
             f"Stage '{stage_override}' is not in the pipeline"
-            f" for client '{client_name}'."
+            f" for client '{task.client}'."
         )
         raise RequeueStageError(msg)
 
@@ -773,7 +775,7 @@ def _apply_requeue_stage(
     if target_idx < current_idx:
         if not allow_regress:
             msg = (
-                f"Cannot requeue ticket '{ticket_id}'"
+                f"Cannot requeue ticket '{task.ticket_id}'"
                 f" to stage '{stage_override}':"
                 f" that would regress from '{task.stage.value}'."
                 " Only same-stage or forward advancement is allowed."
@@ -782,7 +784,7 @@ def _apply_requeue_stage(
             raise RequeueStageError(msg)
         if task.status != QueueItemStatus.BLOCKED_ON_USER:
             msg = (
-                f"Cannot regress ticket '{ticket_id}'"
+                f"Cannot regress ticket '{task.ticket_id}'"
                 f" to stage '{stage_override}': status is"
                 f" {task.status.value!r}, expected BLOCKED_ON_USER."
             )
@@ -834,8 +836,6 @@ def requeue_ticket(
             stages,
             stage_override,
             allow_regress=allow_regress,
-            client_name=client_name,
-            ticket_id=ticket_id,
         )
 
         if not regressed:
