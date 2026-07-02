@@ -194,18 +194,26 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
     default=None,
     help="Stage to requeue at (default: current stage). Forward-only.",
 )
+@click.option(
+    "--regress",
+    "regress",
+    is_flag=True,
+    default=False,
+    help="Allow a backward --stage target on a blocked ticket (e.g. review->impl).",
+)
 @handle_errors
 def dev_queue_requeue(
-    ticket_id: str, client: str | None, stage_override: str | None
+    ticket_id: str, client: str | None, stage_override: str | None, regress: bool
 ) -> None:
     """Requeue a BLOCKED_ON_USER ticket back to PENDING.
 
-    Defaults to re-running the current stage. Use --stage to advance forward
-    (never backward — forward-only guard enforced).
+    Defaults to re-running the current stage. Use --stage to advance forward.
+    Use --regress with a backward --stage to move a blocked ticket backward
+    (e.g. a plan-deviation review exit back to impl).
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
-    result = requeue_ticket(ticket_id, resolved, stage_override)
+    result = requeue_ticket(ticket_id, resolved, stage_override, allow_regress=regress)
     record_event(
         OrchestratorEventType.TICKET_REQUEUED,
         {
@@ -213,6 +221,13 @@ def dev_queue_requeue(
             "client": resolved,
             "from_stage": result["from_stage"],
             "to_stage": result["to_stage"],
+            "reason": "cli_regress" if result["regressed"] else "cli_requeue",
+            "regressed": result["regressed"],
+            **(
+                {"regress_attempts": result["regress_attempts"]}
+                if result["regressed"]
+                else {}
+            ),
         },
     )
     click.echo(

@@ -2866,7 +2866,7 @@ class TestRequeueTicket:
 
         with pytest.raises(
             RequeueStageError,
-            match="--regress requires a backward --stage target on a blocked task.",
+            match="--regress requires a backward --stage target on a blocked task",
         ):
             requeue_ticket("GEN-500", "genhealth", allow_regress=True)
 

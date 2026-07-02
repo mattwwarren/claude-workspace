@@ -51,6 +51,11 @@ if TYPE_CHECKING:
 
 _WAIT_POLL_INTERVAL: int = 5
 
+# Issue #917: --regress requires an explicit backward --stage target.
+_REGRESS_NEEDS_BACKWARD_STAGE_MSG = (
+    "--regress requires a backward --stage target on a blocked task."
+)
+
 _TERMINAL_STATUSES: frozenset[QueueItemStatus] = frozenset(
     [
         QueueItemStatus.COMPLETED,
@@ -731,63 +736,125 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
     }
 
 
+def _apply_requeue_stage(
+    task: TicketTask,
+    stages: list[Stage],
+    stage_override: str | None,
+    *,
+    allow_regress: bool,
+    client_name: str,
+    ticket_id: str,
+) -> bool:
+    """Resolve a requeue stage_override and mutate ``task``; report regress.
+
+    Returns True iff the task was regressed backward (via ``_stage_regress``);
+    False for forward/same-stage moves (task.stage is set forward, but status
+    transition + session resets are left to the caller).
+
+    Backward moves are only permitted when ``allow_regress`` is set AND the task
+    is BLOCKED_ON_USER; otherwise a RequeueStageError is raised. This keeps the
+    backward-refusal exception type distinct from the forward-path
+    RequeueStateError (see #917).
+    """
+    if stage_override is None:
+        return False
+
+    target_stage = Stage(stage_override)
+    if target_stage not in stages:
+        msg = (
+            f"Stage '{stage_override}' is not in the pipeline"
+            f" for client '{client_name}'."
+        )
+        raise RequeueStageError(msg)
+
+    current_idx = stages.index(task.stage)
+    target_idx = stages.index(target_stage)
+
+    if target_idx < current_idx:
+        if not allow_regress:
+            msg = (
+                f"Cannot requeue ticket '{ticket_id}'"
+                f" to stage '{stage_override}':"
+                f" that would regress from '{task.stage.value}'."
+                " Only same-stage or forward advancement is allowed."
+                " Use --regress to move backward."
+            )
+            raise RequeueStageError(msg)
+        if task.status != QueueItemStatus.BLOCKED_ON_USER:
+            msg = (
+                f"Cannot regress ticket '{ticket_id}'"
+                f" to stage '{stage_override}': status is"
+                f" {task.status.value!r}, expected BLOCKED_ON_USER."
+            )
+            raise RequeueStageError(msg)
+        _stage_regress(task, target_stage)
+        return True
+
+    # Forward or same-stage: caller enforces the BLOCKED_ON_USER precondition.
+    task.stage = target_stage
+    return False
+
+
 def requeue_ticket(
     ticket_id: str,
     client_name: str,
     stage_override: str | None = None,
-) -> dict[str, str]:
+    *,
+    allow_regress: bool = False,
+) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER ticket, optionally at a specific stage.
 
-    Returns dict with from_stage, to_stage, ticket_id, client for event emission.
+    Returns dict with from_stage, to_stage, ticket_id, client, regressed, and
+    regress_attempts for event emission. ``regressed`` is True only on a genuine
+    backward regress (``allow_regress`` + backward ``stage_override`` + blocked
+    task); ``regress_attempts`` is the post-mutation attempt count (0 on the
+    forward/same-stage path).
 
     Raises:
-        RequeueStateError: if ticket is not BLOCKED_ON_USER.
-        RequeueStageError: if stage_override would regress the ticket or is not
-            in the client pipeline.
+        RequeueStateError: if ticket is not BLOCKED_ON_USER (forward path).
+        RequeueStageError: if stage_override would regress without allow_regress,
+            is not in the client pipeline, regresses a non-blocked task, or if
+            allow_regress is set with no backward stage_override.
         CwError: if no matching task is found.
     """
     with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
 
-        if task.status != QueueItemStatus.BLOCKED_ON_USER:
-            msg = (
-                f"Cannot requeue ticket '{ticket_id}': status is {task.status.value!r},"
-                " expected BLOCKED_ON_USER."
-            )
-            raise RequeueStateError(msg)
-
         client_cfg = get_client(client_name)
         stages = client_cfg.pipeline.stages
 
         from_stage = task.stage
 
-        if stage_override is not None:
-            target_stage = Stage(stage_override)
-            if target_stage not in stages:
-                msg = (
-                    f"Stage '{stage_override}' is not in the pipeline"
-                    f" for client '{client_name}'."
-                )
-                raise RequeueStageError(msg)
-            current_idx = stages.index(task.stage)
-            target_idx = stages.index(target_stage)
-            if target_idx < current_idx:
-                msg = (
-                    f"Cannot requeue ticket '{ticket_id}'"
-                    f" to stage '{stage_override}':"
-                    f" that would regress from '{task.stage.value}'."
-                    " Only same-stage or forward advancement is allowed."
-                )
-                raise RequeueStageError(msg)
-            task.stage = target_stage
+        if allow_regress and stage_override is None:
+            raise RequeueStageError(_REGRESS_NEEDS_BACKWARD_STAGE_MSG)
 
-        transition_task_status(task, QueueItemStatus.PENDING)
-        task.session_id = None
-        task.stage_base_ref = None
-        task.regress_attempts = 0
+        regressed = _apply_requeue_stage(
+            task,
+            stages,
+            stage_override,
+            allow_regress=allow_regress,
+            client_name=client_name,
+            ticket_id=ticket_id,
+        )
+
+        if not regressed:
+            # Forward/same-stage path (including inert allow_regress forward
+            # targets) requires the ticket to be at a BLOCKED_ON_USER gate.
+            if task.status != QueueItemStatus.BLOCKED_ON_USER:
+                msg = (
+                    f"Cannot requeue ticket '{ticket_id}':"
+                    f" status is {task.status.value!r},"
+                    " expected BLOCKED_ON_USER."
+                )
+                raise RequeueStateError(msg)
+            transition_task_status(task, QueueItemStatus.PENDING)
+            task.session_id = None
+            task.stage_base_ref = None
+            task.regress_attempts = 0
 
         to_stage = task.stage
+        regress_attempts = task.regress_attempts if regressed else 0
         save_dev_queue(store)
 
     return {
@@ -795,6 +862,8 @@ def requeue_ticket(
         "to_stage": to_stage.value,
         "ticket_id": ticket_id,
         "client": client_name,
+        "regressed": regressed,
+        "regress_attempts": regress_attempts,
     }
 
 

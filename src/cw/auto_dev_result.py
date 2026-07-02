@@ -283,6 +283,7 @@ class Review(BaseModel):
     must_fix_initial: int
     should_fix: int
     fix_cycles_used: int
+    deferred: int = 0
 
 
 class AgentHealthEntry(BaseModel):
