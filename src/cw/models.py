@@ -80,6 +80,7 @@ class ReapReason(StrEnum):
     SALVAGE_COMPLETED = "salvage_completed"
     SALVAGE_PARKED = "salvage_parked"
     FINALIZE_BLOCKED = "finalize_blocked"
+    TERMINAL_SIBLING = "terminal_sibling"
 
 
 class Stage(StrEnum):

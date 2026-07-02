@@ -297,12 +297,16 @@ def add_ticket(task: TicketTask) -> bool:
     """Enqueue a TicketTask, acquiring the file lock atomically.
 
     Returns True if the task was inserted, False if a task with the same
-    (client, ticket_id) is already PENDING or RUNNING (deduplication guard).
+    (client, ticket_id) is already PENDING or RUNNING, or if the same
+    (client, ticket_id, stage) is already COMPLETED or CANCELLED
+    (deduplication guard — terminal check is stage-scoped to allow normal
+    multi-stage progression, e.g. COMPLETED PLAN does not block IMPL, #876).
 
     Raises:
         LaneNotFoundError: if task.lane is not declared for the client.
     """
     _active = {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
+    _terminal = {QueueItemStatus.COMPLETED, QueueItemStatus.CANCELLED}
     with _lock():
         try:
             client_cfg = get_client(task.client)
@@ -319,11 +323,11 @@ def add_ticket(task: TicketTask) -> bool:
                 raise LaneNotFoundError(msg)
         store = load_dev_queue()
         for existing in store.tasks:
-            if (
-                existing.client == task.client
-                and existing.ticket_id == task.ticket_id
-                and existing.status in _active
-            ):
+            if existing.client != task.client or existing.ticket_id != task.ticket_id:
+                continue
+            if existing.status in _active:
+                return False
+            if existing.status in _terminal and existing.stage == task.stage:
                 return False
         store.tasks.append(task)
         save_dev_queue(store)
