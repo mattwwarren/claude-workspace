@@ -5221,9 +5221,7 @@ class TestApplyStagedDecision:
 
         task = self._make_parked_task("ASSERT-1", stage=Stage.FINALIZE)
         with pytest.raises(AssertionError):
-            apply_staged_decision(
-                task, "stage_complete", None, self._clients(tmp_path)
-            )
+            apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
 
     def test_route_staged_decision_advances_parked_terminal(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
@@ -5259,9 +5257,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import _route_staged_decision
 
         task = self._make_parked_task("PARK-NONTERM-1", stage=Stage.IMPL)
-        _route_staged_decision(
-            task, "stage_complete", None, self._clients(tmp_path)
-        )
+        _route_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
 
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.REVIEW

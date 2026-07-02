@@ -2476,7 +2476,7 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Late AutoDevResult(blocked) re-parks the task; rescue still flagged (#918)."""
+        """Late AutoDevResult(blocked) re-parks the task; rescue flagged (#918)."""
         from cw.dev_queue import load_dev_queue
         from cw.models import QueueItemStatus
 
@@ -2505,7 +2505,7 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Late BlockedResult leaves the parked task untouched; no rescue keys (#918)."""
+        """Late BlockedResult leaves parked task untouched; no rescue keys (#918)."""
         from cw.dev_queue import load_dev_queue
         from cw.models import QueueItemStatus
 
