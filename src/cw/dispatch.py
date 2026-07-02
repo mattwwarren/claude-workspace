@@ -105,6 +105,9 @@ _SPAWN_ERROR_BACKOFF_CAP_SECONDS: int = 300
 # Duplicated from cw.doctor; importing from there creates a circular dep.
 # A future cw.const cleanup can consolidate these.
 _CW_PACKAGE_NAME: str = "claude-workspace"
+# paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
+# stage (ambiguities_pending_resolution / premises_pending_verification).
+_PLAN_PARKED_REASON = "plan_parked"
 
 
 def _resolve_loaded_version() -> str:
@@ -1338,6 +1341,20 @@ def apply_staged_decision(
     elif status in PAUSED_FOR_USER_INPUT_STATUSES:
         # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
         # premises_pending_verification). Scope-gated statuses caught by Rule 1.
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": _PLAN_PARKED_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
