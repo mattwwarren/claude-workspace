@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import importlib.metadata
 import json
+import logging
 import shutil
 import subprocess as _sp
 import tomllib
@@ -148,6 +149,8 @@ _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
 # Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
 # failure path that leaves roster absent but session still "active" in cw state).
 _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
+
+_log = logging.getLogger(__name__)
 
 
 def _gh_on_path() -> bool:
@@ -831,7 +834,9 @@ def _collapse_blocked_on_user_tasks(
 
     For each ticket_id in blocked_ticket_ids, sorts BLOCKED_ON_USER tasks by
     created_at (ascending), reverts the first (oldest) to PENDING with
-    session_id cleared, and cancels the rest.
+    session_id cleared, and cancels the rest. Skips the whole ticket
+    (no mutation) when the oldest task already has ``pr_url`` set — see
+    the inline comment at the guard for why.
 
     Returns True when any mutation was applied.
     """
@@ -847,6 +852,18 @@ def _collapse_blocked_on_user_tasks(
         # Stable sort preserves insertion order for equal created_at values.
         tasks_for_ticket.sort(key=lambda t: t.created_at)
         oldest = tasks_for_ticket[0]
+        # Why: reverting a task that already has a pr_url clears it and
+        # re-enables dispatch, which re-runs FINALIZE against a branch that
+        # may already be merged — producing a duplicate/empty PR (#912).
+        if oldest.pr_url:
+            _log.warning(
+                "Skipping _collapse_blocked_on_user_tasks for ticket %s: "
+                "oldest BLOCKED_ON_USER task has pr_url set (%s). "
+                "Will not revert to PENDING.",
+                ticket_id,
+                oldest.pr_url,
+            )
+            continue
         transition_task_status(oldest, QueueItemStatus.PENDING)
         oldest.session_id = None
         changed = True
@@ -863,7 +880,8 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     Class-3 (task-running-completed-session): revert queue task to PENDING.
     Class-4 (repo-ahead-of-queue): advisory only — no mutations.
     Class-5 (blocked-on-user-dead-session): revert oldest to PENDING, cancel
-        duplicates via _collapse_blocked_on_user_tasks.
+        duplicates via _collapse_blocked_on_user_tasks — skipped entirely if
+        the oldest task already has pr_url set.
     Class-6 (active-no-daemon-entry): call _reap_session_by_selector per
         phantom session; that helper marks COMPLETED, reverts queue task to
         PENDING, stops the daemon surface, and emits an audit event.

@@ -3841,6 +3841,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         ticket_id: str,
         session_id: str | None = "dead-sess-1",
         created_at: datetime | None = None,
+        pr_url: str | None = None,
     ) -> TicketTask:
         from cw.models import QueueItemStatus, TicketTask
 
@@ -3851,12 +3852,14 @@ class TestWedgeDeadSessionBlockedOnUser:
                 status=QueueItemStatus.BLOCKED_ON_USER,
                 session_id=session_id,
                 created_at=created_at,
+                pr_url=pr_url,
             )
         return TicketTask(
             ticket_id=ticket_id,
             client="client-a",
             status=QueueItemStatus.BLOCKED_ON_USER,
             session_id=session_id,
+            pr_url=pr_url,
         )
 
     def test_blocked_on_user_dead_surface_detected_and_reverted(
@@ -3958,6 +3961,95 @@ class TestWedgeDeadSessionBlockedOnUser:
         assert len(cancelled) == 2
         # The oldest (t1) becomes PENDING
         assert pending[0].created_at == datetime(2026, 1, 1, tzinfo=UTC)
+
+    def test_blocked_on_user_with_pr_url_not_reverted(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dead-session task with pr_url set → stays BLOCKED_ON_USER (#912)."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        save_state(CwState(sessions=[]))
+        task = self._make_blocked_task(
+            "TST-912-A",
+            session_id=None,
+            pr_url="https://github.com/o/r/pull/1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-912-A")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.pr_url == "https://github.com/o/r/pull/1"
+
+    def test_blocked_on_user_oldest_has_pr_url_whole_ticket_skipped(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Oldest has pr_url, younger sibling none → both stay BLOCKED (#912)."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        save_state(CwState(sessions=[]))
+        oldest = self._make_blocked_task(
+            "TST-912-B",
+            session_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            pr_url="https://github.com/o/r/pull/2",
+        )
+        younger = self._make_blocked_task(
+            "TST-912-B",
+            session_id=None,
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[oldest, younger]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        tasks = [t for t in store.tasks if t.ticket_id == "TST-912-B"]
+        assert len(tasks) == 2
+        assert all(t.status == QueueItemStatus.BLOCKED_ON_USER for t in tasks)
+
+    def test_blocked_on_user_without_pr_url_still_collapses(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """pr_url=None → still reverts to PENDING (regression guard for #912)."""
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.get_native_daemon_client", lambda: daemon)
+
+        save_state(CwState(sessions=[]))
+        task = self._make_blocked_task("TST-912-C", session_id=None, pr_url=None)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TST-912-C")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
 
     def test_blocked_on_user_live_session_not_reaped(
         self,
