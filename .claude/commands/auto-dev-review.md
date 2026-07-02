@@ -293,11 +293,30 @@ git checkout <original-branch>   # restore main session state
 
 Direct execution is slower than delegation but guaranteed to work. Use it as a last resort when two subagent attempts have failed due to sandbox issues.
 
+**Pre-exit invariant (required, no exceptions):** Before ending the review session at any point — on normal completion, on error, at a context boundary, or after the fallback path above — run:
+```bash
+git status --porcelain
+```
+If the output is non-empty (staged or unstaged changes exist), you MUST either:
+- **Commit and push** the staged changes (if they represent completed work), then emit the sentinel as normal, OR
+- **Emit a `blocked` sentinel** with `blocker.reason: "impl_failed"` and `blocker.details: "dirty git index at session exit — staged changes present but not committed"`
+
+Never exit with a dirty tree and no sentinel. A session exit with no sentinel looks identical to "never ran" to the dispatcher — it resets the task to the plan stage and discards origin commits, causing an infinite plan→impl→review→silent-exit loop.
+
 ---
 
 ## Stage 3 Completion (headless only)
 
 After all Stage 3 steps complete successfully in headless mode (review clean or fix loop resolved, branch pushed with fix commits), emit the `AUTO_DEV_RESULT` sentinel:
+
+**Before emitting the sentinel, resolve `scope.tier` explicitly.** `apply_staged_decision` Rule 1 in the dispatcher gates on this field — a null tier causes Rule 1 to route to `BLOCKED_ON_USER` regardless of the review outcome, creating false-positive blocks. The model does not always carry the Stage-1c tier classification forward automatically.
+
+To resolve the tier:
+1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`, or similar Stage-1c marker.
+2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint`.
+3. If neither yields `"small"` or `"large"`, **do NOT emit a `stage_complete` or `review_pending_approval` sentinel** — emit `blocked` instead with `blocker.reason: "impl_failed"` and `blocker.details: "scope.tier unresolvable — .cw/plan.md has no tier marker and .claude/cw-context.json queue_metadata.scope_hint is null. Sentinel emitted with tier=null would trigger apply_staged_decision Rule 1 false-positive BLOCKED_ON_USER."`.
+
+Populate `scope.tier` in the sentinel JSON only when the tier resolves to a concrete value.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
