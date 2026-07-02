@@ -455,9 +455,11 @@ class OrchestratorConfig(BaseModel):
     # Per-tier idle-watchdog budgets (seconds). Keyed by TicketTask.scope_hint;
     # unknown tiers fall back to IDLE_WATCHDOG_SECONDS (900s). Large-tier
     # sessions can legitimately stall longer on slow tests/mypy before emitting
-    # any sentinel. See GitHub issues #326, #340.
+    # any sentinel. 60 min (was 30) shrinks the Mode-3 busy-in-tool-call
+    # false-idle window: a real 31-min FINALIZE gate run (pytest+mypy) left no
+    # margin and got parked mid-completion. See GitHub issues #326, #340, #918.
     idle_watchdog_by_tier: dict[str, int] = Field(
-        default_factory=lambda: {"large": 1800}
+        default_factory=lambda: {"large": 3600}
     )
     # Global idle-watchdog budget (seconds) applied when a session has no
     # per-ticket override and no resolvable per-tier budget (e.g. it stalled

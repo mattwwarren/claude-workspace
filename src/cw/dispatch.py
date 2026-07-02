@@ -1268,7 +1268,7 @@ def _resolve_scope_tier(
     return task.scope_hint
 
 
-def _stage_advance(
+def _stage_advance_unchecked(
     task: TicketTask,
     clients: dict[str, ClientConfig],
     *,
@@ -1277,12 +1277,13 @@ def _stage_advance(
 ) -> None:
     """Advance task to next pipeline stage, or mark COMPLETED at terminal stage.
 
-    Precondition: task.status must be RUNNING. Only called from the B2
-    decision table which guards on RUNNING before dispatching to this helper.
+    Assert-free: no status precondition. The live consume/reconcile paths reach
+    this only through ``apply_staged_decision`` (which asserts RUNNING first);
+    the #918 late-sentinel rescue path reaches it through
+    ``_route_staged_decision`` for a BLOCKED_ON_USER (idle-parked) task, so the
+    RUNNING assert cannot live here. Mirrors ``_advance_task_pointer``'s
+    assert-free contract in dev_queue.py.
     """
-    if task.status != QueueItemStatus.RUNNING:
-        msg = f"_stage_advance: expected RUNNING, got {task.status!r}"
-        raise AssertionError(msg)
     client_cfg = clients.get(task.client)
     if client_cfg is None:
         _log.warning(
@@ -1318,11 +1319,33 @@ def apply_staged_decision(
 ) -> None:
     """Apply the B2 staged advance decision to a RUNNING task.
 
+    Thin RUNNING-asserting wrapper over ``_route_staged_decision`` (the shared
+    assert-free routing core). The consume path (_apply_events_to_store) and the
+    RUNNING arm of reconcile's emitted-sentinel router (_apply_sentinel_to_task)
+    both call this; the #918 late-sentinel rescue path calls
+    ``_route_staged_decision`` directly for a parked task. Precondition:
+    task.status is RUNNING. Mutates task in place.
+    """
+    if task.status != QueueItemStatus.RUNNING:
+        msg = f"apply_staged_decision: expected RUNNING, got {task.status!r}"
+        raise AssertionError(msg)
+    _route_staged_decision(task, status, last_result, clients)
+
+
+def _route_staged_decision(
+    task: TicketTask,
+    status: str | None,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> None:
+    """Shared assert-free core of the B2 staged advance decision table.
+
     The single advance authority shared by the consume path
-    (_apply_events_to_store) and reconcile's emitted-sentinel router
-    (_apply_sentinel_to_task), so staged dispatch advances regardless of which
-    path observes the completion first (#698). Precondition: task.status is
-    RUNNING. Mutates task in place.
+    (_apply_events_to_store, via ``apply_staged_decision``) and reconcile's
+    emitted-sentinel router (_apply_sentinel_to_task), so staged dispatch
+    advances regardless of which path observes the completion first (#698) and
+    a late-sentinel rescue lands in exactly the state its live counterpart would
+    (#918). No status precondition — callers gate as needed. Mutates in place.
     """
     disposition = _derive_disposition(status)
     pr_url = _extract_pr_url(last_result)
@@ -1333,7 +1356,9 @@ def apply_staged_decision(
         # task.scope_hint when the sentinel omits it (#696).
         tier = _resolve_scope_tier(last_result, task)
         if tier == SCOPE_TIER_SMALL:
-            _stage_advance(task, clients, disposition=disposition, pr_url=pr_url)
+            _stage_advance_unchecked(
+                task, clients, disposition=disposition, pr_url=pr_url
+            )
         else:
             transition_task_status(
                 task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
@@ -1360,7 +1385,7 @@ def apply_staged_decision(
         )
     elif status in STAGE_SUCCESS_STATUSES:
         # Rule 3: shipped -- advance or complete
-        _stage_advance(task, clients, disposition=disposition, pr_url=pr_url)
+        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
     elif status == "merge_pending":
         # Rule 3b: PR created but awaiting CI/merge gate (#899). Not a failure
         # — preserve pr_url so operator can monitor/merge. Do not re-dispatch.

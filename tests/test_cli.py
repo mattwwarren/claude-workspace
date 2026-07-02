@@ -2300,6 +2300,236 @@ class TestSignalStop:
             "regression: stale stop hook left task PENDING after blocked→retry→shipped"
         )
 
+    def _setup_parked_rescue(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        name: str,
+        stage: Stage,
+        sentinel_text: str,
+    ) -> tuple[Session, Path]:
+        """Seed a headless session whose dev-queue task is idle-parked (#918).
+
+        The task is BLOCKED_ON_USER retaining session_id (the recurrence shape);
+        the session is ACTIVE/headless and the transcript carries *sentinel_text*.
+        Returns (session, worktree) after invoking ``cw signal-stop``.
+        """
+        import datetime as dt
+
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, f"sess-918-{name}", f"worktree-918-{name}"
+        )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=self.SEED_TICKET_ID,
+                        client="test-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        session_id=session.id,  # retained across the park (#918)
+                        stage=stage,
+                        scope_hint="small",
+                        attempts=1,
+                    )
+                ]
+            )
+        )
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = f"uuid-918-{name}"
+        fake_home = tmp_path / f"fake-home-918-{name}"
+        self._write_transcript(worktree, claude_session_id, sentinel_text, fake_home)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        with freeze_time(dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
+            result = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": claude_session_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert result.exit_code == 0, result.output
+        return session, worktree
+
+    def _session_completed_payload(self, consumer: str) -> dict[str, object]:
+        events = read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        return events[0].payload
+
+    def test_signal_stop_late_sentinel_rescues_parked_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Late stage_complete rescues an idle-parked task at a non-terminal stage.
+
+        Regression for GitHub #918: a task parked BLOCKED_ON_USER by the idle
+        watchdog (retaining session_id) must be advanced when its late Stop-hook
+        sentinel arrives, and the SESSION_COMPLETED payload must flag the rescue.
+        """
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        session, _ = self._setup_parked_rescue(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            name="nonterm",
+            stage=Stage.IMPL,
+            sentinel_text=_SENTINEL_918_STAGE_COMPLETE,
+        )
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.REVIEW
+
+        payload = self._session_completed_payload("test-918-nonterm")
+        assert payload["rescued"] is True
+        assert payload["rescue_reason"] == "late_sentinel"
+
+    def test_signal_stop_late_sentinel_rescues_parked_task_terminal(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Late shipped rescues an idle-parked task at the terminal stage (#918)."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        session, _ = self._setup_parked_rescue(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            name="term",
+            stage=Stage.FINALIZE,
+            sentinel_text=_SENTINEL_285_SHIPPED,
+        )
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.pr_url == "https://github.com/foo/bar/pull/285"
+
+        payload = self._session_completed_payload("test-918-term")
+        assert payload["rescued"] is True
+
+    def test_signal_stop_late_no_op_rescues_parked_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Late no_op rescues an idle-parked task → COMPLETED (#918)."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        session, _ = self._setup_parked_rescue(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            name="noop",
+            stage=Stage.PLAN,
+            sentinel_text=_SENTINEL_251_NO_OP,
+        )
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "no_op"
+
+        payload = self._session_completed_payload("test-918-noop")
+        assert payload["rescued"] is True
+
+    def test_signal_stop_late_blocked_autodev_reparks(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Late AutoDevResult(blocked) re-parks the task; rescue flagged (#918)."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        session, _ = self._setup_parked_rescue(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            name="blk",
+            stage=Stage.IMPL,
+            sentinel_text=_SENTINEL_251_BLOCKED_NO_RETRY,
+        )
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+        payload = self._session_completed_payload("test-918-blk")
+        assert payload["rescued"] is True
+
+    def test_signal_stop_late_blocked_result_no_rescue(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Late BlockedResult leaves parked task untouched; no rescue keys (#918)."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+
+        session, _ = self._setup_parked_rescue(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            name="blkres",
+            stage=Stage.IMPL,
+            sentinel_text=_SENTINEL_918_MALFORMED,
+        )
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition is None
+
+        payload = self._session_completed_payload("test-918-blkres")
+        assert "rescued" not in payload
+        assert "rescue_reason" not in payload
+
     def test_signal_stop_schema_version_unsupported_marks_failed(
         self,
         tmp_config_dir: Path,
@@ -3025,6 +3255,43 @@ _SENTINEL_316_AMBIGUITIES_PENDING_V2 = (
 _SENTINEL_263_SCHEMA_VERSION_UNSUPPORTED = (
     "<<<AUTO_DEV_RESULT\n"
     '{"schema_version": 99, "status": "shipped"}\n'
+    "AUTO_DEV_RESULT>>>"
+)
+
+# Sentinel fixtures for GitHub issue #918 late-rescue tests. ticket_id "137"
+# matches TestSignalStop.SEED_TICKET_ID; stage_complete is a PR-less
+# intermediate success that advances the staged pipeline.
+_SENTINEL_918_STAGE_COMPLETE = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 4,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "stage_complete",\n'
+    '  "stage_reached": "stage2_impl",\n'
+    '  "scope": {"tier": "small", "files": 3, "lines_estimate": 60, '
+    '"lines_actual": 55, "forbidden_touched": false},\n'
+    '  "plan_source": "github_issue_existing",\n'
+    '  "branch": "dev/137",\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": "abc918",\n'
+    '  "commits": ["sha918"],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, '
+    '"fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": null,\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# Malformed sentinel: status='proceed' is not a valid Status, so parse_stdout
+# yields BlockedResult(status_unknown) — carries no success signal.
+_SENTINEL_918_MALFORMED = (
+    "<<<AUTO_DEV_RESULT\n"
+    '{"schema_version": 4, "ticket_id": "137", "status": "proceed"}\n'
     "AUTO_DEV_RESULT>>>"
 )
 

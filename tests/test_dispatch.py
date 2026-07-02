@@ -5191,6 +5191,127 @@ class TestApplyStagedDecision:
 
         assert len(attention_events) == 0
 
+    def _make_parked_task(
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.FINALIZE,
+    ) -> TicketTask:
+        """A BLOCKED_ON_USER task retaining its session_id (idle-parked shape).
+
+        The idle watchdog parks a still-completing session BLOCKED_ON_USER
+        without clearing session_id (#918); the late Stop-hook sentinel then
+        rescues it through _route_staged_decision.
+        """
+        task = self._make_running_task(ticket_id, stage=stage)
+        task.status = QueueItemStatus.BLOCKED_ON_USER
+        task.session_id = f"sess-{ticket_id}"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def test_apply_staged_decision_asserts_running(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """apply_staged_decision on a non-RUNNING task raises AssertionError (#918).
+
+        The RUNNING precondition now lives only in the wrapper; the routing
+        core (_route_staged_decision) is assert-free so the rescue path can
+        advance a parked task.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_parked_task("ASSERT-1", stage=Stage.FINALIZE)
+        with pytest.raises(AssertionError):
+            apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+    def test_route_staged_decision_advances_parked_terminal(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """_route_staged_decision on a parked terminal task → COMPLETED (#918).
+
+        No AssertionError despite BLOCKED_ON_USER status; disposition and
+        pr_url are preserved (Comment 5 item 1 terminal arm).
+        """
+        from cw.dispatch import _route_staged_decision
+
+        task = self._make_parked_task("PARK-TERM-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "pr": {"url": "https://github.com/user/repo/pull/918"},
+        }
+        _route_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "stage_complete"
+        assert task.pr_url == "https://github.com/user/repo/pull/918"
+
+    def test_route_staged_decision_advances_parked_nonterminal(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """_route_staged_decision on a parked non-terminal task advances (#918).
+
+        BLOCKED_ON_USER task at IMPL + stage_complete → PENDING at REVIEW
+        (pointer advanced, no assert raised).
+        """
+        from cw.dispatch import _route_staged_decision
+
+        task = self._make_parked_task("PARK-NONTERM-1", stage=Stage.IMPL)
+        _route_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.REVIEW
+
+    def test_route_staged_decision_scope_gated_small_parked_advances(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Small-tier scope-gated arm advances a parked task (#918, Comment 11).
+
+        The SCOPE_GATED_APPROVAL_STATUSES arm calls the (now assert-free)
+        advance helper; a small-tier parked task at PLAN advances to IMPL.
+        """
+        from cw.dispatch import _route_staged_decision
+
+        task = self._make_parked_task("PARK-SG-1", stage=Stage.PLAN)
+        task.scope_hint = "small"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        _route_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+
+    def test_route_staged_decision_scope_gated_large_parked_restamps(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Non-small-tier scope-gated arm re-stamps a parked task (#918).
+
+        Unlike the small-tier arm (which advances), a large/medium-tier
+        SCOPE_GATED_APPROVAL_STATUSES sentinel calls transition_task_status
+        directly with BLOCKED_ON_USER -- a same-state transition when the
+        target is already parked. Confirms this arm tolerates that call
+        (no assert, disposition re-stamped) and stays parked, not advanced.
+        """
+        from cw.dispatch import _route_staged_decision
+
+        task = self._make_parked_task("PARK-SG-LARGE-1", stage=Stage.PLAN)
+        task.scope_hint = "large"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        _route_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "plan_pending_approval"
+        assert task.stage == Stage.PLAN
+
 
 # ---------------------------------------------------------------------------
 # TestWaveCollisionDetection

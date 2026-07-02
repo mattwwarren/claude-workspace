@@ -664,28 +664,39 @@ def _apply_sentinel_to_task(
     ticket_id: str,
     cw_session_id: str,
     sentinel: AutoDevResult | BlockedResult,
-) -> None:
+) -> bool:
     """Update the matching dev-queue task based on the sentinel result.
 
     Shared by signal_stop (cli.py) and the ROUTE_EMITTED_SENTINEL reconcile
     path so both use the same sentinel→QueueItemStatus mapping.  Called before
     marking the session COMPLETED so the task is in its terminal state when
     revert_completed_silent_tasks runs.  See GitHub issues #251, #578.
+
+    The lookup matches a RUNNING task (live completion) or a BLOCKED_ON_USER
+    task that still carries this session_id (an idle-parked session whose late
+    Stop-hook sentinel finally arrived, #918). A parked task retains its
+    session_id (the idle watchdog does not clear it), so the rescue can re-find
+    it. Returns ``True`` iff a parked task was rescued via the AutoDevResult arm.
     """
     with dev_queue_lock():
         store = load_dev_queue()
         target: TicketTask | None = None
+        target_status: QueueItemStatus | None = None
         for task in store.tasks:
             if (
                 task.ticket_id == ticket_id
                 and task.session_id == cw_session_id
-                and task.status == QueueItemStatus.RUNNING
+                and task.status
+                in (QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER)
             ):
                 target = task
+                target_status = task.status
                 break
         if target is None:
-            return
+            return False
 
+        rescued = False
+        mutated = True
         if isinstance(sentinel, AutoDevResult):
             # Delegate to the shared B2 staged advance decision so both the
             # consume path (_apply_events_to_store) and the reconcile
@@ -693,38 +704,63 @@ def _apply_sentinel_to_task(
             # Why function-level import: cw.dispatch imports reconcile at
             # module level (see reconcile.py module docstring); a module-level
             # import here would create a circular dependency.
-            from cw.dispatch import apply_staged_decision
+            from cw.dispatch import _route_staged_decision, apply_staged_decision
 
             clients = _deps.load_effective_clients()
             last_result = sentinel.model_dump(mode="json")
-            apply_staged_decision(target, sentinel.status, last_result, clients)
-        # BlockedResult: sentinel failed to parse or was malformed.
-        elif sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+            if target_status == QueueItemStatus.RUNNING:
+                apply_staged_decision(target, sentinel.status, last_result, clients)
+            else:
+                # #918: rescue an idle-parked (BLOCKED_ON_USER) task through the
+                # same assert-free routing core so it lands in exactly the state
+                # its RUNNING counterpart would.
+                _route_staged_decision(target, sentinel.status, last_result, clients)
+                rescued = True
+        elif target_status == QueueItemStatus.RUNNING:
+            # BlockedResult on a live RUNNING task. A parked task falls through
+            # to an implicit no-op — a BlockedResult carries no success signal,
+            # so leave it parked (never a false FAILED/COMPLETED on a rescue
+            # miss, #918/Comment 9).
+            _route_blocked_result_to_task(target, sentinel)
+        else:
+            # True no-op: a late BlockedResult against an already-parked task
+            # carries no success signal and must not write (#918).
+            mutated = False
+
+        if mutated:
+            save_dev_queue(store)
+        return rescued
+
+
+def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -> None:
+    """Route a malformed/unparseable BlockedResult to a RUNNING task's status.
+
+    A BlockedResult means the sentinel failed to parse or was malformed.
+    Deterministic parse failures and unknown statuses are terminal FAILED;
+    validation_failed and transient failures re-queue to PENDING (clearing
+    session_id) until the attempt cap. Extracted from _apply_sentinel_to_task
+    to keep that function under the branch cap (#918).
+    """
+    if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
+        transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
+    elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
+        if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
             transition_task_status(
                 target, QueueItemStatus.FAILED, disposition="abandoned"
             )
-        elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
-            if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
-                transition_task_status(
-                    target, QueueItemStatus.FAILED, disposition="abandoned"
-                )
-            else:
-                transition_task_status(target, QueueItemStatus.PENDING)
-                target.session_id = None
-        elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+        else:
             transition_task_status(target, QueueItemStatus.PENDING)
             target.session_id = None
-        else:
-            # An unparseable/unknown-status sentinel (status_unknown,
-            # multiple_result_blocks, any unrecognized reason) carries NO success
-            # signal. Never mark it COMPLETED — that silently retires unshipped
-            # work as "shipped" (#750, the #728 loss). Surface as FAILED so the
-            # operator sees it instead of a phantom completion.
-            transition_task_status(
-                target, QueueItemStatus.FAILED, disposition="abandoned"
-            )
-
-        save_dev_queue(store)
+    elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+        transition_task_status(target, QueueItemStatus.PENDING)
+        target.session_id = None
+    else:
+        # An unparseable/unknown-status sentinel (status_unknown,
+        # multiple_result_blocks, any unrecognized reason) carries NO success
+        # signal. Never mark it COMPLETED — that silently retires unshipped work
+        # as "shipped" (#750, the #728 loss). Surface as FAILED so the operator
+        # sees it instead of a phantom completion.
+        transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
 
 
 def _session_project_dir(session: Session) -> Path | None:

@@ -15139,6 +15139,303 @@ class TestApplySentinelToTaskStagedAdvance:
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
 
+def _blocked_autodev_payload(ticket_id: str) -> dict[str, Any]:
+    """Minimal valid AutoDevResult with status='blocked' at IMPL.
+
+    Routes through STAGE_FAILURE (Rule 5) → BLOCKED_ON_USER when applied.
+    """
+    return {
+        "schema_version": 4,
+        "ticket_id": ticket_id,
+        "status": "blocked",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 5,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage2_impl",
+            "reason": "agent_block",
+            "details": "still failing",
+        },
+        "next_actions": [],
+    }
+
+
+class TestApplySentinelToTaskLateRescue:
+    """GitHub #918: a late Stop-hook sentinel must rescue an idle-parked task.
+
+    The idle watchdog can park a still-completing session BLOCKED_ON_USER
+    (retaining session_id). When the late sentinel arrives, the widened
+    _apply_sentinel_to_task lookup re-finds the parked task and routes it
+    through the shared _route_staged_decision. Returns True iff a parked task
+    was rescued via the AutoDevResult arm.
+    """
+
+    def _seed_parked_task(
+        self,
+        tmp_config_dir: Path,
+        *,
+        ticket_id: str,
+        session_id: str,
+        stage: Stage,
+        scope_hint: str = "small",
+    ) -> None:
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=session_id,  # retained across the park (#918)
+            stage=stage,
+            scope_hint=scope_hint,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def test_late_stage_complete_rescues_parked_task_nonterminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked at IMPL + late stage_complete → PENDING at REVIEW; return True."""
+        ticket_id, session_id = "GH-918-nonterm", "sess-918-nonterm"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_late_shipped_rescues_parked_task_terminal_preserves_pr_url(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked at FINALIZE + late shipped → COMPLETED + pr_url; return True."""
+        ticket_id, session_id = "GH-918-ship", "sess-918-ship"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.FINALIZE,
+        )
+        sentinel = AutoDevResult.model_validate(_shipped_salvage_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "shipped"
+        assert t.pr_url == "https://github.com/foo/bar/pull/99"
+
+    def test_late_no_op_rescues_parked_task(self, tmp_config_dir: Path) -> None:
+        """Parked + late no_op → COMPLETED disposition='no_op'; return True."""
+        ticket_id, session_id = "GH-918-noop", "sess-918-noop"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.PLAN,
+        )
+        sentinel = AutoDevResult.model_validate(_no_op_salvage_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "no_op"
+
+    def test_late_blocked_autodevresult_reparks_parked_task(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked + late AutoDevResult(blocked) → stays BLOCKED_ON_USER; return True.
+
+        The #923 disposition re-stamp is allowed (Comment 2 rule 5) — rescue
+        reports True because the AutoDevResult arm handled a parked task.
+        """
+        ticket_id, session_id = "GH-918-blk", "sess-918-blk"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        sentinel = AutoDevResult.model_validate(_blocked_autodev_payload(ticket_id))
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == "blocked"
+
+    def test_late_blocked_result_leaves_parked_task_untouched(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked + late BlockedResult → task untouched; return False (Comment 9).
+
+        A malformed/unknown-status sentinel carries no success signal, so the
+        parked task must not be mutated (no false FAILED, no false completion).
+        """
+        ticket_id, session_id = "GH-918-blkres", "sess-918-blkres"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        sentinel = parse_stdout(
+            "<<<AUTO_DEV_RESULT\n"
+            f'{{"schema_version": 4, "ticket_id": "{ticket_id}", '
+            '"status": "proceed"}\n'
+            "AUTO_DEV_RESULT>>>"
+        )
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "status_unknown"
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition is None
+
+    def test_running_task_autodevresult_returns_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING task + stage_complete advances (existing #698) and returns False.
+
+        Only a parked (BLOCKED_ON_USER) rescue reports True; the live RUNNING
+        path returns False even though it advances.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-918-run", "sess-918-run"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            scope_hint="small",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_running_blocked_result_unchanged(self, tmp_config_dir: Path) -> None:
+        """RUNNING task + validation_failed BlockedResult still routes as today.
+
+        Regression guard on the widened lookup: the BlockedResult arms must run
+        only for RUNNING and behave exactly as before (PENDING + clear session).
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-918-runblk", "sess-918-runblk"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = parse_stdout(
+            "<<<AUTO_DEV_RESULT\n"
+            "{\n"
+            '  "schema_version": 4,\n'
+            f'  "ticket_id": "{ticket_id}",\n'
+            '  "status": "shipped",\n'
+            '  "stage_reached": "stage5_post_create",\n'
+            '  "scope": {"tier": "small", "files": 1, "lines_estimate": 10, '
+            '"lines_actual": 5, "forbidden_touched": false},\n'
+            '  "plan_source": "github_issue_existing",\n'
+            '  "branch": "auto-dev/918",\n'
+            '  "worktree_path": null,\n'
+            '  "fork_point_sha": "abc123",\n'
+            '  "commits": ["def456"],\n'
+            '  "pr": null,\n'
+            '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+            '"fix_cycles_used": 0},\n'
+            '  "health": {"lowest_agent_confidence": "HIGH", '
+            '"any_incomplete_risk": false, "shortcuts": [], '
+            '"recommendation": "PROCEED", "downgrade_applied": false, '
+            '"fix_loop_escalated": false},\n'
+            '  "friction_highlights": [],\n'
+            '  "blocker": null,\n'
+            '  "next_actions": ["wait_for_ci"]\n'
+            "}\n"
+            "AUTO_DEV_RESULT>>>"
+        )
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "validation_failed"
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+
+    def test_running_no_result_emitted_requeues(self, tmp_config_dir: Path) -> None:
+        """RUNNING task + transient no_result_emitted → PENDING, session cleared.
+
+        Regression guard on the extracted _route_blocked_result_to_task helper:
+        the transient parse-failure branch must still re-queue a RUNNING task.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-918-transient", "sess-918-transient"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = parse_stdout("narrative only, no sentinel block emitted\n")
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "no_result_emitted"
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+
+
 class TestVerifySupervisorSessionId:
     """_verify_supervisor_session_id compares stored csid against supervisor state."""
 
