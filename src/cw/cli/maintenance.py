@@ -156,8 +156,8 @@ def _run_onboarding_steps(workspace: Path, name: str) -> None:
     )
 
 
-def _report_init_outcome(path: Path, name: str, *, no_onboarding: bool) -> None:
-    """Run onboarding (or warn it was skipped) and print the Next steps block."""
+def _onboard_or_warn(path: Path, name: str, *, no_onboarding: bool) -> None:
+    """Run onboarding steps, or warn that onboarding was skipped."""
     if not no_onboarding:
         click.echo()
         click.echo("Agent onboarding:")
@@ -169,6 +169,9 @@ def _report_init_outcome(path: Path, name: str, *, no_onboarding: bool) -> None:
             f"is complete. Run: cw init {name} --onboard-only"
         )
 
+
+def _print_init_next_steps(name: str, *, no_onboarding: bool) -> None:
+    """Print post-init guidance, pointing at onboarding first if it was skipped."""
     click.echo()
     click.echo("Next steps:")
     if no_onboarding:
@@ -274,7 +277,8 @@ def init(
 
     click.echo(f"Added client '{name}' to configuration.")
 
-    _report_init_outcome(path, name, no_onboarding=no_onboarding)
+    _onboard_or_warn(path, name, no_onboarding=no_onboarding)
+    _print_init_next_steps(name, no_onboarding=no_onboarding)
 
 
 # --- Schema command group ---
