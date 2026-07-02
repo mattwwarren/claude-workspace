@@ -763,7 +763,7 @@ class TestConsumeCompletesTasks:
         assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     @pytest.mark.parametrize(
-        "v4_status,ambiguities,premises",
+        ("v4_status", "ambiguities", "premises"),
         [
             (
                 "ambiguities_pending_resolution",
