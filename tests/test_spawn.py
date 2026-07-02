@@ -1722,6 +1722,40 @@ class TestSpawnCLI:
         assert result.exit_code != 0
         assert "nonexistent-id" in result.output
 
+    def test_cli_confirmed_dead_flag_accepted(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw spawn close --confirmed-dead <id>: flag accepted, session closed."""
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", "--confirmed-dead", sess.id])
+
+        assert result.exit_code == 0
+        assert "Closed session" in result.output
+
+    def test_cli_confirmed_dead_flag_defaults_off(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw spawn close <id> (no flag): optional, backwards-compatible."""
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 0
+
+    def test_cli_confirmed_dead_flag_trailing_position_accepted(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw spawn close <id> --confirmed-dead: Click accepts either order."""
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", sess.id, "--confirmed-dead"])
+
+        assert result.exit_code == 0
+
 
 # ---------------------------------------------------------------------------
 # Tests for #314 task fields in cw-context.json
