@@ -121,7 +121,7 @@ def dev_queue_add(
         if not inserted:
             click.echo(
                 f"Skipped {ticket_id} -> {resolved}: already queued"
-                " (pending or running).",
+                " (pending, running, completed, or cancelled).",
                 err=True,
             )
             continue

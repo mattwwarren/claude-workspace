@@ -1093,17 +1093,29 @@ class TestAddTicketDedupe:
         store2 = load_dev_queue()
         assert len(store2.tasks) == 1
 
-    def test_allows_terminal_duplicate(self, tmp_dev_queue: Path) -> None:
-        """Existing COMPLETED entry does NOT block re-adding."""
+    def test_blocks_completed_duplicate(self, tmp_dev_queue: Path) -> None:
+        """Existing COMPLETED entry blocks re-adding (terminal-sibling dedup, #876)."""
         completed = TicketTask(
             ticket_id="GEN-3", client="genhealth", status=QueueItemStatus.COMPLETED
         )
         save_dev_queue(DevQueueStore(tasks=[completed]))
         new_task = TicketTask(ticket_id="GEN-3", client="genhealth")
         result = add_ticket(new_task)
-        assert result is True
+        assert result is False
         store2 = load_dev_queue()
-        assert len(store2.tasks) == 2
+        assert len(store2.tasks) == 1
+
+    def test_blocks_cancelled_duplicate(self, tmp_dev_queue: Path) -> None:
+        """Existing CANCELLED entry blocks re-adding (terminal-sibling dedup, #876)."""
+        cancelled = TicketTask(
+            ticket_id="GEN-4", client="genhealth", status=QueueItemStatus.CANCELLED
+        )
+        save_dev_queue(DevQueueStore(tasks=[cancelled]))
+        new_task = TicketTask(ticket_id="GEN-4", client="genhealth")
+        result = add_ticket(new_task)
+        assert result is False
+        store2 = load_dev_queue()
+        assert len(store2.tasks) == 1
 
 
 # ---------------------------------------------------------------------------
