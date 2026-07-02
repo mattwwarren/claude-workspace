@@ -109,11 +109,17 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 
 Consolidate review results: deduplicate, sort by severity, group by file.
 
+**Non-deferrable pre-pass (run BEFORE bucket assignment):**
+
+- **(4a) Non-deferrable pre-pass.** Before bucket assignment, scan every finding: any finding describing an implementation **deviation from an EXPLICIT plan requirement or prohibition** — a `do NOT X` the plan states, a mandated mechanism the plan named, a required test the plan named — is `NON_DEFERRABLE`. A NON_DEFERRABLE finding is eligible for **bucket 1 (FIX NOW) only**; it may never land in REJECT (bucket 2) or DEFER (bucket 3).
+- **(4b) Spec-citation cross-check.** If a proposed bucket-2/3 rationale contains any of the literal trigger phrases — `"required by spec"`, `"plan mandated"`, `"plan requires"`, `"the RFC says"`, `"operator required"`, `"operator decided"`, `"ticket spec"` — the coordinating session MUST verify the claim against `.cw/plan.md` **verbatim** before accepting the rejection/deferral. If `.cw/plan.md` contradicts the justification, the finding is `NON_DEFERRABLE`.
+- **Exit rule.** If a NON_DEFERRABLE finding cannot be fixed within the fix loop, or is judged **"beyond fix-loop scope,"** the stage does **not** PROCEED. `"beyond fix-loop scope"` is an **escalation trigger, not an auto-approve**: Stage 3 EXITS `blocked` with `blocker.reason: "plan_deviation"` (open enum), routing to BLOCKED_ON_USER via existing dispatch rules. The "plan in question" note: *the pipeline never adjudicates plan-vs-impl blame — it always exits `blocked`/`plan_deviation`; whether to `cw dev-queue requeue --regress` back to impl or revisit the plan is orchestrator/operator policy.*
+
 Adjudication assigns each finding a disposition. The coordinating session — never a subagent or executor — sorts **every** finding (MUST_FIX *and* SHOULD_FIX) into exactly one of three buckets:
 
 1. **FIX NOW → the action list.** All surviving MUST_FIX plus any SHOULD_FIX the session accepts into scope. Principle: *if it stays in the review, it's worth fixing.* The filtering happens here, at scoping — not by silently ignoring the returned list.
-2. **REJECT (review-the-review).** The session disagrees: the finding is wrong, or the code is a deliberate choice / documented tradeoff. **Record the rationale** (see "Recording adjudication" below). No fix, no ticket.
-3. **DEFER.** Valid but out of scope for this ticket ("handle when scale demands"). **Record now, file as a ticket on merge** (PR Hygiene Sweep Step H3). Skip the ticket only when the item is already a bucket-2 documented tradeoff.
+2. **REJECT (review-the-review).** The session disagrees: the finding is wrong, or the code is a deliberate choice / documented tradeoff. **Record the rationale** (see "Recording adjudication" below). No fix, no ticket. **Excludes NON_DEFERRABLE findings** — a plan-deviation finding may never be rejected.
+3. **DEFER.** Valid but out of scope for this ticket ("handle when scale demands"). **Record now, file as a ticket on merge** (PR Hygiene Sweep Step H3). Skip the ticket only when the item is already a bucket-2 documented tradeoff. **Excludes NON_DEFERRABLE findings** — a plan-deviation finding may never be deferred.
 
 **Invariant:** every finding ends *fixed*, *rejected-with-reason*, or *ticketed*. A reviewer finding that simply vanishes is a process failure.
 
@@ -339,7 +345,7 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
   "fork_point_sha": "<fork point sha>",
   "commits": ["<sha1>", "<sha2>"],
   "pr": null,
-  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0, "deferred": 0},
   "health": {
     "lowest_agent_confidence": "<HIGH|MEDIUM|LOW>",
     "any_incomplete_risk": false,

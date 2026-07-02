@@ -49,6 +49,7 @@ All interactive gates in the pipeline collapse to one of: AUTO-SKIP, AUTO-CONTIN
 | S3 review clean / SHOULD_FIX, small | AUTO-CONTINUE → S4 |
 | S3 review clean / SHOULD_FIX, large | EXIT `review_pending_approval` (post-fix-loop diff, branch pushed, no PR) |
 | S3 MUST_FIX persists after 5 cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` |
+| S3 non-deferrable plan-deviation finding survives fix loop or judged beyond its scope | EXIT `blocked` with `blocker.reason: "plan_deviation"` (routes to BLOCKED_ON_USER; not finalize) |
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
 | S4a merge gate (small only — large already exited) | EXIT `merge_gate_blocked` if prior pipeline PR open |
@@ -146,6 +147,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `review.must_fix_initial` | int | MUST_FIX count from first review pass. |
 | `review.should_fix` | int | SHOULD_FIX count carried out of the loop. |
 | `review.fix_cycles_used` | int | 0 when first pass was clean. |
+| `review.deferred` | int | Count of findings deferred to .cw/deferred-findings.md; 0 or absent on pre-Stage-3 exits (default). |
 | `health` | object | See §5. |
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
 | `blocker` | object \| null | See §4.2. Populated when `status = "blocked"`. |
@@ -223,6 +225,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 |---|---|
 | `impl_failed` | Implementation agent returned BLOCK or failed quality gates after 2 attempts. |
 | `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). |
+| `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
 
 `blocker.reason` is an **open enum** — the producer may add new reasons without a `schema_version` bump. Consumers MUST treat unknown reasons as opaque strings and surface verbatim. (Unlike `status`, which is closed: see §4 and §8.)
