@@ -293,11 +293,31 @@ git checkout <original-branch>   # restore main session state
 
 Direct execution is slower than delegation but guaranteed to work. Use it as a last resort when two subagent attempts have failed due to sandbox issues.
 
+**Pre-exit invariant (required, no exceptions):** Before ending the review session at any point — on normal completion, on error, at a context boundary, or after the fallback path above — run:
+```bash
+git status --porcelain
+```
+If the output is non-empty (staged or unstaged changes exist), you MUST either:
+- **Commit and push** the staged changes (if they represent completed work), then emit the sentinel as normal, OR
+- **Emit a `blocked` sentinel** using the full sentinel template from Stage 3 Completion (scroll down to it), with `blocker.reason: "dirty_tree_no_sentinel"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result.py:561-563` rejects null at stage3_review), `blocker.details: "staged or unstaged changes exist but could not be committed and pushed before session end — emitting blocked rather than exiting silently with a dirty index and no sentinel"`, and `health.lowest_agent_confidence` set to a non-null value (the same validator at `auto_dev_result.py:566-570` requires it for stage3_review; omitting it causes schema rejection → `validation_failed` retries rather than `BLOCKED_ON_USER`).
+
+Never exit with a dirty tree and no sentinel. A session exit with no sentinel looks identical to "never ran" to the dispatcher — it resets the task to the plan stage and discards origin commits, causing an infinite plan→impl→review→silent-exit loop.
+
 ---
 
 ## Stage 3 Completion (headless only)
 
 After all Stage 3 steps complete successfully in headless mode (review clean or fix loop resolved, branch pushed with fix commits), emit the `AUTO_DEV_RESULT` sentinel:
+
+**Before emitting the sentinel, resolve `scope.tier` explicitly.** `apply_staged_decision` Rule 1 in the dispatcher gates on this field — a null tier causes Rule 1 to route to `BLOCKED_ON_USER` when `queue_metadata.scope_hint` is also unset, creating false-positive blocks. The model does not always carry the Stage-1c tier classification forward automatically.
+
+To resolve the tier:
+1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`, or similar Stage-1c marker.
+2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint`.
+3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise. (Account for any Step 3b scope growth.)
+4. If no source yields `"small"` or `"large"`, **do NOT emit a `stage_complete` or `review_pending_approval` sentinel** — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result.py:561-563` rejects null at stage3_review), and `blocker.details: "scope.tier unresolvable — .cw/plan.md has no tier marker, .claude/cw-context.json queue_metadata.scope_hint is null, and diff stat was unavailable. Sentinel emitted with tier=null would fail schema validation and cause validation_failed retries rather than BLOCKED_ON_USER."`.
+
+`scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel — the schema validator requires it for any stage beyond pre-impl. Use the resolved tier when available; fall back to `"small"` when emitting the `scope_tier_unresolvable` blocked sentinel above.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
