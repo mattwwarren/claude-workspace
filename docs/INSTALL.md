@@ -148,7 +148,8 @@ is safe.
 **Flags:**
 
 - `--no-onboarding` — skip all four onboarding steps (useful for scripted
-  installs where you manage these files yourself).
+  installs where you manage these files yourself). Note: the client is not
+  runnable until you follow with `cw init <client> --onboard-only`.
 - `--onboard-only` — re-run onboarding only; skip creating a new client entry
   (client must already exist in `clients.yaml`).
 

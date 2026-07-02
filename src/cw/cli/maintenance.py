@@ -156,6 +156,28 @@ def _run_onboarding_steps(workspace: Path, name: str) -> None:
     )
 
 
+def _report_init_outcome(path: Path, name: str, *, no_onboarding: bool) -> None:
+    """Run onboarding (or warn it was skipped) and print the Next steps block."""
+    if not no_onboarding:
+        click.echo()
+        click.echo("Agent onboarding:")
+        _run_onboarding_steps(path, name)
+    else:
+        # defense-in-depth dispatch check deferred — file follow-on if wanted
+        click.echo(
+            f"Warning: client '{name}' will not be runnable until onboarding "
+            f"is complete. Run: cw init {name} --onboard-only"
+        )
+
+    click.echo()
+    click.echo("Next steps:")
+    if no_onboarding:
+        click.echo(f"  cw init {name} --onboard-only  # Complete onboarding (required)")
+    else:
+        click.echo(f"  cw start {name}              # Start a session")
+    click.echo("  cw config                    # View configuration")
+
+
 @main.command(name="init")
 @click.argument("name", required=False, default=None)
 @click.option(
@@ -252,15 +274,7 @@ def init(
 
     click.echo(f"Added client '{name}' to configuration.")
 
-    if not no_onboarding:
-        click.echo()
-        click.echo("Agent onboarding:")
-        _run_onboarding_steps(path, name)
-
-    click.echo()
-    click.echo("Next steps:")
-    click.echo(f"  cw start {name}              # Start a session")
-    click.echo("  cw config                    # View configuration")
+    _report_init_outcome(path, name, no_onboarding=no_onboarding)
 
 
 # --- Schema command group ---
