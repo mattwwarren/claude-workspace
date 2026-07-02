@@ -53,6 +53,7 @@ These are the only checks. Keep the surface small so MUST_FIX stays meaningful.
   - The `Plan asserts` claim is consistent with the `Read` quote.
   - The `Match` verdict is honest — a CONFIRMED that contradicts the Read body is a fabrication; a NOT_FOUND means the plan must have already been revised before reaching this station.
   - Sample at minimum the touch-points that govern call-graph, return types, and template/substitution behavior — these are the high-blast-radius categories.
+- **Pre-flight Resolution Conformance is present when required.** When the plan-agent prompt contained a `## Binding Pre-flight Resolutions` section, the plan must contain a `## Pre-flight Resolution Conformance` section (per the `auto-dev` Step 1b producer rule) with a conformance line for every R-item. An item with no conformance line is MISSING.
 
 **Reject (MUST_FIX) if:**
 - Plan says "updates description" without quoting the new text.
@@ -62,6 +63,8 @@ These are the only checks. Keep the surface small so MUST_FIX stays meaningful.
 - A Touch-point Contract entry's `Read` quote is paraphrased, truncated past the point of proving the claim, or absent from the cited `file:line`.
 - A Touch-point Contract entry's `Match` is CONFIRMED but the Read body contradicts the Plan asserts (false confirmation).
 - A Touch-point Contract entry's `Match` is NOT_FOUND but the plan still depends on the asserted behavior downstream (planner flagged the gap and didn't revise).
+- The prompt supplied a `## Binding Pre-flight Resolutions` section but the plan omits `## Pre-flight Resolution Conformance`.
+- A binding resolution item has no conformance line (MISSING).
 
 **Example failure (real):** plan said `count` was an output. The implementation returned `len(items[:5])` because the underlying query was capped at 5. Reviewer flagged: "this is a slice length, not a true count, but the action description doesn't disclose that."
 
