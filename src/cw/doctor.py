@@ -57,6 +57,7 @@ from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.orchestrate import TickSummary, latest_tick_summary_by_client
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
+    compute_drift,
     feature_branch_key,
     reconcile,
     ticket_id_for_session,
@@ -143,6 +144,10 @@ _RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
 
 # Wedge class for BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
 _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
+
+# Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
+# failure path that leaves roster absent but session still "active" in cw state).
+_WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
 
 
 def _gh_on_path() -> bool:
@@ -763,6 +768,63 @@ def _check_wedge_dead_session_blocked_on_user(
     return findings
 
 
+def _daemon_supervisor_alive() -> bool:
+    """Return True when roster.json reports a positive supervisorPid.
+
+    Uses the same source as :func:`_check_daemon_reachable` so the outage
+    guard is consistent between the health check and the wedge detector.
+    """
+    try:
+        data: dict[str, object] = json.loads(
+            _ROSTER_PATH.read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    pid = data.get("supervisorPid", 0)
+    return isinstance(pid, int) and pid > 0
+
+
+def _check_wedge_active_no_daemon_entry(
+    state: CwState,
+) -> list[WedgeFinding]:
+    """Detect ACTIVE/IDLE sessions absent from the daemon live roster.
+
+    Guards on a positive supervisorPid before treating an empty live set
+    as "sessions are dead" — a missing or zero supervisorPid means the
+    daemon is restarting; skipping prevents mass-reap false-positives.
+
+    Uses :func:`compute_drift` to apply the same four guards as reconcile:
+    surface_ref present, ref absent from live set, past SPAWN_GRACE_SECONDS,
+    purpose != ORCHESTRATE.
+    """
+    if not _daemon_supervisor_alive():
+        return []
+
+    native_live = get_native_daemon_client().list_live_session_short_ids()
+    drift = compute_drift(state, native_live)
+
+    session_by_id = {s.id: s for s in state.sessions}
+    findings: list[WedgeFinding] = []
+    for session_id in drift.phantom_session_ids:
+        session = session_by_id.get(session_id)
+        ticket_id = ticket_id_for_session(session.name) if session else None
+        findings.append(
+            WedgeFinding(
+                wedge_class=_WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+                session_id=session_id,
+                ticket_id=ticket_id,
+                recipe=(
+                    "ACTIVE session has no live daemon entry — session crashed "
+                    "without writing a terminal sentinel. "
+                    "Run: cw doctor --reap to mark COMPLETED and release the "
+                    "hook context lock."
+                ),
+                state_file=str(state_file()),
+            )
+        )
+    return findings
+
+
 def _collapse_blocked_on_user_tasks(
     queue: DevQueueStore,
     blocked_ticket_ids: set[str],
@@ -804,6 +866,9 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     Class-4 (repo-ahead-of-queue): advisory only — no mutations.
     Class-5 (blocked-on-user-dead-session): revert oldest to PENDING, cancel
         duplicates via _collapse_blocked_on_user_tasks.
+    Class-6 (active-no-daemon-entry): call _reap_session_by_selector per
+        phantom session; that helper marks COMPLETED, reverts queue task to
+        PENDING, stops the daemon surface, and emits an audit event.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -814,14 +879,24 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         for f in findings
         if f.ticket_id
         and f.wedge_class
-        not in {"wedge/repo-ahead-of-queue", _WEDGE_BLOCKED_DEAD_SESSION}
+        not in {
+            "wedge/repo-ahead-of-queue",
+            _WEDGE_BLOCKED_DEAD_SESSION,
+            _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+        }
     }
     blocked_ticket_ids: set[str] = {
         f.ticket_id
         for f in findings
         if f.ticket_id and f.wedge_class == _WEDGE_BLOCKED_DEAD_SESSION
     }
-    if not running_ticket_ids and not blocked_ticket_ids:
+    phantom_session_ids: list[str] = [
+        f.session_id
+        for f in findings
+        if f.session_id and f.wedge_class == _WEDGE_ACTIVE_NO_DAEMON_ENTRY
+    ]
+
+    if not running_ticket_ids and not blocked_ticket_ids and not phantom_session_ids:
         return
 
     with dev_queue_lock():
@@ -840,6 +915,12 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
             changed = changed or blocked_changed
         if changed:
             save_dev_queue(queue)
+
+    # Reap phantom sessions outside the queue lock — _reap_session_by_selector
+    # acquires sessions_lock and dev_queue_lock internally (sequential, no
+    # deadlock risk since we already released dev_queue_lock above).
+    for session_id in phantom_session_ids:
+        _reap_session_by_selector(session_id)
 
 
 def _check_loop_health() -> list[CheckResult]:
@@ -1169,6 +1250,9 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         report.wedge_findings.extend(_check_wedge_repo_ahead(link_state, queue))
         report.wedge_findings.extend(
             _check_wedge_dead_session_blocked_on_user(link_state, queue)
+        )
+        report.wedge_findings.extend(
+            _check_wedge_active_no_daemon_entry(link_state)
         )
         if reap and report.wedge_findings:
             _reap_wedge_findings(report.wedge_findings)
