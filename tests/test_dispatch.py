@@ -5106,6 +5106,91 @@ class TestApplyStagedDecision:
         assert task.disposition == "merge_pending"
         assert task.pr_url == "https://github.com/org/repo/pull/898"
 
+    @pytest.mark.parametrize(
+        "v4_status",
+        ["ambiguities_pending_resolution", "premises_pending_verification"],
+    )
+    def test_v4_pause_emits_needs_attention(
+        self,
+        v4_status: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """V4 pause statuses emit SESSION_NEEDS_ATTENTION(plan_parked) (#923).
+
+        apply_staged_decision is shared by the consume path and the reconcile
+        path (_apply_sentinel_to_task); testing it directly confirms both paths
+        emit the attention event without requiring an end-to-end integration setup.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("PK-1", stage=Stage.IMPL)
+        task.session_id = "sess-pk1"
+        task.client = "test-client"
+        apply_staged_decision(task, v4_status, None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["paused_status"] == "plan_parked"
+        assert payload["ticket_id"] == "PK-1"
+        assert payload["client"] == "test-client"
+        assert payload["session_id"] == "sess-pk1"
+        assert payload["crashed"] is False
+
+    @pytest.mark.parametrize(
+        "non_v4_status",
+        ["blocked", "no_op", "shipped", "merge_pending"],
+    )
+    def test_non_v4_status_does_not_emit_plan_parked(
+        self,
+        non_v4_status: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-V4 statuses do not emit SESSION_NEEDS_ATTENTION(plan_parked).
+
+        Guards against false-positive plan_parked emissions for shipped, blocked,
+        no_op, and merge_pending paths in apply_staged_decision.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        attention_events: list[object] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                attention_events.append(event_type)
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        last_result: dict[str, object] = {"status": non_v4_status}
+        if non_v4_status == "merge_pending":
+            last_result["pr"] = {"url": "https://github.com/org/repo/pull/1"}
+        task = self._make_running_task("NPK-1", stage=Stage.FINALIZE)
+        apply_staged_decision(task, non_v4_status, last_result, self._clients(tmp_path))
+
+        assert len(attention_events) == 0
+
 
 # ---------------------------------------------------------------------------
 # TestWaveCollisionDetection
