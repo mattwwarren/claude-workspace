@@ -18,6 +18,7 @@ from cw.executor import (
     LocalExecutor,
     StageExecutor,
     _local_preflight,
+    _PreflightOK,
     resolve_executor,
     resolve_executor_config,
 )
@@ -967,17 +968,16 @@ def test_local_executor_launch_reached_after_tracker_fetch(
             proc.wait()
 
 
-def test_local_preflight_success_returns_endpoint(
-    tmp_config_dir: Path,
+def test_local_preflight_success_returns_preflight_ok(
+    tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """_local_preflight success path returns (None, str, str) — endpoint narrowed.
+    """_local_preflight returns _PreflightOK on all-checks-pass.
 
-    The discriminated-union return type lets the caller unpack three values and use
-    endpoint without an ``or ""`` guard. Before the fix this test raises ValueError
-    (cannot unpack 2-tuple into 3 variables); after the fix it passes.
+    Locks in the discriminated-union contract: callers narrow with
+    isinstance(_PreflightOK) instead of testing the first element for None.
     """
-    worktree = make_git_repo("wt-preflight-endpoint")
+    worktree = make_git_repo("wt-preflight-ok")
     cw_dir = worktree / ".cw"
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
@@ -985,15 +985,36 @@ def test_local_preflight_success_returns_endpoint(
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
     )
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    task = TicketTask(ticket_id="T-ok", client="test", stage=Stage.IMPL)
     client = ClientConfig(name="test", workspace_path=worktree)
 
     with patch("cw.executor.aider_available", return_value=True):
-        result, task_message, endpoint = _local_preflight(
-            config, task, worktree, client
-        )
+        result = _local_preflight(config, task, worktree, client)
 
-    assert result is None
-    assert isinstance(task_message, str)
-    assert len(task_message) > 0
-    assert endpoint == "http://localhost:1234/v1"
+    assert isinstance(result, _PreflightOK)
+    assert result.endpoint == "http://localhost:1234/v1"
+    assert result.model == "qwen"
+    assert "do the thing" in result.task_message
+
+
+def test_local_preflight_ok_model_none_defaults_to_empty_string(
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """_PreflightOK.model is '' when config.model is None."""
+    worktree = make_git_repo("wt-preflight-model-none")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
+
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model=None, endpoint="http://localhost:1234/v1"
+    )
+    task = TicketTask(ticket_id="T-mnone", client="test", stage=Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+
+    with patch("cw.executor.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client)
+
+    assert isinstance(result, _PreflightOK)
+    assert result.model == ""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import subprocess
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import (
     AutoDevResult,
@@ -187,43 +187,42 @@ class ClaudeNativeExecutor:
         return AutoDevResult.model_json_schema()
 
 
+class _PreflightOK(NamedTuple):
+    """Resolved launch parameters returned by _local_preflight on success."""
+
+    endpoint: str
+    model: str
+    task_message: str
+
+
 def _local_preflight(
     config: StageExecutorConfig,
     task: TicketTask,
     worktree: Path,
     client: ClientConfig,
-) -> tuple[AutoDevResult, None, None] | tuple[None, str, str]:
+) -> AutoDevResult | _PreflightOK:
     """Run LocalExecutor pre-flight checks (endpoint/aider/plan availability).
 
-    Returns a discriminated union: ``(blocked_result, None, None)`` when a check
-    fails (first match wins), or ``(None, task_message, endpoint)`` when all
-    checks pass. The success branch carries both resolved values so the caller can
-    use them directly without ``or ""`` guards — mypy narrows each element to its
-    concrete type. Kept synchronous (Addendum 1 Alt A): pre-flight failures
-    complete the session inline, before any fire-and-forget launch.
+    Returns a blocked ``AutoDevResult`` on the first failing check; returns
+    ``_PreflightOK`` with the resolved launch parameters when all checks pass.
+    The discriminated return lets callers use ``isinstance(_PreflightOK)`` to
+    narrow without ``or ""`` guards on the resolved values. Kept synchronous
+    (Addendum 1 Alt A): pre-flight failures complete the session inline, before
+    any fire-and-forget launch.
     """
     if config.endpoint is None:
-        return (
-            make_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=ENDPOINT_NOT_CONFIGURED,
-            ),
-            None,
-            None,
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=ENDPOINT_NOT_CONFIGURED,
         )
-    endpoint = config.endpoint
     if not aider_available():
-        return (
-            make_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=AIDER_NOT_FOUND,
-                retry_eligible=True,
-                retry_delay_seconds=0,
-            ),
-            None,
-            None,
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=AIDER_NOT_FOUND,
+            retry_eligible=True,
+            retry_delay_seconds=0,
         )
     plan_fetcher: PlanFetcher | None = None
     if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
@@ -234,16 +233,16 @@ def _local_preflight(
         plan_fetcher=plan_fetcher,
     )
     if task_message is None:
-        return (
-            make_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=PLAN_MISSING,
-            ),
-            None,
-            None,
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=PLAN_MISSING,
         )
-    return None, task_message, endpoint
+    return _PreflightOK(
+        endpoint=config.endpoint,  # narrowed: is-None check above
+        model=config.model or "",
+        task_message=task_message,
+    )
 
 
 class LocalExecutor:
@@ -308,21 +307,18 @@ class LocalExecutor:
             state.sessions.append(sess)
             save_state(state)
 
-        # Step 2: Pre-flight checks (synchronous, Addendum 1 Alt A). preflight[0]
-        # non-None → a check failed; task_message/endpoint narrowed when all passed.
+        # Step 2: Pre-flight checks (synchronous, Addendum 1 Alt A).
+        # _PreflightOK → all checks passed; AutoDevResult → blocked.
         preflight = _local_preflight(self._config, task, worktree, client)
 
         try:
-            if preflight[0] is None:
+            if isinstance(preflight, _PreflightOK):
                 # Step 3: Launch aider fire-and-forget (pre-flight all passed).
                 # Capture the PID + start-time as a liveness handle, leave the
                 # session ACTIVE, and return — reconcile/local harvest completes
                 # it once the process exits. NEVER block on the run here.
-                # preflight narrowed to tuple[None, str, str] — no ``or ""`` guards.
-                _, task_message, endpoint = preflight
-                model = self._config.model or ""
-                argv = build_argv(model, task_message)
-                env = build_env(endpoint)
+                argv = build_argv(preflight.model, preflight.task_message)
+                env = build_env(preflight.endpoint)
                 proc = self._runner.launch(worktree, argv, env)
                 start_time_ns = read_process_start_time_ns(proc.pid)
                 if start_time_ns is not None:
@@ -345,24 +341,23 @@ class LocalExecutor:
                 with contextlib.suppress(OSError):
                     proc.kill()
                     proc.wait()
-                result: AutoDevResult = make_blocked(
+                completion_result: AutoDevResult = make_blocked(
                     ticket_id=task.ticket_id,
                     worktree=worktree,
                     reason=UNEXPECTED_ERROR,
                 )
             else:
-                # Pre-flight blocked: preflight[0] is AutoDevResult (narrowed).
-                result = preflight[0]
+                completion_result = preflight
 
             # Pre-flight blocked OR proc stat unreadable: complete synchronously.
-            # Persist the blocked
-            # result, mark COMPLETED, and emit SESSION_COMPLETED — no "stdout"
-            # key so dispatch skips persist_last_result and uses last_result.
+            # Persist the blocked result, mark COMPLETED, and emit SESSION_COMPLETED
+            # — no "stdout" key so dispatch skips persist_last_result and uses
+            # last_result.
             with sessions_lock():
                 state = load_state()
                 target = next((s for s in state.sessions if s.id == sid), None)
                 if target is not None:
-                    target.last_result = result.model_dump(mode="json")
+                    target.last_result = completion_result.model_dump(mode="json")
                     target.status = SessionStatus.COMPLETED
                     save_state(state)
             _record_orchestrator_event(
