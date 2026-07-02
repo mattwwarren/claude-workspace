@@ -12,6 +12,7 @@ AGENTS = ROOT / ".claude" / "agents"
 SKILLS = ROOT / ".claude" / "skills"
 
 REFUSE = "multiple resolution comments detected — re-run /harden-ticket to consolidate"
+MARKER = "<!-- auto-dev-preflight-resolutions -->"
 
 
 def _cmd(name: str) -> str:
@@ -26,6 +27,18 @@ def _skill(name: str) -> str:
     return (SKILLS / name).read_text()
 
 
+def _step1b_section() -> str:
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("### Step 1b: Generate Plan")
+    end = content.index("### Step 1c:")
+    return content[start:end]
+
+
+def _nearby(content: str, anchor: str, span: int = 400) -> str:
+    idx = content.index(anchor)
+    return content[max(0, idx - span) : idx + len(anchor)]
+
+
 def test_plan_refuses_multiple_marker_comments() -> None:
     """>1 marker comment refuses with the exact operator message."""
     assert REFUSE in _cmd("auto-dev-plan.md")
@@ -33,15 +46,23 @@ def test_plan_refuses_multiple_marker_comments() -> None:
 
 def test_plan_refuse_uses_ambiguities_status() -> None:
     """Multi-marker refuse reuses the ambiguities_pending_resolution status."""
-    content = _cmd("auto-dev-plan.md")
-    idx = content.index(REFUSE)
-    window = content[max(0, idx - 400) : idx + len(REFUSE)]
+    window = _nearby(_cmd("auto-dev-plan.md"), REFUSE)
     assert "ambiguities_pending_resolution" in window
 
 
 def test_plan_setup_greps_preflight_marker() -> None:
     """Step 1b setup greps the pre-flight resolutions marker."""
-    assert "<!-- auto-dev-preflight-resolutions -->" in _cmd("auto-dev-plan.md")
+    assert MARKER in _cmd("auto-dev-plan.md")
+
+
+def test_marker_consistent_between_producer_and_consumer() -> None:
+    """harden-ticket posts the same marker literal auto-dev-plan greps for.
+
+    A typo in either file breaks pre-flight-resolution detection silently —
+    exactly the drift class this ticket exists to close.
+    """
+    assert MARKER in _skill("harden-ticket/SKILL.md")
+    assert MARKER in _cmd("auto-dev-plan.md")
 
 
 def test_harden_directs_superseding_comment() -> None:
@@ -59,11 +80,7 @@ def test_harden_drops_accretion_guidance() -> None:
 
 def test_step1b_receives_all_comments() -> None:
     """Step 1b's context bullet passes ALL ticket comments, mirroring Step 1c."""
-    content = _cmd("auto-dev-plan.md")
-    start = content.index("### Step 1b: Generate Plan")
-    end = content.index("### Step 1c:")
-    section = content[start:end]
-    assert "ALL ticket comments in chronological order" in section
+    assert "ALL ticket comments in chronological order" in _step1b_section()
 
 
 def test_plan_injects_binding_resolutions_section() -> None:
@@ -87,10 +104,7 @@ def test_conformance_line_format() -> None:
 
 def test_conformance_placed_before_ambiguities() -> None:
     """Within Step 1b, the conformance bullet precedes the Ambiguities bullet."""
-    content = _cmd("auto-dev-plan.md")
-    start = content.index("### Step 1b: Generate Plan")
-    end = content.index("### Step 1c:")
-    section = content[start:end]
+    section = _step1b_section()
     conf = section.index("## Pre-flight Resolution Conformance")
     amb = section.index("## Ambiguities")
     assert conf < amb
@@ -118,7 +132,6 @@ def test_plan_spec_stays_v2_no_bump() -> None:
 
 def test_conformance_omitted_when_no_binding_resolutions() -> None:
     """The producer bullet states the no-marker omit fallback near the Binding name."""
-    content = _cmd("auto-dev-plan.md")
-    omit = content.index("omit `## Pre-flight Resolution Conformance` entirely")
-    preceding = content[max(0, omit - 400) : omit]
+    anchor = "omit `## Pre-flight Resolution Conformance` entirely"
+    preceding = _nearby(_cmd("auto-dev-plan.md"), anchor)
     assert "## Binding Pre-flight Resolutions" in preceding
