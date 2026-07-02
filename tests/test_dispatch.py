@@ -5191,6 +5191,125 @@ class TestApplyStagedDecision:
 
         assert len(attention_events) == 0
 
+    def test_scope_gate_hint_large_tier_small_blocks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """scope_hint='large' + sentinel tier='small' → BLOCKED_ON_USER (#926).
+
+        Regression: an operator ``--scope large`` hint must force the approval
+        gate even when the plan sentinel reclassifies the ticket 'small'. A hint
+        can only ADD the gate, never remove it. Pre-fix this auto-advanced.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SG-HL-TS", stage=Stage.PLAN)
+        task.scope_hint = "large"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.PLAN
+
+    def test_scope_gate_hint_large_tier_large_blocks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """scope_hint='large' + sentinel tier='large' → BLOCKED_ON_USER (#926)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SG-HL-TL", stage=Stage.PLAN)
+        task.scope_hint = "large"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.PLAN
+
+    def test_scope_gate_hint_large_tier_none_blocks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """scope_hint='large' + sentinel omits tier → BLOCKED_ON_USER (#926)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SG-HL-TN", stage=Stage.PLAN)
+        task.scope_hint = "large"
+        last_result: dict[str, object] = {"status": "plan_pending_approval"}
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.PLAN
+
+    def test_scope_gate_hint_small_tier_large_blocks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """scope_hint='small' + sentinel tier='large' → BLOCKED_ON_USER (#926).
+
+        A large sentinel tier is never de-escalated by a smaller hint.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SG-HS-TL", stage=Stage.PLAN)
+        task.scope_hint = "small"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.PLAN
+
+    def test_scope_gate_hint_small_tier_small_advances(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """scope_hint='small' + sentinel tier='small' → advances PLAN→IMPL (#926)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SG-HS-TS", stage=Stage.PLAN)
+        task.scope_hint = "small"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+
+    def test_scope_gate_hint_none_tier_small_advances(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """scope_hint=None + sentinel tier='small' → advances PLAN→IMPL (#926)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SG-HN-TS", stage=Stage.PLAN)
+        task.scope_hint = None
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+
     def _make_parked_task(
         self,
         ticket_id: str,
