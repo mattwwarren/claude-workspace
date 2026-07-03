@@ -88,12 +88,26 @@ Data-integrity floor: the board is only as trustworthy as the state workers writ
 
 Phase 1 is the prerequisite for Phase 2 (board accuracy) and Phase 3 (correct gate state). Phases 2 and 3 are independent and can ship in either order.
 
-## Open questions
+## Open questions — RESOLVED (operator, 2026-07-03)
 
-1. **Signoff default granularity.** Per-ticket (`--signoff operator` at enqueue), per-lane (`default_signoff` in `clients.yaml`), or a global `orchestrator.yaml` flag? All three proposed; hierarchy = ticket > lane > global. Flag if finer or coarser resolution is needed.
-2. **Board web variant.** `cw_pr_events_server.py` already has SSE; a static HTML page consuming that stream would give a browser-based live dashboard with zero new infrastructure. In-scope for Phase 4 or a follow-on?
-3. **`cw status` / `cw list` fate.** Do these fold into `cw board --once` as aliases, or stay as separate plain-text outputs for scripting? Leaning: keep plain-text paths, make board the interactive default.
-4. **`tui.py` migration completeness.** `tui.py` is 837 lines with session-grouping logic not yet in `board.py`. Full parity before deprecation is the bar; partial parity with a feature flag is the fallback. Assess at Phase 2 entry.
+1. **Signoff default granularity.** ~~Per-ticket, per-lane, or global?~~
+   **Resolved: all three levels ship**, hierarchy `ticket > lane > global`
+   (per-ticket `--signoff` at enqueue overrides `default_signoff` in
+   `clients.yaml`, which overrides the `orchestrator.yaml` flag). Most
+   specific wins.
+2. **Board web variant.** ~~In-scope for Phase 4 or a follow-on?~~
+   **Resolved: follow-on RFC.** This sprint stays terminal-only; file a
+   separate ticket/RFC for the SSE-consuming HTML page after Phase 4.
+3. **`cw status` / `cw list` fate.** ~~Aliases or separate?~~
+   **Resolved: keep plain-text paths** for scripting; `cw board` becomes the
+   interactive default read surface.
+4. **`tui.py` migration completeness.** ~~Full parity vs. partial + flag?~~
+   **Resolved: neither — a usefulness bar, not a parity bar.** Port the
+   features actually in operator use, delete the rest (git history is the
+   archive). Additionally: session-grouping logic must not live in a display
+   module — extract it to a non-display module (e.g. alongside the reconcile
+   or models layer) as part of the Phase 2 port. Assess the keep-list at
+   Phase 2 entry.
 
 ## References
 
