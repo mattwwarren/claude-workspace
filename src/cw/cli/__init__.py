@@ -15,6 +15,7 @@ from __future__ import annotations
 from cw.cli import (
     channels,
     config_cmds,
+    guard,
     maintenance,
     queues,
     session_inspect,
@@ -83,6 +84,7 @@ __all__ = [
     "_transcript_age_seconds",
     "channels",
     "config_cmds",
+    "guard",
     "main",
     "maintenance",
     "queues",

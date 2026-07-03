@@ -12,9 +12,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
+from cw.cli.guard import _read_hook_cwd
 from cw.models import SessionOrigin
 from cw.spawn import _write_hook_context
 
@@ -40,9 +42,7 @@ def _write_context(worktree: Path, workspace_path: Path | None) -> None:
 
 def _invoke(cwd: Path) -> int:
     runner = CliRunner()
-    result = runner.invoke(
-        main, ["guard-cwd"], input=json.dumps({"cwd": str(cwd)})
-    )
+    result = runner.invoke(main, ["guard-cwd"], input=json.dumps({"cwd": str(cwd)}))
     return result.exit_code
 
 
@@ -115,3 +115,41 @@ def test_guard_noop_on_empty_stdin(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(main, ["guard-cwd"], input="")
     assert result.exit_code == 0
+
+
+def test_guard_noop_on_non_dict_context(tmp_path: Path) -> None:
+    """cw-context.json that parses to a non-object (list) → exit 0."""
+    cwd = tmp_path / "listctx"
+    (cwd / ".claude").mkdir(parents=True)
+    (cwd / ".claude" / "cw-context.json").write_text("[]")
+
+    assert _invoke(cwd) == 0
+
+
+def test_guard_survives_unexpected_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash inside the block check is swallowed → exit 0 (hook never wedges)."""
+
+    def _boom() -> bool:
+        msg = "unexpected"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("cw.cli.guard._guard_cwd_blocks", _boom)
+    runner = CliRunner()
+    result = runner.invoke(main, ["guard-cwd"], input=json.dumps({"cwd": "/x"}))
+    assert result.exit_code == 0
+
+
+def test_read_hook_cwd_returns_none_on_stdin_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_read_hook_cwd returns None when stdin.read raises (best-effort)."""
+
+    class _BoomStdin:
+        def read(self) -> str:
+            msg = "stdin gone"
+            raise OSError(msg)
+
+    monkeypatch.setattr("cw.cli.guard.sys.stdin", _BoomStdin())
+    assert _read_hook_cwd() is None

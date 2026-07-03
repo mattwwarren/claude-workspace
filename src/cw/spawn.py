@@ -230,7 +230,17 @@ _HOOK_SETTINGS_TEMPLATE = {
                 "matcher": "",
                 "hooks": [{"type": "command", "command": "cw signal-stop"}],
             }
-        ]
+        ],
+        # PreToolUse guard (#940 R5): blocks a Bash tool call when the worker's
+        # cwd resolves to the operator main checkout (workspace_path in
+        # cw-context.json), preventing the #925/#766 isolation breach. Fail-open
+        # (exit 0) on any missing/malformed context so it never blocks legit work.
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": "cw guard-cwd"}],
+            }
+        ],
     }
 }
 
