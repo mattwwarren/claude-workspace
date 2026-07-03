@@ -42,6 +42,10 @@ from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
 )
+from cw.reconcile.main_drift import (
+    _act_on_main_drift_candidates,
+    _detect_main_drift_candidates,
+)
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
@@ -316,6 +320,15 @@ def _reconcile_locked(
         now=now,
         task_by_ticket=shared_task_by_ticket,
     )
+
+    # Main-checkout drift sweep (#925/#940): flag live worktree workers whose
+    # main checkout is dirty or ahead/diverged — the isolation-breach signal.
+    # A local git read (no daemon dependency), so it runs BEFORE the daemon
+    # query + outage guard, mirroring the local-harvest sweep above. Advisory
+    # only: emits SESSION_NEEDS_ATTENTION, mutates no session or queue state.
+    main_drift_clients = load_clients()
+    main_drift_candidates = _detect_main_drift_candidates(state, main_drift_clients)
+    _act_on_main_drift_candidates(main_drift_candidates, main_drift_clients)
 
     try:
         # `claude agents --json` returns sessionId as a full UUID

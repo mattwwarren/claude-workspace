@@ -60,6 +60,7 @@ from cw.reconcile._shared import (
     _CAUSE_USAGE_LIMIT,
     _DIRTY_WORKTREE_REASON,
     _FINALIZE_BLOCKED_REASON,
+    _MAIN_CHECKOUT_DRIFT_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_SKIP_REASON,
@@ -123,6 +124,10 @@ from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
 )
+from cw.reconcile.main_drift import (
+    _act_on_main_drift_candidates,
+    _detect_main_drift_candidates,
+)
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
@@ -156,6 +161,7 @@ __all__ = [
     "_CAUSE_USAGE_LIMIT",
     "_DIRTY_WORKTREE_REASON",
     "_FINALIZE_BLOCKED_REASON",
+    "_MAIN_CHECKOUT_DRIFT_REASON",
     "_NEEDS_SALVAGE_REASON",
     "_SALVAGE_KIND_GIT_STATE",
     "_SALVAGE_SKIP_REASON",
@@ -169,6 +175,7 @@ __all__ = [
     "ReconcileReport",
     "_act_on_idle_candidates",
     "_act_on_local_harvest_candidates",
+    "_act_on_main_drift_candidates",
     "_act_on_phantom_candidates",
     "_act_on_stalled_candidates",
     "_apply_salvaged_completion",
@@ -181,6 +188,7 @@ __all__ = [
     "_csid_from_transcript",
     "_detect_idle_candidates",
     "_detect_local_harvest_candidates",
+    "_detect_main_drift_candidates",
     "_detect_phantom_candidates",
     "_detect_post_review_clean",
     "_detect_stalled_candidates",

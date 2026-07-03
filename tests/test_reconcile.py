@@ -18188,9 +18188,7 @@ def _prime_drift_reconcile(
     ff_safety: str,
 ) -> None:
     """Wire load_clients, the two git probes, config, and a live daemon roster."""
-    monkeypatch.setattr(
-        "cw.reconcile.core.load_orchestrator_config", _auto_config
-    )
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     monkeypatch.setattr(
         "cw.reconcile.core.load_clients",
         lambda: {
@@ -18212,11 +18210,20 @@ def _prime_drift_reconcile(
     )
 
 
-def _read_drift_events(consumer: str) -> list[object]:
-    return read_events(
-        consumer=consumer,
-        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
-    )
+def _read_drift_events(consumer: str) -> list[Any]:
+    """SESSION_NEEDS_ATTENTION events carrying the main-checkout-drift reason.
+
+    Filters on paused_status so an unrelated watchdog attention event (e.g. the
+    idle sweep firing on the same long-lived session) is never miscounted.
+    """
+    return [
+        e
+        for e in read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        if e.payload.get("paused_status") == _MAIN_CHECKOUT_DRIFT_REASON
+    ]
 
 
 def test_main_drift_dirty_main_emits_attention(
@@ -18233,7 +18240,7 @@ def test_main_drift_dirty_main_emits_attention(
 
     events = _read_drift_events("test-drift-dirty")
     assert len(events) == 1
-    payload = events[0].payload  # type: ignore[attr-defined]
+    payload = events[0].payload
     assert payload["paused_status"] == _MAIN_CHECKOUT_DRIFT_REASON
     assert payload["client"] == "client-a"
     assert payload["crashed"] is False
@@ -18255,7 +18262,7 @@ def test_main_drift_ahead_emits_attention(
 
     events = _read_drift_events("test-drift-ahead")
     assert len(events) == 1
-    assert "ahead of origin" in events[0].payload["breadcrumbs"]  # type: ignore[attr-defined]
+    assert "ahead of origin" in events[0].payload["breadcrumbs"]
 
 
 def test_main_drift_diverged_emits_attention(
@@ -18272,7 +18279,7 @@ def test_main_drift_diverged_emits_attention(
 
     events = _read_drift_events("test-drift-diverged")
     assert len(events) == 1
-    assert "diverged from origin" in events[0].payload["breadcrumbs"]  # type: ignore[attr-defined]
+    assert "diverged from origin" in events[0].payload["breadcrumbs"]
 
 
 def test_main_drift_clean_main_no_event(
@@ -18344,7 +18351,9 @@ def test_detect_main_drift_skips_worktree_none() -> None:
         "no-wt", SessionStatus.ACTIVE, Path("/tmp/x")
     )
     sess.worktree_path = None
-    clients = {"client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))}
+    clients = {
+        "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
+    }
     assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
 
 
@@ -18358,7 +18367,9 @@ def test_detect_main_drift_skips_backgrounded(
     sess = _mk_daemon_session_with_worktree(
         "bg", SessionStatus.BACKGROUNDED, Path("/tmp/wt-bg")
     )
-    clients = {"client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))}
+    clients = {
+        "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
+    }
     assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
 
 
@@ -18368,3 +18379,22 @@ def test_detect_main_drift_skips_unknown_client() -> None:
         "orphan", SessionStatus.ACTIVE, Path("/tmp/wt-orphan")
     )
     assert _detect_main_drift_candidates(CwState(sessions=[sess]), {}) == []
+
+
+def test_detect_main_drift_swallows_git_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A git error during classification is treated as no-drift (fail-safe)."""
+
+    def _boom(_c: object) -> bool:
+        msg = "git blew up"
+        raise WorktreeError(msg)
+
+    monkeypatch.setattr("cw.reconcile.main_drift.is_main_checkout_dirty", _boom)
+    sess = _mk_daemon_session_with_worktree(
+        "err", SessionStatus.ACTIVE, Path("/tmp/wt-err")
+    )
+    clients = {
+        "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
+    }
+    assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
