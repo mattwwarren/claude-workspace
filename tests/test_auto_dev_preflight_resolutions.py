@@ -144,9 +144,8 @@ def test_conformance_omitted_when_no_binding_resolutions() -> None:
 
 def test_intake_step3_fetch_includes_comments() -> None:
     """Step 3 single-ticket github-issues fetch requests comments."""
-    assert (
-        "gh issue view <n> --json title,body,state,url,comments"
-        in _cmd("auto-dev-intake.md")
+    assert "gh issue view <n> --json title,body,state,url,comments" in _cmd(
+        "auto-dev-intake.md"
     )
 
 
@@ -159,9 +158,8 @@ def test_intake_table_row_includes_comments() -> None:
 
 def test_plan_live_fetch_every_invocation() -> None:
     """Plan Stage 1 mandates a comments live-fetch on every invocation."""
-    assert (
-        "live-fetch the ticket comments on every invocation"
-        in _cmd("auto-dev-plan.md")
+    assert "live-fetch the ticket comments on every invocation" in _cmd(
+        "auto-dev-plan.md"
     )
 
 
