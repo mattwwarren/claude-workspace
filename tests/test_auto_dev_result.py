@@ -10,7 +10,9 @@ import pytest
 from pydantic import ValidationError
 
 from cw.auto_dev_result import (
+    _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
+    BLOCKER_REASON_VALIDATION_FAILED,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
@@ -2295,6 +2297,110 @@ class TestCase1EmptyAmbiguitiesAndPremisesCoerce:
         result = parse_stdout(_wrap_sentinel(p))
         assert isinstance(result, AutoDevResult)
         assert result.status == "premises_pending_verification"
+
+
+# ---------------------------------------------------------------------------
+# Issue #953 — empty-question ambiguity items ({question: null, ...}) must be
+# rejected: dropped at the parse boundary, and if none survive, coerced to a
+# labeled synthetic placeholder that parks the ticket visibly as a producer
+# glitch. Strict model_validate rejects any residual empty-question item.
+# ---------------------------------------------------------------------------
+
+
+class TestCase953EmptyQuestionAmbiguitiesRejected:
+    """Empty-question ambiguity items are filtered / rejected (issue #953).
+
+    The producer twice emitted an ambiguities array containing a single
+    fully-empty item ({question: null, plan_assumption: null,
+    alternatives: null}). The sentinel validated and the ticket parked with
+    nothing for the operator to answer. The parse boundary now drops such
+    items; if none remain, a labeled placeholder is injected so the park is
+    visibly a producer glitch. Strict model_validate rejects the raw shape.
+    """
+
+    def test_exact_regression_payload_parks_with_labeled_placeholder(self) -> None:
+        """R6a: the exact regression payload parses to a labeled placeholder."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [
+            {"question": None, "plan_assumption": None, "alternatives": None}
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+        assert len(result.ambiguities) == 1
+        assert (
+            result.ambiguities[0]["question"] == _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION
+        )
+
+    def test_exact_regression_payload_strict_rejects(self) -> None:
+        """R6b: strict model_validate rejects the same raw empty-question shape."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [
+            {"question": None, "plan_assumption": None, "alternatives": None}
+        ]
+        with pytest.raises(ValidationError, match="question"):
+            AutoDevResult.model_validate(p)
+
+    def test_mixed_valid_and_empty_filters_to_valid_only(self) -> None:
+        """R6c: a mix of valid + empty items filters down to the valid ones."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [
+            {"question": "real one?", "plan_assumption": "x"},
+            {"question": None, "plan_assumption": None, "alternatives": None},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.ambiguities) == 1
+        assert result.ambiguities[0]["question"] == "real one?"
+
+    def test_whitespace_only_question_strict_rejects(self) -> None:
+        """R6d: a whitespace-only question is rejected by strict model_validate."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [{"question": "   "}]
+        with pytest.raises(ValidationError, match="question"):
+            AutoDevResult.model_validate(p)
+
+    def test_whitespace_only_question_filtered_at_parse_boundary(self) -> None:
+        """R6d: a whitespace-only question is filtered → labeled placeholder park."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [{"question": "   "}]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "ambiguities_pending_resolution"
+        assert len(result.ambiguities) == 1
+        assert (
+            result.ambiguities[0]["question"] == _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION
+        )
+
+    def test_placeholder_passes_strict_validation(self) -> None:
+        """R6e: the injected placeholder question passes strict model_validate."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [{"question": _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.ambiguities) == 1
+
+    def test_non_dict_item_survives_filter_and_fails_loudly(self) -> None:
+        """R8c: a non-dict item is left in place and fails strict validation."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = ["not-a-dict", {"question": "real?"}]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED
+
+    def test_all_valid_list_untouched(self) -> None:
+        """No-op branch: an all-valid ambiguities list is left unchanged."""
+        result = parse_stdout(_wrap_sentinel(_ambiguities_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.ambiguities) == 1
+
+    def test_validator_message_names_offending_index(self) -> None:
+        """Field validator names the offending index in its error message."""
+        p = _ambiguities_pending_payload()
+        p["ambiguities"] = [
+            {"question": None, "plan_assumption": None, "alternatives": None}
+        ]
+        with pytest.raises(ValidationError, match=r"ambiguities\[0\]"):
+            AutoDevResult.model_validate(p)
 
 
 # ---------------------------------------------------------------------------

@@ -283,6 +283,7 @@ Both `ambiguities_pending_resolution` and `premises_pending_verification` (§4.1
 - Both statuses require `next_actions` non-empty (A2).
 - Both statuses prohibit `branch` (pre-branch, A4) and require `scope.lines_actual=null` (pre-impl, A4).
 - Both statuses require `schema_version >= 4` (A1).
+- Each ambiguity item's question must be a non-empty, non-whitespace string; empty-question items are filtered at the parse boundary, and an all-empty/missing array coerces to a labeled synthetic placeholder that parks the ticket visibly as a producer glitch (**A6**, #953).
 
 **Consumer guidance:** Key off `result.status` directly — these are now canonical statuses. Route `user_resolve_ambiguities` / `user_verify_premises` via `next_actions`. The `ambiguities` and `premises` arrays hold the structured entries for human presentation.
 
@@ -405,6 +406,7 @@ The parser applies several pre-validation coercions before handing the payload t
 | `no_op` + stray `pr` / `branch` / `commits` | `status=no_op` and `pr`, `branch`, or `commits` is non-null/non-empty | Set `pr=null`, `branch=null`, `commits=[]` | #367 |
 | `blocked` + stray `next_actions` | `status=blocked` and `next_actions` is non-empty with non-user-directed verbs (not `user_resolve_*` / `user_decide_*` / `user_verify_*` prefixes; not `stage_reached=stage1_pre_flight`) | Drop `next_actions` (set to `[]`), preserve `blocker` | #371 |
 | `no_op` + stray `scope.lines_actual` | `status=no_op` and `stage_reached ∈ {stage1_pre_flight, stage1_plan}` and `scope.lines_actual` is non-null | Set `scope.lines_actual=null` | #399 |
+| empty-question ambiguity items | `status=ambiguities_pending_resolution` and one or more ambiguity items have a null/empty/whitespace question | Drop the empty item(s); if none remain, inject labeled placeholder `{"question": "(producer emitted no usable ambiguity … see #953)"}` | #953 |
 
 All coercions log a `WARNING` with the affected field names and ticket ID. The model-level invariants remain strict — coercion happens only at the parse boundary so existing test coverage for the invariants is unaffected.
 
@@ -430,6 +432,8 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 | 2 | Added `no_op` status (§4.1) and `close_issue_as_completed` advisory action (§4.3). v1-tagged payloads with `status=no_op` are rejected as `validation_failed`. |
 | 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). Also added `github_issue_existing` to `plan_source` (the post-Linear analog of `linear_existing`; treated identically). Accepted under v2 and v3 — same rollout-exception treatment, since the producer emits this value at v2 today (see #190). |
 | 4 | Promoted `ambiguities_pending_resolution` and `premises_pending_verification` from §4.4 interim states (not in closed enum) to canonical `Status` values (§4.1). Added `ambiguities` and `premises` top-level fields with cross-field invariants (non-empty when corresponding status is set, §4.4). Added `user_resolve_ambiguities` and `user_verify_premises` to §4.3 vocabulary. v3-tagged payloads with either new status are rejected as `validation_failed`. Tracked in #191. |
+
+**Note (A6, #953):** Rejecting empty-question ambiguity items and coercing an empty/missing ambiguities array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (consistent with the #430 `_coerce_empty_pending_array` precedent).
 
 **Bump required when:**
 - Any field is removed or renamed.
