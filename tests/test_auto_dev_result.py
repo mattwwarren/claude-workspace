@@ -20,6 +20,7 @@ from cw.auto_dev_result import (
     SUPPORTED_SCHEMA_VERSIONS,
     AutoDevResult,
     BlockedResult,
+    Review,
     extract_block,
     is_documented_example,
     parse_stdout,
@@ -3073,3 +3074,24 @@ def test_is_documented_example_returns_false_for_non_example() -> None:
     }
     result = AutoDevResult.model_validate(p)
     assert not is_documented_example(result)
+
+
+class TestReviewDeferred:
+    """Issue #917 — Review.deferred field (count of deferred findings)."""
+
+    def test_review_deferred_defaults_to_zero_when_omitted(self) -> None:
+        """Omitting `deferred` defaults to 0 (backward-compatible)."""
+        review = Review(must_fix_initial=0, should_fix=1, fix_cycles_used=0)
+        assert review.deferred == 0
+
+    def test_review_deferred_parses_explicit_value(self) -> None:
+        """An explicit `deferred` value round-trips."""
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 2,
+                "should_fix": 1,
+                "fix_cycles_used": 1,
+                "deferred": 3,
+            }
+        )
+        assert review.deferred == 3

@@ -134,6 +134,7 @@ All 41 rows define the deterministic headless action for every interactive gate 
 | S3 action list empty (every finding fixed / rejected / deferred), small | AUTO-CONTINUE → S4. Rejections recorded in PR body + `friction_highlights`; deferrals queued for merge-time ticketing (Step H3) |
 | S3 large scope, action list resolved (clean, or fix loop complete) | EXIT `review_pending_approval` (post-fix-loop diff, branch pushed, no PR); adjudication applies within the human review |
 | S3 action list non-empty after 5 fix cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` |
+| S3 non-deferrable plan-deviation finding survives fix loop or judged beyond its scope | EXIT `blocked` with `blocker.reason: "plan_deviation"` (routes to BLOCKED_ON_USER; not finalize) |
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
 | Tool call denied by auto-mode classifier (any stage) | EXIT `blocked` with `blocker.reason: "tool_denied"`, `retry_eligible: true`, `next_actions: ["redispatch_ticket"]` (see Tool-Use Denial Exit section) |
@@ -822,7 +823,7 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
     "auto_merge": true,
     "base": "main"
   },
-  "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+  "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0, "deferred": 0},
   "health": {
     "lowest_agent_confidence": "MEDIUM",
     "any_incomplete_risk": false,
@@ -857,10 +858,10 @@ The `plan_source` field is a closed literal — consumers will reject any value 
 The `review` field is **always a Review dict**, never null — even for pre-impl statuses where no review has occurred. Emit a zero-valued placeholder for any status that hasn't yet completed Stage 3 review:
 
 ```json
-"review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0}
+"review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0, "deferred": 0}
 ```
 
-Applies to: `no_op`, `plan_pending_approval`, `ambiguities_pending_resolution`, `premises_pending_verification`, `scope_exceeded`, `forbidden_area`, and `blocked` exits before Stage 3. Use real values once Stage 3 reviewers have actually run.
+Applies to: `no_op`, `plan_pending_approval`, `ambiguities_pending_resolution`, `premises_pending_verification`, `scope_exceeded`, `forbidden_area`, and `blocked` exits before Stage 3. Use real values once Stage 3 reviewers have actually run. `deferred` counts the findings stashed to `.cw/deferred-findings.md` (bucket 3); it defaults to `0` and is optional (omitted → 0) for backward compatibility.
 
 ### Status Enum (closed)
 
@@ -888,6 +889,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 | `impl_not_pushed` | Step 2.5 pre-gate: `origin/<branch-name>` was absent after `git fetch` — impl agent claimed done but never pushed. `retry_eligible: true`; orchestrator may re-dispatch or resume from S2 |
 | `impl_failed` | Implementation agent returned BLOCK or failed quality gates after 2 attempts |
 | `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap) |
+| `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it always exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan |
 | `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — the plan needs human triage, not another auto-revision. No branch created |
 | `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX (direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a headless run, or it persisted after a Step 1f.4 revision cycle — the chosen direction needs human judgment. No branch created |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve |
