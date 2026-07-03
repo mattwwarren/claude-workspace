@@ -3977,6 +3977,48 @@ class TestFreshnessGateAutoFF:
         )
         assert any("dirty" in ln or "uncommitted" in ln for ln in emitted)
 
+    def test_auto_ff_diverged_warn_advises_inspect_not_rebase(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#940: diverged WARN advises inspect-first, not ``pull --rebase``.
+
+        A diverged main may carry stray commits from an isolation breach; the
+        operator must inspect before touching it, so the advice points at a
+        read-only ``git log origin/<default_branch>..HEAD`` and explicitly warns
+        against auto-rebase/reset.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-940", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.get_head_branch",
+            lambda _client: "main",
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "diverged",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        diverged_warns = [ln for ln in emitted if "diverged" in ln]
+        assert diverged_warns, f"no diverged WARN emitted: {emitted}"
+        warn = diverged_warns[0]
+        assert "log origin/" in warn
+        assert "do NOT auto-rebase" in warn
+        assert "pull --rebase" not in warn
+
 
 # ---------------------------------------------------------------------------
 # TestTier1ClientSelection — max_parallel_clients (#558)
