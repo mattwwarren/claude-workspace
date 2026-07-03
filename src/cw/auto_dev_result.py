@@ -458,6 +458,12 @@ class AutoDevResult(BaseModel):
             raise ValueError(msg)
         return v
 
+    # Why: intentionally status-agnostic (fires on every model_validate, not
+    # only ambiguities_pending_resolution) per #953 pre-flight resolution #1.
+    # A stray populated `ambiguities` array with an empty-question item on an
+    # unrelated status would now hard-fail as validation_failed instead of
+    # being silently ignored — accepted trade-off, reviewed non-blocking by
+    # Plan Soundness Reviewer at plan time (see .cw/deferred-findings.md).
     @field_validator("ambiguities")
     @classmethod
     def _reject_empty_question_ambiguities(
