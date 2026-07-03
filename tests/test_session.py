@@ -763,6 +763,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440000",
                 )
@@ -800,6 +801,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440000",
                 )
@@ -949,6 +951,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440001",
                 )
@@ -1043,6 +1046,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     # Dead surface — not in mock's live set — forces re-spawn.
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440099",
@@ -2032,10 +2036,8 @@ class TestResolveResumeCwd:
         )
         assert _resolve_resume_cwd(session, client) == wt
 
-    def test_user_non_worktree_purpose_main_cwd_unguarded(
-        self, tmp_path: Path
-    ) -> None:
-        """(iii) USER-origin debt is legitimately main-homed → no guard, returns main."""
+    def test_user_non_worktree_purpose_main_cwd_unguarded(self, tmp_path: Path) -> None:
+        """(iii) USER-origin debt is legitimately main-homed → no guard."""
         client = self._client(tmp_path)
         session = self._session(
             origin=SessionOrigin.USER,

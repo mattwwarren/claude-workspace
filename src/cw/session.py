@@ -346,6 +346,39 @@ def background_all_sessions(
             click.echo(f"Warning: could not background {session.name}: {exc}")
 
 
+def _resolve_resume_cwd(session: Session, client: ClientConfig) -> Path:
+    """Resolve the respawn cwd for a dead resume surface, guarding #940.
+
+    Implements the R2 decision table so a re-spawned worker never lands on the
+    operator's main checkout (the #925/#766 isolation breach):
+
+    - (i)  DAEMON-origin with ``worktree_path is None`` — corrupted state; raise
+           rather than silently respawn into the main checkout.
+    - (ii) USER-origin with a worktree-homed purpose AND a set ``worktree_path``
+           — verify that worktree does not degenerately resolve to the main
+           checkout (the #300 shape) before respawn. A USER worktree purpose with
+           ``worktree_path is None`` (e.g. an ``impl`` session started on a
+           non-worktree client) is legitimately main-homed and needs no guard.
+    - (iii) USER-origin with a non-worktree purpose (``debt`` etc.) — legitimately
+            main-homed; no guard.
+    """
+    if session.origin is SessionOrigin.DAEMON and session.worktree_path is None:
+        msg = (
+            f"Refusing to resume DAEMON session {session.name}: worktree_path is"
+            " unset (corrupted state). A daemon worker must never respawn into"
+            " the operator main checkout."
+        )
+        raise CwError(msg)
+    session_cwd: Path = session.worktree_path or session.workspace_path
+    if (
+        session.origin is SessionOrigin.USER
+        and session.worktree_path is not None
+        and session.purpose in WORKTREE_PURPOSES
+    ):
+        check_not_main_checkout(session_cwd, client)
+    return session_cwd
+
+
 def resume_session(
     session_name: str,
     *,
@@ -413,8 +446,9 @@ def resume_session(
         _attach_session(surface)
     else:
         # Dead or missing surface: spawn a new daemon session using --resume
-        # to re-enter the Claude transcript.
-        session_cwd: Path = session.worktree_path or session.workspace_path
+        # to re-enter the Claude transcript. Guard the respawn cwd (#940) so a
+        # worktree worker never re-lands on the operator main checkout.
+        session_cwd = _resolve_resume_cwd(session, client)
 
         extra_args: list[str] = []
         if session.claude_session_id:
