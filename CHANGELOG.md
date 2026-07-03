@@ -6,6 +6,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-07-03
+
+The **reliability bug sprint, waves 2–3 (P0 correctness)**: every P0 from the
+109-issue triage is now shipped. The pipeline can no longer emit a
+false-positive review PROCEED for plan-contradicting work, silently bypass the
+operator's scope gate, park still-working sessions without rescue, or lose an
+approved plan between stages.
+
+### Added
+
+- **Late-sentinel rescue for parked sessions** (#918, #946): a terminal
+  `AutoDevResult` recorded by the Stop hook on an already-parked task now
+  rescues it through a shared routing helper that mirrors live
+  `apply_staged_decision` semantics (including FINALIZE self-heal regress and
+  terminal-stage `pr_url` preservation). Large-tier idle budget default
+  raised to 3600s. `BlockedResult` arms stay RUNNING-gated — an operator park
+  is never reversed by an unparseable late signal.
+- **Non-deferrable review findings + `requeue --regress`** (#917, #955): a
+  finding that the implementation contradicts the approved plan (or an
+  operator mandate) cannot be adjudicated away — review exits `blocked` with
+  `blocker.reason: "plan_deviation"`. Spec-citation claims ("required by
+  spec") are cross-checked against `.cw/plan.md` verbatim. New optional
+  `review.deferred` sentinel field surfaces deferral counts. New
+  `cw dev-queue requeue --regress` permits a backward stage target on a
+  blocked task — the operator's bounce-to-impl path.
+- **`cw init --no-onboarding` runnability warning** (#922, #945): init now
+  warns the client is not runnable until `--onboard-only`, and the Next-steps
+  block points at onboarding first.
+
+### Changed
+
+- **Operator scope gate is escalate-only** (#926, #950): the gate fires when
+  EITHER the operator's `--scope large` hint OR the worker's sentinel tier
+  says large — a worker reclassifying to small can no longer bypass the
+  operator's primary safety gate. Budget resolution unchanged.
+- **Pre-flight Resolutions are binding plan constraints** (#828, #951): the
+  plan stage extracts the single authoritative resolution set (body or
+  comment marker), refuses multi-marker accretion, and emits a per-item
+  `## Pre-flight Resolution Conformance` section the Plan Reviewer enforces.
+
+### Fixed
+
+- **Plan stage persists `.cw/plan.md`** (#943, #944): Stage 1 writes the
+  reviewed plan to the worktree before posting/sentinel; Stage 2 falls back
+  to the newest reviewed tracker comment before exiting `plan_missing`. The
+  latent gap became fatal with instruction-literal worker models.
+
 ## [1.8.0] — 2026-07-02
 
 The **reliability bug sprint, waves 0–1**: stabilized the CI gate, hardened
