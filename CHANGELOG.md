@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-07-03
+
+### Fixed
+
+- **Deterministic `cw event tail --follow` test** (#948, #959): the flaky
+  follow-mode test's fixed 2-iteration sleep budget is replaced with a
+  poll-until-observed loop (spy on the streaming seam), tolerating the
+  `tail_events_follow` st_size guard lag tracked as #954. Test-only change.
+
 ## [1.9.0] — 2026-07-03
 
 The **reliability bug sprint, waves 2–3 (P0 correctness)**: every P0 from the
