@@ -745,7 +745,23 @@ def test_cli_event_tail_follow_streams_new_events(
     """cw event tail --follow streams events written after the command starts."""
     ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     ev2_holder: list[OrchestratorEvent] = []
+    printed_ids: list[str] = []
 
+    # Why: no public seam observes "was this event actually streamed"; a
+    # pass-through spy on the private _print_event is the only observable
+    # streaming point. Tolerates the tail_events_follow st_size guard (#954),
+    # which can lag a just-completed append by one poll iteration.
+    from cw.cli import queues
+
+    original_print_event = queues._print_event
+
+    def spy_print_event(ev: OrchestratorEvent, *, as_json: bool) -> None:
+        printed_ids.append(ev.id)
+        original_print_event(ev, as_json=as_json)
+
+    monkeypatch.setattr(queues, "_print_event", spy_print_event)
+
+    max_poll_iterations = 100  # safety cap: bound the poll-until loop
     call_count = 0
 
     def sleep_side_effect(*args: object, **kwargs: object) -> None:
@@ -754,16 +770,25 @@ def test_cli_event_tail_follow_streams_new_events(
         if call_count == 1:
             ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
             ev2_holder.append(ev2)
-        else:
+            return
+        if ev2_holder[0].id in printed_ids:
             raise KeyboardInterrupt
+        if call_count - 1 >= max_poll_iterations:
+            msg = (
+                f"ev2 {ev2_holder[0].id} not streamed after "
+                f"{max_poll_iterations} polls; printed={printed_ids}"
+            )
+            raise AssertionError(msg)
+        # else: no-op — let the follow loop re-poll until st_size catches up
 
     monkeypatch.setattr("time.sleep", sleep_side_effect)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["event", "tail", "--follow"])
+    result = runner.invoke(main, ["event", "tail", "--follow"], catch_exceptions=False)
     assert result.exit_code == 130
     assert ev1.id in result.output
     assert len(ev2_holder) == 1
+    assert ev2_holder[0].id in printed_ids
     assert ev2_holder[0].id in result.output
 
 
