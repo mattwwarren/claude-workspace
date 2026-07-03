@@ -204,7 +204,7 @@ CWCTXEOF
 cw event record session.needs_attention \
   --payload '{"reason": "comments_fetch_failed", "ticket_id": "<n>", "session_id": "<from .claude/cw-context.json>"}'
 ```
-Do NOT emit `stage.errored` for this: `STAGE_ERRORED` events are deliberately ignored when deriving a session's current stage (`orchestrate.py:463`), so a `stage.errored` here would never surface as operator attention. `session.needs_attention` is the signal the operator sees.
+Do NOT emit `stage.errored` for this: `STAGE_ERRORED` events are deliberately ignored by `orchestrate.py`'s `_derive_last_stage_by_session`, so a `stage.errored` here would never surface as operator attention. `session.needs_attention` is the signal the operator sees.
 
 **Known limitation (intentionally not WARNed):** a comments fetch that **succeeds but returns empty for a ticket that actually has comments** is NOT detectable from within this stage without a second independent source of the true comment count, so it is intentionally left un-WARNed. The `comments_fetch_failed` WARN above covers only hard failures (non-zero exit / malformed JSON), not a well-formed empty result.
 

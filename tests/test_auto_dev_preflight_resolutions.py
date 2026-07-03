@@ -165,9 +165,7 @@ def test_plan_live_fetch_every_invocation() -> None:
 
 def test_plan_marker_source_pinned_to_live_fetch() -> None:
     """Step 1b marker grep is pinned to the live fetch, excluding the cache."""
-    content = _cmd("auto-dev-plan.md")
-    assert "NEVER the" in content
-    assert "`.cw/context.json` `comments` array" in content
+    assert "NEVER the `.cw/context.json` `comments` array" in _cmd("auto-dev-plan.md")
 
 
 def test_plan_cached_comments_is_snapshot_only() -> None:
@@ -177,9 +175,8 @@ def test_plan_cached_comments_is_snapshot_only() -> None:
 
 def test_intake_warn_names_needs_attention() -> None:
     """The intake WARN names the session.needs_attention event and its reason."""
-    content = _cmd("auto-dev-intake.md")
-    assert "session.needs_attention" in content
-    assert "comments_fetch_failed" in content
+    window = _nearby(_cmd("auto-dev-intake.md"), "comments_fetch_failed")
+    assert "session.needs_attention" in window
 
 
 def test_intake_warn_documents_empty_undetectable() -> None:
