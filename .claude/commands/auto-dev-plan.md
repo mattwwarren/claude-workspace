@@ -8,6 +8,8 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "AskUserQuesti
 
 **Orientation:** Before running this stage, read `.cw/context.json` for ticket context (ticket body, title, prior decisions). If the file is absent, prose-delegate to `auto-dev-intake.md` first to materialize it.
 
+**Comments are live, not cached.** Regardless of whether `.cw/context.json` already exists, Stage 1 MUST **live-fetch the ticket comments on every invocation** — including a standalone `/auto-dev-plan <ticket-id> --headless` plan-round re-dispatch — via the active tracker's fetch op (`list_comments(<id>)` for `linear`; `gh issue view <n> --json comments` for `github-issues`). The cached `comments` array in `.cw/context.json` is a **Stage-0 provenance snapshot only** and MUST NOT be treated as current: on a plan-round re-dispatch the intake stage does not re-run, so that array can be stale — e.g. missing the operator "Pre-flight Resolutions" comment posted after Stage 0 materialized the file (#952). Use the live fetch as the source of truth for every comment-derived decision below.
+
 This stage runs as a standalone headless entrypoint (`/auto-dev-plan <ticket-id> --headless`) or as part of the interactive monolith chain. In the chained path, the monolith controls sentinel emission — do NOT emit the `AUTO_DEV_RESULT` sentinel in the chained/interactive context; emit it only under `--headless` standalone invocation.
 
 **Arguments:** "$ARGUMENTS"
@@ -40,7 +42,7 @@ For each ticket in the queue:
 
 ### Step 1b: Generate Plan (Agent)
 
-**Step 1b setup — Pre-flight Resolution pre-extraction (orchestrator, before spawning the Plan agent).** Grep the materialized ticket comments for the marker `<!-- auto-dev-preflight-resolutions -->` (the `/harden-ticket` resolution comment). Branch on the count of comments bearing it:
+**Step 1b setup — Pre-flight Resolution pre-extraction (orchestrator, before spawning the Plan agent).** Grep the **Stage-1 live-fetched ticket comments** (the Orientation live fetch above, run via the active tracker's fetch op on this very invocation) for the marker `<!-- auto-dev-preflight-resolutions -->` (the `/harden-ticket` resolution comment). Grep that live fetch — **NEVER the `.cw/context.json` `comments` array**, which is a Stage-0 provenance snapshot and can be stale on a plan-round re-dispatch (exactly the staleness that hid operator resolutions in #952). Branch on the count of comments bearing it:
 - **>1 marker comment** → EXIT `ambiguities_pending_resolution` with the message `multiple resolution comments detected — re-run /harden-ticket to consolidate.` (headless: post the message as the ticket comment and include it in the result payload; no branch is created — same EXIT idiom as the Step 1c `ambiguities_pending_resolution` clause). Do NOT build supersession logic here; consolidating multiple resolution comments is `/harden-ticket`'s job.
 - **0 marker comments** → proceed normally; no resolutions section is injected into the plan-agent prompt.
 - **exactly 1 marker comment** → parse its numbered resolution items and inject them into the plan-agent prompt as a dedicated `## Binding Pre-flight Resolutions` numbered list (one line per resolution, preserving the `R<n>` numbering). Instruct the plan agent to treat every item as a **binding constraint** on the plan — not advisory context — and to prove conformance via the `## Pre-flight Resolution Conformance` producer rule below.

@@ -30,7 +30,7 @@ perform the active tracker's equivalent:
 
 | Operation | `linear` | `github-issues` |
 |-----------|----------|-----------------|
-| Fetch ticket body | `get_issue(<id>)` | `gh issue view <n> --json title,body,state,url` |
+| Fetch ticket body | `get_issue(<id>)` | `gh issue view <n> --json title,body,state,url,comments` |
 | Fetch ticket comments | `list_comments(<id>)` | `gh issue view <n> --json comments` |
 | Post a comment | Linear create-comment | `gh issue comment <n> --body <text>` (or `--body-file`) |
 | Read plan/marker comments | scan Linear comments | scan `gh issue view <n> --json comments` (markers are HTML comments in the body, identical syntax) |
@@ -136,8 +136,11 @@ rules below are tracker-aware.
    - `--forbidden <comma-separated areas>` → hard-reject tickets touching these areas
 
 3. **Single-ticket mode:** Fetch the issue via the **active tracker's** fetch op
-   (`get_issue(<id>)` for `linear`; `gh issue view <n> --json title,body,state,url`
-   for `github-issues`). Proceed to Stage 1.
+   (`get_issue(<id>)` for `linear`; `gh issue view <n> --json title,body,state,url,comments`
+   for `github-issues` — the single call carries the comments too). For `linear`,
+   `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** (see
+   Step 0d) so the comments are in hand before context is materialized. Proceed to
+   Stage 1.
 
    **Headless only — initialize correlation context and emit `stage.entered` (`s0_intake`):**
    ```bash
@@ -191,6 +194,19 @@ cat > .cw/context.json << 'CWCTXEOF'
 }
 CWCTXEOF
 ```
+
+**Populating `comments` (from a real fetch, never model initiative):** the `comments` array MUST be filled from an actual tracker fetch — never guessed, never left `[]` by default:
+- **`github-issues` mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`). The single Step 3 call already carries them; do not re-fetch.
+- **`linear` mode:** `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
+
+**WARN on comments-fetch failure:** if the comments fetch exits non-zero or returns malformed JSON, emit an attention signal and continue with `comments: []`:
+```bash
+cw event record session.needs_attention \
+  --payload '{"reason": "comments_fetch_failed", "ticket_id": "<n>", "session_id": "<from .claude/cw-context.json>"}'
+```
+Do NOT emit `stage.errored` for this: `STAGE_ERRORED` events are deliberately ignored by `orchestrate.py`'s `_derive_last_stage_by_session`, so a `stage.errored` here would never surface as operator attention. `session.needs_attention` is the signal the operator sees.
+
+**Known limitation (intentionally not WARNed):** a comments fetch that **succeeds but returns empty for a ticket that actually has comments** is NOT detectable from within this stage without a second independent source of the true comment count, so it is intentionally left un-WARNed. The `comments_fetch_failed` WARN above covers only hard failures (non-zero exit / malformed JSON), not a well-formed empty result.
 
 Stamp `materialized_by_session` with the current `session_id` (read it from `.claude/cw-context.json`). This is what makes the idempotency guard below requeue-safe.
 

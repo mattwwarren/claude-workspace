@@ -135,3 +135,60 @@ def test_conformance_omitted_when_no_binding_resolutions() -> None:
     anchor = "omit `## Pre-flight Resolution Conformance` entirely"
     preceding = _nearby(_cmd("auto-dev-plan.md"), anchor)
     assert "## Binding Pre-flight Resolutions" in preceding
+
+
+# ---------------------------------------------------------------------------
+# Zero-comment context.json staleness (#952)
+# ---------------------------------------------------------------------------
+
+
+def test_intake_step3_fetch_includes_comments() -> None:
+    """Step 3 single-ticket github-issues fetch requests comments."""
+    assert "gh issue view <n> --json title,body,state,url,comments" in _cmd(
+        "auto-dev-intake.md"
+    )
+
+
+def test_intake_table_row_includes_comments() -> None:
+    """The op-mapping 'Fetch ticket body' row (github-issues) also fetches comments."""
+    content = _cmd("auto-dev-intake.md")
+    row = next(ln for ln in content.splitlines() if "Fetch ticket body" in ln)
+    assert "title,body,state,url,comments" in row
+
+
+def test_plan_live_fetch_every_invocation() -> None:
+    """Plan Stage 1 mandates a comments live-fetch on every invocation."""
+    assert "live-fetch the ticket comments on every invocation" in _cmd(
+        "auto-dev-plan.md"
+    )
+
+
+def test_plan_marker_source_pinned_to_live_fetch() -> None:
+    """Step 1b marker grep is pinned to the live fetch, excluding the cache."""
+    assert "NEVER the `.cw/context.json` `comments` array" in _cmd("auto-dev-plan.md")
+
+
+def test_plan_cached_comments_is_snapshot_only() -> None:
+    """The cached comments array is documented as a Stage-0 provenance snapshot."""
+    assert "Stage-0 provenance snapshot only" in _cmd("auto-dev-plan.md")
+
+
+def test_intake_warn_names_needs_attention() -> None:
+    """The intake WARN names the session.needs_attention event and its reason."""
+    window = _nearby(_cmd("auto-dev-intake.md"), "comments_fetch_failed")
+    assert "session.needs_attention" in window
+
+
+def test_intake_warn_documents_empty_undetectable() -> None:
+    """Intake documents that a fetch-succeeds-but-empty case is not detectable."""
+    assert (
+        "NOT detectable from within this stage without a second independent source"
+        in _cmd("auto-dev-intake.md")
+    )
+
+
+def test_intake_linear_list_comments_before_0d() -> None:
+    """Linear mode mandates list_comments before Step 0d, not model initiative."""
+    content = _cmd("auto-dev-intake.md")
+    assert "list_comments(<id>)" in content
+    assert "mandatory op that MUST run before Step 0d" in content

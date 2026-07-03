@@ -279,6 +279,38 @@ def test_cli_event_record_creates_event(tmp_events_dir: Path) -> None:
     assert data["payload"] == {"pr": 42}
 
 
+def test_cli_event_record_session_needs_attention(tmp_events_dir: Path) -> None:
+    """cw event record session.needs_attention persists with a round-tripped payload.
+
+    Regression pin (#952): the WARN emitted by auto-dev-intake on a comments
+    fetch failure relies on session.needs_attention being an accepted event type
+    for `cw event record`. The allowlist is enum-derived, so this asserts the
+    contract stays intact.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "event",
+            "record",
+            "session.needs_attention",
+            "--payload",
+            '{"reason": "comments_fetch_failed", "ticket_id": "952", '
+            '"session_id": "s1"}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Recorded event:" in result.output
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    assert inbox.exists()
+    data = json.loads(inbox.read_text().strip())
+    assert data["type"] == "session.needs_attention"
+    assert data["payload"]["reason"] == "comments_fetch_failed"
+    assert data["payload"]["ticket_id"] == "952"
+    assert data["payload"]["session_id"] == "s1"
+
+
 def test_cli_event_record_with_correlation_id(tmp_events_dir: Path) -> None:
     """cw event record --correlation-id passes the correlation_id."""
     runner = CliRunner()
