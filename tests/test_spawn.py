@@ -26,6 +26,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.spawn import _LINEAR_MCP_DISALLOW, _LINEAR_MCP_DISALLOW_ARG
+from tests.conftest import _seed_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,33 +53,6 @@ def _make_prompt_file(tmp_path: Path, content: str = "Do the thing.") -> Path:
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text(content)
     return prompt_file
-
-
-def _seed_daemon_session(
-    tmp_path: Path,
-    tmp_config_dir: Path,
-    session_id: str = "test1234",
-    client: str = "test-client",
-    name: str | None = None,
-    surface_ref: str | None = "fake-pane-99",
-    status: SessionStatus = SessionStatus.ACTIVE,
-) -> Session:
-    """Create and save a daemon session in state."""
-    workspace = tmp_path / "workspace" / client
-    workspace.mkdir(parents=True, exist_ok=True)
-    sess = Session(
-        id=session_id,
-        name=name or f"{client}/auto-dev/GEN-42",
-        client=client,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=status,
-        workspace_path=workspace,
-        surface_ref=surface_ref,
-    )
-    state = CwState(sessions=[sess])
-    save_state(state)
-    return sess
 
 
 def _seed_running_task(
