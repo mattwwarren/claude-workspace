@@ -144,12 +144,16 @@ def test_guard_survives_unexpected_error(
 def test_read_hook_cwd_returns_none_on_stdin_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_read_hook_cwd returns None when stdin.read raises (best-effort)."""
+    """_read_hook_cwd returns None when stdin.read raises (best-effort).
+
+    The actual stdin read lives in the shared ``cw.cli._hook_io`` module
+    (#940 code review — deduplicated from cli/sessions.py's Stop-hook reader).
+    """
 
     class _BoomStdin:
         def read(self) -> str:
             msg = "stdin gone"
             raise OSError(msg)
 
-    monkeypatch.setattr("cw.cli.guard.sys.stdin", _BoomStdin())
+    monkeypatch.setattr("cw.cli._hook_io.sys.stdin", _BoomStdin())
     assert _read_hook_cwd() is None

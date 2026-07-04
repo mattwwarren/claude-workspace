@@ -16,13 +16,13 @@ raise uncaught.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
 import click
 
 from cw.cli._base import main
+from cw.cli._hook_io import _read_cw_context, _read_hook_stdin_json
 
 # PreToolUse contract: exit 2 blocks the tool call and feeds stderr back to the
 # agent; any other code (0 here) allows it. Distinct from
@@ -37,17 +37,8 @@ def _read_hook_cwd() -> str | None:
     Best-effort: unreadable stdin, an empty body, malformed JSON, a non-object
     payload, or a missing/non-string ``cwd`` all yield None (silent no-op).
     """
-    try:
-        stdin_text = sys.stdin.read()
-    except (OSError, ValueError):
-        return None
-    if not stdin_text:
-        return None
-    try:
-        payload = json.loads(stdin_text)
-    except json.JSONDecodeError:
-        return None
-    cwd_value = payload.get("cwd") if isinstance(payload, dict) else None
+    payload = _read_hook_stdin_json()
+    cwd_value = payload.get("cwd") if payload is not None else None
     return cwd_value if isinstance(cwd_value, str) else None
 
 
@@ -57,14 +48,8 @@ def _guard_cwd_blocks() -> bool:
     if cwd_value is None:
         return False
 
-    context_path = Path(cwd_value) / ".claude" / "cw-context.json"
-    if not context_path.is_file():
-        return False
-    try:
-        context = json.loads(context_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(context, dict):
+    context = _read_cw_context(cwd_value)
+    if context is None:
         return False
 
     workspace_raw = context.get("workspace_path")

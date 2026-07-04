@@ -29,6 +29,8 @@ from cw.reconcile._shared import (
 from cw.worktree import check_main_ff_safety, is_main_checkout_dirty
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import ClientConfig, CwState, Session
 
 # Human-readable drift kinds surfaced in the event breadcrumbs.
@@ -43,6 +45,7 @@ class _MainDriftCandidate:
 
     session: Session
     drift_kind: str
+    workspace_path: Path
 
 
 def _classify_main_drift(client: ClientConfig) -> str | None:
@@ -74,8 +77,14 @@ def _detect_main_drift_candidates(
     Considers only live (ACTIVE/IDLE) DAEMON-origin sessions with a resolved
     ``worktree_path``; each is checked against its client's main checkout. A
     session whose client is absent from *clients* is skipped (cannot probe).
+
+    Drift is a property of the *client's* main checkout, not the session, so
+    ``_classify_main_drift`` is memoized per client name — multiple live
+    sessions on the same client (e.g. impl + idea) probe git at most once per
+    tick rather than once per session.
     """
     candidates: list[_MainDriftCandidate] = []
+    drift_by_client: dict[str, str | None] = {}
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
             continue
@@ -86,27 +95,28 @@ def _detect_main_drift_candidates(
         client = clients.get(session.client)
         if client is None:
             continue
-        drift_kind = _classify_main_drift(client)
+        if session.client not in drift_by_client:
+            drift_by_client[session.client] = _classify_main_drift(client)
+        drift_kind = drift_by_client[session.client]
         if drift_kind is None:
             continue
-        candidates.append(_MainDriftCandidate(session=session, drift_kind=drift_kind))
+        candidates.append(
+            _MainDriftCandidate(
+                session=session,
+                drift_kind=drift_kind,
+                workspace_path=client.workspace_path,
+            )
+        )
     return candidates
 
 
-def _act_on_main_drift_candidates(
-    candidates: list[_MainDriftCandidate],
-    clients: dict[str, ClientConfig],
-) -> None:
+def _act_on_main_drift_candidates(candidates: list[_MainDriftCandidate]) -> None:
     """Emit a SESSION_NEEDS_ATTENTION event per drift candidate (no state writes)."""
     for candidate in candidates:
         session = candidate.session
-        client = clients.get(session.client)
-        workspace = (
-            client.workspace_path if client is not None else session.workspace_path
-        )
         ticket_id = ticket_id_for_session(session.name)
         breadcrumbs = (
-            f"main checkout {workspace} is {candidate.drift_kind}"
+            f"main checkout {candidate.workspace_path} is {candidate.drift_kind}"
             f" (worktree at {session.worktree_path})"
         )
         record_event(

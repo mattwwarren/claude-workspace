@@ -66,7 +66,7 @@ from cw.reconcile.tasks import (
 )
 
 if TYPE_CHECKING:
-    from cw.models import CwState
+    from cw.models import ClientConfig, CwState
 
 _log = logging.getLogger(__name__)
 
@@ -225,6 +225,7 @@ def reconcile() -> ReconcileReport:
             merged_ticket_ids=merged_ticket_ids,
             gh_blocked_ticket_ids=gh_blocked_ticket_ids,
             finalize_pr_by_branch=finalize_pr_by_branch,
+            clients=_clients,
         )
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
@@ -252,6 +253,7 @@ def _reconcile_locked(
     merged_ticket_ids: frozenset[str] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
     finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] | None = None,
+    clients: dict[str, ClientConfig] | None = None,
 ) -> tuple[ReconcileReport, list[_SalvageCandidate]]:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -263,6 +265,9 @@ def _reconcile_locked(
     reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
     finalize_pr_by_branch comes from a second lockless pre-pass that checks PR
     existence for FINALIZE-stage sessions (GitHub #812, liveness invariant #485).
+    clients comes from the same lockless pre-pass's `load_clients()` call
+    (feature_branch_prefix SSOT, #728) — threaded through so the main-drift
+    sweep (#940) doesn't re-read clients.yaml a second time this tick.
 
     Returns a tuple of (ReconcileReport, salvage_git_candidates) where
     salvage_git_candidates is the list of git-state salvage candidates for
@@ -273,6 +278,8 @@ def _reconcile_locked(
     # under sessions_lock (#816 SHOULD_FIX 1 — latent lock-under-gh footgun).
     if finalize_pr_by_branch is None:
         finalize_pr_by_branch = {}
+    if clients is None:
+        clients = load_clients()
     state = load_state()
     now = datetime.now(UTC)
 
@@ -326,9 +333,8 @@ def _reconcile_locked(
     # A local git read (no daemon dependency), so it runs BEFORE the daemon
     # query + outage guard, mirroring the local-harvest sweep above. Advisory
     # only: emits SESSION_NEEDS_ATTENTION, mutates no session or queue state.
-    main_drift_clients = load_clients()
-    main_drift_candidates = _detect_main_drift_candidates(state, main_drift_clients)
-    _act_on_main_drift_candidates(main_drift_candidates, main_drift_clients)
+    main_drift_candidates = _detect_main_drift_candidates(state, clients)
+    _act_on_main_drift_candidates(main_drift_candidates)
 
     try:
         # `claude agents --json` returns sessionId as a full UUID

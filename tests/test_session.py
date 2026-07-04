@@ -196,7 +196,9 @@ class TestStartSession:
         """#940 invariant: a non-worktree (debt) start never sets workspace_path
         in the hook context, so ``cw guard-cwd`` no-ops instead of blocking every
         Bash call on a legitimately main-homed interactive session (R2 case iii /
-        Plan Soundness Advisory)."""
+        Plan Soundness Advisory). See
+        test_start_worktree_impl_hook_context_sets_workspace_path for the
+        contrasting worktree-homed case, where workspace_path IS set."""
         self._write_clients_file(tmp_config_dir, sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -212,6 +214,44 @@ class TestStartSession:
         assert len(hook_calls) == 1
         # workspace_path absent (defaults to None) → guard-cwd fallback no-ops.
         assert hook_calls[0].get("workspace_path") is None
+
+    def test_start_worktree_impl_hook_context_sets_workspace_path(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#940 R5 coverage: an ``impl`` start that IS worktree-homed (cwd ==
+        worktree_path, distinct from the main checkout) must set workspace_path
+        to the main checkout, so ``cw guard-cwd`` actually protects it — the
+        contrasting case to the debt/non-worktree no-op above. Prior to the
+        #940 fix, workspace_path was omitted unconditionally regardless of
+        purpose, silently disabling the guard for every USER-origin session."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        worktree_dir = sample_client.workspace_path.parent / "wt-impl"
+        worktree_dir.mkdir()
+        monkeypatch.setattr(
+            "cw.session.create_worktree",
+            lambda _client, _branch: worktree_dir,
+        )
+
+        hook_calls: list[dict[str, object]] = []
+
+        def capture_hook(path: object, **kwargs: object) -> None:
+            hook_calls.append({"path": path, **kwargs})
+
+        monkeypatch.setattr("cw.session._write_hook_context", capture_hook)
+
+        start_session(
+            "test-client", "impl", worktree="feat/x", native_daemon=mock_native_daemon
+        )
+
+        assert len(hook_calls) == 1
+        assert hook_calls[0]["path"] == worktree_dir
+        assert hook_calls[0].get("workspace_path") == sample_client.workspace_path
 
     def test_existing_backgrounded_triggers_resume(
         self,

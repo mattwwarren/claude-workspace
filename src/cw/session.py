@@ -206,6 +206,17 @@ def start_session(
     # Write Stop hook + correlation context before spawning. Raises
     # HookContextConflictError if a USER-origin worktree already has
     # settings.local.json (gate-behind-worktree strategy from #165).
+    #
+    # main_checkout_path is set only when this session is genuinely
+    # worktree-homed (same condition as session_cwd above) — cw guard-cwd
+    # (#940 R5) blocks a Bash call when cwd resolves to workspace_path, so
+    # setting it for a legitimately main-homed session (debt/explore, or
+    # impl/idea without a worktree) would wedge every one of that session's
+    # Bash calls. For a worktree-mode client, `client.workspace_path` was
+    # already rebound to the new worktree path above (_resolve_start_worktree),
+    # so it can't be used here — `client.repo_path or client.workspace_path`
+    # (mirroring worktree.py's private `_git_dir`) is the real main checkout.
+    main_checkout_path = client.repo_path or client.workspace_path
     _write_hook_context(
         session_cwd,
         session_id=session.id,
@@ -214,6 +225,11 @@ def start_session(
         purpose=purpose,
         ticket_id=None,
         origin=SessionOrigin.USER,
+        workspace_path=(
+            main_checkout_path
+            if (worktree_path and purpose in WORKTREE_PURPOSES)
+            else None
+        ),
     )
 
     # Build per-purpose system prompt for the session.
