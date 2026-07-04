@@ -43,6 +43,26 @@ def _read_json_payload(path: str) -> dict[str, Any]:
     return payload
 
 
+def _validate_or_exit(
+    payload: dict[str, Any], *, extra_stderr_line: str | None = None
+) -> AutoDevResult:
+    """Validate PAYLOAD against AutoDevResult, echoing errors and exiting on failure.
+
+    Shared by ``result validate`` and ``result emit`` so their validation-failure
+    output (the ``field: message`` lines from :func:`_format_errors`) can't drift
+    apart. *extra_stderr_line*, if given, is echoed after the field-error lines
+    (``emit`` uses this to note that no state was mutated).
+    """
+    try:
+        return AutoDevResult.model_validate(payload)
+    except ValidationError as exc:
+        for line in _format_errors(exc):
+            click.echo(line, err=True)
+        if extra_stderr_line is not None:
+            click.echo(extra_stderr_line, err=True)
+        raise click.exceptions.Exit(1) from exc
+
+
 def validate_payload(payload: dict[str, Any]) -> list[str]:
     """Validate a raw AutoDevResult payload dict.
 
@@ -108,14 +128,7 @@ def result_validate(path: str) -> None:
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
     payload = _read_json_payload(path)
-
-    try:
-        result_obj = AutoDevResult.model_validate(payload)
-    except ValidationError as exc:
-        for line in _format_errors(exc):
-            click.echo(line, err=True)
-        raise click.exceptions.Exit(1) from exc
-
+    result_obj = _validate_or_exit(payload)
     click.echo(result_obj.model_dump_json(indent=2))
 
 
@@ -182,17 +195,18 @@ def result_emit(path: str, session_id: str | None) -> None:
     'No session state was modified.' notice to stderr.
     """
     payload = _read_json_payload(path)
-
-    try:
-        result_obj = AutoDevResult.model_validate(payload)
-    except ValidationError as exc:
-        for line in _format_errors(exc):
-            click.echo(line, err=True)
-        click.echo("No session state was modified.", err=True)
-        raise click.exceptions.Exit(1) from exc
+    result_obj = _validate_or_exit(
+        payload, extra_stderr_line="No session state was modified."
+    )
 
     resolved_id = _resolve_emit_session_id(session_id)
 
+    # Why not mutate_state: the not-found case must abort loudly before any
+    # write, and the post-write echo/log needs the prior status captured
+    # during the mutation -- mutate_state's Callable[[CwState], None] shape
+    # has no return value, so both would need a nonlocal-capturing closure.
+    # An explicit lock block reads more plainly here; mirrors the equally
+    # simple single-mutation site at doctor.py's targeted-reap path.
     with sessions_lock():
         state = load_state()
         session = state.find_by_name_or_id(resolved_id)

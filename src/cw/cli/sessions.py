@@ -392,6 +392,11 @@ def _reconstruct_emitted_sentinel(session: Session) -> AutoDevResult | None:
     try:
         return AutoDevResult.model_validate(session.last_result)
     except ValidationError:
+        logger.warning(
+            "session=%s emitted last_result failed AutoDevResult validation, "
+            "falling back to transcript parse",
+            session.id,
+        )
         return None
 
 
