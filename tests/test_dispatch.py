@@ -6079,8 +6079,7 @@ class TestLaneCircuitBreaker:
         )
         assert len(events) == 1
         assert (
-            events[0].payload["skip_reason"]
-            == DispatchSkipReason.LANE_CIRCUIT_PAUSED
+            events[0].payload["skip_reason"] == DispatchSkipReason.LANE_CIRCUIT_PAUSED
         )
 
     def test_operator_pause_does_not_report_circuit_paused(

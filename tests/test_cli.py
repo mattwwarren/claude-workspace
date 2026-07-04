@@ -6242,9 +6242,7 @@ class TestDevQueueStatusWithTick:
         assert "    lane fast:" in result.output
         assert "    lane slow:" in result.output
 
-    def test_dev_queue_status_shows_paused_marker(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_dev_queue_status_shows_paused_marker(self, tmp_config_dir: Path) -> None:
         """A paused lane override appends the [PAUSED] marker to its line."""
         from cw.config import _save_concurrency_overrides
         from cw.dev_queue import add_ticket

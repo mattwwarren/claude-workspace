@@ -791,9 +791,7 @@ def _check_lane_circuit_paused(
     from a plain operator pause: only the former, with pending work still
     waiting, warrants the LANE_CIRCUIT_PAUSED skip_reason. See GitHub #875.
     """
-    override = _load_concurrency_overrides().lanes.get(
-        f"{client_name}/{lane_cfg.name}"
-    )
+    override = _load_concurrency_overrides().lanes.get(f"{client_name}/{lane_cfg.name}")
     if override is None:
         return False
     if override.consecutive_spawn_errors < config.lane_circuit_breaker_threshold:

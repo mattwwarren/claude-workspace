@@ -1438,9 +1438,7 @@ class TestGetEffectiveClient:
         lane_map = {ln.name: ln for ln in client.effective_lanes}
         assert lane_map["fast"].paused is True
 
-    def test_unknown_client_raises(
-        self, tmp_config_dir: Path, tmp_path: Path
-    ) -> None:
+    def test_unknown_client_raises(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         """An unknown client name raises CwError with the available-clients hint."""
         from cw.config import get_effective_client
 
