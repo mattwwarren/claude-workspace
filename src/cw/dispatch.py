@@ -29,6 +29,9 @@ from cw.auto_dev_result import (
 )
 from cw.collision import detect_wave_collisions
 from cw.config import (
+    _load_concurrency_overrides,
+    _save_concurrency_overrides,
+    concurrency_override_lock,
     load_clients,
     load_effective_clients,
     load_effective_config,
@@ -60,7 +63,9 @@ from cw.exceptions import (
 from cw.executor import resolve_executor
 from cw.models import (
     ClientConfig,
+    ConcurrencyOverrides,
     DispatchSkipReason,
+    LaneConcurrencyOverride,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -109,6 +114,9 @@ _CW_PACKAGE_NAME: str = "claude-workspace"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
+# ``source`` field on a LANE_PAUSED event emitted by the per-lane circuit breaker
+# (as opposed to an operator-initiated ``cw lane pause``). See GitHub issue #875.
+_LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = "circuit_breaker"
 
 
 def _resolve_loaded_version() -> str:
@@ -301,6 +309,9 @@ class _SpawnOutcome:
     ``spawned`` — True if a session was started (counters should be bumped).
     ``usage_limit_detected`` — True if a :class:`UsageLimitError` fired.
     ``spawn_error`` — True if a broad spawn failure reverted the task.
+    ``error`` — the exception string from a broad spawn failure (``""`` when
+    none), carried so the caller can stamp ``last_error`` on the per-lane
+    circuit-breaker LANE_PAUSED payload (#875).
 
     Both error flags signal the caller to break out of the slot/lane loops.
     """
@@ -308,6 +319,7 @@ class _SpawnOutcome:
     spawned: bool = False
     usage_limit_detected: bool = False
     spawn_error: bool = False
+    error: str = ""
 
 
 def _revert_claimed_task_to_pending(
@@ -727,7 +739,7 @@ def _spawn_claimed_task(
         # Revert the claimed task back to PENDING — spawn never succeeded.
         _revert_claimed_task_to_pending(client.name, task.ticket_id)
         return _SpawnOutcome(usage_limit_detected=True)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
         # Paired tests: TestDispatchTickSpawnErrors in
         # tests/test_dispatch.py:1097+ (asserts the loop survives
@@ -750,7 +762,7 @@ def _spawn_claimed_task(
             task.ticket_id,
         )
         _revert_claimed_task_to_pending(client.name, task.ticket_id, stamp_backoff=True)
-        return _SpawnOutcome(spawn_error=True)
+        return _SpawnOutcome(spawn_error=True, error=str(exc))
 
     return _SpawnOutcome(spawned=True)
 
@@ -765,6 +777,97 @@ class _ClientDispatchResult:
 
     spawned: int = 0
     usage_limit_detected: bool = False
+
+
+def _check_lane_circuit_paused(
+    lane_cfg: LaneConfig,
+    queue_snapshot: DevQueueStore,
+    client_name: str,
+    *,
+    overrides: ConcurrencyOverrides,
+    config: OrchestratorConfig,
+) -> bool:
+    """Return True when a lane is paused *by the breaker* and has pending work.
+
+    Distinguishes a circuit-breaker trip (consecutive_spawn_errors >= threshold)
+    from a plain operator pause: only the former, with pending work still
+    waiting, warrants the LANE_CIRCUIT_PAUSED skip_reason. See GitHub #875.
+
+    ``overrides`` is loaded once per :func:`_dispatch_client_lanes` call (not
+    once per paused lane) and passed in by the caller.
+    """
+    override = overrides.lanes.get(f"{client_name}/{lane_cfg.name}")
+    if override is None:
+        return False
+    if override.consecutive_spawn_errors < config.lane_circuit_breaker_threshold:
+        return False
+    pending_in_lane = sum(
+        1
+        for t in queue_snapshot.tasks
+        if t.client == client_name
+        and t.lane == lane_cfg.name
+        and t.status == QueueItemStatus.PENDING
+    )
+    return pending_in_lane > 0
+
+
+def _record_lane_spawn_error(
+    lane_cfg: LaneConfig,
+    client_name: str,
+    last_error: str,
+    *,
+    config: OrchestratorConfig,
+) -> None:
+    """Increment the lane's spawn-error counter; trip the breaker at threshold.
+
+    Under the override lock: load → increment → save.  When the post-increment
+    count reaches ``lane_circuit_breaker_threshold`` the lane is paused and a
+    circuit-breaker-sourced LANE_PAUSED event is emitted with the post-increment
+    count and the (always-string) last error.  See GitHub #875.
+    """
+    lane_key = f"{client_name}/{lane_cfg.name}"
+    tripped = False
+    with concurrency_override_lock():
+        overrides = _load_concurrency_overrides()
+        override = overrides.lanes.get(lane_key, LaneConcurrencyOverride())
+        count = override.consecutive_spawn_errors + 1
+        updates: dict[str, object] = {"consecutive_spawn_errors": count}
+        if count >= config.lane_circuit_breaker_threshold:
+            updates["paused"] = True
+            tripped = True
+        overrides.lanes[lane_key] = override.model_copy(update=updates)
+        _save_concurrency_overrides(overrides)
+    if tripped:
+        record_event(
+            OrchestratorEventType.LANE_PAUSED,
+            {
+                "client": client_name,
+                "lane": lane_cfg.name,
+                "source": _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER,
+                "consecutive_count": count,
+                "last_error": last_error,
+            },
+        )
+
+
+def _reset_lane_spawn_errors(lane_cfg: LaneConfig, client_name: str) -> None:
+    """Reset the lane's spawn-error counter to zero after a successful spawn.
+
+    Short-circuits (no write) when the counter is already zero or the lane has
+    no override, so a steady-state healthy lane never rewrites the override
+    file.  Never clears ``paused`` — a breaker-paused lane resumes only via
+    ``cw lane resume``.  See GitHub #875.
+    """
+    lane_key = f"{client_name}/{lane_cfg.name}"
+    with concurrency_override_lock():
+        overrides = _load_concurrency_overrides()
+        override = overrides.lanes.get(lane_key)
+        if override is None or override.consecutive_spawn_errors == 0:
+            return
+        overrides.lanes[lane_key] = override.model_copy(
+            update={"consecutive_spawn_errors": 0}
+        )
+        _save_concurrency_overrides(overrides)
 
 
 def _dispatch_client_lanes(
@@ -801,6 +904,12 @@ def _dispatch_client_lanes(
     # True when at least one PENDING task was skipped due to active
     # spawn_error backoff (next_eligible_at in the future). See GitHub #868.
     spawn_backoff_skipped = False
+    # True when a lane is skipped because its circuit breaker has tripped
+    # (consecutive_spawn_errors >= threshold) and pending work waits. See #875.
+    lane_circuit_paused = False
+    # Lazily loaded at most once per call (only if a paused lane is seen),
+    # not once per paused lane -- see _check_lane_circuit_paused. See #875.
+    overrides: ConcurrencyOverrides | None = None
 
     # Tier-1 client slot budget: use the session-based running_count (not
     # the task-based total_running) so pre-existing DAEMON sessions without
@@ -813,6 +922,14 @@ def _dispatch_client_lanes(
         if available_client_slots <= 0:
             break
         if lane_cfg.paused:
+            overrides = overrides or _load_concurrency_overrides()
+            lane_circuit_paused = lane_circuit_paused or _check_lane_circuit_paused(
+                lane_cfg,
+                queue_snapshot,
+                client.name,
+                overrides=overrides,
+                config=config,
+            )
             continue
         # running_in_lane = RUNNING + BLOCKED_ON_USER (total occupied slots).
         running_in_lane = running_by_lane.get(lane_cfg.name, 0)
@@ -865,11 +982,18 @@ def _dispatch_client_lanes(
                 usage_limit_detected = True
             if outcome.spawn_error:
                 spawn_error = True
+                _record_lane_spawn_error(
+                    lane_cfg,
+                    client_name=client.name,
+                    last_error=outcome.error or "",
+                    config=config,
+                )
             if outcome.spawned:
                 running_count += 1
                 client_spawned += 1
                 lane_claimed += 1
                 available_client_slots -= 1
+                _reset_lane_spawn_errors(lane_cfg, client.name)
 
             if usage_limit_detected or spawn_error:
                 break
@@ -897,6 +1021,7 @@ def _dispatch_client_lanes(
         spawn_error=spawn_error,
         lane_cap_blocked=lane_cap_blocked,
         spawn_backoff_skipped=spawn_backoff_skipped,
+        lane_circuit_paused=lane_circuit_paused,
         client_spawned=client_spawned,
     )
 
@@ -917,6 +1042,29 @@ def _dispatch_client_lanes(
     )
 
 
+def _resolve_low_precedence_skip_reason(
+    *,
+    lane_circuit_paused: bool,
+    spawn_backoff_skipped: bool,
+    client_spawned: int,
+) -> DispatchSkipReason:
+    """Resolve the low-precedence tail of the skip_reason chain (#875).
+
+    LANE_CIRCUIT_PAUSED > (SPAWN_ERROR_BACKOFF | NO_PENDING when nothing
+    spawned this tick) > NONE.  Split out of _resolve_dispatch_skip_reason so
+    that function stays within the PLR0911 six-return ceiling.
+    """
+    if lane_circuit_paused:
+        return DispatchSkipReason.LANE_CIRCUIT_PAUSED
+    if client_spawned == 0:
+        return (
+            DispatchSkipReason.SPAWN_ERROR_BACKOFF
+            if spawn_backoff_skipped
+            else DispatchSkipReason.NO_PENDING
+        )
+    return DispatchSkipReason.NONE
+
+
 def _resolve_dispatch_skip_reason(
     *,
     usage_limit_detected: bool,
@@ -924,21 +1072,24 @@ def _resolve_dispatch_skip_reason(
     spawn_error: bool,
     lane_cap_blocked: bool,
     spawn_backoff_skipped: bool,
+    lane_circuit_paused: bool,
     client_spawned: int,
 ) -> DispatchSkipReason:
     """Resolve the dispatch.tick skip_reason via first-match precedence.
 
-    Mirrors the operator resolution order (issue #459, #588):
+    Mirrors the operator resolution order (issue #459, #588, #875):
     1. freshness_gate — handled by early-continue before this is called
     2. usage_limited — usage limit detected this tick for this client
     3. cap_full — running_count >= cap before loop entered
     4. lane_cap_blocked — pending>0 but every lane slot is occupied by
        RUNNING or BLOCKED_ON_USER tasks; grant<=0 for all lanes
-    5. spawn_error_backoff — pending tasks exist but all are in spawn_error
+    5. spawn_error — exception broke the loop (regardless of client_spawned)
+    6. lane_circuit_paused — a lane's circuit breaker has tripped and pending
+       work is stranded behind it (see _resolve_low_precedence_skip_reason)
+    7. spawn_error_backoff — pending tasks exist but all are in spawn_error
        backoff (next_eligible_at in the future); no exception occurred
-    6. spawn_error — exception broke the loop (regardless of client_spawned)
-    7. no_pending — loop exited with zero claims and no spawn error
-    8. none — at least one session spawned
+    8. no_pending — loop exited with zero claims and no spawn error
+    9. none — at least one session spawned
     """
     if usage_limit_detected:
         return DispatchSkipReason.USAGE_LIMITED
@@ -948,13 +1099,11 @@ def _resolve_dispatch_skip_reason(
         return DispatchSkipReason.LANE_CAP_BLOCKED
     if spawn_error:
         return DispatchSkipReason.SPAWN_ERROR
-    if client_spawned == 0:
-        return (
-            DispatchSkipReason.SPAWN_ERROR_BACKOFF
-            if spawn_backoff_skipped
-            else DispatchSkipReason.NO_PENDING
-        )
-    return DispatchSkipReason.NONE
+    return _resolve_low_precedence_skip_reason(
+        lane_circuit_paused=lane_circuit_paused,
+        spawn_backoff_skipped=spawn_backoff_skipped,
+        client_spawned=client_spawned,
+    )
 
 
 def _reconcile_usage_limited() -> bool:

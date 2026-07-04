@@ -169,6 +169,9 @@ class LaneConcurrencyOverride(BaseModel):
 
     max_parallel: int | None = None
     paused: bool | None = None
+    # Consecutive spawn_error count for the per-lane circuit breaker (#875).
+    # Incremented once per tick on a spawn error, reset to 0 on any success.
+    consecutive_spawn_errors: int = 0
 
 
 class ClientConcurrencyOverride(BaseModel):
@@ -238,7 +241,8 @@ class DispatchSkipReason(StrEnum):
 
     Precedence (highest first):
     FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > LANE_CAP_BLOCKED
-    > SPAWN_ERROR > NO_PENDING > NONE.
+    > SPAWN_ERROR > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF > NO_PENDING
+    > NONE.
     ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
     parks a task; it is not part of the per-client-tick precedence chain.
     """
@@ -248,8 +252,9 @@ class DispatchSkipReason(StrEnum):
     CAP_FULL = "cap_full"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
-    SPAWN_ERROR_BACKOFF = "spawn_error_backoff"
     SPAWN_ERROR = "spawn_error"
+    LANE_CIRCUIT_PAUSED = "lane_circuit_paused"
+    SPAWN_ERROR_BACKOFF = "spawn_error_backoff"
     NO_PENDING = "no_pending"
     NONE = "none"
 
@@ -482,6 +487,12 @@ class OrchestratorConfig(BaseModel):
     # instead of spawning again. Above the per-stage caps (#756), below the
     # observed 14-attempt usage-limit churn. See GitHub issue #786.
     global_attempt_ceiling: int = DEFAULT_GLOBAL_ATTEMPT_CEILING
+    # Consecutive spawn_error count at which a lane's circuit breaker trips and
+    # pauses the lane, halting the retry churn a persistent backend outage would
+    # otherwise drive. Complements the per-task exponential backoff (#868) and
+    # the global attempt ceiling (#786); a paused lane resumes only via
+    # ``cw lane resume``. See GitHub issue #875.
+    lane_circuit_breaker_threshold: int = 3
     # Number of consecutive failed idle-watchdog observations required before a
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.
