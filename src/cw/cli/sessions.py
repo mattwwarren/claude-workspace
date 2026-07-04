@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+from pydantic import ValidationError
 
 from cw._util import _iter_assistant_text_blocks, claude_project_dir
+from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import (
     _complete_client,
     _complete_session,
@@ -58,6 +60,7 @@ from cw.native_daemon import get_native_daemon_client
 from cw.orchestrate import latest_tick_summary_by_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
+    _has_terminal_sentinel,
     reconcile,
     resolve_headless_budget,
 )
@@ -71,7 +74,7 @@ from cw.session import (
 from cw.tui import watch_flat
 
 if TYPE_CHECKING:
-    from cw.auto_dev_result import AutoDevResult, BlockedResult
+    from cw.auto_dev_result import BlockedResult
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +357,49 @@ def _resolve_signal_stop_context() -> (
     return hook_payload, context, cwd_value, cw_session_id
 
 
+def _parse_headless_sentinel(
+    session: Session,
+    cwd_value: str,
+    claude_session_id: object,
+) -> AutoDevResult | BlockedResult | None:
+    """Parse the transcript sentinel for a headless Stop hook.
+
+    Issue #799: when EnterWorktree shifts the hook cwd to a nested worktree,
+    ``cwd_value`` derives the wrong Claude project dir. Retry with the session's
+    recorded ``worktree_path`` — the directory whose project dir holds the actual
+    transcript. Returns ``None`` when neither location yields a parseable sentinel.
+
+    Extracted out of :func:`signal_stop` (rather than inlined) so the #536
+    emit-precedence gate could be added there without pushing the function
+    over its PLR0912 branch-count ceiling.
+    """
+    csid = claude_session_id if isinstance(claude_session_id, str) else None
+    parsed = _parse_sentinel_from_transcript(cwd_value, csid)
+    if parsed is None and session.worktree_path is not None:
+        parsed = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
+    return parsed
+
+
+def _reconstruct_emitted_sentinel(session: Session) -> AutoDevResult | None:
+    """Reconstruct the authoritative sentinel from an emitted ``last_result``.
+
+    ``_has_terminal_sentinel`` only confirms a ``"status"`` key is present —
+    it does not guarantee the dict matches the ``AutoDevResult`` schema (e.g.
+    a stale/foreign shape). Returns ``None`` on a validation failure so the
+    caller falls back to the transcript parse instead of raising out of the
+    Stop hook, which must never block claude from exiting.
+    """
+    try:
+        return AutoDevResult.model_validate(session.last_result)
+    except ValidationError:
+        logger.warning(
+            "session=%s emitted last_result failed AutoDevResult validation, "
+            "falling back to transcript parse",
+            session.id,
+        )
+        return None
+
+
 def _handle_headless_no_sentinel(
     state: CwState,
     session: Session,
@@ -602,20 +648,20 @@ def signal_stop() -> None:
         )
         now = datetime.now(UTC)
         parsed_sentinel: AutoDevResult | BlockedResult | None = None
-        if is_headless:
-            parsed_sentinel = _parse_sentinel_from_transcript(
-                cwd_value,
-                claude_session_id if isinstance(claude_session_id, str) else None,
+        # Issue #536: emit precedence. When the producer already pushed a
+        # terminal result via ``cw result emit`` (session.last_result carries a
+        # "status"), that value is authoritative — reconstruct it and skip the
+        # transcript re-parse entirely. The transcript sentinel is demoted to a
+        # forensic fallback: it still runs (and is still authoritative) whenever
+        # no emitted result exists, so a worker that never emits is unaffected.
+        emit_terminal = False
+        if is_headless and _has_terminal_sentinel(session):
+            parsed_sentinel = _reconstruct_emitted_sentinel(session)
+            emit_terminal = parsed_sentinel is not None
+        if not emit_terminal and is_headless:
+            parsed_sentinel = _parse_headless_sentinel(
+                session, cwd_value, claude_session_id
             )
-            # Issue #799: when EnterWorktree shifts the hook cwd to a nested
-            # worktree, cwd_value derives the wrong Claude project dir. Retry
-            # with the session's recorded worktree_path — the directory whose
-            # project dir holds the actual transcript.
-            if parsed_sentinel is None and session.worktree_path is not None:
-                parsed_sentinel = _parse_sentinel_from_transcript(
-                    str(session.worktree_path),
-                    claude_session_id if isinstance(claude_session_id, str) else None,
-                )
             if parsed_sentinel is None:
                 _handle_headless_no_sentinel(
                     state,
@@ -652,7 +698,10 @@ def signal_stop() -> None:
         # (consume_completed_sessions, /cw-followup) can route by status.
         # parse_stdout returns BlockedResult on malformed payloads — we
         # persist either shape; both serialize to a dict with a "status" field.
-        if parsed_sentinel is not None:
+        # Issue #536: when the result was pushed via ``cw result emit``
+        # (emit_terminal), session.last_result is already the authoritative value
+        # — do NOT overwrite it with the reconstructed/re-parsed sentinel.
+        if parsed_sentinel is not None and not emit_terminal:
             session.last_result = parsed_sentinel.model_dump(mode="json")
         save_state(state)
 

@@ -11457,6 +11457,43 @@ def test_detect_phantom_candidates_crash_complete(
     assert _state_queue_snapshot() == snap
 
 
+def test_detect_phantom_candidates_skips_emitted_terminal_result(
+    tmp_config_dir: Path,
+) -> None:
+    """#536: a phantom with a terminal last_result is left for the operator.
+
+    An emit-then-crash session (``cw result emit`` already persisted a terminal
+    result, then the surface died) is never re-salvaged or re-crashed over its
+    authoritative emit-time result — the gate ``continue``s past it. A sibling
+    phantom with no emitted result still yields CRASH_COMPLETE, so the gate
+    does not over-fire.
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    gated = _mk_phantom_daemon_session("phantom-emit-1", started_at)
+    gated.last_result = {"status": "shipped"}
+    ungated = _mk_phantom_daemon_session("phantom-emit-2", started_at)
+    state = CwState(sessions=[gated, ungated])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={gated.id, ungated.id},
+    )
+
+    # The emitted-terminal session is skipped entirely (no candidate of any kind).
+    assert all(c.session_id != gated.id for c in candidates)
+    # The sibling without an emitted result still crashes.
+    ungated_candidates = [c for c in candidates if c.session_id == ungated.id]
+    assert len(ungated_candidates) == 1
+    assert ungated_candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
+    # Purity: detection makes zero writes.
+    assert _state_queue_snapshot() == snap
+
+
 def test_detect_phantom_candidates_salvage_on_terminal_sentinel(
     tmp_config_dir: Path,
     tmp_path: Path,
