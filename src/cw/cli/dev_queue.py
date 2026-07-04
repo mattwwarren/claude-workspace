@@ -11,7 +11,13 @@ import click
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.cli._base import _complete_client, _emit_freshness_subline, handle_errors, main
 from cw.cli._sentinels import _parse_sentinel_from_transcript
-from cw.config import get_client, load_clients, load_orchestrator_config, load_state
+from cw.config import (
+    _load_concurrency_overrides,
+    get_client,
+    load_clients,
+    load_orchestrator_config,
+    load_state,
+)
 from cw.dev_queue import (
     _find_ticket,
     add_ticket,
@@ -59,6 +65,10 @@ from cw.worktree import fast_forward_main
 _ACTIVE_STATUSES: frozenset[QueueItemStatus] = frozenset(
     {QueueItemStatus.PENDING, QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER}
 )
+
+# Suffix appended to a lane breakdown line when that lane is paused (operator or
+# circuit breaker). Pinned exact string — asserted verbatim in tests. See #875.
+_PAUSED_LANE_MARKER = " [PAUSED]"
 
 
 @main.group(name="dev-queue")
@@ -326,6 +336,7 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
     lanes_seen: set[str] = {t.lane for t in tasks}
     if len(lanes_seen) <= 1 and lanes_seen == {DEFAULT_LANE}:
         return
+    overrides = _load_concurrency_overrides()
     by_lane: dict[str, list[TicketTask]] = {}
     for task in tasks:
         by_lane.setdefault(task.lane, []).append(task)
@@ -336,9 +347,11 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
         blocked = sum(
             1 for t in lane_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER
         )
+        override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
+        marker = _PAUSED_LANE_MARKER if override is not None and override.paused else ""
         click.echo(
             f"    lane {lane_name}:"
-            f" pending={pending} running={running} blocked={blocked}"
+            f" pending={pending} running={running} blocked={blocked}{marker}"
         )
 
 

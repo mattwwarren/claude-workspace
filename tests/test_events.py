@@ -14,7 +14,13 @@ from click.testing import CliRunner
 from freezegun import freeze_time
 
 from cw.cli import main
-from cw.events import advance_cursor, init_cursor_at_end, read_events, wait_for_event
+from cw.events import (
+    advance_cursor,
+    init_cursor_at_end,
+    read_events,
+    tail_events_follow,
+    wait_for_event,
+)
 from cw.events import record_event as events_record_event
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
@@ -781,8 +787,9 @@ def test_cli_event_tail_follow_streams_new_events(
 
     # Why: no public seam observes "was this event actually streamed"; a
     # pass-through spy on the private _print_event is the only observable
-    # streaming point. Tolerates the tail_events_follow st_size guard (#954),
-    # which can lag a just-completed append by one poll iteration.
+    # streaming point. Tolerates the tail_events_follow _poll_inbox_growth
+    # change-detection guard (#954), which can lag a just-completed append by
+    # one poll iteration.
     from cw.cli import queues
 
     original_print_event = queues._print_event
@@ -1009,6 +1016,155 @@ def test_cli_event_tail_follow_returns_on_exhausted_stream(
     runner = CliRunner()
     result = runner.invoke(main, ["event", "tail", "--follow"])
     assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# tail_events_follow — _poll_inbox_growth change-detection guard (issue #954)
+# ---------------------------------------------------------------------------
+
+
+def test_poll_inbox_growth_stat_oserror_treated_as_size_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stat() OSError on an existing inbox is treated as size 0 (reads)."""
+    from cw.events import _poll_inbox_growth
+
+    class _RaisingPath:
+        def exists(self) -> bool:
+            return True
+
+        def stat(self) -> object:
+            raise OSError
+
+    monkeypatch.setattr("cw.events._inbox_path", _RaisingPath)
+
+    should_read, size = _poll_inbox_growth(None)
+
+    assert size == 0
+    assert should_read is True
+
+
+def test_tail_events_follow_size_decrease_warns_and_continues(
+    tmp_events_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Defensive shrink branch: inbox size decrease warns and the loop continues.
+
+    The inbox is append-only in production, so this exercises the defensive
+    dead branch of the shared _poll_inbox_growth guard: it must warn, reset the
+    baseline, skip the read for that poll, and keep polling (no crash).
+    """
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    inbox = tmp_events_dir / "inbox.jsonl"
+
+    call_count = 0
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Truncate the inbox to force current_size < last_size on next poll.
+            inbox.write_text("")
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    gen = tail_events_follow(
+        since_cursor=None,
+        since_ts=None,
+        event_types=None,
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="cw.events"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        list(gen)
+
+    assert any("inbox size decreased" in record.message for record in caplog.records)
+
+
+def test_tail_events_follow_absent_inbox_first_poll_reads(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First poll with an absent inbox reads regardless (size 0) without crashing."""
+    inbox = tmp_events_dir / "inbox.jsonl"
+    assert not inbox.exists()
+
+    call_count = 0
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    gen = tail_events_follow(
+        since_cursor=None,
+        since_ts=None,
+        event_types=None,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        list(gen)
+
+    # First-pass-reads-regardless invariant: the guard read once, then slept.
+    assert call_count == 1
+
+
+def test_tail_events_follow_empty_inbox_no_events_no_crash(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A present-but-empty inbox yields no events and does not crash."""
+    inbox = tmp_events_dir / "inbox.jsonl"
+    inbox.write_text("")
+
+    yielded: list[OrchestratorEvent] = []
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    gen = tail_events_follow(
+        since_cursor=None,
+        since_ts=None,
+        event_types=None,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        yielded.extend(gen)
+
+    assert yielded == []
+
+
+def test_wait_for_event_detects_appended_event_via_shared_guard(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """wait_for_event detects an event appended after the first poll via the guard.
+
+    Deterministic counterpart to test_wait_for_event_blocks_then_matches (which
+    uses a real thread): the shared _poll_inbox_growth guard must see the size
+    grow on the second poll and drive the read that surfaces the match.
+    """
+    appended: list[OrchestratorEvent] = []
+
+    def sleep_side_effect(*args: object, **kwargs: object) -> None:
+        if not appended:
+            appended.append(
+                events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
+            )
+
+    monkeypatch.setattr("time.sleep", sleep_side_effect)
+
+    gen = wait_for_event(
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        timeout=5.0,
+    )
+    result = next(gen)
+
+    assert appended
+    assert result.id == appended[0].id
 
 
 def test_ticket_needs_sync_event_type_serializes(tmp_events_dir: Path) -> None:
