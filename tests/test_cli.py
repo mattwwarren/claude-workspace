@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -6702,7 +6703,12 @@ class TestDevQueueStatusWithTick:
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
-        assert "NEEDS_ATTN: 1" in result.output
+        assert "NEEDS_ATTN" in result.output
+        row = next(line for line in result.output.splitlines() if "attn-client" in line)
+        # Fields are separated by 2+ spaces; NEEDS_ATTN is the second-to-last
+        # column, immediately before the ticket-id list.
+        fields = re.split(r" {2,}", row.strip())
+        assert fields[-2] == "1"
 
     def test_status_json_includes_needs_attn(self, tmp_config_dir: Path) -> None:
         """dev-queue status --json exposes needs_attn per client (#929)."""

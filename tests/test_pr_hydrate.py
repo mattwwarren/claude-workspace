@@ -558,3 +558,48 @@ class TestMultiTaskRouting:
         assert len(events) == 1
         assert events[0].correlation_id == "GEN-A"
         assert events[0].payload["repo"] == "acme/widgets"
+
+    def test_same_ticket_id_different_client_routes_independently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The routing key is (client, ticket_id), not ticket_id alone.
+
+        TicketTask.session_id's docstring documents that ticket_id is not
+        guaranteed unique across task instances (crashed vs. respawned tasks
+        can share one). Confirm a same-ticket_id, different-client pair
+        doesn't collapse into one dict entry and cross-contaminate the
+        other's persisted state.
+        """
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-SHARED", client="acme", pr_url=self._URL_A
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-SHARED", client="widgets-co", pr_url=self._URL_B
+                    ),
+                ]
+            )
+        )
+
+        def _fake_fetch(pr_ref: str, **_kw: object) -> dict[str, Any]:
+            if pr_ref == self._URL_A:
+                return _pr_view_payload(state="OPEN", reviewDecision="APPROVED")
+            if pr_ref == self._URL_B:
+                return _pr_view_payload(state="OPEN", mergeStateStatus="DIRTY")
+            msg = f"unexpected pr_ref: {pr_ref}"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.pr_hydrate.fetch_pr_view", _fake_fetch)
+        hydrate_pr_states(OrchestratorConfig())
+
+        tasks_by_client = {t.client: t for t in load_dev_queue().tasks}
+        state_acme = tasks_by_client["acme"].pr_state
+        state_widgets = tasks_by_client["widgets-co"].pr_state
+        assert state_acme is not None
+        assert state_widgets is not None
+        assert state_acme.review_decision == "APPROVED"
+        assert state_acme.merge_state_status == "CLEAN"
+        assert state_widgets.merge_state_status == "DIRTY"
+        assert state_widgets.review_decision == ""

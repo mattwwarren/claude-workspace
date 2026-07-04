@@ -404,7 +404,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
 
     header = (
         f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'BLOCKED':>7}"
-        f"  {'COMPLETED':>9}  {'CANCELLED':>9}  NEEDS_ATTN  TICKETS"
+        f"  {'COMPLETED':>9}  {'CANCELLED':>9}  {'NEEDS_ATTN':>10}  TICKETS"
     )
     click.echo(header)
     click.echo("-" * 90)
@@ -431,7 +431,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
             f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
-            f"  {len(cancelled_tasks):>9}  NEEDS_ATTN: {needs_attn}  {ticket_ids}"
+            f"  {len(cancelled_tasks):>9}  {needs_attn:>10}  {ticket_ids}"
         )
 
     tick_data = latest_tick_summary_by_client()
