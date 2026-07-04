@@ -255,7 +255,12 @@ def _pr_state(**fields: Any) -> PrState:
     return PrState(**defaults)
 
 
-_BASE = {"repo": "acme/widgets", "pr_number": 42, "ticket_id": "GEN-9", "client": "acme"}
+_BASE = {
+    "repo": "acme/widgets",
+    "pr_number": 42,
+    "ticket_id": "GEN-9",
+    "client": "acme",
+}
 
 
 class TestTransitions:
@@ -346,7 +351,7 @@ class TestCandidateSelection:
         calls = []
         monkeypatch.setattr(
             "cw.pr_hydrate.fetch_pr_view",
-            lambda *a, **k: calls.append(a) or _pr_view_payload(),
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(),
         )
         hydrate_pr_states(OrchestratorConfig())
         assert calls == []
@@ -371,7 +376,7 @@ class TestCandidateSelection:
         calls = []
         monkeypatch.setattr(
             "cw.pr_hydrate.fetch_pr_view",
-            lambda *a, **k: calls.append(a) or _pr_view_payload(),
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(),
         )
         hydrate_pr_states(OrchestratorConfig())
         assert calls == []
@@ -389,7 +394,7 @@ class TestThrottle:
         calls: list[Any] = []
         monkeypatch.setattr(
             "cw.pr_hydrate.fetch_pr_view",
-            lambda *a, **k: calls.append(a) or _pr_view_payload(state="OPEN"),
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(state="OPEN"),
         )
         config = OrchestratorConfig(pr_hydration_interval_seconds=150)
         with freeze_time("2026-07-04 12:00:00") as frozen:
