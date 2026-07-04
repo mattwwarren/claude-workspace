@@ -6242,6 +6242,59 @@ class TestLaneCircuitBreaker:
         )
         assert result is False
 
+    def test_dispatch_loads_overrides_once_with_multiple_paused_lanes(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two simultaneously-paused lanes in one tick share a single override load.
+
+        Regression guard for the lazy-load fix in _dispatch_client_lanes: without
+        it, _check_lane_circuit_paused would reload the override file once per
+        paused lane per tick instead of once per call.
+        """
+        lanes = [
+            LaneConfig(name="impl", max_parallel=1),
+            LaneConfig(name="idea", max_parallel=1),
+        ]
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=sample_client_config.workspace_path,
+            default_branch="main",
+            worktree_base=sample_client_config.worktree_base,
+            lanes=lanes,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={
+                    "test-client/impl": LaneConcurrencyOverride(paused=True),
+                    "test-client/idea": LaneConcurrencyOverride(paused=True),
+                }
+            )
+        )
+        add_ticket(TicketTask(ticket_id="GEN-875O1", client="test-client", lane="impl"))
+        add_ticket(TicketTask(ticket_id="GEN-875O2", client="test-client", lane="idea"))
+
+        import cw.dispatch as dispatch_mod
+
+        loads: list[object] = []
+        real_load = dispatch_mod._load_concurrency_overrides
+
+        def _counting_load() -> ConcurrencyOverrides:
+            loads.append(None)
+            return real_load()
+
+        monkeypatch.setattr(dispatch_mod, "_load_concurrency_overrides", _counting_load)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert len(loads) == 1
+
 
 class TestResolveDispatchSkipReasonCircuitPaused:
     """Precedence of LANE_CIRCUIT_PAUSED inside _resolve_dispatch_skip_reason."""
