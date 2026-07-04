@@ -479,3 +479,82 @@ class TestHydrateEmitsEvents:
         assert events[0].payload["repo"] == "acme/widgets"
         assert events[0].payload["pr_number"] == 42
         assert events[0].correlation_id == "GEN-1"
+
+
+class TestMultiTaskRouting:
+    """Two candidates in the same pass route to the correct task, no cross-talk."""
+
+    _URL_A = "https://github.com/acme/widgets/pull/1"
+    _URL_B = "https://github.com/acme/gadgets/pull/2"
+
+    def test_two_candidates_fetch_correct_urls_and_persist_to_correct_tasks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(ticket_id="GEN-A", client="acme", pr_url=self._URL_A),
+                    TicketTask(ticket_id="GEN-B", client="acme", pr_url=self._URL_B),
+                ]
+            )
+        )
+
+        def _fake_fetch(pr_ref: str, **_kw: object) -> dict[str, Any]:
+            if pr_ref == self._URL_A:
+                return _pr_view_payload(state="OPEN", reviewDecision="APPROVED")
+            if pr_ref == self._URL_B:
+                return _pr_view_payload(state="OPEN", mergeStateStatus="DIRTY")
+            msg = f"unexpected pr_ref: {pr_ref}"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.pr_hydrate.fetch_pr_view", _fake_fetch)
+        hydrate_pr_states(OrchestratorConfig())
+
+        tasks_by_id = {t.ticket_id: t for t in load_dev_queue().tasks}
+        state_a = tasks_by_id["GEN-A"].pr_state
+        state_b = tasks_by_id["GEN-B"].pr_state
+        assert state_a is not None
+        assert state_b is not None
+        assert state_a.review_decision == "APPROVED"
+        assert state_a.merge_state_status == "CLEAN"
+        assert state_b.merge_state_status == "DIRTY"
+        assert state_b.review_decision == ""
+
+    def test_two_candidates_emit_independent_transitions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-A",
+                        client="acme",
+                        pr_url=self._URL_A,
+                        pr_state=PrState(
+                            state="OPEN", hydrated_at=datetime(2000, 1, 1, tzinfo=UTC)
+                        ),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-B",
+                        client="acme",
+                        pr_url=self._URL_B,
+                        pr_state=PrState(
+                            state="OPEN", hydrated_at=datetime(2000, 1, 1, tzinfo=UTC)
+                        ),
+                    ),
+                ]
+            )
+        )
+
+        def _fake_fetch(pr_ref: str, **_kw: object) -> dict[str, Any]:
+            if pr_ref == self._URL_A:
+                return _pr_view_payload(state="MERGED")
+            return _pr_view_payload(state="OPEN")
+
+        monkeypatch.setattr("cw.pr_hydrate.fetch_pr_view", _fake_fetch)
+        hydrate_pr_states(OrchestratorConfig())
+
+        events = read_events(event_types=[OrchestratorEventType.PR_MERGED])
+        assert len(events) == 1
+        assert events[0].correlation_id == "GEN-A"
+        assert events[0].payload["repo"] == "acme/widgets"

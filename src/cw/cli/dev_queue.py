@@ -404,7 +404,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
 
     header = (
         f"{'CLIENT':<20} {'PENDING':>7}  {'RUNNING':>7}  {'BLOCKED':>7}"
-        f"  {'COMPLETED':>9}  {'CANCELLED':>9}  TICKETS"
+        f"  {'COMPLETED':>9}  {'CANCELLED':>9}  NEEDS_ATTN  TICKETS"
     )
     click.echo(header)
     click.echo("-" * 90)
@@ -1126,20 +1126,21 @@ def _task_to_dict(task: TicketTask) -> dict[str, object]:
     }
 
 
+def _task_attention_state(task: TicketTask) -> str | None:
+    """The task's hydrated PR attention_state, or None if not hydrated/clean."""
+    return task.pr_state.attention_state if task.pr_state is not None else None
+
+
 def _count_needs_attn(tasks: list[TicketTask]) -> int:
     """Count tasks whose hydrated PR state carries a non-null attention_state."""
-    return sum(
-        1
-        for t in tasks
-        if t.pr_state is not None and t.pr_state.attention_state is not None
-    )
+    return sum(1 for t in tasks if _task_attention_state(t) is not None)
 
 
 def _needs_attn_by_client(tasks: list[TicketTask]) -> dict[str, int]:
     """Map client -> count of tasks needing attention (non-null attention_state)."""
     counts: dict[str, int] = {}
     for t in tasks:
-        if t.pr_state is not None and t.pr_state.attention_state is not None:
+        if _task_attention_state(t) is not None:
             counts[t.client] = counts.get(t.client, 0) + 1
     return counts
 
@@ -1164,9 +1165,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
     click.echo(header)
     click.echo("-" * len(header))
     for t in tasks:
-        attention = (
-            t.pr_state.attention_state if t.pr_state is not None else None
-        ) or "—"
+        attention = _task_attention_state(t) or "—"
         row = [
             t.ticket_id[:12],
             t.client[:16],

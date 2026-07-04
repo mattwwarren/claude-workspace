@@ -15,7 +15,6 @@ chain re-implemented in ``_compute_attention_state``.
 
 from __future__ import annotations
 
-import logging
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -28,8 +27,6 @@ from cw.models import OrchestratorEventType, PrState
 if TYPE_CHECKING:
     from cw.models import OrchestratorConfig, TicketTask
 
-logger = logging.getLogger(__name__)
-
 # Ported verbatim from .claude/scripts/review_monitor.py (_summarize_status_checks).
 _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
     {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
@@ -37,6 +34,10 @@ _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
 _PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
     {"IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"}
 )
+# Superset of _compute_attention_state's Row-1 (DIRTY, BEHIND) tuple: this set
+# also gates the pr.mergeable event on a BLOCKED->CLEAN transition, which Row 1
+# deliberately does not treat as merge_blocked (BLOCKED means "waiting on
+# required reviews," not a code problem - see Row 5). Keep both in sync.
 _BLOCKING_MERGE_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND", "BLOCKED"})
 _TERMINAL_PR_STATES: frozenset[str] = frozenset({"MERGED", "CLOSED"})
 
@@ -236,34 +237,37 @@ def _throttled(tasks: list[TicketTask], interval_seconds: int) -> bool:
 def _persist_and_emit(derived: list[tuple[TicketTask, PrState]]) -> None:
     """Persist new states under the queue lock, then emit events (persist-first).
 
-    Transitions are computed against each task's pre-persist state; the durable
-    baseline is written first (at-most-once emit), then events fire OUTSIDE the
-    queue lock so ``record_event``'s inbox lock never nests inside it.
+    Transitions are diffed against the state re-read INSIDE ``dev_queue_lock()``
+    — not the pre-lock snapshot passed in via *derived* — so a writer that
+    touched this task's ``pr_state`` between the initial candidate scan and this
+    call can't produce a stale diff or a duplicate emit. The durable baseline is
+    written first (at-most-once emit); events fire OUTSIDE the queue lock so
+    ``record_event``'s inbox lock never nests inside it.
     """
+    new_by_key: dict[tuple[str, str], PrState] = {
+        (task.client, task.ticket_id): new_state for task, new_state in derived
+    }
     pending_events: list[tuple[str, OrchestratorEventType, dict[str, object]]] = []
-    new_by_key: dict[tuple[str, str], PrState] = {}
-    for task, new_state in derived:
-        new_by_key[(task.client, task.ticket_id)] = new_state
-        parsed = _parse_pr_url(task.pr_url or "")
-        if parsed is None:
-            continue
-        repo, pr_number = parsed
-        base: dict[str, object] = {
-            "repo": repo,
-            "pr_number": pr_number,
-            "ticket_id": task.ticket_id,
-            "client": task.client,
-        }
-        transitions = _diff_transitions(task.pr_state, new_state, base=base)
-        for event_type, payload in transitions:
-            pending_events.append((task.ticket_id, event_type, payload))
 
     with dev_queue_lock():
         store = load_dev_queue()
         for task in store.tasks:
             fresh = new_by_key.get((task.client, task.ticket_id))
-            if fresh is not None:
-                task.pr_state = fresh
+            if fresh is None:
+                continue
+            parsed = _parse_pr_url(task.pr_url or "")
+            if parsed is not None:
+                repo, pr_number = parsed
+                base: dict[str, object] = {
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "ticket_id": task.ticket_id,
+                    "client": task.client,
+                }
+                transitions = _diff_transitions(task.pr_state, fresh, base=base)
+                for event_type, payload in transitions:
+                    pending_events.append((task.ticket_id, event_type, payload))
+            task.pr_state = fresh
         save_dev_queue(store)
 
     for ticket_id, event_type, payload in pending_events:
