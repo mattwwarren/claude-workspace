@@ -684,3 +684,13 @@ class TestFetchPrView:
 
         monkeypatch.setattr("cw.gh._sp.run", _raise)
         assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None
+
+    def test_non_dict_json_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Valid JSON that isn't an object (e.g. a bare array) must not be
+        returned as-is — callers assume a dict and would raise AttributeError
+        on .get() otherwise, breaking the "None on ANY failure" contract."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, "[1, 2, 3]"),
+        )
+        assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None

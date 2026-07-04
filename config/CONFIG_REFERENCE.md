@@ -293,6 +293,12 @@ idle_watchdog_by_tier:
 # MIGRATION: existing deployments wanting self-healing must set:
 #   reap_policy: auto
 reap_policy: signal_only
+
+# Minimum elapsed seconds between PR-state hydration passes in the serve tick
+# (GitHub #929). Gated off max(pr_state.hydrated_at) across dev-queue tasks —
+# no separate timer state. Each pass fetches `gh pr view` for every open PR
+# referenced by a dev-queue task, so lowering this increases gh API load.
+pr_hydration_interval_seconds: 150
 ```
 
 Override a single ticket's budget at enqueue time:

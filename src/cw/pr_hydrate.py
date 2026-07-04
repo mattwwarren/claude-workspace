@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.gh import fetch_pr_view
+from cw.gh import _GH_PR_STATE_MERGED, fetch_pr_view
 from cw.models import OrchestratorEventType, PrState
 
 if TYPE_CHECKING:
@@ -34,12 +34,14 @@ _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
 _PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
     {"IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"}
 )
-# Superset of _compute_attention_state's Row-1 (DIRTY, BEHIND) tuple: this set
-# also gates the pr.mergeable event on a BLOCKED->CLEAN transition, which Row 1
-# deliberately does not treat as merge_blocked (BLOCKED means "waiting on
-# required reviews," not a code problem - see Row 5). Keep both in sync.
-_BLOCKING_MERGE_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND", "BLOCKED"})
-_TERMINAL_PR_STATES: frozenset[str] = frozenset({"MERGED", "CLOSED"})
+# Row-1 of the attention-state decision table (merge_blocked). _BLOCKING_MERGE_STATES
+# below is a superset that also gates the pr.mergeable event on a BLOCKED->CLEAN
+# transition, which Row 1 deliberately does not treat as merge_blocked (BLOCKED
+# means "waiting on required reviews," not a code problem - see Row 5). Single
+# source of truth so the two can't drift independently.
+_ROW1_MERGE_BLOCKING_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND"})
+_BLOCKING_MERGE_STATES: frozenset[str] = _ROW1_MERGE_BLOCKING_STATES | {"BLOCKED"}
+_TERMINAL_PR_STATES: frozenset[str] = frozenset({_GH_PR_STATE_MERGED, "CLOSED"})
 
 _PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
 
@@ -109,7 +111,7 @@ def _compute_attention_state(
     """
     if is_draft:  # Row 0 — drafts never enter an escalation path.
         return None
-    if merge_state_status in ("DIRTY", "BEHIND"):  # Row 1
+    if merge_state_status in _ROW1_MERGE_BLOCKING_STATES:  # Row 1
         return "merge_blocked"
     if not ci_ok:  # Row 2
         return "ci_failing"
@@ -169,12 +171,16 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
 
 
 def _diff_transitions(
+    *,
     old: PrState | None,
     new: PrState,
-    *,
     base: dict[str, object],
 ) -> list[tuple[OrchestratorEventType, dict[str, object]]]:
     """Return ``(event_type, payload)`` pairs for each old->new transition (R5).
+
+    ``old``/``new`` are keyword-only: both are ``PrState``-domain values with no
+    structural difference at the call site, so an accidental positional swap
+    would silently invert every transition's direction with no type error.
 
     Dedup rule: value-change events (ci_failed/review_received/mergeable) require
     a prior persisted baseline (``old is not None``); ``pr.merged`` fires on the
@@ -182,7 +188,7 @@ def _diff_transitions(
     """
     events: list[tuple[OrchestratorEventType, dict[str, object]]] = []
     old_state = old.state if old is not None else ""
-    if new.state == "MERGED" and old_state != "MERGED":
+    if new.state == _GH_PR_STATE_MERGED and old_state != _GH_PR_STATE_MERGED:
         events.append((OrchestratorEventType.PR_MERGED, dict(base)))
     if old is not None and old.ci_ok and not new.ci_ok:
         events.append(
@@ -264,7 +270,7 @@ def _persist_and_emit(derived: list[tuple[TicketTask, PrState]]) -> None:
                     "ticket_id": task.ticket_id,
                     "client": task.client,
                 }
-                transitions = _diff_transitions(task.pr_state, fresh, base=base)
+                transitions = _diff_transitions(old=task.pr_state, new=fresh, base=base)
                 for event_type, payload in transitions:
                     pending_events.append((task.ticket_id, event_type, payload))
             task.pr_state = fresh

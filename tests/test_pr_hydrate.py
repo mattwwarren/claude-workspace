@@ -267,7 +267,7 @@ class TestTransitions:
     def test_merged_transition_emits_base_payload(self) -> None:
         old = _pr_state(state="OPEN")
         new = _pr_state(state="MERGED")
-        events = _diff_transitions(old, new, base=dict(_BASE))
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         types = {t for t, _ in events}
         assert OrchestratorEventType.PR_MERGED in types
         payload = next(p for t, p in events if t == OrchestratorEventType.PR_MERGED)
@@ -275,32 +275,32 @@ class TestTransitions:
 
     def test_merged_first_seen_emits(self) -> None:
         new = _pr_state(state="MERGED")
-        events = _diff_transitions(None, new, base=dict(_BASE))
+        events = _diff_transitions(old=None, new=new, base=dict(_BASE))
         assert OrchestratorEventType.PR_MERGED in {t for t, _ in events}
 
     def test_ci_failed_transition_true_to_false(self) -> None:
         old = _pr_state(ci_ok=True)
         new = _pr_state(ci_ok=False, failing_checks=["lint", "test-unit"])
-        events = _diff_transitions(old, new, base=dict(_BASE))
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         payload = next(p for t, p in events if t == OrchestratorEventType.PR_CI_FAILED)
         assert payload == {**_BASE, "failing_checks": ["lint", "test-unit"]}
 
     def test_ci_failed_not_emitted_without_prior_true(self) -> None:
         # First-seen failing (old is None) does not emit ci_failed.
         new = _pr_state(ci_ok=False, failing_checks=["lint"])
-        events = _diff_transitions(None, new, base=dict(_BASE))
+        events = _diff_transitions(old=None, new=new, base=dict(_BASE))
         assert OrchestratorEventType.PR_CI_FAILED not in {t for t, _ in events}
 
     def test_ci_failed_deduped_when_still_failing(self) -> None:
         old = _pr_state(ci_ok=False, failing_checks=["lint"])
         new = _pr_state(ci_ok=False, failing_checks=["lint"])
-        events = _diff_transitions(old, new, base=dict(_BASE))
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         assert OrchestratorEventType.PR_CI_FAILED not in {t for t, _ in events}
 
     def test_review_received_on_change(self) -> None:
         old = _pr_state(review_decision="REVIEW_REQUIRED")
         new = _pr_state(review_decision="CHANGES_REQUESTED")
-        events = _diff_transitions(old, new, base=dict(_BASE))
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         payload = next(
             p for t, p in events if t == OrchestratorEventType.PR_REVIEW_RECEIVED
         )
@@ -309,20 +309,26 @@ class TestTransitions:
     def test_review_received_deduped_when_unchanged(self) -> None:
         old = _pr_state(review_decision="APPROVED")
         new = _pr_state(review_decision="APPROVED")
-        events = _diff_transitions(old, new, base=dict(_BASE))
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         assert OrchestratorEventType.PR_REVIEW_RECEIVED not in {t for t, _ in events}
 
     def test_mergeable_transition_into_clean(self) -> None:
         old = _pr_state(merge_state_status="DIRTY")
         new = _pr_state(merge_state_status="CLEAN")
-        events = _diff_transitions(old, new, base=dict(_BASE))
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         payload = next(p for t, p in events if t == OrchestratorEventType.PR_MERGEABLE)
+        # Literal key assertion (not just the value): mergeStateStatus is a
+        # deliberate camelCase passthrough of the raw gh field name (R5), unlike
+        # every sibling payload key, which is snake_case. Guards against a future
+        # "normalize the key" refactor silently breaking bus consumers.
+        assert "mergeStateStatus" in payload
+        assert "merge_state_status" not in payload
         assert payload == {**_BASE, "mergeStateStatus": "CLEAN"}
 
     def test_mergeable_not_emitted_when_already_clean(self) -> None:
         old = _pr_state(merge_state_status="CLEAN")
         new = _pr_state(merge_state_status="CLEAN")
-        events = _diff_transitions(old, new, base=dict(_BASE))
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         assert OrchestratorEventType.PR_MERGEABLE not in {t for t, _ in events}
 
 
@@ -367,6 +373,31 @@ class TestCandidateSelection:
                         pr_url=_URL,
                         pr_state=PrState(
                             state="MERGED",
+                            hydrated_at=datetime(2000, 1, 1, tzinfo=UTC),
+                        ),
+                    )
+                ]
+            )
+        )
+        calls = []
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        assert calls == []
+
+    def test_skips_closed_pr_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLOSED is terminal alongside MERGED — both excluded from re-hydration."""
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=PrState(
+                            state="CLOSED",
                             hydrated_at=datetime(2000, 1, 1, tzinfo=UTC),
                         ),
                     )
@@ -479,6 +510,47 @@ class TestHydrateEmitsEvents:
         assert events[0].payload["repo"] == "acme/widgets"
         assert events[0].payload["pr_number"] == 42
         assert events[0].correlation_id == "GEN-1"
+
+    def test_repeated_hydration_passes_dedup_through_persisted_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end (R12): two real hydrate_pr_states calls with an unchanged
+        fetched state emit the transition exactly once, not once per call.
+
+        Unlike TestTransitions' unit tests (which call _diff_transitions
+        directly with hand-built old/new PrState objects), this exercises the
+        full persisted-state wiring through _persist_and_emit — the same path
+        where round 1 found and fixed a real persist/emit dedup race.
+        """
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=PrState(
+                            state="OPEN",
+                            ci_ok=True,
+                            hydrated_at=datetime(2000, 1, 1, tzinfo=UTC),
+                        ),
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                state="OPEN", statusCheckRollup=[_checkrun("COMPLETED", "FAILURE")]
+            ),
+        )
+        config = OrchestratorConfig(pr_hydration_interval_seconds=150)
+        with freeze_time("2026-07-04 12:00:00") as frozen:
+            hydrate_pr_states(config)  # first pass: ci_ok True -> False, emits
+            frozen.tick(delta=timedelta(seconds=200))  # clear the throttle
+            hydrate_pr_states(config)  # second pass: still False -> False, no-op
+        events = read_events(event_types=[OrchestratorEventType.PR_CI_FAILED])
+        assert len(events) == 1
 
 
 class TestMultiTaskRouting:

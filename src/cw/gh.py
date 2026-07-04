@@ -107,8 +107,10 @@ def fetch_pr_view(
         return None
 
     try:
-        data: dict[str, Any] = json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except (ValueError, AttributeError):
+        return None
+    if not isinstance(data, dict):
         return None
     return data
 
