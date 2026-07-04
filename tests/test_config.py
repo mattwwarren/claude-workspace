@@ -1386,6 +1386,79 @@ class TestLoadEffectiveClients:
 
 
 # ---------------------------------------------------------------------------
+# TestGetEffectiveClient
+# ---------------------------------------------------------------------------
+
+
+class TestGetEffectiveClient:
+    """Tests for get_effective_client() — single-client effective lookup (#875)."""
+
+    def _write_clients_yaml(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+            f"    lanes:\n      - name: default\n        max_parallel: 1\n"
+            f"      - name: fast\n        max_parallel: 2\n"
+        )
+
+    def test_returns_declared_when_no_override(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No override → the effective client's lanes match the declared state."""
+        from cw.config import get_effective_client
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        client = get_effective_client("acme")
+        lane_map = {ln.name: ln for ln in client.effective_lanes}
+        assert lane_map["fast"].paused is False
+
+    def test_reflects_lane_pause_override(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A paused override propagates to the effective client's lane."""
+        from cw.config import (
+            _save_concurrency_overrides,
+            concurrency_override_file,
+            get_effective_client,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={"acme/fast": LaneConcurrencyOverride(paused=True)}
+            )
+        )
+
+        client = get_effective_client("acme")
+        lane_map = {ln.name: ln for ln in client.effective_lanes}
+        assert lane_map["fast"].paused is True
+
+    def test_unknown_client_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An unknown client name raises CwError with the available-clients hint."""
+        from cw.config import get_effective_client
+
+        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        with pytest.raises(CwError, match="Unknown client 'nope'"):
+            get_effective_client("nope")
+
+
+class TestOrchestratorConfigLaneCircuitBreaker:
+    """OrchestratorConfig.lane_circuit_breaker_threshold field (#875)."""
+
+    def test_lane_circuit_breaker_threshold_default(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        assert OrchestratorConfig().lane_circuit_breaker_threshold == 3
+
+
+# ---------------------------------------------------------------------------
 # TestUsageLimitedUntilPersistence
 # ---------------------------------------------------------------------------
 

@@ -13,6 +13,8 @@ import pytest
 import yaml
 
 from cw.config import (
+    _load_concurrency_overrides,
+    _save_concurrency_overrides,
     load_effective_config,
     load_state,
     orchestrator_config_file,
@@ -31,6 +33,7 @@ from cw.dispatch import (
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
+    _resolve_dispatch_skip_reason,
     consume_completed_sessions,
     dispatch_tick,
     persist_last_result,
@@ -42,10 +45,12 @@ from cw.models import (
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     ClientConfig,
+    ConcurrencyOverrides,
     CwState,
     DevQueueStore,
     DispatchPlan,
     DispatchSkipReason,
+    LaneConcurrencyOverride,
     LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -115,6 +120,16 @@ def cap2_config() -> OrchestratorConfig:
     return OrchestratorConfig(
         tick_interval_seconds=30,
         per_client_max_parallel={"test-client": 2},
+    )
+
+
+@pytest.fixture
+def breaker_config() -> OrchestratorConfig:
+    """OrchestratorConfig with a low lane circuit-breaker threshold for tests."""
+    return OrchestratorConfig(
+        tick_interval_seconds=30,
+        per_client_max_parallel={"test-client": 1},
+        lane_circuit_breaker_threshold=2,
     )
 
 
@@ -5842,3 +5857,327 @@ class TestSpawnErrorBackoff:
         # B must be RUNNING (spawned); A stays PENDING in backoff
         assert b.status == QueueItemStatus.RUNNING
         assert a.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# TestLaneCircuitBreaker — per-lane breaker on consecutive spawn_error (#875)
+# ---------------------------------------------------------------------------
+
+
+_BREAKER_LANE_KEY = "test-client/default"
+
+
+def _seed_lane_override(count: int, *, paused: bool | None = None) -> None:
+    """Persist a LaneConcurrencyOverride for the default test-client lane."""
+    _save_concurrency_overrides(
+        ConcurrencyOverrides(
+            lanes={
+                _BREAKER_LANE_KEY: LaneConcurrencyOverride(
+                    consecutive_spawn_errors=count,
+                    paused=paused,
+                )
+            }
+        )
+    )
+
+
+def _lane_override() -> LaneConcurrencyOverride:
+    """Read back the persisted default test-client lane override."""
+    return _load_concurrency_overrides().lanes[_BREAKER_LANE_KEY]
+
+
+class TestLaneCircuitBreaker:
+    """Per-lane circuit breaker trips after N consecutive spawn errors (#875).
+
+    Sibling of TestSpawnErrorBackoff: the per-lane counter is orthogonal to
+    the per-task exponential backoff. The counter increments once per tick on
+    a spawn error, trips (pauses the lane) at the configured threshold, and
+    resets to zero on any successful spawn.
+    """
+
+    def test_spawn_error_increments_lane_counter(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """One raising tick increments the lane counter but does not yet trip."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-875A", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("boom"))
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        override = _lane_override()
+        assert override.consecutive_spawn_errors == 1
+        # Threshold is 2; not yet tripped.
+        assert not override.paused
+
+    def test_counter_increments_once_per_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """Two pending tasks + raising daemon → counter increments by exactly 1."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-875B1", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-875B2", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("boom"))
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert _lane_override().consecutive_spawn_errors == 1
+
+    def test_breaker_trips_at_threshold_sets_paused(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """Reaching the threshold on a tick sets the lane's paused flag."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-875C", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("boom"))
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        override = _lane_override()
+        assert override.consecutive_spawn_errors == 2
+        assert override.paused is True
+
+    def test_trip_emits_lane_paused_breaker_payload(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """The tripping tick emits a circuit-breaker-sourced LANE_PAUSED event."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-875D", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("boom"))
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-875-trip",
+            event_types=[OrchestratorEventType.LANE_PAUSED],
+        )
+        assert len(events) == 1
+        assert events[0].payload == {
+            "client": "test-client",
+            "lane": "default",
+            "source": "circuit_breaker",
+            "consecutive_count": 2,
+            "last_error": "boom",
+        }
+
+    def test_last_error_empty_string_when_exception_blank(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A blank exception message yields last_error == "" (never null)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-875E", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError(""))
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-875-blank",
+            event_types=[OrchestratorEventType.LANE_PAUSED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["last_error"] == ""
+
+    def test_success_resets_lane_counter(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A successful spawn resets the lane's consecutive-error counter."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-875F", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        assert _lane_override().consecutive_spawn_errors == 0
+
+    def test_reset_short_circuits_when_already_zero(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An already-zero counter is not re-persisted on a successful spawn."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-875G", client="test-client"))
+
+        saves: list[object] = []
+        import cw.dispatch as dispatch_mod
+
+        real_save = dispatch_mod._save_concurrency_overrides
+
+        def _counting_save(overrides: object) -> None:
+            saves.append(overrides)
+            real_save(overrides)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(dispatch_mod, "_save_concurrency_overrides", _counting_save)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        # Counter was already 0 → reset helper must short-circuit before save.
+        assert saves == []
+
+    def test_paused_lane_skipped_next_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A breaker-paused lane is skipped: no spawn attempted."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-875H", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+
+    def test_circuit_paused_skip_reason_emitted(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A breaker-paused lane with pending work reports LANE_CIRCUIT_PAUSED."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-875I", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-875-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert (
+            events[0].payload["skip_reason"]
+            == DispatchSkipReason.LANE_CIRCUIT_PAUSED
+        )
+
+    def test_operator_pause_does_not_report_circuit_paused(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """An operator pause (counter below threshold) is not LANE_CIRCUIT_PAUSED."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(0, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-875J", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-875-oppause",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.NO_PENDING
+
+    def test_spawn_error_precedes_circuit_paused_on_tripping_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """The tick that trips reports SPAWN_ERROR (higher precedence)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-875K", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("boom"))
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-875-precede",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.SPAWN_ERROR
+
+    def test_backoff_unchanged(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """Per-task spawn_error_count still increments alongside the lane counter."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-875L", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("boom"))
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        queue = load_dev_queue()
+        assert queue.tasks[0].spawn_error_count == 1
+        assert _lane_override().consecutive_spawn_errors == 1
+
+
+class TestResolveDispatchSkipReasonCircuitPaused:
+    """Precedence of LANE_CIRCUIT_PAUSED inside _resolve_dispatch_skip_reason."""
+
+    def test_circuit_paused_returned_when_set(self) -> None:
+        reason = _resolve_dispatch_skip_reason(
+            usage_limit_detected=False,
+            cap_full=False,
+            spawn_error=False,
+            lane_cap_blocked=False,
+            spawn_backoff_skipped=False,
+            lane_circuit_paused=True,
+            client_spawned=0,
+        )
+        assert reason == DispatchSkipReason.LANE_CIRCUIT_PAUSED
+
+    def test_spawn_error_wins_over_circuit_paused(self) -> None:
+        reason = _resolve_dispatch_skip_reason(
+            usage_limit_detected=False,
+            cap_full=False,
+            spawn_error=True,
+            lane_cap_blocked=False,
+            spawn_backoff_skipped=False,
+            lane_circuit_paused=True,
+            client_spawned=0,
+        )
+        assert reason == DispatchSkipReason.SPAWN_ERROR
+
+    def test_circuit_paused_wins_over_backoff(self) -> None:
+        reason = _resolve_dispatch_skip_reason(
+            usage_limit_detected=False,
+            cap_full=False,
+            spawn_error=False,
+            lane_cap_blocked=False,
+            spawn_backoff_skipped=True,
+            lane_circuit_paused=True,
+            client_spawned=0,
+        )
+        assert reason == DispatchSkipReason.LANE_CIRCUIT_PAUSED

@@ -6242,6 +6242,65 @@ class TestDevQueueStatusWithTick:
         assert "    lane fast:" in result.output
         assert "    lane slow:" in result.output
 
+    def test_dev_queue_status_shows_paused_marker(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A paused lane override appends the [PAUSED] marker to its line."""
+        from cw.config import _save_concurrency_overrides
+        from cw.dev_queue import add_ticket
+        from cw.events import record_event
+        from cw.models import (
+            ConcurrencyOverrides,
+            LaneConcurrencyOverride,
+            OrchestratorEventType,
+            QueueItemStatus,
+            TicketTask,
+        )
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-P1",
+                client="multi-client",
+                priority=5,
+                status=QueueItemStatus.PENDING,
+                lane="fast",
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-P2",
+                client="multi-client",
+                priority=3,
+                status=QueueItemStatus.PENDING,
+                lane="slow",
+            )
+        )
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={"multi-client/slow": LaneConcurrencyOverride(paused=True)}
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "multi-client",
+                "claimed": 0,
+                "pending": 2,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                "lanes": {
+                    "fast": {"claimed": 0, "running": 0, "pending": 1},
+                    "slow": {"claimed": 0, "running": 0, "pending": 1},
+                },
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "    lane slow: pending=1 running=0 blocked=0 [PAUSED]" in result.output
+        assert "    lane fast: pending=1 running=0 blocked=0\n" in result.output
+
     def test_dev_queue_status_single_default_lane_no_indented_lines(
         self, tmp_config_dir: Path
     ) -> None:
@@ -8044,6 +8103,7 @@ class TestLanePauseResume:
         assert len(paused_events) == 1
         assert paused_events[0].payload["client"] == "acme"
         assert paused_events[0].payload["lane"] == "slow"
+        assert paused_events[0].payload["source"] == "operator"
 
     def test_lane_resume_writes_override_and_emits_event(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -8066,6 +8126,38 @@ class TestLanePauseResume:
         assert len(resumed_events) == 1
         assert resumed_events[0].payload["client"] == "acme"
         assert resumed_events[0].payload["lane"] == "slow"
+        assert resumed_events[0].payload["source"] == "operator"
+
+    def test_lane_resume_resets_consecutive_spawn_errors(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw lane resume clears the breaker's consecutive_spawn_errors counter."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+        )
+        from cw.config import (
+            _load_concurrency_overrides,
+            _save_concurrency_overrides,
+        )
+        from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
+
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={
+                    "acme/slow": LaneConcurrencyOverride(
+                        paused=True, consecutive_spawn_errors=5
+                    )
+                }
+            )
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "resume", "acme", "slow"])
+        assert result.exit_code == 0, result.output
+
+        override = _load_concurrency_overrides().lanes["acme/slow"]
+        assert override.consecutive_spawn_errors == 0
+        assert override.paused is False
 
 
 # ---------------------------------------------------------------------------
