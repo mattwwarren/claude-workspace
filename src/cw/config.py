@@ -288,14 +288,18 @@ def load_clients() -> dict[str, ClientConfig]:
     return clients
 
 
-def get_client(name: str) -> ClientConfig:
-    """Get a client config by name, raising if not found."""
-    clients = load_clients()
+def _lookup_client(clients: dict[str, ClientConfig], name: str) -> ClientConfig:
+    """Look up name in clients, raising CwError with an available-clients hint."""
     if name not in clients:
         available = ", ".join(sorted(clients.keys())) or "(none configured)"
         msg = f"Unknown client '{name}'. Available: {available}"
         raise CwError(msg)
     return clients[name]
+
+
+def get_client(name: str) -> ClientConfig:
+    """Get a client config by name, raising if not found."""
+    return _lookup_client(load_clients(), name)
 
 
 def load_state() -> CwState:
@@ -611,16 +615,12 @@ def load_effective_clients() -> dict[str, ClientConfig]:
 def get_effective_client(name: str) -> ClientConfig:
     """Get a client config with lane-level runtime overrides merged, raising if absent.
 
-    Effective analogue of :func:`get_client`: composes :func:`get_client`'s
-    error contract over :func:`load_effective_clients` so callers that surface
-    lane pause/circuit-breaker state (``cw lane ls``) reflect overrides. See #875.
+    Effective analogue of :func:`get_client`: shares its lookup/raise contract
+    (via :func:`_lookup_client`) over :func:`load_effective_clients` so callers
+    that surface lane pause/circuit-breaker state (``cw lane ls``) reflect
+    overrides. See #875.
     """
-    clients = load_effective_clients()
-    if name not in clients:
-        available = ", ".join(sorted(clients.keys())) or "(none configured)"
-        msg = f"Unknown client '{name}'. Available: {available}"
-        raise CwError(msg)
-    return clients[name]
+    return _lookup_client(load_effective_clients(), name)
 
 
 def ensure_config() -> None:

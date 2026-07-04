@@ -63,6 +63,7 @@ from cw.exceptions import (
 from cw.executor import resolve_executor
 from cw.models import (
     ClientConfig,
+    ConcurrencyOverrides,
     DispatchSkipReason,
     LaneConcurrencyOverride,
     OrchestratorEventType,
@@ -783,6 +784,7 @@ def _check_lane_circuit_paused(
     queue_snapshot: DevQueueStore,
     client_name: str,
     *,
+    overrides: ConcurrencyOverrides,
     config: OrchestratorConfig,
 ) -> bool:
     """Return True when a lane is paused *by the breaker* and has pending work.
@@ -790,8 +792,11 @@ def _check_lane_circuit_paused(
     Distinguishes a circuit-breaker trip (consecutive_spawn_errors >= threshold)
     from a plain operator pause: only the former, with pending work still
     waiting, warrants the LANE_CIRCUIT_PAUSED skip_reason. See GitHub #875.
+
+    ``overrides`` is loaded once per :func:`_dispatch_client_lanes` call (not
+    once per paused lane) and passed in by the caller.
     """
-    override = _load_concurrency_overrides().lanes.get(f"{client_name}/{lane_cfg.name}")
+    override = overrides.lanes.get(f"{client_name}/{lane_cfg.name}")
     if override is None:
         return False
     if override.consecutive_spawn_errors < config.lane_circuit_breaker_threshold:
@@ -822,7 +827,6 @@ def _record_lane_spawn_error(
     """
     lane_key = f"{client_name}/{lane_cfg.name}"
     tripped = False
-    count = 0
     with concurrency_override_lock():
         overrides = _load_concurrency_overrides()
         override = overrides.lanes.get(lane_key, LaneConcurrencyOverride())
@@ -903,6 +907,9 @@ def _dispatch_client_lanes(
     # True when a lane is skipped because its circuit breaker has tripped
     # (consecutive_spawn_errors >= threshold) and pending work waits. See #875.
     lane_circuit_paused = False
+    # Lazily loaded at most once per call (only if a paused lane is seen),
+    # not once per paused lane -- see _check_lane_circuit_paused. See #875.
+    overrides: ConcurrencyOverrides | None = None
 
     # Tier-1 client slot budget: use the session-based running_count (not
     # the task-based total_running) so pre-existing DAEMON sessions without
@@ -915,8 +922,13 @@ def _dispatch_client_lanes(
         if available_client_slots <= 0:
             break
         if lane_cfg.paused:
+            overrides = overrides or _load_concurrency_overrides()
             lane_circuit_paused = lane_circuit_paused or _check_lane_circuit_paused(
-                lane_cfg, queue_snapshot, client.name, config=config
+                lane_cfg,
+                queue_snapshot,
+                client.name,
+                overrides=overrides,
+                config=config,
             )
             continue
         # running_in_lane = RUNNING + BLOCKED_ON_USER (total occupied slots).
@@ -971,7 +983,10 @@ def _dispatch_client_lanes(
             if outcome.spawn_error:
                 spawn_error = True
                 _record_lane_spawn_error(
-                    lane_cfg, client.name, outcome.error or "", config=config
+                    lane_cfg,
+                    client_name=client.name,
+                    last_error=outcome.error or "",
+                    config=config,
                 )
             if outcome.spawned:
                 running_count += 1

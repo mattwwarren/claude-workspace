@@ -6153,6 +6153,91 @@ class TestLaneCircuitBreaker:
             LaneConfig(name="default"),
             DevQueueStore(tasks=[]),
             "test-client",
+            overrides=ConcurrencyOverrides(),
+            config=breaker_config,
+        )
+        assert result is False
+
+    def test_check_returns_false_when_below_threshold(
+        self,
+        tmp_dispatch_dirs: Path,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """An override below the threshold is not (yet) a breaker pause."""
+        from cw.dispatch import _check_lane_circuit_paused
+
+        overrides = ConcurrencyOverrides(
+            lanes={
+                _BREAKER_LANE_KEY: LaneConcurrencyOverride(consecutive_spawn_errors=1)
+            }
+        )
+        queue_snapshot = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="GEN-875M",
+                    client="test-client",
+                    status=QueueItemStatus.PENDING,
+                )
+            ]
+        )
+        result = _check_lane_circuit_paused(
+            LaneConfig(name="default"),
+            queue_snapshot,
+            "test-client",
+            overrides=overrides,
+            config=breaker_config,
+        )
+        assert result is False
+
+    def test_check_returns_true_at_threshold_with_pending(
+        self,
+        tmp_dispatch_dirs: Path,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """At/above threshold with pending work in the lane is a breaker pause."""
+        from cw.dispatch import _check_lane_circuit_paused
+
+        overrides = ConcurrencyOverrides(
+            lanes={
+                _BREAKER_LANE_KEY: LaneConcurrencyOverride(consecutive_spawn_errors=2)
+            }
+        )
+        queue_snapshot = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="GEN-875N",
+                    client="test-client",
+                    status=QueueItemStatus.PENDING,
+                )
+            ]
+        )
+        result = _check_lane_circuit_paused(
+            LaneConfig(name="default"),
+            queue_snapshot,
+            "test-client",
+            overrides=overrides,
+            config=breaker_config,
+        )
+        assert result is True
+
+    def test_check_returns_false_when_tripped_but_no_pending(
+        self,
+        tmp_dispatch_dirs: Path,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A tripped lane with no pending work is not a (reportable) breaker pause."""
+        from cw.dispatch import _check_lane_circuit_paused
+
+        overrides = ConcurrencyOverrides(
+            lanes={
+                _BREAKER_LANE_KEY: LaneConcurrencyOverride(consecutive_spawn_errors=2)
+            }
+        )
+        result = _check_lane_circuit_paused(
+            LaneConfig(name="default"),
+            DevQueueStore(tasks=[]),
+            "test-client",
+            overrides=overrides,
             config=breaker_config,
         )
         assert result is False
