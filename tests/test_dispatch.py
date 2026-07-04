@@ -6141,6 +6141,22 @@ class TestLaneCircuitBreaker:
         assert queue.tasks[0].spawn_error_count == 1
         assert _lane_override().consecutive_spawn_errors == 1
 
+    def test_check_returns_false_when_lane_has_no_override(
+        self,
+        tmp_dispatch_dirs: Path,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A lane paused with no override entry is not a breaker pause."""
+        from cw.dispatch import _check_lane_circuit_paused
+
+        result = _check_lane_circuit_paused(
+            LaneConfig(name="default"),
+            DevQueueStore(tasks=[]),
+            "test-client",
+            config=breaker_config,
+        )
+        assert result is False
+
 
 class TestResolveDispatchSkipReasonCircuitPaused:
     """Precedence of LANE_CIRCUIT_PAUSED inside _resolve_dispatch_skip_reason."""
