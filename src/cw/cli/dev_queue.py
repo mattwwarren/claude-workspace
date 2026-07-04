@@ -370,6 +370,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     """Show dev queue status grouped by client."""
     if output_json:
         tick_data = latest_tick_summary_by_client()
+        attn_by_client = _needs_attn_by_client(list_tickets(client))
         click.echo(
             json.dumps(
                 {
@@ -377,6 +378,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
                         "skip_reason": tick.skip_reason,
                         "freshness_detail": tick.freshness_detail,
                         "blocked_branch": tick.blocked_branch,
+                        "needs_attn": attn_by_client.get(c, 0),
                     }
                     for c, tick in tick_data.items()
                     if client is None or c == client
@@ -419,6 +421,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
         cancelled_tasks = [
             t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
         ]
+        needs_attn = _count_needs_attn(client_tasks)
         display_tasks = (
             client_tasks
             if show_all
@@ -428,7 +431,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
         click.echo(
             f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
             f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
-            f"  {len(cancelled_tasks):>9}  {ticket_ids}"
+            f"  {len(cancelled_tasks):>9}  NEEDS_ATTN: {needs_attn}  {ticket_ids}"
         )
 
     tick_data = latest_tick_summary_by_client()
@@ -1117,7 +1120,28 @@ def _task_to_dict(task: TicketTask) -> dict[str, object]:
         "worktree_path": str(task.worktree_path) if task.worktree_path else None,
         "disposition": task.disposition,
         "pr_url": task.pr_url,
+        "pr_state": (
+            task.pr_state.model_dump(mode="json") if task.pr_state is not None else None
+        ),
     }
+
+
+def _count_needs_attn(tasks: list[TicketTask]) -> int:
+    """Count tasks whose hydrated PR state carries a non-null attention_state."""
+    return sum(
+        1
+        for t in tasks
+        if t.pr_state is not None and t.pr_state.attention_state is not None
+    )
+
+
+def _needs_attn_by_client(tasks: list[TicketTask]) -> dict[str, int]:
+    """Map client -> count of tasks needing attention (non-null attention_state)."""
+    counts: dict[str, int] = {}
+    for t in tasks:
+        if t.pr_state is not None and t.pr_state.attention_state is not None:
+            counts[t.client] = counts.get(t.client, 0) + 1
+    return counts
 
 
 def _print_tasks_human(tasks: list[TicketTask]) -> None:
@@ -1133,12 +1157,16 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
         "LANE",
         "DISPOSITION",
         "PR",
+        "ATTENTION",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 20, 10]
+    col_widths = [12, 16, 16, 12, 8, 12, 20, 10, 18]
     header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
     click.echo(header)
     click.echo("-" * len(header))
     for t in tasks:
+        attention = (
+            t.pr_state.attention_state if t.pr_state is not None else None
+        ) or "—"
         row = [
             t.ticket_id[:12],
             t.client[:16],
@@ -1148,6 +1176,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             t.lane[:12],
             (t.disposition or "—")[:20],
             (t.pr_url or "—")[:10],
+            attention[:18],
         ]
         click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
 

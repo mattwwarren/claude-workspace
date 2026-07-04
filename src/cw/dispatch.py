@@ -73,6 +73,7 @@ from cw.models import (
     Stage,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
     reconcile,
     resolve_headless_budget,
@@ -1839,6 +1840,18 @@ def run_dispatch_loop(
                 _log.warning("dispatch: config reload failed; using last-good config")
 
             consume_completed_sessions()
+            try:
+                hydrate_pr_states(config)
+            except Exception:  # noqa: BLE001
+                # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+                # 1. hydrate_pr_states shells out to ``gh pr view`` — failure
+                #    modes include subprocess crash, JSON decode, lock I/O.
+                # 2. Logging: _log.exception captures the full traceback.
+                # 3. Non-critical: PR-state hydration is best-effort fallback
+                #    polling (#929); skipping a pass just delays state refresh.
+                # 4. Paired test: tests/test_dispatch.py
+                #    TestRunDispatchLoopHydrationHook.
+                _log.exception("pr-state hydration failed during tick; continuing")
             try:
                 _installed = importlib.metadata.version(_CW_PACKAGE_NAME)
             except importlib.metadata.PackageNotFoundError:

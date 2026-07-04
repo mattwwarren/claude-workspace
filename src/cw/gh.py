@@ -10,6 +10,13 @@ _GH_PR_STATE_MERGED = "MERGED"
 _PR_EXISTS_TIMEOUT = 10
 _PLAN_MARKER = "<!-- plan-spec-reviewed"
 _FETCH_COMMENTS_TIMEOUT = 30
+_PR_VIEW_TIMEOUT = 15
+# Field list hydrated per PR by the serve-tick pass (GitHub #929). Order is
+# asserted by tests/test_gh.py — keep it in sync with the decision-table spec.
+_PR_VIEW_FIELDS = (
+    "state,mergeable,mergeStateStatus,statusCheckRollup,"
+    "reviewDecision,isDraft,reviewRequests"
+)
 
 # Lookback window for timed_out-merged detection, shared by doctor.py and reconcile.py.
 # Lives here (co-located with pr_is_merged_for_ticket) to avoid a circular import:
@@ -72,6 +79,38 @@ def _fetch_pr_state(pr_number: int, timeout: int) -> str | None:
         return str(pr_data.get("state", ""))
     except ValueError:
         return None
+
+
+def fetch_pr_view(
+    pr_ref: str, *, timeout: int = _PR_VIEW_TIMEOUT
+) -> dict[str, Any] | None:
+    """Return the parsed ``gh pr view --json`` response for *pr_ref*, or None.
+
+    *pr_ref* may be a full PR URL (``gh`` infers owner/repo) or a PR number.
+    Fetches the fixed ``_PR_VIEW_FIELDS`` set consumed by ``cw.pr_hydrate``.
+
+    Returns None on ANY failure — non-zero exit, timeout, malformed JSON, or a
+    missing ``gh`` binary — so the best-effort hydration pass never raises.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "pr", "view", pr_ref, "--json", _PR_VIEW_FIELDS],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data: dict[str, Any] = json.loads(result.stdout)
+    except (ValueError, AttributeError):
+        return None
+    return data
 
 
 def _fetch_branch_merged_pr(branch: str, timeout: int) -> tuple[bool | None, bool]:

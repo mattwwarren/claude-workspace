@@ -2499,6 +2499,7 @@ class TestDevQueueTasks:
             "worktree_path",
             "disposition",
             "pr_url",
+            "pr_state",
         }
         assert set(tasks[0].keys()) == expected_fields
 

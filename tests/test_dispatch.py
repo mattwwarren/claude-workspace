@@ -6390,9 +6390,11 @@ class TestRunDispatchLoopHydrationHook:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
         calls: list[object] = []
-        monkeypatch.setattr(
-            "cw.dispatch.hydrate_pr_states", lambda cfg: calls.append(cfg)
-        )
+
+        def _record(cfg: object) -> None:
+            calls.append(cfg)
+
+        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
 
@@ -6406,7 +6408,8 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
 
         def _boom(_cfg: object) -> None:
-            raise RuntimeError("hydration boom")
+            msg = "hydration boom"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _boom)
         # Broad-catch idiom: hydration failure must never crash the tick loop.

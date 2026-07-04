@@ -628,9 +628,7 @@ def _make_pr_view_result(**fields: Any) -> Any:
 
 
 class TestFetchPrView:
-    def test_success_returns_parsed_dict(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_success_returns_parsed_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "cw.gh._sp.run",
             lambda *_a, **_kw: _make_pr_view_result(state="OPEN"),
@@ -658,9 +656,7 @@ class TestFetchPrView:
         assert "--json" in argv
         assert argv[argv.index("--json") + 1] == _PR_VIEW_FIELDS
 
-    def test_nonzero_exit_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_nonzero_exit_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "cw.gh._sp.run",
             lambda *_a, **_kw: _make_run_result(1, ""),
@@ -674,9 +670,7 @@ class TestFetchPrView:
         monkeypatch.setattr("cw.gh._sp.run", _raise)
         assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None
 
-    def test_malformed_json_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_malformed_json_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "cw.gh._sp.run",
             lambda *_a, **_kw: _make_run_result(0, "not json"),
@@ -685,7 +679,8 @@ class TestFetchPrView:
 
     def test_missing_gh_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*_a: object, **_kw: object) -> Any:
-            raise FileNotFoundError("gh")
+            msg = "gh"
+            raise FileNotFoundError(msg)
 
         monkeypatch.setattr("cw.gh._sp.run", _raise)
         assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None
