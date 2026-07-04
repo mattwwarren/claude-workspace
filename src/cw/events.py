@@ -274,6 +274,45 @@ def read_events(
 _FOLLOW_POLL_INTERVAL: float = 0.05  # 50ms — satisfies ≤100ms acceptance criterion
 
 
+def _poll_inbox_growth(last_size: int | None) -> tuple[bool, int]:
+    """Change-detection guard for the inbox-follow polls.
+
+    Compares the current inbox byte size against the bytes-consumed offset from
+    the previous poll (*last_size*) and returns ``(should_read, current_size)``.
+    The caller always adopts the returned size as its new baseline; *should_read*
+    gates the cursor-based ``read_events`` call. This helper never reads or
+    replays — cursor semantics stay entirely in ``read_events``.
+
+    Decision table (append-only inbox -> size is monotonic in production):
+      * first poll (``last_size is None``) -> read
+      * size grew                           -> read
+      * size unchanged                      -> no-op
+      * size shrank (defensive dead branch) -> warn + reset baseline, no read
+
+    The shrink branch is defensive: the inbox is single-file, global, strictly
+    append-only and lock-serialised, never truncated or rotated, so size is
+    monotonic. Resetting the baseline (rather than replaying from 0) avoids the
+    cursor-not-found replay path in ``read_events``.
+    """
+    inbox = _inbox_path()
+    current_size: int = 0
+    if inbox.exists():
+        try:
+            current_size = inbox.stat().st_size
+        except OSError:
+            current_size = 0
+
+    if last_size is not None and current_size < last_size:
+        logger.warning(
+            "inbox size decreased (%d -> %d); resetting change-detection baseline",
+            last_size,
+            current_size,
+        )
+        return False, current_size
+
+    return (last_size is None or current_size != last_size), current_size
+
+
 def _event_matches_wait(
     event: OrchestratorEvent,
     *,
@@ -303,7 +342,8 @@ def wait_for_event(
 
     Reads from the beginning of the inbox so events recorded before the
     call started are also matched.  Polls the inbox every *poll_interval*
-    seconds for new content.
+    seconds, using the shared ``_poll_inbox_growth`` change-detection guard
+    to skip the read when the inbox byte size is unchanged.
 
     In default mode (follow=False) exits after the first match.  With
     follow=True streams all matches until timeout.
@@ -326,16 +366,8 @@ def wait_for_event(
     matched = False
 
     while True:
-        inbox = _inbox_path()
-        current_size: int = 0
-        if inbox.exists():
-            try:
-                current_size = inbox.stat().st_size
-            except OSError:
-                current_size = 0
-
-        if last_size is None or current_size != last_size:
-            last_size = current_size
+        should_read, last_size = _poll_inbox_growth(last_size)
+        if should_read:
             new_events = read_events(
                 since_cursor=last_cursor,
                 event_types=event_types,
@@ -374,10 +406,11 @@ def tail_events_follow(
 ) -> Generator[OrchestratorEvent]:
     """Yield new events as they arrive, polling the inbox for changes.
 
-    Polls ``_inbox_path().stat().st_size`` as a cheap change-detection guard;
-    calls ``read_events`` only when the size changes.  Does not hold the inbox
-    lock during sleep.  Does not advance any consumer cursor — that remains
-    one-shot only.
+    Uses the shared ``_poll_inbox_growth`` guard as a cheap change-detection
+    check over the inbox byte size; calls ``read_events`` only when the size
+    grows.  A size decrease (defensive, append-only inbox) warns and resets the
+    baseline without reading.  Does not hold the inbox lock during sleep.  Does
+    not advance any consumer cursor — that remains one-shot only.
 
     Exits when the caller sends a ``GeneratorExit`` (or raises
     ``KeyboardInterrupt`` / ``BrokenPipeError`` in the iterating loop).
@@ -386,16 +419,8 @@ def tail_events_follow(
     last_size: int | None = None
 
     while True:
-        inbox = _inbox_path()
-        current_size: int = 0
-        if inbox.exists():
-            try:
-                current_size = inbox.stat().st_size
-            except OSError:
-                current_size = 0
-
-        if last_size is None or current_size != last_size:
-            last_size = current_size
+        should_read, last_size = _poll_inbox_growth(last_size)
+        if should_read:
             new_events = read_events(
                 since_cursor=last_cursor,
                 since_ts=since_ts,
