@@ -608,6 +608,21 @@ def load_effective_clients() -> dict[str, ClientConfig]:
     return result
 
 
+def get_effective_client(name: str) -> ClientConfig:
+    """Get a client config with lane-level runtime overrides merged, raising if absent.
+
+    Effective analogue of :func:`get_client`: composes :func:`get_client`'s
+    error contract over :func:`load_effective_clients` so callers that surface
+    lane pause/circuit-breaker state (``cw lane ls``) reflect overrides. See #875.
+    """
+    clients = load_effective_clients()
+    if name not in clients:
+        available = ", ".join(sorted(clients.keys())) or "(none configured)"
+        msg = f"Unknown client '{name}'. Available: {available}"
+        raise CwError(msg)
+    return clients[name]
+
+
 def ensure_config() -> None:
     """Create config directory and example file if missing."""
     config_dir().mkdir(parents=True, exist_ok=True)
