@@ -18,6 +18,7 @@ from cw.config import (
     clients_lock,
     concurrency_override_lock,
     get_client,
+    get_effective_client,
     load_effective_config,
     load_orchestrator_config,
     show_config,
@@ -31,6 +32,10 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
+
+# ``source`` field on LANE_PAUSED / LANE_RESUMED events emitted by an operator
+# via ``cw lane pause/resume`` (vs. the circuit breaker in dispatch). See #875.
+_LANE_PAUSE_SOURCE_OPERATOR = "operator"
 
 
 @main.group("config", invoke_without_command=True, help="Show or manage configuration.")
@@ -174,7 +179,7 @@ def lane() -> None:
 @handle_errors
 def lane_ls(client: str, as_json: bool) -> None:
     """List declared lanes for CLIENT."""
-    client_cfg = get_client(client)
+    client_cfg = get_effective_client(client)
     lanes = client_cfg.effective_lanes
     if as_json:
         click.echo(json.dumps([ln.model_dump() for ln in lanes], indent=2))
@@ -343,7 +348,7 @@ def lane_pause(client: str, name: str) -> None:
 
     record_event(
         OrchestratorEventType.LANE_PAUSED,
-        {"client": client, "lane": name},
+        {"client": client, "lane": name, "source": _LANE_PAUSE_SOURCE_OPERATOR},
     )
     click.echo(f"Lane '{name}' paused for client '{client}'.")
 
@@ -364,12 +369,17 @@ def lane_resume(client: str, name: str) -> None:
     with concurrency_override_lock():
         current = _load_concurrency_overrides()
         lane_override = current.lanes.get(lane_key, LaneConcurrencyOverride())
-        updated_lane = lane_override.model_copy(update={"paused": False})
+        # Resume also clears the circuit-breaker counter: resume is the sole
+        # recovery path for a tripped lane, so a stale count must not re-trip
+        # the breaker on the next spawn error. See GitHub #875.
+        updated_lane = lane_override.model_copy(
+            update={"paused": False, "consecutive_spawn_errors": 0}
+        )
         current.lanes[lane_key] = updated_lane
         _save_concurrency_overrides(current)
 
     record_event(
         OrchestratorEventType.LANE_RESUMED,
-        {"client": client, "lane": name},
+        {"client": client, "lane": name, "source": _LANE_PAUSE_SOURCE_OPERATOR},
     )
     click.echo(f"Lane '{name}' resumed for client '{client}'.")
