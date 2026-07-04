@@ -167,6 +167,9 @@ ignore = [
 # circular dependency. consume_completed_sessions() is a thin wrapper whose
 # deferred body import is the sanctioned mechanism, not a workaround.
 "src/cw/dev_queue.py" = ["PLC0415"]
+# result defers the cli._hook_io import to break the cli <-> result circular
+# dependency; inline import is the sanctioned mechanism, not a workaround.
+"src/cw/result.py" = ["PLC0415"]
 # reconcile defers the dispatch import inside _apply_sentinel_to_task to
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.
