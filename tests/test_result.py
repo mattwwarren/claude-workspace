@@ -135,7 +135,9 @@ class TestResultEmit:
         )
         assert result.exit_code == 1
         # field: message line(s) from _format_errors, plus the no-mutation notice.
-        assert any(": " in line for line in result.output.splitlines())
+        # Field-specific (not just "any colon-containing line") so a regression
+        # that silently drops the real pr/status cross-field error is caught.
+        assert any("pr must be non-null" in line for line in result.output.splitlines())
         assert "No session state was modified." in result.output
 
         sess = next(s for s in load_state().sessions if s.id == "test1234")

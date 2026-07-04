@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+from pydantic import ValidationError
 
 from cw._util import _iter_assistant_text_blocks, claude_project_dir
 from cw.auto_dev_result import AutoDevResult
@@ -367,12 +368,31 @@ def _parse_headless_sentinel(
     ``cwd_value`` derives the wrong Claude project dir. Retry with the session's
     recorded ``worktree_path`` — the directory whose project dir holds the actual
     transcript. Returns ``None`` when neither location yields a parseable sentinel.
+
+    Extracted out of :func:`signal_stop` (rather than inlined) so the #536
+    emit-precedence gate could be added there without pushing the function
+    over its PLR0912 branch-count ceiling.
     """
     csid = claude_session_id if isinstance(claude_session_id, str) else None
     parsed = _parse_sentinel_from_transcript(cwd_value, csid)
     if parsed is None and session.worktree_path is not None:
         parsed = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
     return parsed
+
+
+def _reconstruct_emitted_sentinel(session: Session) -> AutoDevResult | None:
+    """Reconstruct the authoritative sentinel from an emitted ``last_result``.
+
+    ``_has_terminal_sentinel`` only confirms a ``"status"`` key is present —
+    it does not guarantee the dict matches the ``AutoDevResult`` schema (e.g.
+    a stale/foreign shape). Returns ``None`` on a validation failure so the
+    caller falls back to the transcript parse instead of raising out of the
+    Stop hook, which must never block claude from exiting.
+    """
+    try:
+        return AutoDevResult.model_validate(session.last_result)
+    except ValidationError:
+        return None
 
 
 def _handle_headless_no_sentinel(
@@ -629,10 +649,11 @@ def signal_stop() -> None:
         # transcript re-parse entirely. The transcript sentinel is demoted to a
         # forensic fallback: it still runs (and is still authoritative) whenever
         # no emitted result exists, so a worker that never emits is unaffected.
-        emit_terminal = is_headless and _has_terminal_sentinel(session)
-        if emit_terminal:
-            parsed_sentinel = AutoDevResult.model_validate(session.last_result)
-        elif is_headless:
+        emit_terminal = False
+        if is_headless and _has_terminal_sentinel(session):
+            parsed_sentinel = _reconstruct_emitted_sentinel(session)
+            emit_terminal = parsed_sentinel is not None
+        if not emit_terminal and is_headless:
             parsed_sentinel = _parse_headless_sentinel(
                 session, cwd_value, claude_session_id
             )

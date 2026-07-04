@@ -111,9 +111,12 @@ def _detect_phantom_candidates(
             continue
         # Issue #536: a session that already pushed a terminal result via
         # ``cw result emit`` (last_result carries a "status") is authoritative —
-        # never re-salvage or re-crash over it. Mirrors idle.py:151. It is left
-        # ACTIVE for operator resolution; the consume path routes from
-        # last_result, so no completion signal is lost.
+        # never re-salvage or re-crash over it. Mirrors idle.py:151. Left ACTIVE
+        # with no inline completion path (R11(a), accepted non-blocking risk for
+        # Phase 1): consume_completed_sessions is event-driven off
+        # SESSION_COMPLETED, which a crashed session never emits, so this is a
+        # genuine gap in automated recovery, not a covered case — operator
+        # resolution is required until a compensating signal exists.
         if _has_terminal_sentinel(session):
             continue
         ticket_id = ticket_id_for_session(session.name)
