@@ -6,6 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-07-04
+
+**Observability sprint Wave 0**: worker-context correctness (the RFC 0007 W4
+data-integrity floor), the per-lane circuit breaker, and defense-in-depth
+against worker escapes onto the operator's main checkout.
+
+### Added
+
+- **Per-lane circuit breaker on consecutive spawn errors** (#875, #969): a
+  lane that accumulates consecutive `spawn_error`s pauses instead of grinding
+  a ticket to the attempt cap. Manual `cw lane resume` resets the
+  consecutive-error counter (operator decision: resuming asserts the
+  underlying problem is fixed). No auto-resume.
+- **Main-checkout escape defenses** (#940, #972): new `cw guard-cwd`
+  subcommand wired as a `PreToolUse` hook that blocks worker Bash calls whose
+  cwd resolves to the client `workspace_path`; `resume_session` respawn guard
+  (DAEMON-origin with no worktree hard-fails; USER worktree-purpose sessions
+  get `check_not_main_checkout`); new `main_drift` reconcile sweep emitting
+  `session.needs_attention` per tick while a live session's client checkout
+  is dirty/ahead with the session homed elsewhere; freshness-gate divergence
+  message now gives inspect-first advice instead of `pull --rebase`.
+- **`cw event record session.needs_attention`** (#952, #965): the attention
+  event type workers are instructed to emit on comments-fetch failure is now
+  accepted by the record CLI.
+
+### Fixed
+
+- **Workers no longer plan against stale ticket context** (#952, #965): the
+  plan stage live-fetches issue comments on every invocation (including
+  re-dispatch rounds) and pins the resolutions-marker grep to that live fetch;
+  intake's single-ticket fetch now requests comments explicitly. Root cause of
+  the #949 three-round resolution-blindness incident; RFC 0007 W4's original
+  suspect corrected in the RFC.
+- **Empty ambiguity items can no longer park a ticket with nothing to answer**
+  (#953, #966): strict model-layer rejection of question-less ambiguity items
+  (the future `cw result emit` in-turn error), with the parse boundary
+  filtering empty items and coercing all-empty arrays to a labeled synthetic
+  placeholder that parks visibly. Contract invariant A6; no schema bump.
+- **Event-follow staleness guard deduplicated and hardened** (#954, #971):
+  `tail_events_follow` and `wait_for_event` share one offset-tracking guard;
+  the unreachable size-decrease case logs and continues instead of silently
+  misbehaving. Delivery contract unchanged.
+
 ## [1.9.1] — 2026-07-03
 
 ### Fixed
