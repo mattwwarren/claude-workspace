@@ -34,7 +34,12 @@ from cw.spawn import (
     _write_hook_context,
 )
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import check_not_main_checkout, create_worktree, remove_worktree
+from cw.worktree import (
+    _git_dir,
+    check_not_main_checkout,
+    create_worktree,
+    remove_worktree,
+)
 
 # Purposes that receive worktree cwd (impl works on the feature branch,
 # idea brainstorms within it; debt stays on the main workspace).
@@ -185,10 +190,9 @@ def start_session(
         return
 
     # Determine cwd: worktree-eligible purposes use worktree_path when available.
+    is_worktree_homed = bool(worktree_path) and purpose in WORKTREE_PURPOSES
     session_cwd: Path = (
-        worktree_path
-        if (worktree_path and purpose in WORKTREE_PURPOSES)
-        else client.workspace_path
+        worktree_path if worktree_path and is_worktree_homed else client.workspace_path
     )
 
     # Build the new session object.
@@ -199,13 +203,24 @@ def start_session(
         workspace_path=client.workspace_path,
         origin=SessionOrigin.USER,
     )
-    if worktree_path and purpose in WORKTREE_PURPOSES:
+    if is_worktree_homed:
         session.worktree_path = worktree_path
         session.branch = worktree_branch
 
     # Write Stop hook + correlation context before spawning. Raises
     # HookContextConflictError if a USER-origin worktree already has
     # settings.local.json (gate-behind-worktree strategy from #165).
+    #
+    # workspace_path (below) is set only when this session is genuinely
+    # worktree-homed (is_worktree_homed, same condition as session_cwd above)
+    # — cw guard-cwd (#940 R5) blocks a Bash call when cwd resolves to
+    # workspace_path, so setting it for a legitimately main-homed session
+    # (debt/explore, or impl/idea without a worktree) would wedge every one
+    # of that session's Bash calls. For a worktree-mode client,
+    # `client.workspace_path` was already rebound to the new worktree path
+    # above (_resolve_start_worktree), so it can't be used here — `_git_dir`
+    # (the same helper `check_not_main_checkout` uses) resolves the real
+    # main checkout regardless.
     _write_hook_context(
         session_cwd,
         session_id=session.id,
@@ -214,6 +229,7 @@ def start_session(
         purpose=purpose,
         ticket_id=None,
         origin=SessionOrigin.USER,
+        workspace_path=_git_dir(client) if is_worktree_homed else None,
     )
 
     # Build per-purpose system prompt for the session.
@@ -346,6 +362,39 @@ def background_all_sessions(
             click.echo(f"Warning: could not background {session.name}: {exc}")
 
 
+def _resolve_resume_cwd(session: Session, client: ClientConfig) -> Path:
+    """Resolve the respawn cwd for a dead resume surface, guarding #940.
+
+    Implements the R2 decision table so a re-spawned worker never lands on the
+    operator's main checkout (the #925/#766 isolation breach):
+
+    - (i)  DAEMON-origin with ``worktree_path is None`` — corrupted state; raise
+           rather than silently respawn into the main checkout.
+    - (ii) USER-origin with a worktree-homed purpose AND a set ``worktree_path``
+           — verify that worktree does not degenerately resolve to the main
+           checkout (the #300 shape) before respawn. A USER worktree purpose with
+           ``worktree_path is None`` (e.g. an ``impl`` session started on a
+           non-worktree client) is legitimately main-homed and needs no guard.
+    - (iii) USER-origin with a non-worktree purpose (``debt`` etc.) — legitimately
+            main-homed; no guard.
+    """
+    if session.origin is SessionOrigin.DAEMON and session.worktree_path is None:
+        msg = (
+            f"Refusing to resume DAEMON session {session.name}: worktree_path is"
+            " unset (corrupted state). A daemon worker must never respawn into"
+            " the operator main checkout."
+        )
+        raise CwError(msg)
+    session_cwd: Path = session.worktree_path or session.workspace_path
+    if (
+        session.origin is SessionOrigin.USER
+        and session.worktree_path is not None
+        and session.purpose in WORKTREE_PURPOSES
+    ):
+        check_not_main_checkout(session_cwd, client)
+    return session_cwd
+
+
 def resume_session(
     session_name: str,
     *,
@@ -413,8 +462,9 @@ def resume_session(
         _attach_session(surface)
     else:
         # Dead or missing surface: spawn a new daemon session using --resume
-        # to re-enter the Claude transcript.
-        session_cwd: Path = session.worktree_path or session.workspace_path
+        # to re-enter the Claude transcript. Guard the respawn cwd (#940) so a
+        # worktree worker never re-lands on the operator main checkout.
+        session_cwd = _resolve_resume_cwd(session, client)
 
         extra_args: list[str] = []
         if session.claude_session_id:

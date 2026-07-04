@@ -145,6 +145,11 @@ _STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
 # session times out with commits pushed but no PR (GitHub #812). The worktree is
 # preserved; rescue_finalize_blocked_sessions opens the PR on the next tick.
 _FINALIZE_BLOCKED_REASON = "finalize_blocked"
+# Paused-status written to SESSION_NEEDS_ATTENTION events by the main_drift sweep
+# when a live worktree worker's OWN worktree is elsewhere but the operator main
+# checkout is dirty or ahead/diverged from origin — the #925/#940 isolation
+# breach (a worker escaped its worktree and committed on the main checkout).
+_MAIN_CHECKOUT_DRIFT_REASON = "main_checkout_drift"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"

@@ -546,9 +546,12 @@ def _emit_stale_skip(
                 elif freshness_detail == FRESHNESS_MAIN_DIVERGED:
                     emit(
                         f"WARN {client.name}/{payload['ticket_id']}:"
-                        " main has diverged from origin (ahead or diverged),"
-                        " ticket skipped — reconcile with: git -C"
-                        f" {client.workspace_path} pull --rebase"
+                        " main has diverged from origin, ticket skipped"
+                        " — inspect before touching it: git -C"
+                        f" {client.workspace_path} log origin/"
+                        f"{client.default_branch}..HEAD --oneline —"
+                        " do NOT auto-rebase or reset; stray commits"
+                        " may need manual triage"
                     )
                 else:
                     emit(

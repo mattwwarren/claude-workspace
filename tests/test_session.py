@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.config import load_state, save_state
-from cw.exceptions import CwError, SpawnUnregisteredError
+from cw.exceptions import CwError, SpawnUnregisteredError, WorktreeError
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -19,6 +19,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.session import (
+    _resolve_resume_cwd,
     background_all_sessions,
     background_session,
     done_session,
@@ -184,6 +185,73 @@ class TestStartSession:
         assert hook_calls[0]["client"] == "test-client"
         assert hook_calls[0]["purpose"] == "impl"
         assert hook_calls[0]["origin"] == SessionOrigin.USER
+
+    def test_start_debt_purpose_hook_context_omits_workspace_path(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#940 invariant: a non-worktree (debt) start never sets workspace_path
+        in the hook context, so ``cw guard-cwd`` no-ops instead of blocking every
+        Bash call on a legitimately main-homed interactive session (R2 case iii /
+        Plan Soundness Advisory). See
+        test_start_worktree_impl_hook_context_sets_workspace_path for the
+        contrasting worktree-homed case, where workspace_path IS set."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        hook_calls: list[dict[str, object]] = []
+
+        def capture_hook(path: object, **kwargs: object) -> None:
+            hook_calls.append({"path": path, **kwargs})
+
+        monkeypatch.setattr("cw.session._write_hook_context", capture_hook)
+
+        start_session("test-client", "debt", native_daemon=mock_native_daemon)
+
+        assert len(hook_calls) == 1
+        # workspace_path absent (defaults to None) → guard-cwd fallback no-ops.
+        assert hook_calls[0].get("workspace_path") is None
+
+    def test_start_worktree_impl_hook_context_sets_workspace_path(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#940 R5 coverage: an ``impl`` start that IS worktree-homed (cwd ==
+        worktree_path, distinct from the main checkout) must set workspace_path
+        to the main checkout, so ``cw guard-cwd`` actually protects it — the
+        contrasting case to the debt/non-worktree no-op above. Prior to the
+        #940 fix, workspace_path was omitted unconditionally regardless of
+        purpose, silently disabling the guard for every USER-origin session."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        worktree_dir = sample_client.workspace_path.parent / "wt-impl"
+        worktree_dir.mkdir()
+        monkeypatch.setattr(
+            "cw.session.create_worktree",
+            lambda _client, _branch: worktree_dir,
+        )
+
+        hook_calls: list[dict[str, object]] = []
+
+        def capture_hook(path: object, **kwargs: object) -> None:
+            hook_calls.append({"path": path, **kwargs})
+
+        monkeypatch.setattr("cw.session._write_hook_context", capture_hook)
+
+        start_session(
+            "test-client", "impl", worktree="feat/x", native_daemon=mock_native_daemon
+        )
+
+        assert len(hook_calls) == 1
+        assert hook_calls[0]["path"] == worktree_dir
+        assert hook_calls[0].get("workspace_path") == sample_client.workspace_path
 
     def test_existing_backgrounded_triggers_resume(
         self,
@@ -735,6 +803,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440000",
                 )
@@ -772,6 +841,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440000",
                 )
@@ -921,6 +991,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440001",
                 )
@@ -1015,6 +1086,7 @@ class TestResumeSession:
                     origin=SessionOrigin.DAEMON,
                     status=SessionStatus.BACKGROUNDED,
                     workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
                     # Dead surface — not in mock's live set — forces re-spawn.
                     surface_ref="deadbeef",
                     claude_session_id="550e8400-e29b-41d4-a716-446655440099",
@@ -1926,3 +1998,142 @@ class TestStartSessionIsolationGuard:
 
         with pytest.raises(WorktreeError, match="main checkout"):
             start_session("wt-client", "impl", native_daemon=mock_native_daemon)
+
+
+# ---------------------------------------------------------------------------
+# TestResolveResumeCwd — R2 respawn-cwd guard (#940)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveResumeCwd:
+    """_resolve_resume_cwd enforces the R2 decision table before respawn (#940)."""
+
+    def _client(self, tmp_path: Path) -> ClientConfig:
+        workspace = tmp_path / "main-checkout"
+        workspace.mkdir(parents=True, exist_ok=True)
+        return ClientConfig(
+            name="test-client",
+            workspace_path=workspace,
+            default_branch="main",
+        )
+
+    def _session(
+        self,
+        *,
+        origin: SessionOrigin,
+        purpose: SessionPurpose,
+        workspace_path: Path,
+        worktree_path: Path | None,
+    ) -> Session:
+        return Session(
+            id="sess940a",
+            name=f"test-client/{purpose.value}",
+            client="test-client",
+            purpose=purpose,
+            origin=origin,
+            status=SessionStatus.BACKGROUNDED,
+            workspace_path=workspace_path,
+            worktree_path=worktree_path,
+        )
+
+    def test_daemon_origin_worktree_none_raises(self, tmp_path: Path) -> None:
+        """(i) DAEMON-origin with worktree_path=None is corrupted → CwError."""
+        client = self._client(tmp_path)
+        session = self._session(
+            origin=SessionOrigin.DAEMON,
+            purpose=SessionPurpose.IMPL,
+            workspace_path=client.workspace_path,
+            worktree_path=None,
+        )
+        with pytest.raises(CwError, match="worktree_path"):
+            _resolve_resume_cwd(session, client)
+
+    def test_user_worktree_purpose_cwd_is_main_raises(self, tmp_path: Path) -> None:
+        """(ii) USER-origin impl whose cwd resolves to main → WorktreeError."""
+        client = self._client(tmp_path)
+        session = self._session(
+            origin=SessionOrigin.USER,
+            purpose=SessionPurpose.IMPL,
+            workspace_path=client.workspace_path,
+            # Degenerate: worktree_path points at the main checkout itself.
+            worktree_path=client.workspace_path,
+        )
+        with pytest.raises(WorktreeError, match="main checkout"):
+            _resolve_resume_cwd(session, client)
+
+    def test_user_worktree_purpose_distinct_worktree_proceeds(
+        self, tmp_path: Path
+    ) -> None:
+        """(ii) USER-origin impl with a distinct worktree → returns that path."""
+        client = self._client(tmp_path)
+        wt = tmp_path / "wt-impl"
+        wt.mkdir()
+        session = self._session(
+            origin=SessionOrigin.USER,
+            purpose=SessionPurpose.IMPL,
+            workspace_path=client.workspace_path,
+            worktree_path=wt,
+        )
+        assert _resolve_resume_cwd(session, client) == wt
+
+    def test_user_non_worktree_purpose_main_cwd_unguarded(self, tmp_path: Path) -> None:
+        """(iii) USER-origin debt is legitimately main-homed → no guard."""
+        client = self._client(tmp_path)
+        session = self._session(
+            origin=SessionOrigin.USER,
+            purpose=SessionPurpose.DEBT,
+            workspace_path=client.workspace_path,
+            worktree_path=None,
+        )
+        assert _resolve_resume_cwd(session, client) == client.workspace_path
+
+    def test_daemon_origin_worktree_set_proceeds(self, tmp_path: Path) -> None:
+        """DAEMON-origin with a worktree set → returns worktree, no guard/raise."""
+        client = self._client(tmp_path)
+        wt = tmp_path / "wt-daemon"
+        wt.mkdir()
+        session = self._session(
+            origin=SessionOrigin.DAEMON,
+            purpose=SessionPurpose.IMPL,
+            workspace_path=client.workspace_path,
+            worktree_path=wt,
+        )
+        assert _resolve_resume_cwd(session, client) == wt
+
+    def test_daemon_worktree_none_blocks_spawn_via_resume_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """resume_session on a corrupted DAEMON session raises before spawn_bg."""
+        workspace = tmp_path / "main-checkout"
+        workspace.mkdir(parents=True, exist_ok=True)
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n  test-client:\n    workspace_path: {workspace}\n"
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="sess940b",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=workspace,
+                    worktree_path=None,
+                    surface_ref="deadbeef",  # not live → dead-surface respawn path
+                )
+            ]
+        )
+        save_state(state)
+
+        with pytest.raises(CwError, match="worktree_path"):
+            resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_calls == []

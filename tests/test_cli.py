@@ -549,8 +549,10 @@ class TestSignalStop:
         """Direct-call the underlying callback with stdin raising OSError.
 
         CliRunner.invoke installs its own sys.stdin wrapper that out-races a
-        patch on ``cw.cli.sessions.sys.stdin``, so this case is exercised by calling
-        the command's callback directly with a fake stdin instead.
+        patch on ``cw.cli._hook_io.sys.stdin``, so this case is exercised by
+        calling the command's callback directly with a fake stdin instead.
+        The actual stdin read lives in ``cw.cli._hook_io`` (shared with the
+        ``guard-cwd`` PreToolUse hook, #940), not in ``cw.cli.sessions``.
         """
 
         class _RaisingStdin:
@@ -560,7 +562,7 @@ class TestSignalStop:
 
         callback = main.commands["signal-stop"].callback
         assert callable(callback)
-        with patch("cw.cli.sessions.sys.stdin", _RaisingStdin()):
+        with patch("cw.cli._hook_io.sys.stdin", _RaisingStdin()):
             callback()
 
     def test_stops_native_bg_session_on_daemon_origin(

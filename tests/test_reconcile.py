@@ -43,6 +43,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     _DIRTY_WORKTREE_REASON,
+    _MAIN_CHECKOUT_DRIFT_REASON,
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_SKIP_REASON,
@@ -56,6 +57,7 @@ from cw.reconcile import (
     _apply_sentinel_to_task,
     _claude_agents_json,
     _detect_local_harvest_candidates,
+    _detect_main_drift_candidates,
     _has_terminal_sentinel,
     _verify_supervisor_session_id,
     complete_timed_out_merged_tasks,
@@ -18164,3 +18166,235 @@ def test_park_terminal_sibling_tasks_failed_not_terminal(
         if t.ticket_id == "TSB-FAIL" and t.status == QueueItemStatus.PENDING
     )
     assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# main-checkout drift detection — #940 (worktree worker escaped to main)
+# ---------------------------------------------------------------------------
+
+
+def _mk_live_drift_session(sid: str, wt_path: Path) -> Session:
+    """DAEMON+IMPL session with worktree set and a LIVE surface (survives reap)."""
+    sess = _mk_daemon_session_with_worktree(sid, SessionStatus.ACTIVE, wt_path)
+    sess.surface_ref = "live0001"
+    return sess
+
+
+def _prime_drift_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    dirty: bool,
+    ff_safety: str,
+) -> None:
+    """Wire load_clients, the two git probes, config, and a live daemon roster."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr(
+        "cw.reconcile.core.load_clients",
+        lambda: {
+            "client-a": ClientConfig(
+                name="client-a", workspace_path=tmp_path / "main-checkout"
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.main_drift.is_main_checkout_dirty", lambda _c: dirty
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.main_drift.check_main_ff_safety", lambda _c: ff_safety
+    )
+    # Live roster: session surface_ref "live0001" stays ACTIVE (not phantom).
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live0001"}],
+    )
+
+
+def _read_drift_events(consumer: str) -> list[Any]:
+    """SESSION_NEEDS_ATTENTION events carrying the main-checkout-drift reason.
+
+    Filters on paused_status so an unrelated watchdog attention event (e.g. the
+    idle sweep firing on the same long-lived session) is never miscounted.
+    """
+    return [
+        e
+        for e in read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        if e.payload.get("paused_status") == _MAIN_CHECKOUT_DRIFT_REASON
+    ]
+
+
+def test_main_drift_dirty_main_emits_attention(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dirty main checkout + worktree elsewhere → 1 SESSION_NEEDS_ATTENTION."""
+    wt = tmp_path / "wt-dirty"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-dirty", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+
+    reconcile()
+
+    events = _read_drift_events("test-drift-dirty")
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["paused_status"] == _MAIN_CHECKOUT_DRIFT_REASON
+    assert payload["client"] == "client-a"
+    assert payload["crashed"] is False
+    assert "dirty" in payload["breadcrumbs"]
+    assert str(wt) in payload["breadcrumbs"]
+
+
+def test_main_drift_ahead_emits_attention(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """check_main_ff_safety == 'ahead' → SESSION_NEEDS_ATTENTION with 'ahead'."""
+    wt = tmp_path / "wt-ahead"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-ahead", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=False, ff_safety="ahead")
+
+    reconcile()
+
+    events = _read_drift_events("test-drift-ahead")
+    assert len(events) == 1
+    assert "ahead of origin" in events[0].payload["breadcrumbs"]
+
+
+def test_main_drift_diverged_emits_attention(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """check_main_ff_safety == 'diverged' → SESSION_NEEDS_ATTENTION with 'diverged'."""
+    wt = tmp_path / "wt-diverged"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-div", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=False, ff_safety="diverged")
+
+    reconcile()
+
+    events = _read_drift_events("test-drift-diverged")
+    assert len(events) == 1
+    assert "diverged from origin" in events[0].payload["breadcrumbs"]
+
+
+def test_main_drift_clean_main_no_event(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clean main (not dirty, ff='equal') → no drift event."""
+    wt = tmp_path / "wt-clean"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-clean", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=False, ff_safety="equal")
+
+    reconcile()
+
+    assert _read_drift_events("test-drift-clean") == []
+
+
+def test_main_drift_detached_ignored(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ff='detached' is the known adjacent bug (out of scope) → no drift event."""
+    wt = tmp_path / "wt-detached"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-det", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=False, ff_safety="detached")
+
+    reconcile()
+
+    assert _read_drift_events("test-drift-detached") == []
+
+
+def test_main_drift_refires_each_tick(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-session state check re-fires while drift holds — two ticks → two events."""
+    wt = tmp_path / "wt-refire"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-refire", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+
+    reconcile()
+    reconcile()
+
+    assert len(_read_drift_events("test-drift-refire")) == 2
+
+
+def test_main_drift_non_daemon_session_skipped(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A USER-origin session is not a worktree worker → no drift sweep event."""
+    wt = tmp_path / "wt-user"
+    sess = _mk_live_drift_session("drift-user", wt)
+    sess.origin = SessionOrigin.USER
+    save_state(CwState(sessions=[sess]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+
+    reconcile()
+
+    assert _read_drift_events("test-drift-user") == []
+
+
+def test_detect_main_drift_skips_worktree_none() -> None:
+    """_detect_main_drift_candidates skips a session with worktree_path=None."""
+    sess = _mk_daemon_session_with_worktree(
+        "no-wt", SessionStatus.ACTIVE, Path("/tmp/x")
+    )
+    sess.worktree_path = None
+    clients = {
+        "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
+    }
+    assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
+
+
+def test_detect_main_drift_skips_backgrounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_detect_main_drift_candidates skips a non-live (BACKGROUNDED) session."""
+    monkeypatch.setattr(
+        "cw.reconcile.main_drift.is_main_checkout_dirty", lambda _c: True
+    )
+    sess = _mk_daemon_session_with_worktree(
+        "bg", SessionStatus.BACKGROUNDED, Path("/tmp/wt-bg")
+    )
+    clients = {
+        "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
+    }
+    assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
+
+
+def test_detect_main_drift_skips_unknown_client() -> None:
+    """A session whose client is absent from the clients dict is skipped."""
+    sess = _mk_daemon_session_with_worktree(
+        "orphan", SessionStatus.ACTIVE, Path("/tmp/wt-orphan")
+    )
+    assert _detect_main_drift_candidates(CwState(sessions=[sess]), {}) == []
+
+
+def test_detect_main_drift_swallows_git_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A git error during classification is treated as no-drift (fail-safe)."""
+
+    def _boom(_c: object) -> bool:
+        msg = "git blew up"
+        raise WorktreeError(msg)
+
+    monkeypatch.setattr("cw.reconcile.main_drift.is_main_checkout_dirty", _boom)
+    sess = _mk_daemon_session_with_worktree(
+        "err", SessionStatus.ACTIVE, Path("/tmp/wt-err")
+    )
+    clients = {
+        "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
+    }
+    assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []

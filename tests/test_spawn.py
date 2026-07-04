@@ -719,6 +719,28 @@ class TestValidateWorktree:
         assert daemon.spawn_calls == []
 
 
+class TestHookSettingsTemplate:
+    """The settings.local.json template wires both hooks (#940 R5 + #147)."""
+
+    def test_template_has_pretooluse_guard_and_preserves_stop(self) -> None:
+        """PreToolUse/Bash/cw guard-cwd is present; Stop/cw signal-stop preserved."""
+        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+
+        hooks = _HOOK_SETTINGS_TEMPLATE["hooks"]
+
+        stop_entries = hooks["Stop"]
+        assert any(
+            entry["hooks"][0]["command"] == "cw signal-stop" for entry in stop_entries
+        )
+
+        pretooluse_entries = hooks["PreToolUse"]
+        assert any(
+            entry.get("matcher") == "Bash"
+            and entry["hooks"][0]["command"] == "cw guard-cwd"
+            for entry in pretooluse_entries
+        )
+
+
 class TestHookContextInjection:
     """Tests for the Stop-hook + cw-context file injection (issue #147)."""
 

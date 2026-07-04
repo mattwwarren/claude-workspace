@@ -8,9 +8,7 @@ deprecation shim, and ``completion``.
 from __future__ import annotations
 
 import importlib.resources
-import json
 import logging
-import sys
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +25,7 @@ from cw.cli._base import (
     handle_errors,
     main,
 )
+from cw.cli._hook_io import _read_cw_context, _read_hook_stdin_json
 from cw.cli._sentinels import _parse_sentinel_from_transcript
 from cw.config import (
     load_clients,
@@ -321,17 +320,10 @@ def _read_stop_hook_payload() -> tuple[dict[str, object], str] | None:
     string ``cwd``, else ``None``. Best-effort: every failure mode (unreadable
     stdin, empty body, malformed JSON, missing cwd) is a silent no-op.
     """
-    try:
-        stdin_text = sys.stdin.read()
-    except (OSError, ValueError):
+    hook_payload = _read_hook_stdin_json()
+    if hook_payload is None:
         return None
-    if not stdin_text:
-        return None
-    try:
-        hook_payload = json.loads(stdin_text)
-    except json.JSONDecodeError:
-        return None
-    cwd_value = hook_payload.get("cwd") if isinstance(hook_payload, dict) else None
+    cwd_value = hook_payload.get("cwd")
     if not isinstance(cwd_value, str):
         return None
     return hook_payload, cwd_value
@@ -351,14 +343,8 @@ def _resolve_signal_stop_context() -> (
         return None
     hook_payload, cwd_value = payload
 
-    context_path = Path(cwd_value) / ".claude" / "cw-context.json"
-    if not context_path.is_file():
-        return None
-    try:
-        context = json.loads(context_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(context, dict):
+    context = _read_cw_context(cwd_value)
+    if context is None:
         return None
 
     cw_session_id = context.get("session_id")
