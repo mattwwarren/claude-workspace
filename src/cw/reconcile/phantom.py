@@ -39,6 +39,7 @@ from cw.reconcile._shared import (
     _apply_queue_mutations,
     _apply_salvaged_completion,
     _apply_sentinel_to_task,
+    _has_terminal_sentinel,
     _parse_any_sentinel_from_transcript,
     _queue_status_for_salvaged,
     resolve_reap_policy,
@@ -107,6 +108,13 @@ def _detect_phantom_candidates(
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
         if session.id not in phantom_set:
+            continue
+        # Issue #536: a session that already pushed a terminal result via
+        # ``cw result emit`` (last_result carries a "status") is authoritative —
+        # never re-salvage or re-crash over it. Mirrors idle.py:151. It is left
+        # ACTIVE for operator resolution; the consume path routes from
+        # last_result, so no completion signal is lost.
+        if _has_terminal_sentinel(session):
             continue
         ticket_id = ticket_id_for_session(session.name)
         task = _task_by_ticket.get(ticket_id) if ticket_id else None
