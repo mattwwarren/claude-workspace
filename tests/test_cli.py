@@ -40,6 +40,7 @@ from cw.models import (
     TaskSpec,
     TicketTask,
 )
+from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -1638,6 +1639,86 @@ class TestSignalStop:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.COMPLETED
+
+    def test_signal_stop_prefers_emitted_result_over_transcript(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#536: a prior ``cw result emit`` wins over the transcript re-parse.
+
+        When the session already carries a terminal ``last_result`` (an emitted
+        AutoDevResult), the Stop hook must NOT re-parse the transcript nor
+        overwrite the emit-time value. The session still completes and routes
+        its RUNNING task from the emitted result (inline #251 routing intact).
+        """
+        import datetime as dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-536-emit", "worktree-536-emit"
+        )
+        # Simulate a prior `cw result emit`: a terminal shipped result is
+        # already persisted on the session before the Stop hook fires.
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.last_result = _valid_payload()
+        save_state(state)
+
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        # No transcript is written: the emit-precedence gate must short-circuit
+        # the transcript parse entirely and reconstruct from last_result.
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": "uuid-536-emit",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        # Emit-time value preserved — NOT overwritten by a transcript re-parse.
+        assert updated.last_result is not None
+        assert updated.last_result["status"] == "shipped"
+
+        # Stop remains the completion-event source.
+        events = read_events(
+            consumer="test-536-emit",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(e.payload.get("session_id") == session.id for e in events)
+
+        # Inline #251 routing fired from the emit-time value: the RUNNING task
+        # advanced off RUNNING (shipped → stage advance / complete).
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status != QueueItemStatus.RUNNING
 
     def test_signal_stop_premises_pending_v2_marks_task_blocked_on_user(
         self,
