@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from cw.gh import (
     branch_exists_on_origin,
     fetch_approved_plan_comment,
+    fetch_pr_view,
     pr_exists_for_branch,
     pr_is_merged_for_ticket,
 )
@@ -602,3 +603,89 @@ class TestFetchApprovedPlanComment:
         fetch_approved_plan_comment("42")
         assert len(captured) == 1
         assert "42" in captured[0]
+
+
+_PR_VIEW_FIELDS = (
+    "state,mergeable,mergeStateStatus,statusCheckRollup,"
+    "reviewDecision,isDraft,reviewRequests"
+)
+
+
+def _make_pr_view_result(**fields: Any) -> Any:
+    """Build a gh pr view --json result with permissive defaults (superset of
+    _make_pr_result — do NOT overload the narrow single-field helper)."""
+    payload: dict[str, Any] = {
+        "state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "statusCheckRollup": [],
+        "reviewDecision": "",
+        "isDraft": False,
+        "reviewRequests": [],
+    }
+    payload.update(fields)
+    return _make_run_result(0, json.dumps(payload))
+
+
+class TestFetchPrView:
+    def test_success_returns_parsed_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_pr_view_result(state="OPEN"),
+        )
+        result = fetch_pr_view("https://github.com/acme/widgets/pull/42")
+        assert result is not None
+        assert result["state"] == "OPEN"
+        assert result["mergeStateStatus"] == "CLEAN"
+
+    def test_argv_carries_exact_field_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            captured.append(list(args))
+            return _make_pr_view_result()
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        fetch_pr_view("https://github.com/acme/widgets/pull/42")
+        assert len(captured) == 1
+        argv = captured[0]
+        assert argv[:3] == ["gh", "pr", "view"]
+        assert argv[3] == "https://github.com/acme/widgets/pull/42"
+        assert "--json" in argv
+        assert argv[argv.index("--json") + 1] == _PR_VIEW_FIELDS
+
+    def test_nonzero_exit_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(1, ""),
+        )
+        assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise subprocess.TimeoutExpired(cmd="gh", timeout=15)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None
+
+    def test_malformed_json_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, "not json"),
+        )
+        assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None
+
+    def test_missing_gh_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise FileNotFoundError("gh")
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None

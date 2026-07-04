@@ -6676,6 +6676,145 @@ class TestDevQueueStatusWithTick:
         assert "GEN-220" not in result.output
         assert "—" in result.output
 
+    def test_status_shows_needs_attn_aggregate(self, tmp_config_dir: Path) -> None:
+        """dev-queue status prints a per-client NEEDS_ATTN count (#929)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-300",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state="ci_failing"),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-301",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state=None),
+                    ),
+                ]
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "NEEDS_ATTN: 1" in result.output
+
+    def test_status_json_includes_needs_attn(self, tmp_config_dir: Path) -> None:
+        """dev-queue status --json exposes needs_attn per client (#929)."""
+        import json as _json
+
+        from cw.dev_queue import save_dev_queue
+        from cw.events import record_event
+        from cw.models import (
+            DevQueueStore,
+            OrchestratorEventType,
+            PrState,
+            QueueItemStatus,
+            TicketTask,
+        )
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-310",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state="merge_blocked"),
+                    ),
+                ]
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "attn-client",
+                "claimed": 0,
+                "pending": 0,
+                "running": 1,
+                "cap": 2,
+                "skip_reason": "none",
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data["attn-client"]["needs_attn"] == 1
+
+
+class TestDevQueueTasksPrState:
+    """`cw dev-queue tasks` surfaces pr_state fields/column (#929)."""
+
+    def test_tasks_json_includes_pr_state(self, tmp_config_dir: Path) -> None:
+        import json as _json
+
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-400",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(
+                            state="OPEN",
+                            ci_ok=False,
+                            attention_state="ci_failing",
+                        ),
+                    )
+                ]
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data[0]["pr_state"]["attention_state"] == "ci_failing"
+        assert data[0]["pr_state"]["ci_ok"] is False
+
+    def test_tasks_json_pr_state_none(self, tmp_config_dir: Path) -> None:
+        import json as _json
+
+        from cw.dev_queue import add_ticket
+        from cw.models import TicketTask
+
+        add_ticket(TicketTask(ticket_id="GEN-401", client="attn-client"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data[0]["pr_state"] is None
+
+    def test_tasks_human_has_attention_column(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-402",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        pr_state=PrState(attention_state="changes_requested"),
+                    )
+                ]
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "ATTENTION" in result.output
+        assert "changes_requested" in result.output
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueWait (GitHub issue #474)

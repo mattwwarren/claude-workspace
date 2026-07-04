@@ -1847,6 +1847,45 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["disposition"] == "shipped"
         assert migrated["tasks"][0]["pr_url"] == "https://github.com/foo/bar/pull/1"
 
+    def test_v7_to_v8_fills_pr_state_default(self) -> None:
+        """migrate_dev_queue fills pr_state=None on tasks missing the key (v8)."""
+        raw: dict[str, object] = {
+            "schema_version": 7,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-40",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["pr_state"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 8
+
+    def test_v8_pr_state_preserved_idempotently(self) -> None:
+        """Existing pr_state survives a second migration pass (idempotent)."""
+        raw: dict[str, object] = {
+            "schema_version": 8,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-41",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "running",
+                    "pr_state": {
+                        "state": "OPEN",
+                        "ci_ok": True,
+                        "attention_state": "ready_to_approve",
+                        "hydrated_at": "2026-07-04T10:00:00+00:00",
+                    },
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["pr_state"]["state"] == "OPEN"
+
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""
         import json

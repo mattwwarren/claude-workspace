@@ -6376,3 +6376,38 @@ class TestResolveDispatchSkipReasonCircuitPaused:
             client_spawned=0,
         )
         assert reason == DispatchSkipReason.LANE_CIRCUIT_PAUSED
+
+
+class TestRunDispatchLoopHydrationHook:
+    """PR-state hydration hook fires once per loop iteration, fault-tolerant (#929)."""
+
+    def test_hydrate_called_once_per_iteration(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch.hydrate_pr_states", lambda cfg: calls.append(cfg)
+        )
+        run_dispatch_loop(once=True, emit=None)
+        assert len(calls) == 1
+
+    def test_hydrate_exception_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+
+        def _boom(_cfg: object) -> None:
+            raise RuntimeError("hydration boom")
+
+        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _boom)
+        # Broad-catch idiom: hydration failure must never crash the tick loop.
+        run_dispatch_loop(once=True, emit=None)
