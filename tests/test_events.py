@@ -1023,6 +1023,27 @@ def test_cli_event_tail_follow_returns_on_exhausted_stream(
 # ---------------------------------------------------------------------------
 
 
+def test_poll_inbox_growth_stat_oserror_treated_as_size_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stat() OSError on an existing inbox is treated as size 0 (reads)."""
+    from cw.events import _poll_inbox_growth
+
+    class _RaisingPath:
+        def exists(self) -> bool:
+            return True
+
+        def stat(self) -> object:
+            raise OSError
+
+    monkeypatch.setattr("cw.events._inbox_path", _RaisingPath)
+
+    should_read, size = _poll_inbox_growth(None)
+
+    assert size == 0
+    assert should_read is True
+
+
 def test_tail_events_follow_size_decrease_warns_and_continues(
     tmp_events_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1055,14 +1076,13 @@ def test_tail_events_follow_size_decrease_warns_and_continues(
         since_ts=None,
         event_types=None,
     )
-    with caplog.at_level(logging.WARNING, logger="cw.events"), pytest.raises(
-        KeyboardInterrupt
+    with (
+        caplog.at_level(logging.WARNING, logger="cw.events"),
+        pytest.raises(KeyboardInterrupt),
     ):
         list(gen)
 
-    assert any(
-        "inbox size decreased" in record.message for record in caplog.records
-    )
+    assert any("inbox size decreased" in record.message for record in caplog.records)
 
 
 def test_tail_events_follow_absent_inbox_first_poll_reads(
@@ -1132,9 +1152,7 @@ def test_wait_for_event_detects_appended_event_via_shared_guard(
     def sleep_side_effect(*args: object, **kwargs: object) -> None:
         if not appended:
             appended.append(
-                events_record_event(
-                    OrchestratorEventType.SESSION_COMPLETED, {"n": 1}
-                )
+                events_record_event(OrchestratorEventType.SESSION_COMPLETED, {"n": 1})
             )
 
     monkeypatch.setattr("time.sleep", sleep_side_effect)
