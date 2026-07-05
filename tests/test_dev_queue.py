@@ -1862,7 +1862,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 8
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 9
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -1885,6 +1885,45 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"]["state"] == "OPEN"
+
+    def test_migrate_dev_queue_fills_signoff_default(self) -> None:
+        """migrate_dev_queue fills signoff=None on tasks missing the key (v9)."""
+        raw: dict[str, object] = {
+            "schema_version": 8,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-50",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["signoff"] is None
+
+    def test_migrate_dev_queue_bumps_to_v9(self) -> None:
+        """migrate_dev_queue bumps schema_version to 9 regardless of input."""
+        raw: dict[str, object] = {"schema_version": 1, "tasks": []}
+        migrated = migrate_dev_queue(raw)
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 9
+
+    def test_v9_signoff_preserved_idempotently(self) -> None:
+        """Existing signoff value survives a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 9,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-51",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "signoff": "operator",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["signoff"] == "operator"
 
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""
@@ -2343,6 +2382,36 @@ class TestFindTicket:
         result = _find_ticket(loaded, "GEN-583", "genhealth")
         assert result.session_id == "sess-new"
 
+    def test_find_ticket_prefers_awaiting_signoff_over_terminal_duplicate(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF wins over CANCELLED (mirrors BLOCKED_ON_USER).
+
+        See GitHub #990.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        old_ts = datetime(2025, 5, 1, tzinfo=UTC)
+        new_ts = old_ts + timedelta(minutes=30)
+        cancelled = TicketTask(
+            ticket_id="GEN-990",
+            client="genhealth",
+            status=QueueItemStatus.CANCELLED,
+            created_at=old_ts,
+        )
+        signoff_parked = TicketTask(
+            ticket_id="GEN-990",
+            client="genhealth",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            created_at=new_ts,
+        )
+        store = DevQueueStore(tasks=[cancelled, signoff_parked])
+        save_dev_queue(store)
+
+        loaded = load_dev_queue()
+        result = _find_ticket(loaded, "GEN-990", "genhealth")
+        assert result.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+
 
 # ---------------------------------------------------------------------------
 # TestMoveTicket
@@ -2411,6 +2480,25 @@ class TestMoveTicket:
 
         with pytest.raises(LaneMoveError):
             move_ticket("GEN-202", "genhealth", "fast")
+
+    def test_move_ticket_rejects_awaiting_signoff(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF ticket raises LaneMoveError (#990)."""
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneMoveError
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        task = TicketTask(
+            ticket_id="GEN-204",
+            client="genhealth",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            lane="default",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(LaneMoveError):
+            move_ticket("GEN-204", "genhealth", "fast")
 
     def test_move_ticket_undeclared_lane_raises_lane_not_found_error(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -2500,6 +2588,7 @@ class TestDevQueueTasks:
             "disposition",
             "pr_url",
             "pr_state",
+            "signoff",
         }
         assert set(tasks[0].keys()) == expected_fields
 
@@ -2770,6 +2859,196 @@ class TestApproveTicket:
         with pytest.raises(ApproveGateError, match="terminal stage"):
             approve_ticket("GEN-500", "genhealth")
 
+    # -- Operator-signoff gates (RFC 0007 Phase 3, #990) ---------------------
+
+    def test_approve_ticket_returns_awaiting_signoff_false_on_plain_advance(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Ordinary (no-signoff) approval returns awaiting_signoff=False."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-plain-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-plain-1",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is False
+        assert result["to_stage"] == "impl"
+
+    def test_approve_small_signoff_parked_ticket_clears_to_finalize_pending(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF at REVIEW -> approve clears to FINALIZE PENDING.
+
+        No session/last_result validation on this arm -- the signoff gate is
+        purely an operator-authorization state, not an AutoDevResult approval
+        gate (#990).
+        """
+        from cw.dev_queue import approve_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is False
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.FINALIZE
+
+    def test_approve_signoff_parked_at_terminal_stage_completes(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF already at the terminal stage -> COMPLETED.
+
+        Exercises _clear_signoff_gate's terminal-stage branch (mirrors
+        _stage_advance_unchecked's COMPLETED arm) -- this is the second
+        approve in the large-ticket two-approval flow once the stage pointer
+        has already been advanced to the pipeline's last stage.
+        """
+        from cw.dev_queue import approve_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is False
+        assert result["from_stage"] == "finalize"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "signoff_gate"
+
+    def test_approve_large_review_pending_with_signoff_parks(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """review_pending_approval at REVIEW + ticket signoff -> re-routes to
+        AWAITING_OPERATOR_SIGNOFF instead of advancing straight to FINALIZE."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-signoff-1")
+        task.signoff = "operator"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-signoff-1",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is True
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "review"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert t.disposition == "signoff_gate"
+        assert t.stage == Stage.REVIEW
+
+    def test_approve_large_signoff_second_approve_releases_to_pending(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A second `approve` clears the signoff-parked gate to FINALIZE PENDING."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-signoff-2")
+        task.signoff = "operator"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-signoff-2",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        first = approve_ticket("GEN-500", "genhealth")
+        assert first["awaiting_signoff"] is True
+
+        second = approve_ticket("GEN-500", "genhealth")
+
+        assert second["awaiting_signoff"] is False
+        assert second["from_stage"] == "review"
+        assert second["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.FINALIZE
+
+    def test_approve_awaiting_signoff_twice_errors_cleanly(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Approving an already-cleared (now PENDING) ticket raises cleanly."""
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        approve_ticket("GEN-500", "genhealth")  # clears -> PENDING at FINALIZE
+
+        with pytest.raises(
+            ApproveGateError, match="BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF"
+        ):
+            approve_ticket("GEN-500", "genhealth")
+
+    def test_approve_signoff_parked_stage_not_in_pipeline_errors_cleanly(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF ticket whose stage isn't in the client's
+        pipeline raises ApproveGateError, not an unhandled ValueError.
+
+        Mirrors the existing BLOCKED_ON_USER arm's `task.stage not in stages`
+        guard (dev_queue.py ~:795), which _clear_signoff_gate's caller must
+        also apply before calling `_advance_task_pointer` (#990).
+        """
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.HARDEN,  # not in the default pipeline stages
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(ApproveGateError, match="not in pipeline"):
+            approve_ticket("GEN-500", "genhealth")
+
 
 # ---------------------------------------------------------------------------
 # TestRequeueTicket — requeue_ticket() mutation function
@@ -2986,6 +3265,87 @@ class TestRequeueTicket:
         )
         assert result3["regressed"] is False
         assert result3["regress_attempts"] == 0
+
+    # -- AWAITING_OPERATOR_SIGNOFF requeue lever (RFC 0007 Phase 3, #990) ----
+
+    def test_requeue_forward_from_awaiting_signoff_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF ticket can requeue forward without --regress."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-req-1",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", stage_override="finalize")
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.FINALIZE
+        assert t.session_id is None
+
+    def test_requeue_regress_from_awaiting_signoff_to_impl_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--regress moves an AWAITING_OPERATOR_SIGNOFF ticket backward.
+
+        The reject-a-ship lever: an operator can send a signoff-parked ticket
+        back to an earlier stage instead of clearing the gate forward.
+        """
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-req-2",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "impl"
+        assert result["regressed"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.IMPL
+        assert t.regress_attempts == 1
+
+    def test_requeue_from_awaiting_signoff_without_regress_flag_stage_target_forward_ok(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No --stage: re-runs the current stage from AWAITING_OPERATOR_SIGNOFF."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-req-3",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "review"
+        assert result["regressed"] is False
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
 
 
 # ---------------------------------------------------------------------------

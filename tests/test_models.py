@@ -592,8 +592,9 @@ class TestQueueItemStatusBlockedOnUser:
         assert QueueItemStatus.BLOCKED_ON_USER.value == "blocked_on_user"
 
     def test_all_queue_statuses(self) -> None:
-        # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER
-        assert len(QueueItemStatus) == 6
+        # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER,
+        # AWAITING_OPERATOR_SIGNOFF (#990)
+        assert len(QueueItemStatus) == 7
 
     def test_blocked_on_user_not_in_running(self) -> None:
         store = DevQueueStore(
@@ -789,8 +790,8 @@ def test_session_lane_round_trips() -> None:
 class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
-    def test_dev_queue_schema_version_is_8(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 8
+    def test_dev_queue_schema_version_is_9(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 9
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -817,3 +818,57 @@ class TestPrStateAndSchemaV8:
 
     def test_config_pr_hydration_interval_default(self) -> None:
         assert OrchestratorConfig().pr_hydration_interval_seconds == 150
+
+
+class TestOperatorSignoffGates:
+    """RFC 0007 Phase 3 (W3) operator-signoff data model surface (#990)."""
+
+    def test_queue_item_status_has_awaiting_operator_signoff(self) -> None:
+        assert QueueItemStatus.AWAITING_OPERATOR_SIGNOFF == "awaiting_operator_signoff"
+
+    def test_occupied_lane_statuses_includes_signoff(self) -> None:
+        from cw.models import OCCUPIED_LANE_STATUSES
+
+        assert (
+            frozenset(
+                [
+                    QueueItemStatus.RUNNING,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+                ]
+            )
+            == OCCUPIED_LANE_STATUSES
+        )
+
+    def test_ticket_task_signoff_defaults_none(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.signoff is None
+
+    def test_ticket_task_carries_signoff_operator(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme", signoff="operator")
+        assert task.signoff == "operator"
+
+    def test_lane_config_signoff_defaults_none(self) -> None:
+        from cw.models import LaneConfig
+
+        assert LaneConfig(name="default").signoff is None
+
+    def test_lane_config_carries_signoff_operator(self) -> None:
+        from cw.models import LaneConfig
+
+        lane = LaneConfig(name="default", signoff="operator")
+        assert lane.signoff == "operator"
+
+    def test_orchestrator_config_default_signoff_is_none(self) -> None:
+        assert OrchestratorConfig().default_signoff == "none"
+
+    def test_orchestrator_config_accepts_default_signoff_operator(self) -> None:
+        assert OrchestratorConfig(default_signoff="operator").default_signoff == (
+            "operator"
+        )
+
+    def test_orchestrator_config_rejects_invalid_default_signoff(self) -> None:
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            OrchestratorConfig(default_signoff="bogus")  # type: ignore[arg-type]

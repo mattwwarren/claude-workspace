@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pydantic
 import yaml
@@ -42,6 +42,7 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import (
+    SIGNOFF_GATE_DISPOSITION,
     _advance_task_pointer,
     _derive_disposition,
     _extract_pr_url,
@@ -62,6 +63,7 @@ from cw.exceptions import (
 )
 from cw.executor import resolve_executor
 from cw.models import (
+    OCCUPIED_LANE_STATUSES,
     ClientConfig,
     ConcurrencyOverrides,
     DispatchSkipReason,
@@ -262,14 +264,16 @@ def _claim_next_pending(
 def _lane_stats_for_client(
     client: ClientConfig, queue_snapshot: DevQueueStore
 ) -> dict[str, dict[str, int]]:
-    """Per-lane ``{claimed, running, blocked, pending}`` counts for event payloads.
+    """Per-lane ``{claimed, running, blocked, signoff, pending}`` counts for
+    event payloads.
 
     Why task-based running: RUNNING/BLOCKED_ON_USER tasks carry ``lane``;
     sessions carry ``lane`` as of #594, but occupancy counting stays task-join
     based per ADR-0006 / Phase 4a scope (stamped-but-not-read by the
     scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
-    ``running + blocked`` is the total occupied count. ``blocked`` is split out
-    so operators can see at a glance why claimed=0 when pending>0 (#588).
+    ``running + blocked + signoff`` is the total occupied count. ``blocked``
+    and ``signoff`` are split out so operators can see at a glance why
+    claimed=0 when pending>0 (#588, #990).
     """
     stats: dict[str, dict[str, int]] = {}
     for lane_cfg in client.effective_lanes:
@@ -287,6 +291,13 @@ def _lane_stats_for_client(
             and t.lane == lane_cfg.name
             and t.status == QueueItemStatus.BLOCKED_ON_USER
         )
+        signoff = sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client.name
+            and t.lane == lane_cfg.name
+            and t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        )
         pending = sum(
             1
             for t in queue_snapshot.tasks
@@ -298,6 +309,7 @@ def _lane_stats_for_client(
             "claimed": 0,
             "running": running,
             "blocked": blocked,
+            "signoff": signoff,
             "pending": pending,
         }
     return stats
@@ -935,7 +947,8 @@ def _dispatch_client_lanes(
                 config=config,
             )
             continue
-        # running_in_lane = RUNNING + BLOCKED_ON_USER (total occupied slots).
+        # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
+        # (total occupied slots, OCCUPIED_LANE_STATUSES, #990).
         running_in_lane = running_by_lane.get(lane_cfg.name, 0)
         # blocked_in_lane = BLOCKED_ON_USER only (for per-lane breakdown).
         blocked_in_lane = sum(
@@ -944,6 +957,16 @@ def _dispatch_client_lanes(
             if t.client == client.name
             and t.lane == lane_cfg.name
             and t.status == QueueItemStatus.BLOCKED_ON_USER
+        )
+        # signoff_in_lane = AWAITING_OPERATOR_SIGNOFF only (for per-lane
+        # breakdown). Must be subtracted out of running_in_lane below, else a
+        # signoff-parked ticket is misreported as "running" (#990).
+        signoff_in_lane = sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client.name
+            and t.lane == lane_cfg.name
+            and t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
         )
         pending_in_lane = sum(
             1
@@ -1004,8 +1027,9 @@ def _dispatch_client_lanes(
 
         lane_stats[lane_cfg.name] = {
             "claimed": lane_claimed,
-            "running": running_in_lane - blocked_in_lane,
+            "running": running_in_lane - blocked_in_lane - signoff_in_lane,
             "blocked": blocked_in_lane,
+            "signoff": signoff_in_lane,
             "pending": pending_in_lane,
         }
 
@@ -1323,18 +1347,17 @@ def dispatch_tick(
         cap_full = running_count >= client_ceiling
 
         # Build per-lane running count from tasks→sessions join.
-        # Tasks in RUNNING or BLOCKED_ON_USER with an active session_id count
-        # toward their lane's cap (ADR-0006: BLOCKED_ON_USER occupies the slot).
+        # Tasks in RUNNING, BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF with
+        # an active session_id count toward their lane's cap (ADR-0006:
+        # BLOCKED_ON_USER occupies the slot; #990 extends this to a
+        # signoff-parked ticket, which is likewise not eligible for re-dispatch).
         # Reuses the queue_snapshot taken above — nothing between the two
         # points mutates the queue (auto-ff is git-only).
         running_by_lane: dict[str, int] = {}
         for qt in queue_snapshot.tasks:
             if qt.client != client.name:
                 continue
-            if qt.status not in (
-                QueueItemStatus.RUNNING,
-                QueueItemStatus.BLOCKED_ON_USER,
-            ):
+            if qt.status not in OCCUPIED_LANE_STATUSES:
                 continue
             lane_key = qt.lane
             running_by_lane[lane_key] = running_by_lane.get(lane_key, 0) + 1
@@ -1431,6 +1454,51 @@ def _resolve_scope_tier(
     return task.scope_hint
 
 
+def resolve_signoff(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> Literal["operator"] | None:
+    """Resolve the effective operator-signoff policy for *task* (RFC 0007 Phase 3).
+
+    Precedence (highest to lowest), mirroring ``resolve_reap_policy``
+    (reconcile/_shared.py) but with a 3rd tier for the per-ticket override:
+      1. ``TicketTask.signoff`` -- per-ticket override (``cw dev-queue add
+         --signoff operator``).
+      2. ``LaneConfig.signoff`` in the task's client config.
+      3. ``OrchestratorConfig.default_signoff`` -- global default; ``"none"``
+         resolves to ``None`` (no gate).
+
+    A task whose client is absent from *clients*, or whose lane name is not
+    declared in that client's lanes, falls through to the global default --
+    keeps behaviour identical to the pre-#990 read for any task that predates
+    lane stamping. See GitHub #990.
+    """
+    if task.signoff is not None:
+        return task.signoff
+    client_cfg = clients.get(task.client)
+    if client_cfg is not None:
+        for lane_cfg in client_cfg.effective_lanes:
+            if lane_cfg.name == task.lane and lane_cfg.signoff is not None:
+                return lane_cfg.signoff
+    return config.default_signoff if config.default_signoff != "none" else None
+
+
+def _should_gate_for_signoff(
+    task: TicketTask, clients: dict[str, ClientConfig]
+) -> bool:
+    """True iff *task* requires an explicit operator signoff before advancing.
+
+    Lazily loads ``OrchestratorConfig`` itself -- the single call site for that
+    load -- so ``_route_staged_decision``/``apply_staged_decision`` (and
+    ``approve_ticket`` in dev_queue.py, its other caller) keep their existing
+    signatures unchanged (#990). Mirrors the ad hoc ``load_effective_config()``
+    calls already made elsewhere in ``run_dispatch_loop``.
+    """
+    config = load_effective_config()
+    return resolve_signoff(task, clients, config) is not None
+
+
 def _stage_advance_unchecked(
     task: TicketTask,
     clients: dict[str, ClientConfig],
@@ -1495,6 +1563,74 @@ def apply_staged_decision(
     _route_staged_decision(task, status, last_result, clients)
 
 
+def _route_scope_gated_approval(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    last_result: dict[str, object] | None,
+    disposition: str | None,
+    pr_url: str | None,
+) -> None:
+    """Rule 1 body: scope-gated approval -- small tier auto-advances, large blocks.
+
+    Small tier additionally checks the operator-signoff gate before advancing,
+    but ONLY at Stage.REVIEW -- signoff is the ship checkpoint (REVIEW->FINALIZE),
+    not a per-stage checkpoint, so a small-tier `plan_pending_approval` at
+    Stage.PLAN must advance unattended exactly as it did before #990. Mirrors
+    ``_route_stage_success``'s identical REVIEW-scoping. Tier resolution is
+    escalate-only -- see ``_resolve_scope_tier`` docstring (#696, #926).
+    Extracted from ``_route_staged_decision`` to keep that function under the
+    PLR0912 branch ceiling.
+    """
+    tier = _resolve_scope_tier(last_result, task)
+    if tier != SCOPE_TIER_SMALL:
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+        )
+        return
+    if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
+        # Why: the operator-signoff gate takes precedence over the small-tier
+        # auto-advance -- the ticket parks for an explicit operator approval
+        # before continuing the pipeline, rather than advancing unattended
+        # (RFC 0007 Phase 3, #990). REVIEW-scoped for the same reason as
+        # _route_stage_success: signoff is the ship checkpoint only.
+        transition_task_status(
+            task,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            disposition=SIGNOFF_GATE_DISPOSITION,
+        )
+    else:
+        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+
+
+def _route_stage_success(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    disposition: str | None,
+    pr_url: str | None,
+) -> None:
+    """Rule 3 body: shipped/stage_complete -- advance or complete.
+
+    Why REVIEW-scoped: STAGE_SUCCESS_STATUSES fires at every pipeline stage as
+    the ordinary staged-advance signal (each of HARDEN/PLAN/IMPL/REVIEW's
+    "stage_complete", plus terminal "shipped"); gating every one of those
+    would pause the ticket at every stage. Signoff is the ship checkpoint
+    only -- the REVIEW->FINALIZE transition -- so the gate applies only when
+    task.stage is REVIEW. This relies on an unenforced producer contract that
+    only REVIEW's advance represents "ready to ship"; dispatch does not
+    otherwise verify it (RFC 0007 Phase 3, #990). Extracted from
+    ``_route_staged_decision`` to keep that function under the PLR0912
+    branch ceiling.
+    """
+    if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
+        transition_task_status(
+            task,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            disposition=SIGNOFF_GATE_DISPOSITION,
+        )
+    else:
+        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+
+
 def _route_staged_decision(
     task: TicketTask,
     status: str | None,
@@ -1515,17 +1651,7 @@ def _route_staged_decision(
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
-        # Tier resolution is escalate-only -- see _resolve_scope_tier docstring
-        # (#696, #926).
-        tier = _resolve_scope_tier(last_result, task)
-        if tier == SCOPE_TIER_SMALL:
-            _stage_advance_unchecked(
-                task, clients, disposition=disposition, pr_url=pr_url
-            )
-        else:
-            transition_task_status(
-                task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
-            )
+        _route_scope_gated_approval(task, clients, last_result, disposition, pr_url)
     elif status in PAUSED_FOR_USER_INPUT_STATUSES:
         # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
         # premises_pending_verification). Scope-gated statuses caught by Rule 1.
@@ -1547,8 +1673,9 @@ def _route_staged_decision(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
     elif status in STAGE_SUCCESS_STATUSES:
-        # Rule 3: shipped -- advance or complete
-        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+        # Rule 3: shipped -- advance or complete (REVIEW-scoped signoff gate;
+        # see _route_stage_success docstring).
+        _route_stage_success(task, clients, disposition, pr_url)
     elif status == "merge_pending":
         # Rule 3b: PR created but awaiting CI/merge gate (#899). Not a failure
         # — preserve pr_url so operator can monitor/merge. Do not re-dispatch.

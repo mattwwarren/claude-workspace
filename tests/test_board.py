@@ -156,6 +156,16 @@ class TestRenderBoardWithTickets:
         output = _render(state)
         assert "claude-test-model" in output
 
+    def test_status_label_awaiting_signoff(self) -> None:
+        """AWAITING_OPERATOR_SIGNOFF renders as 'awaiting signoff' (#990)."""
+        output = _render(
+            _state_with_task(
+                ticket_id="MW-990",
+                status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            )
+        )
+        assert "awaiting signoff" in output
+
     def test_model_fallback_to_worker_model(self) -> None:
         from cw.models import ClientConfig
 
@@ -225,6 +235,34 @@ class TestRenderBoardLaneHeader:
     def test_running_count_shown(self) -> None:
         output = _render(self._state_with_lane(running_count=2, max_parallel=4))
         assert "2" in output
+
+    def test_lane_panel_occupancy_counts_awaiting_signoff(self) -> None:
+        """AWAITING_OPERATOR_SIGNOFF occupies its lane slot like BLOCKED_ON_USER
+        for the panel's [running/max_parallel] title tally (#990)."""
+        from cw.models import ClientConfig
+
+        lane = LaneConfig(name="default", max_parallel=3)
+        client_cfg = ClientConfig(
+            name="acme",
+            workspace_path=Path("/tmp/acme"),
+            lanes=[lane],
+        )
+        task = TicketTask(
+            ticket_id="MW-990",
+            client="acme",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            stage=Stage.REVIEW,
+            lane="default",
+        )
+        state = BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(tasks=[task]),
+            clients={"acme": client_cfg},
+            config=OrchestratorConfig(),
+            now=NOW,
+        )
+        output = _render(state)
+        assert "[1/3]" in output
 
 
 class TestRenderBoardFooter:

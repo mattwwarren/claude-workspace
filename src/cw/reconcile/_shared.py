@@ -47,6 +47,7 @@ from cw.exceptions import USAGE_LIMIT_RE, CwError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
+    OCCUPIED_LANE_STATUSES,
     ClientConfig,
     CompletionReason,
     OrchestratorConfig,
@@ -677,11 +678,12 @@ def _apply_sentinel_to_task(
     marking the session COMPLETED so the task is in its terminal state when
     revert_completed_silent_tasks runs.  See GitHub issues #251, #578.
 
-    The lookup matches a RUNNING task (live completion) or a BLOCKED_ON_USER
-    task that still carries this session_id (an idle-parked session whose late
-    Stop-hook sentinel finally arrived, #918). A parked task retains its
-    session_id (the idle watchdog does not clear it), so the rescue can re-find
-    it. Returns ``True`` iff a parked task was rescued via the AutoDevResult arm.
+    The lookup matches a RUNNING task (live completion) or a BLOCKED_ON_USER /
+    AWAITING_OPERATOR_SIGNOFF task that still carries this session_id (an
+    idle-parked or signoff-parked session whose late Stop-hook sentinel
+    finally arrived, #918, #990). A parked task retains its session_id (the
+    idle watchdog does not clear it), so the rescue can re-find it. Returns
+    ``True`` iff a parked task was rescued via the AutoDevResult arm.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -691,8 +693,7 @@ def _apply_sentinel_to_task(
             if (
                 task.ticket_id == ticket_id
                 and task.session_id == cw_session_id
-                and task.status
-                in (QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER)
+                and task.status in OCCUPIED_LANE_STATUSES
             ):
                 target = task
                 target_status = task.status
