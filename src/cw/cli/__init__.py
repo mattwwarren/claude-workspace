@@ -36,6 +36,7 @@ from cw.cli.dev_queue import (
     _WAIT_EXIT_ATTENTION,
     _WAIT_EXIT_BLOCKED,
     _WAIT_EXIT_FAILED,
+    _WAIT_EXIT_SIGNOFF,
     _WAIT_EXIT_TIMEOUT,
 )
 from cw.cli.orchestrate import (
@@ -66,6 +67,7 @@ __all__ = [
     "_WAIT_EXIT_ATTENTION",
     "_WAIT_EXIT_BLOCKED",
     "_WAIT_EXIT_FAILED",
+    "_WAIT_EXIT_SIGNOFF",
     "_WAIT_EXIT_TIMEOUT",
     "_apply_sentinel_to_task",
     "_complete_client",

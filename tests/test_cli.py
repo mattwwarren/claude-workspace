@@ -5240,6 +5240,69 @@ class TestDevQueueAddTimeout:
         assert task.headless_timeout_override is None
 
 
+class TestDevQueueAddSignoff:
+    """Tests for ``--signoff`` flag on ``cw dev-queue add`` (RFC 0007 Phase 3, #990)."""
+
+    def test_dev_queue_add_signoff_operator_flag(self, tmp_config_dir: Path) -> None:
+        """--signoff operator sets TicketTask.signoff on the created task."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "add",
+                "GEN-990",
+                "--client",
+                "client-a",
+                "--signoff",
+                "operator",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-990"), None)
+        assert task is not None
+        assert task.signoff == "operator"
+
+    def test_dev_queue_add_signoff_invalid_choice_rejected(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An unrecognized --signoff value is rejected by click.Choice."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "add",
+                "GEN-991",
+                "--client",
+                "client-a",
+                "--signoff",
+                "bogus",
+            ],
+        )
+        assert result.exit_code != 0
+
+    def test_dev_queue_add_default_signoff_none(self, tmp_config_dir: Path) -> None:
+        """Without --signoff, TicketTask.signoff defaults to None."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "GEN-992", "--client", "client-a"],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-992"), None)
+        assert task is not None
+        assert task.signoff is None
+
+
 # ---------------------------------------------------------------------------
 # TestOrchestratorStart (GitHub issue #295)
 # ---------------------------------------------------------------------------
@@ -6501,8 +6564,11 @@ class TestDevQueueStatusWithTick:
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
-        assert "    lane slow: pending=1 running=0 blocked=0 [PAUSED]" in result.output
-        assert "    lane fast: pending=1 running=0 blocked=0\n" in result.output
+        assert (
+            "    lane slow: pending=1 running=0 blocked=0 signoff=0 [PAUSED]"
+            in result.output
+        )
+        assert "    lane fast: pending=1 running=0 blocked=0 signoff=0\n" in result.output
 
     def test_dev_queue_status_single_default_lane_no_indented_lines(
         self, tmp_config_dir: Path
@@ -6818,6 +6884,38 @@ class TestDevQueueTasksPrState:
         data = _json.loads(result.output)
         assert data[0]["pr_state"] is None
 
+    def test_tasks_json_includes_signoff_null_by_default(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_task_to_dict's JSON contract carries a signoff key, null by default (#990)."""
+        import json as _json
+
+        from cw.dev_queue import add_ticket
+        from cw.models import TicketTask
+
+        add_ticket(TicketTask(ticket_id="GEN-402", client="attn-client"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data[0]["signoff"] is None
+
+    def test_tasks_json_includes_signoff_operator(self, tmp_config_dir: Path) -> None:
+        """signoff='operator' round-trips through the JSON contract (#990)."""
+        import json as _json
+
+        from cw.dev_queue import add_ticket
+        from cw.models import TicketTask
+
+        add_ticket(
+            TicketTask(ticket_id="GEN-403", client="attn-client", signoff="operator")
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data[0]["signoff"] == "operator"
+
     def test_tasks_human_has_attention_column(self, tmp_config_dir: Path) -> None:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask
@@ -6958,6 +7056,54 @@ class TestDevQueueWait:
         runner = CliRunner()
         result = runner.invoke(
             main, ["dev-queue", "wait", "GEN-13", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_BLOCKED
+
+    def test_wait_exits_4_on_awaiting_signoff(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF ticket -> exit _WAIT_EXIT_SIGNOFF (4, #990)."""
+        from cw.cli import _WAIT_EXIT_SIGNOFF
+        from cw.models import QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="GEN-990",
+            client="genhealth",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait_for_terminal",
+            lambda _ticket_id, _client, **_kw: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-990", "--client", "genhealth"]
+        )
+        assert result.exit_code == _WAIT_EXIT_SIGNOFF
+        assert _WAIT_EXIT_SIGNOFF == 4
+
+    def test_wait_blocked_on_user_exit_unchanged_regression(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: adding the signoff exit code leaves BLOCKED_ON_USER's
+        exit (_WAIT_EXIT_BLOCKED, 2) unchanged."""
+        from cw.cli import _WAIT_EXIT_BLOCKED, _WAIT_EXIT_SIGNOFF
+        from cw.models import QueueItemStatus, TicketTask
+
+        assert _WAIT_EXIT_BLOCKED != _WAIT_EXIT_SIGNOFF
+
+        task = TicketTask(
+            ticket_id="GEN-14",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait_for_terminal",
+            lambda _ticket_id, _client, **_kw: task,
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "wait", "GEN-14", "--client", "genhealth"]
         )
         assert result.exit_code == _WAIT_EXIT_BLOCKED
 
@@ -7149,11 +7295,85 @@ class TestDevQueueWait:
 
     def test_wait_exit_codes_match_constants(self) -> None:
         """Named exit-code constants have the expected integer values."""
-        from cw.cli import _WAIT_EXIT_BLOCKED, _WAIT_EXIT_FAILED, _WAIT_EXIT_TIMEOUT
+        from cw.cli import (
+            _WAIT_EXIT_BLOCKED,
+            _WAIT_EXIT_FAILED,
+            _WAIT_EXIT_SIGNOFF,
+            _WAIT_EXIT_TIMEOUT,
+        )
 
         assert _WAIT_EXIT_FAILED == 1
         assert _WAIT_EXIT_BLOCKED == 2
+        assert _WAIT_EXIT_SIGNOFF == 4
         assert _WAIT_EXIT_TIMEOUT == 124
+
+
+# ---------------------------------------------------------------------------
+# TestDevQueueApproveCli (RFC 0007 Phase 3, #990)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueApproveCli:
+    """CLI-level stdout messaging for ``cw dev-queue approve`` (#990)."""
+
+    def _seed_review_pending(
+        self, tmp_config_dir: Path, tmp_path: Path, *, signoff: bool
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+        )
+
+        task = TicketTask(
+            ticket_id="ACME-1",
+            client="acme",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id="sess-approve-cli",
+            signoff="operator" if signoff else None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = Session(
+            id="sess-approve-cli",
+            name="acme/impl-1",
+            client="acme",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=ws,
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+    def test_approve_plain_advance_message(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No signoff configured: ordinary 'from -> to' advance message."""
+        self._seed_review_pending(tmp_config_dir, tmp_path, signoff=False)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "review -> finalize" in result.output
+        assert "awaiting operator signoff" not in result.output
+
+    def test_approve_signoff_awaiting_message(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Signoff configured: parked message instead of the advance arrow."""
+        self._seed_review_pending(tmp_config_dir, tmp_path, signoff=True)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "awaiting operator signoff" in result.output
 
 
 # ---------------------------------------------------------------------------

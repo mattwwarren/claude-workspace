@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import UTC, datetime
+from typing import Literal
 
 import click
 
@@ -63,7 +64,12 @@ from cw.worktree import fast_forward_main
 
 # Statuses considered "active" for default filtering in list / status.
 _ACTIVE_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    {QueueItemStatus.PENDING, QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER}
+    {
+        QueueItemStatus.PENDING,
+        QueueItemStatus.RUNNING,
+        QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+    }
 )
 
 # Suffix appended to a lane breakdown line when that lane is paused (operator or
@@ -106,6 +112,16 @@ def dev_queue() -> None:
     show_default=True,
     help="Target lane name (must be declared for the client).",
 )
+@click.option(
+    "--signoff",
+    "signoff",
+    type=click.Choice(["operator"]),
+    default=None,
+    help=(
+        "Require an explicit operator signoff before this ticket ships,"
+        " overriding the lane/global default (RFC 0007 Phase 3)."
+    ),
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
@@ -114,6 +130,7 @@ def dev_queue_add(
     headless_timeout_override: int | None,
     scope_hint: str | None,
     lane_name: str,
+    signoff: Literal["operator"] | None,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
     config = load_orchestrator_config()
@@ -126,6 +143,7 @@ def dev_queue_add(
             headless_timeout_override=headless_timeout_override,
             scope_hint=scope_hint,
             lane=lane_name,
+            signoff=signoff,
         )
         inserted = add_ticket(task)
         if not inserted:
@@ -171,10 +189,14 @@ def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
 @click.option("--client", "-c", default=None, help="Client name.")
 @handle_errors
 def dev_queue_approve(ticket_id: str, client: str | None) -> None:
-    """Approve a plan or review gate and advance to the next stage.
+    """Approve a plan/review gate, or clear an operator-signoff gate.
 
     The ticket must be BLOCKED_ON_USER with last_result status of
-    plan_pending_approval or review_pending_approval.
+    plan_pending_approval or review_pending_approval, or already parked
+    AWAITING_OPERATOR_SIGNOFF (RFC 0007 Phase 3). Approving a REVIEW-stage
+    gate on a ticket with signoff configured re-routes it to
+    AWAITING_OPERATOR_SIGNOFF instead of advancing -- run `approve` again
+    to clear it.
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
@@ -188,10 +210,17 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
             "to_stage": result["to_stage"],
         },
     )
-    click.echo(
-        f"Approved {ticket_id} ({resolved}):"
-        f" {result['from_stage']} -> {result['to_stage']}"
-    )
+    if result["awaiting_signoff"]:
+        click.echo(
+            f"Approved {ticket_id} ({resolved}): parked at"
+            f" {result['from_stage']} awaiting operator signoff before it ships."
+            " Run 'approve' again to clear the gate."
+        )
+    else:
+        click.echo(
+            f"Approved {ticket_id} ({resolved}):"
+            f" {result['from_stage']} -> {result['to_stage']}"
+        )
 
 
 @dev_queue.command(name="requeue")
@@ -347,11 +376,17 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
         blocked = sum(
             1 for t in lane_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER
         )
+        signoff = sum(
+            1
+            for t in lane_tasks
+            if t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        )
         override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
         marker = _PAUSED_LANE_MARKER if override is not None and override.paused else ""
         click.echo(
             f"    lane {lane_name}:"
-            f" pending={pending} running={running} blocked={blocked}{marker}"
+            f" pending={pending} running={running} blocked={blocked}"
+            f" signoff={signoff}{marker}"
         )
 
 
@@ -625,6 +660,8 @@ _WAIT_DEFAULT_TIMEOUT: int = 300
 _WAIT_EXIT_FAILED: int = 1
 _WAIT_EXIT_BLOCKED: int = 2
 _WAIT_EXIT_ATTENTION: int = 3
+# Ticket parked AWAITING_OPERATOR_SIGNOFF (RFC 0007 Phase 3, #990).
+_WAIT_EXIT_SIGNOFF: int = 4
 _WAIT_EXIT_TIMEOUT: int = 124
 
 # Poll interval for the sentinel-aware wait loop (seconds).
@@ -674,8 +711,8 @@ def _handle_terminal_task(
     """Emit terminal-status output and raise the mapped ``Exit`` for *task*.
 
     Only call when ``task.status`` is one of COMPLETED / FAILED / CANCELLED /
-    BLOCKED_ON_USER. COMPLETED returns normally; every other terminal status
-    raises ``click.exceptions.Exit``.
+    BLOCKED_ON_USER / AWAITING_OPERATOR_SIGNOFF. COMPLETED returns normally;
+    every other terminal status raises ``click.exceptions.Exit``.
     """
     status_str = task.status.value
     if output_json:
@@ -699,6 +736,8 @@ def _handle_terminal_task(
         return
     if task.status == QueueItemStatus.BLOCKED_ON_USER:
         raise click.exceptions.Exit(_blocked_on_user_exit_code(task))
+    if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
+        raise click.exceptions.Exit(_WAIT_EXIT_SIGNOFF)
     raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
 
 
@@ -1008,6 +1047,8 @@ def dev_queue_wait(
       2   blocked / *_pending_* family / BLOCKED_ON_USER (no reap proposal)
       3   ATTENTION — transcript stale past idle budget, worker not in roster;
           or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set)
+      4   AWAITING_OPERATOR_SIGNOFF — ticket parked for an explicit operator
+          signoff before it ships (RFC 0007 Phase 3, #990)
       124 hard timeout ceiling (--timeout) with no terminal or attention signal
     """
     config = load_orchestrator_config()
@@ -1040,6 +1081,7 @@ def dev_queue_wait(
             QueueItemStatus.FAILED,
             QueueItemStatus.CANCELLED,
             QueueItemStatus.BLOCKED_ON_USER,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
         }:
             # COMPLETED returns; every other terminal status raises Exit.
             _handle_terminal_task(task, ticket_id, resolved, output_json)
@@ -1123,6 +1165,7 @@ def _task_to_dict(task: TicketTask) -> dict[str, object]:
         "pr_state": (
             task.pr_state.model_dump(mode="json") if task.pr_state is not None else None
         ),
+        "signoff": task.signoff,
     }
 
 

@@ -2585,6 +2585,7 @@ class TestDevQueueTasks:
             "disposition",
             "pr_url",
             "pr_state",
+            "signoff",
         }
         assert set(tasks[0].keys()) == expected_fields
 
