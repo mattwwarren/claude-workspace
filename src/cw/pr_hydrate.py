@@ -34,13 +34,14 @@ _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
 _PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
     {"IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"}
 )
-# Row-1 of the attention-state decision table (merge_blocked). _BLOCKING_MERGE_STATES
-# below is a superset that also gates the pr.mergeable event on a BLOCKED->CLEAN
-# transition, which Row 1 deliberately does not treat as merge_blocked (BLOCKED
-# means "waiting on required reviews," not a code problem - see Row 5). Single
-# source of truth so the two can't drift independently.
+# Row-1 of the attention-state decision table (merge_blocked). BLOCKED is
+# deliberately NOT in this set — it means "waiting on required reviews/checks,"
+# not a code problem (see Rows 5a-5c).
 _ROW1_MERGE_BLOCKING_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND"})
-_BLOCKING_MERGE_STATES: frozenset[str] = _ROW1_MERGE_BLOCKING_STATES | {"BLOCKED"}
+# pr.mergeable fires on ENTERING one of GitHub's genuinely-mergeable statuses
+# from outside the set — not on merely leaving a blocking status into
+# UNKNOWN/DRAFT (operator resolution, #929 premise round 2026-07-05).
+_MERGEABLE_STATES: frozenset[str] = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"})
 _TERMINAL_PR_STATES: frozenset[str] = frozenset({_GH_PR_STATE_MERGED, "CLOSED"})
 
 _PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
@@ -91,6 +92,7 @@ def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
 def _compute_attention_state(
     *,
     ci_ok: bool,
+    pending_count: int,
     merge_state_status: str,
     review_decision: str,
     is_draft: bool,
@@ -107,7 +109,14 @@ def _compute_attention_state(
       2. not ci_ok                                   -> ci_failing
       3. review_decision == CHANGES_REQUESTED        -> changes_requested
       4. review_decision == REVIEW_REQUIRED and no reviewer -> no_reviewer
-      5/6. BLOCKED / healthy default                 -> ready_to_approve
+      5a. BLOCKED and pending checks                 -> None (waiting on CI)
+      5b. BLOCKED and review required                -> ready_to_approve
+      5c. BLOCKED otherwise                          -> None (unknown blocker)
+      6. healthy default                             -> ready_to_approve
+
+    Rows 5a-5c encode the #929 premise-round finding (2026-07-05): BLOCKED can
+    co-occur with green CI (a required check that hasn't run yet, or missing
+    approvals), so BLOCKED alone must not read as "ready to approve".
     """
     if is_draft:  # Row 0 — drafts never enter an escalation path.
         return None
@@ -119,9 +128,28 @@ def _compute_attention_state(
         return "changes_requested"
     if review_decision == "REVIEW_REQUIRED" and reviewer_count == 0:  # Row 4
         return "no_reviewer"
-    # Rows 5 (BLOCKED — waiting on required reviews) and 6 (healthy default)
-    # both resolve to ready_to_approve.
-    return "ready_to_approve"
+    # Rows 5a-5c (BLOCKED) delegate; anything else is Row 6's healthy default.
+    return (
+        _blocked_attention_state(
+            pending_count=pending_count, review_decision=review_decision
+        )
+        if merge_state_status == "BLOCKED"
+        else "ready_to_approve"
+    )
+
+
+def _blocked_attention_state(*, pending_count: int, review_decision: str) -> str | None:
+    """Rows 5a-5c: attention state for ``mergeStateStatus == BLOCKED``.
+
+    5a — a required check is still running: waiting on CI, no attention state.
+    5b — approvals outstanding: the one genuinely approvable BLOCKED shape.
+    5c — blocked for an undetermined reason: don't overclaim approvability.
+    """
+    if pending_count > 0:  # 5a
+        return None
+    if review_decision == "REVIEW_REQUIRED":  # 5b
+        return "ready_to_approve"
+    return None  # 5c
 
 
 def _parse_pr_url(pr_url: str) -> tuple[str, int] | None:
@@ -151,6 +179,7 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
         if state in _TERMINAL_PR_STATES
         else _compute_attention_state(
             ci_ok=ci_ok,
+            pending_count=summary["pending_count"],
             merge_state_status=merge_state_status,
             review_decision=review_decision,
             is_draft=bool(data.get("isDraft", False)),
@@ -206,8 +235,8 @@ def _diff_transitions(
         )
     if (
         old is not None
-        and old.merge_state_status in _BLOCKING_MERGE_STATES
-        and new.merge_state_status not in _BLOCKING_MERGE_STATES
+        and old.merge_state_status not in _MERGEABLE_STATES
+        and new.merge_state_status in _MERGEABLE_STATES
     ):
         # mergeStateStatus is a deliberate passthrough (not snake_cased) — it is
         # the raw gh field name, unlike the derived failing_checks/review_decision.

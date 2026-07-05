@@ -98,6 +98,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=False,
+                pending_count=0,
                 merge_state_status="DIRTY",
                 review_decision="CHANGES_REQUESTED",
                 is_draft=True,
@@ -110,6 +111,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="DIRTY",
                 review_decision="",
                 is_draft=False,
@@ -122,6 +124,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="BEHIND",
                 review_decision="",
                 is_draft=False,
@@ -134,6 +137,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=False,
+                pending_count=0,
                 merge_state_status="CLEAN",
                 review_decision="",
                 is_draft=False,
@@ -146,6 +150,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="CLEAN",
                 review_decision="CHANGES_REQUESTED",
                 is_draft=False,
@@ -158,6 +163,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="CLEAN",
                 review_decision="REVIEW_REQUIRED",
                 is_draft=False,
@@ -171,6 +177,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="CLEAN",
                 review_decision="REVIEW_REQUIRED",
                 is_draft=False,
@@ -185,6 +192,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="CLEAN",
                 review_decision="REVIEW_REQUIRED",
                 is_draft=True,
@@ -198,6 +206,7 @@ class TestAttentionState:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="CLEAN",
                 review_decision="REVIEW_REQUIRED",
                 is_draft=False,
@@ -206,22 +215,54 @@ class TestAttentionState:
             == "no_reviewer"
         )
 
-    def test_row5_blocked_ready_to_approve(self) -> None:
+    def test_row5a_blocked_with_pending_checks_is_none(self) -> None:
+        # #929 premise round (2026-07-05): BLOCKED + green-so-far CI + a check
+        # still running -> waiting on CI, NOT ready_to_approve.
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=2,
                 merge_state_status="BLOCKED",
-                review_decision="APPROVED",
+                review_decision="REVIEW_REQUIRED",
+                is_draft=False,
+                reviewer_count=1,
+            )
+            is None
+        )
+
+    def test_row5b_blocked_review_required_ready_to_approve(self) -> None:
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="BLOCKED",
+                review_decision="REVIEW_REQUIRED",
                 is_draft=False,
                 reviewer_count=1,
             )
             == "ready_to_approve"
         )
 
+    def test_row5c_blocked_without_review_requirement_is_none(self) -> None:
+        # BLOCKED, nothing pending, no review requirement -> unknown blocker;
+        # do not claim the PR is approvable.
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="BLOCKED",
+                review_decision="APPROVED",
+                is_draft=False,
+                reviewer_count=1,
+            )
+            is None
+        )
+
     def test_row6_default_ready_to_approve(self) -> None:
         assert (
             _compute_attention_state(
                 ci_ok=True,
+                pending_count=0,
                 merge_state_status="CLEAN",
                 review_decision="APPROVED",
                 is_draft=False,
@@ -330,6 +371,22 @@ class TestTransitions:
         new = _pr_state(merge_state_status="CLEAN")
         events = _diff_transitions(old=old, new=new, base=dict(_BASE))
         assert OrchestratorEventType.PR_MERGEABLE not in {t for t, _ in events}
+
+    def test_mergeable_not_emitted_leaving_blocked_into_unknown(self) -> None:
+        # #929 premise round (2026-07-05): the event fires on ENTERING a
+        # genuinely-mergeable status, not on merely leaving a blocking one.
+        old = _pr_state(merge_state_status="BLOCKED")
+        new = _pr_state(merge_state_status="UNKNOWN")
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
+        assert OrchestratorEventType.PR_MERGEABLE not in {t for t, _ in events}
+
+    def test_mergeable_emitted_entering_unstable(self) -> None:
+        # UNSTABLE is in GitHub's mergeable set (failing non-required checks).
+        old = _pr_state(merge_state_status="BLOCKED")
+        new = _pr_state(merge_state_status="UNSTABLE")
+        events = _diff_transitions(old=old, new=new, base=dict(_BASE))
+        payload = next(p for t, p in events if t == OrchestratorEventType.PR_MERGEABLE)
+        assert payload == {**_BASE, "mergeStateStatus": "UNSTABLE"}
 
 
 class TestCandidateSelection:
