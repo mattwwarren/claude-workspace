@@ -755,13 +755,14 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
         client_cfg = get_client(client_name)
         stages = client_cfg.pipeline.stages
 
+        if task.stage not in stages:
+            msg = (
+                f"Cannot approve ticket '{ticket_id}':"
+                f" stage {task.stage!r} not in pipeline."
+            )
+            raise ApproveGateError(msg)
+
         if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
-            if task.stage not in stages:
-                msg = (
-                    f"Cannot approve ticket '{ticket_id}':"
-                    f" stage {task.stage!r} not in pipeline."
-                )
-                raise ApproveGateError(msg)
             from_stage = task.stage.value
             _clear_signoff_gate(task, stages)
             to_stage = task.stage.value
@@ -797,13 +798,6 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
                 f" (last_result status={actual!r})."
                 " Expected one of: plan_pending_approval, review_pending_approval."
                 " Use 'requeue' if you want to re-run the current stage."
-            )
-            raise ApproveGateError(msg)
-
-        if task.stage not in stages:
-            msg = (
-                f"Cannot approve ticket '{ticket_id}':"
-                f" stage {task.stage!r} not in pipeline."
             )
             raise ApproveGateError(msg)
 
