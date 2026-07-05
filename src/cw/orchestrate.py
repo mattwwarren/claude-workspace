@@ -415,7 +415,7 @@ class OrchestratorStatus(BaseModel):
     last_tick_by_client: dict[str, TickSummary] = Field(default_factory=dict)
 
 
-def _summarise_ticket(task: TicketTask) -> TicketSummary:
+def summarise_ticket(task: TicketTask) -> TicketSummary:
     return TicketSummary(
         ticket_id=task.ticket_id,
         client=task.client,
@@ -427,7 +427,7 @@ def _summarise_ticket(task: TicketTask) -> TicketSummary:
     )
 
 
-def _summarise_session(
+def summarise_session(
     sess: Session,
     *,
     last_stage: str | None = None,
@@ -595,7 +595,7 @@ def orchestrator_status() -> OrchestratorStatus:
     """Build a snapshot of pending tickets, running sessions, PRs, events."""
     queue = load_dev_queue()
     pending = [
-        _summarise_ticket(t) for t in queue.tasks if t.status == QueueItemStatus.PENDING
+        summarise_ticket(t) for t in queue.tasks if t.status == QueueItemStatus.PENDING
     ]
 
     # Read all events first so we can derive last_stage per session before
@@ -607,7 +607,7 @@ def orchestrator_status() -> OrchestratorStatus:
     now = datetime.now(UTC)
     state = load_state()
     running = [
-        _summarise_session(s, last_stage=last_stage_by_session.get(s.id), now=now)
+        summarise_session(s, last_stage=last_stage_by_session.get(s.id), now=now)
         for s in state.sessions
         if s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
     ]
