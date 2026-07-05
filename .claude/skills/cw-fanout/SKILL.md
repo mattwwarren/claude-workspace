@@ -110,6 +110,35 @@ back to the operator.
 This is the handoff `/cw-queue-peek` was built to receive. Drive it from
 **checkpoints**, not a busy `sleep` poll — react to events and re-check state.
 
+**Monitor LIVENESS, not just queue state.** Queue rows, the roster, and
+`wave_status` output can all lag or lie (false parks on live sessions — #976;
+rows deleted mid-run with no event — #978; silent worker deaths produce NO
+queue transition, ever). The 2026-07-03/05 sprint's operator had to manually
+bump a queue-transition-only monitor twice. The wave monitor MUST watch three
+signals per ticket:
+
+1. **Queue transitions** — the `wave_status.py` diff (below).
+2. **Transcript-mtime LIVE/STALE flips** — newest `*.jsonl` under
+   `~/.claude/projects/<worktree-slug>-dev-<T>/`; STALE when untouched
+   > 15-20 min while the ticket is non-terminal (use ~20 min for review
+   stages — reviewer subagents are parent-silent for long stretches).
+3. **New worktree commits** — `git -C <wt> rev-parse --short HEAD` changes
+   (positive progress proof: silence + LIVE = genuinely working).
+
+**Announce initial state when arming the monitor** — a change-only monitor
+started against an already-stale world silently baselines the outage and
+never fires.
+
+**The liveness decision ladder (before ANY park/requeue action):**
+- Transcript **< 2 min old** → the session is ALIVE regardless of row status.
+  Do NOT requeue (double-spawn, the #919 class). Wait for its sentinel; the
+  #918 late-sentinel rescue recovers a falsely-parked row.
+- Transcript **flat ≥ 45 min** (or two consecutive 20-min stale checks with
+  no queue movement) → dead regardless of a `running` row. Adopt-check, then
+  `cw spawn close <sid> --confirmed-dead` and requeue/re-add.
+- In between → arm a bounded one-shot deadline check (resume-or-dead), don't
+  guess.
+
 **a. Wave lifecycle — am I done?**
 
 ```bash
@@ -180,11 +209,23 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
      | jq -r '.[0].status')
    ```
 4. If `STATUS` is still `blocked_on_user`:
-   - `plan_pending_approval` / `review_pending_approval` →
-     `cw dev-queue approve <T> -c <CLIENT>` (fallback auto-approve; if session
-     not found, falls back to `cw dev-queue requeue <T> -c <CLIENT>`)
+   - `plan_pending_approval` → **do NOT use `cw dev-queue approve`** (#968:
+     its plan arm advances straight to impl, skipping Plan Quality Review, so
+     impl exits on an empty `.cw/plan.md`). Instead: post the approval as an
+     issue COMMENT, then `cw dev-queue requeue <T> -c <CLIENT>` at the plan
+     stage — Stage 1 sees the approval and proceeds to quality review. Before
+     approving a Large plan, grep its text for the literal strings the
+     resolutions mandated — a `[SATISFIED]` conformance row is a claim, not
+     evidence (#929 round 1 shipped one with the mandated field list absent).
+   - `review_pending_approval` →
+     `cw dev-queue approve <T> -c <CLIENT>` (this arm is sound: review →
+     finalize; if session not found, fall back to
+     `cw dev-queue requeue <T> -c <CLIENT>`)
    - `ambiguities_pending_resolution` / `premises_pending_verification` →
-     `cw dev-queue requeue <T> -c <CLIENT>`
+     answer **as an issue COMMENT** (the scanner's response-check is blind to
+     body edits — #980) while ALSO keeping the binding resolutions folded in
+     the issue BODY under its single `auto-dev-preflight-resolutions` marker,
+     then `cw dev-queue requeue <T> -c <CLIENT>`
 5. On successful re-dispatch: print
    `gate closed: #<T> (<GATE>) → re-dispatched, watching` — resume the loop.
 
@@ -199,6 +240,25 @@ unavailable (ordinary slow timeout).
 See [`session-disposition.md §5a`](../../docs/session-disposition.md#5a-branch-absence-anomaly-on-session_timed_out-808).
 
 Resume the monitoring loop after handling any attention signal.
+
+**b2. Nothing claiming? Check the circuit breaker and held slots.**
+
+If pending tickets sit unclaimed across ticks:
+- `cw dev-queue status` lane lines — a `[PAUSED]` marker means the per-lane
+  circuit breaker (#875) tripped on consecutive spawn errors (a quota window
+  does this). Remedy: `cw lane resume <CLIENT> <lane>` — resume also resets
+  the consecutive-error counter. The pause is currently SILENT (no attention
+  event until the Wave-4 escalation work lands) — this check is on you.
+- BLOCKED_ON_USER rows **hold lane slots by design** — a parked ticket can
+  starve the lane. Requeue or remove it to convert a dead slot into a
+  working one.
+- `disposition=attempt_cap_blocked` after an environmental outage (quota
+  window, hang loop): stop ALL dispatch loops (`pkill -f "cw dev-queue run"`,
+  then pgrep-verify ZERO — TaskStop on a wrapper does not reliably kill the
+  python child), reset the row's `attempts`/`disposition` in
+  `~/.local/share/cw/dev_queue.json`, verify the write, requeue, restart the
+  loop. NEVER edit that file with a loop alive — a tick's read-modify-write
+  silently clobbers the edit.
 
 **c. In-flight health — is a running session stuck?**
 
