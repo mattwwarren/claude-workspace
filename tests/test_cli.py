@@ -5743,6 +5743,25 @@ class TestWatchCommand:
         assert result.exit_code == 0
         assert called
 
+    def test_orchestrate_watch_invokes_run_board(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+        from cw.cli import orchestrate as cli
+
+        called: list[dict[str, object]] = []
+        monkeypatch.setattr(cli, "run_board", lambda **kwargs: called.append(kwargs))
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["orchestrate", "watch", "--interval", "3", "--client", "acme"]
+        )
+        assert result.exit_code == 0
+        assert called
+        assert called[0]["interval"] == 3
+        assert called[0]["client_filter"] == "acme"
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueRunQuiet

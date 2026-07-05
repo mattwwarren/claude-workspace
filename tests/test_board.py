@@ -9,6 +9,7 @@ from pathlib import Path
 from rich.console import Console
 
 from cw.board import BoardState, render_board, run_board
+from cw.orchestrate import SessionSummary, TicketSummary
 from cw.models import (
     CwState,
     DevQueueStore,
@@ -32,12 +33,18 @@ def _render(
     *,
     client_filter: str | None = None,
     raw_events: bool = False,
+    detail: bool = False,
 ) -> str:
     """Render board_state to a string using a captured Console."""
     buf = StringIO()
     console = Console(file=buf, no_color=True, width=200)
     console.print(
-        render_board(board_state, client_filter=client_filter, raw_events=raw_events)
+        render_board(
+            board_state,
+            client_filter=client_filter,
+            raw_events=raw_events,
+            detail=detail,
+        )
     )
     return buf.getvalue()
 
@@ -66,6 +73,8 @@ def _state_with_task(
     created_at: datetime | None = None,
     events: list[OrchestratorEvent] | None = None,
     sessions: list[Session] | None = None,
+    running_sessions: list[SessionSummary] | None = None,
+    pending_tickets: list[TicketSummary] | None = None,
 ) -> BoardState:
     """Build a BoardState with one TicketTask — shared builder for board tests."""
     task = TicketTask(
@@ -85,6 +94,8 @@ def _state_with_task(
         config=OrchestratorConfig(),
         now=NOW,
         events=events or [],
+        running_sessions=running_sessions or [],
+        pending_tickets=pending_tickets or [],
     )
 
 
@@ -353,6 +364,64 @@ class TestRenderBoardSynthesisedLaneSkip:
         assert "MW-900" not in output
 
 
+def _session_summary(
+    session_id: str,
+    client: str = "acme",
+    *,
+    purpose: str = "impl",
+    worktree_path: Path | None = None,
+) -> SessionSummary:
+    return SessionSummary(
+        id=session_id,
+        name=f"{client}/impl",
+        client=client,
+        status="active",
+        purpose=purpose,
+        started_at=NOW - timedelta(minutes=5),
+        worktree_path=worktree_path,
+    )
+
+
+class TestRenderBoardDetail:
+    def test_detail_panel_shows_session_id_and_client(self) -> None:
+        state = _state_with_task(
+            running_sessions=[_session_summary("sess-abc", client="acme")],
+        )
+        output = _render(state, detail=True)
+        assert "sess-abc" in output
+        assert "acme" in output
+
+    def test_detail_panel_shows_worktree_column(self) -> None:
+        state = _state_with_task(
+            running_sessions=[
+                _session_summary(
+                    "sess-abc", worktree_path=Path("/home/u/wt/dev-1")
+                )
+            ],
+        )
+        output = _render(state, detail=True)
+        assert "WORKTREE" in output
+
+    def test_contention_marker_when_two_sessions_share_worktree(self) -> None:
+        shared = Path("/home/u/wt/shared")
+        state = _state_with_task(
+            running_sessions=[
+                _session_summary("sess-a", worktree_path=shared),
+                _session_summary("sess-b", worktree_path=shared),
+            ],
+        )
+        output = _render(state, detail=True)
+        assert "⚠" in output
+
+    def test_default_board_has_no_detail_panel(self) -> None:
+        state = _state_with_task(
+            running_sessions=[_session_summary("sess-abc")],
+        )
+        output = _render(state, detail=False)
+        # The detail panel is not rendered without detail=True.
+        assert "sess-abc" not in output
+
+
 class TestRunBoard:
     def test_ticks_once_renders_without_live(self) -> None:
         """ticks=1 path renders one frame via console.print, no Live."""
@@ -382,6 +451,16 @@ class TestRunBoard:
         console = Console(file=buf, no_color=True, width=200)
         run_board(ticks=3, console=console, loader_fn=counting_loader)
         assert len(calls) == 3
+
+    def test_detail_frame_renders_session(self) -> None:
+        """run_board(detail=True) renders the detail panel for a session."""
+        state = _state_with_task(
+            running_sessions=[_session_summary("sess-xyz", client="acme")],
+        )
+        buf = StringIO()
+        console = Console(file=buf, no_color=True, width=200)
+        run_board(ticks=1, detail=True, console=console, loader_fn=lambda: state)
+        assert "sess-xyz" in buf.getvalue()
 
     def test_multi_tick_keyboard_interrupt_exits(self) -> None:
         """KeyboardInterrupt during multi-tick loop exits cleanly."""
@@ -832,4 +911,13 @@ class TestBoardCliSmoke:
 
         runner = CliRunner()
         result = runner.invoke(main, ["board", "--once", "--raw-events"])
+        assert result.exit_code == 0
+
+    def test_once_with_detail_exits_zero(self) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["board", "--once", "--detail"])
         assert result.exit_code == 0
