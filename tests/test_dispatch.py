@@ -5668,10 +5668,17 @@ class TestApplyStagedDecision:
 
     # -- Operator-signoff gates (RFC 0007 Phase 3, #990) ---------------------
 
-    def test_small_tier_with_signoff_parks_awaiting_signoff(
+    def test_small_tier_plan_stage_with_signoff_ignores_signoff_scoping(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
-        """Rule 1 small-tier + ticket-level signoff -> parks, does not advance."""
+        """Rule 1 small-tier at Stage.PLAN + signoff -> advances unattended.
+
+        Signoff is the ship checkpoint (REVIEW->FINALIZE) only, mirroring Rule
+        3's identical REVIEW-scoping (test_stage_complete_at_non_review_stage_
+        ignores_signoff). A small-tier plan_pending_approval fires at
+        Stage.PLAN, not Stage.REVIEW, so it must advance PLAN->IMPL unattended
+        even when signoff is configured -- the same as if signoff were unset.
+        """
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("SIGNOFF-1", stage=Stage.PLAN)
@@ -5684,9 +5691,8 @@ class TestApplyStagedDecision:
             task, "plan_pending_approval", last_result, self._clients(tmp_path)
         )
 
-        assert task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
-        assert task.disposition == "signoff_gate"
-        assert task.stage == Stage.PLAN  # not advanced -- gate fired first
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
 
     def test_small_tier_without_signoff_advances_unchanged(
         self, tmp_dispatch_dirs: Path, tmp_path: Path

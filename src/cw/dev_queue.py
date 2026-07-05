@@ -463,7 +463,8 @@ def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
     Raises:
         CwError: if no matching task is found for (ticket_id, client_name).
         LaneNotFoundError: if to_lane is not declared for the client.
-        LaneMoveError: if the task status is RUNNING or BLOCKED_ON_USER.
+        LaneMoveError: if the task status is RUNNING, BLOCKED_ON_USER, or
+            AWAITING_OPERATOR_SIGNOFF.
 
     Note: record_event is NOT called here — the CLI layer fires TICKET_MOVED.
     """
@@ -642,7 +643,8 @@ def wait_for_terminal(
     # Why: before #471 merges, TIMED_OUT-but-PR-merged tickets may stay PENDING;
     # wait will then hit --timeout (exit 124) rather than returning COMPLETED.
 
-    Terminal statuses: COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER.
+    Terminal statuses: COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER,
+    AWAITING_OPERATOR_SIGNOFF.
     Raises CwError if the ticket is not found.
     Raises TimeoutError if *timeout* seconds elapse before a terminal status.
     """
@@ -754,6 +756,12 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
         stages = client_cfg.pipeline.stages
 
         if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
+            if task.stage not in stages:
+                msg = (
+                    f"Cannot approve ticket '{ticket_id}':"
+                    f" stage {task.stage!r} not in pipeline."
+                )
+                raise ApproveGateError(msg)
             from_stage = task.stage.value
             _clear_signoff_gate(task, stages)
             to_stage = task.stage.value
@@ -904,7 +912,8 @@ def requeue_ticket(
     *,
     allow_regress: bool = False,
 ) -> dict[str, str | bool | int]:
-    """Requeue a BLOCKED_ON_USER ticket, optionally at a specific stage.
+    """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
+    at a specific stage.
 
     Returns dict with from_stage, to_stage, ticket_id, client, regressed, and
     regress_attempts for event emission. ``regressed`` is True only on a genuine
@@ -913,7 +922,8 @@ def requeue_ticket(
     forward/same-stage path).
 
     Raises:
-        RequeueStateError: if ticket is not BLOCKED_ON_USER (forward path).
+        RequeueStateError: if ticket is not BLOCKED_ON_USER or
+            AWAITING_OPERATOR_SIGNOFF (forward path).
         RequeueStageError: if stage_override would regress without allow_regress,
             is not in the client pipeline, regresses a non-blocked task, or if
             allow_regress is set with no backward stage_override.

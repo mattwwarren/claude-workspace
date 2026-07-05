@@ -3025,6 +3025,30 @@ class TestApproveTicket:
         ):
             approve_ticket("GEN-500", "genhealth")
 
+    def test_approve_signoff_parked_stage_not_in_pipeline_errors_cleanly(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF ticket whose stage isn't in the client's
+        pipeline raises ApproveGateError, not an unhandled ValueError.
+
+        Mirrors the existing BLOCKED_ON_USER arm's `task.stage not in stages`
+        guard (dev_queue.py ~:795), which _clear_signoff_gate's caller must
+        also apply before calling `_advance_task_pointer` (#990).
+        """
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.HARDEN,  # not in the default pipeline stages
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(ApproveGateError, match="not in pipeline"):
+            approve_ticket("GEN-500", "genhealth")
+
 
 # ---------------------------------------------------------------------------
 # TestRequeueTicket — requeue_ticket() mutation function

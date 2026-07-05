@@ -502,11 +502,12 @@ clearing path.
 3. **Global default** — `OrchestratorConfig.default_signoff` (`"none"` or `"operator"`).
 
 **Where the gate fires:** only at the REVIEW→FINALIZE checkpoint — the point
-a ticket would otherwise auto-advance (small-tier `plan_pending_approval` /
+a ticket at `Stage.REVIEW` would otherwise auto-advance (small-tier
 `review_pending_approval`) or complete (`stage_complete` fired while the task
-is at `Stage.REVIEW`). Ordinary mid-pipeline `stage_complete` advances
-(HARDEN→PLAN, PLAN→IMPL, IMPL→REVIEW) are never gated, even when signoff is
-configured — the gate is a ship checkpoint, not a per-stage checkpoint.
+is at `Stage.REVIEW`). A small-tier `plan_pending_approval` (PLAN→IMPL) and
+every other mid-pipeline `stage_complete` advance (HARDEN→PLAN, PLAN→IMPL,
+IMPL→REVIEW) are never gated, even when signoff is configured — the gate is a
+ship checkpoint, not a per-stage checkpoint.
 
 **Clearing the gate:** `cw dev-queue approve` on an `AWAITING_OPERATOR_SIGNOFF`
 ticket advances (or completes, at the pipeline's terminal stage) unconditionally

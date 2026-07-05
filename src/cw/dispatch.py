@@ -1572,11 +1572,14 @@ def _route_scope_gated_approval(
 ) -> None:
     """Rule 1 body: scope-gated approval -- small tier auto-advances, large blocks.
 
-    Small tier additionally checks the operator-signoff gate before advancing
-    (RFC 0007 Phase 3, #990). Tier resolution is escalate-only -- see
-    ``_resolve_scope_tier`` docstring (#696, #926). Extracted from
-    ``_route_staged_decision`` to keep that function under the PLR0912
-    branch ceiling.
+    Small tier additionally checks the operator-signoff gate before advancing,
+    but ONLY at Stage.REVIEW -- signoff is the ship checkpoint (REVIEW->FINALIZE),
+    not a per-stage checkpoint, so a small-tier `plan_pending_approval` at
+    Stage.PLAN must advance unattended exactly as it did before #990. Mirrors
+    ``_route_stage_success``'s identical REVIEW-scoping. Tier resolution is
+    escalate-only -- see ``_resolve_scope_tier`` docstring (#696, #926).
+    Extracted from ``_route_staged_decision`` to keep that function under the
+    PLR0912 branch ceiling.
     """
     tier = _resolve_scope_tier(last_result, task)
     if tier != SCOPE_TIER_SMALL:
@@ -1584,11 +1587,12 @@ def _route_scope_gated_approval(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
         return
-    if _should_gate_for_signoff(task, clients):
+    if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
         # Why: the operator-signoff gate takes precedence over the small-tier
         # auto-advance -- the ticket parks for an explicit operator approval
         # before continuing the pipeline, rather than advancing unattended
-        # (RFC 0007 Phase 3, #990).
+        # (RFC 0007 Phase 3, #990). REVIEW-scoped for the same reason as
+        # _route_stage_success: signoff is the ship checkpoint only.
         transition_task_status(
             task,
             QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
