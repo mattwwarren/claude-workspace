@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-07-05
+
+**Observability sprint Phase 1 (RFC 0007 W2 poll layer + W4 push completion)**:
+the orchestrator stops re-deriving PR state every prompt, and workers can push
+validated completion results instead of relying solely on transcript parsing.
+
+### Added
+
+- **PR-state hydration in the serve tick — first `pr.*` event producer**
+  (#929, #981): throttled (default 150s) `gh pr view` hydration for dev-queue
+  tasks with open PRs; persisted `TicketTask.pr_state` (dev-queue schema v8);
+  attention-state decision table (ported `_summarize_status_checks`, rows
+  5a-5c distinguishing BLOCKED-waiting-on-CI from genuinely approvable);
+  `pr.merged` / `pr.ci_failed` / `pr.review_received` / `pr.mergeable` emitted
+  on transitions diffed against persisted state (`pr.merged` also fires on
+  first observation so late-enqueued tasks still retire). `retire_merged_prs`
+  begins actually firing. `cw dev-queue tasks` gains `pr_state` (JSON) and an
+  ATTENTION column (human); `status` gains per-client NEEDS_ATTN counts.
+- **`cw result emit` — push-based completion** (#536 Phase 1, #977): workers
+  push the full `AutoDevResult` through a strictly-validated CLI (reusing
+  `cw result validate`, inheriting the A6 empty-ambiguity invariant); on
+  success `session.last_result` is written synchronously under the sessions
+  lock. The Stop hook remains the completion-event source but now defers to
+  an emitted terminal result instead of overwriting it; the phantom-reconcile
+  path gains the same gate so an emit-then-crash session is never re-salvaged
+  over its authoritative result. Transcript sentinels are demoted to forensic
+  fallback. `_seed_daemon_session` promoted to conftest for shared test use.
+
 ## [1.10.0] — 2026-07-04
 
 **Observability sprint Wave 0**: worker-context correctness (the RFC 0007 W4
