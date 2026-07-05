@@ -27,6 +27,7 @@ from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import (
+    OCCUPIED_LANE_STATUSES,
     ConcurrencyOverrides,
     LaneConcurrencyOverride,
     OrchestratorEventType,
@@ -263,15 +264,13 @@ def lane_add(
 def lane_rm(client: str, name: str) -> None:
     """Remove lane NAME from CLIENT.
 
-    Fails if any PENDING, RUNNING, or BLOCKED_ON_USER tasks are in that lane.
+    Fails if any PENDING, RUNNING, BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF
+    tasks are in that lane.
     """
-    _active_statuses = frozenset(
-        [
-            QueueItemStatus.PENDING,
-            QueueItemStatus.RUNNING,
-            QueueItemStatus.BLOCKED_ON_USER,
-        ]
-    )
+    # Composition, not a byte-identical swap: OCCUPIED_LANE_STATUSES alone
+    # omits PENDING (never occupies a lane slot), but lane removal must still
+    # block on PENDING work waiting in the lane (#990).
+    _active_statuses = OCCUPIED_LANE_STATUSES | {QueueItemStatus.PENDING}
     with dev_queue_lock():
         store = load_dev_queue()
         active_in_lane = [

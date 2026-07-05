@@ -24,6 +24,7 @@ from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models import (
     DEFAULT_LANE,
+    OCCUPIED_LANE_STATUSES,
     ClientConfig,
     CwState,
     DevQueueStore,
@@ -69,6 +70,7 @@ _STATUS_LABEL: dict[QueueItemStatus, str] = {
     QueueItemStatus.FAILED: "failed",
     QueueItemStatus.CANCELLED: "cancelled",
     QueueItemStatus.BLOCKED_ON_USER: "blocked",
+    QueueItemStatus.AWAITING_OPERATOR_SIGNOFF: "awaiting signoff",
 }
 
 # Bounded event-feed read: recency window + entry cap, replicating the
@@ -369,11 +371,7 @@ def _build_lane_panel(
     # per-client collapsing becomes a UX requirement.
     # Why: mirrors dispatch._lane_stats_for_client without importing the
     # private function.
-    running = sum(
-        1
-        for t in tasks_in_lane
-        if t.status in {QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER}
-    )
+    running = sum(1 for t in tasks_in_lane if t.status in OCCUPIED_LANE_STATUSES)
 
     pause_tag = " [PAUSED]" if paused else ""
     title = f"{client_name} / {lane_name}{pause_tag}  [{running}/{max_parallel}]"
@@ -389,9 +387,6 @@ def _build_lane_panel(
 
     for task in tasks_in_lane:
         model_display = _derive_model_display(task.stage, client_cfg)
-        # Why: awaiting_operator_signoff doesn't exist in QueueItemStatus yet
-        # (Phase 3). This fallback covers it forward-compat without a new
-        # literal today.
         status_label = _STATUS_LABEL.get(task.status, str(task.status))
         anchor = (
             started_map.get(task.session_id) if task.session_id is not None else None

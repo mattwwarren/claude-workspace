@@ -8428,6 +8428,28 @@ class TestLaneRm:
         result = runner.invoke(main, ["lane", "rm", "acme", "urgent"])
         assert result.exit_code != 0
 
+    def test_lane_rm_blocked_by_awaiting_signoff_task(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF blocks lane removal like BLOCKED_ON_USER (#990)."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        )
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="ACM-2",
+            client="acme",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            lane="urgent",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["lane", "rm", "acme", "urgent"])
+        assert result.exit_code != 0
+
 
 class TestLanePauseResume:
     def test_lane_pause_writes_override_and_emits_event(

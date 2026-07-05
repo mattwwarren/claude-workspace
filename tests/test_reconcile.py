@@ -15238,12 +15238,13 @@ class TestApplySentinelToTaskLateRescue:
         session_id: str,
         stage: Stage,
         scope_hint: str = "small",
+        status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
     ) -> None:
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
-            status=QueueItemStatus.BLOCKED_ON_USER,
+            status=status,
             session_id=session_id,  # retained across the park (#918)
             stage=stage,
             scope_hint=scope_hint,
@@ -15473,6 +15474,33 @@ class TestApplySentinelToTaskLateRescue:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.PENDING
         assert t.session_id is None
+
+    def test_late_sentinel_rescues_signoff_parked_task(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A signoff-parked (AWAITING_OPERATOR_SIGNOFF) task is rescued by a late
+        sentinel the same way a BLOCKED_ON_USER task is (#990).
+
+        No signoff is configured on `_write_staged_clients_yaml`'s client, so
+        this exercises only the widened membership lookup (touch-point #30)
+        -- not the signoff gate re-firing.
+        """
+        ticket_id, session_id = "GH-990-signoff", "sess-990-signoff"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
 
 
 class TestVerifySupervisorSessionId:
