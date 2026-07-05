@@ -11,6 +11,7 @@ import pytest
 from cw.models import (
     DEFAULT_AUTO_PURPOSES,
     DEFAULT_LANE,
+    DEV_QUEUE_SCHEMA_VERSION,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -19,6 +20,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
+    PrState,
     QueueItemStatus,
     ReapPolicy,
     Session,
@@ -782,3 +784,36 @@ def test_session_lane_round_trips() -> None:
         lane="my-lane",
     )
     assert sess.lane == "my-lane"
+
+
+class TestPrStateAndSchemaV8:
+    """PR-state hydration model + schema/config surface (#929)."""
+
+    def test_dev_queue_schema_version_is_8(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 8
+
+    def test_pr_state_defaults(self) -> None:
+        state = PrState()
+        assert state.state == "OPEN"
+        assert state.ci_ok is True
+        assert state.review_decision == ""
+        assert state.attention_state is None
+        assert state.merge_state_status == "UNKNOWN"
+        assert state.failing_checks == []
+        assert isinstance(state.hydrated_at, datetime)
+
+    def test_ticket_task_pr_state_defaults_none(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.pr_state is None
+
+    def test_ticket_task_carries_pr_state(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            pr_state=PrState(state="MERGED", attention_state="ready_to_approve"),
+        )
+        assert task.pr_state is not None
+        assert task.pr_state.state == "MERGED"
+
+    def test_config_pr_hydration_interval_default(self) -> None:
+        assert OrchestratorConfig().pr_hydration_interval_seconds == 150

@@ -263,6 +263,12 @@ def _fill_spawn_error_backoff_default(task_raw: dict[str, Any]) -> None:
         task_raw["next_eligible_at"] = None
 
 
+def _fill_pr_state_default(task_raw: dict[str, Any]) -> None:
+    """Fill pr_state introduced in dev-queue schema v8 (GitHub #929). Idempotent."""
+    if "pr_state" not in task_raw:
+        task_raw["pr_state"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -278,6 +284,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_task_completed_at_default(task_raw)
                 _fill_regress_attempts_default(task_raw)
                 _fill_spawn_error_backoff_default(task_raw)
+                _fill_pr_state_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 

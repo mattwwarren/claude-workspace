@@ -6376,3 +6376,80 @@ class TestResolveDispatchSkipReasonCircuitPaused:
             client_spawned=0,
         )
         assert reason == DispatchSkipReason.LANE_CIRCUIT_PAUSED
+
+
+class TestRunDispatchLoopHydrationHook:
+    """PR-state hydration hook fires once per loop iteration, fault-tolerant (#929)."""
+
+    def test_hydrate_called_once_per_iteration(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        calls: list[object] = []
+
+        def _record(cfg: object) -> None:
+            calls.append(cfg)
+
+        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _record)
+        run_dispatch_loop(once=True, emit=None)
+        assert len(calls) == 1
+
+    def test_hydrate_exception_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+
+        def _boom(_cfg: object) -> None:
+            msg = "hydration boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _boom)
+        # Broad-catch idiom: hydration failure must never crash the tick loop.
+        run_dispatch_loop(once=True, emit=None)
+
+    def test_hydrate_called_once_per_tick_with_multiple_clients(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With 2 configured clients, the hook still fires exactly once per tick.
+
+        A single-client fixture can't distinguish "once per tick" from "once
+        per client" — both would assert len(calls) == 1. This confirms the
+        hook is wired at the outer per-tick level, not inside the per-client
+        dispatch loop.
+        """
+        ws_a = make_git_repo("workspace/client-a")
+        ws_b = make_git_repo("workspace/client-b")
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            f"    workspace_path: {ws_a}\n"
+            "    default_branch: main\n"
+            f"    worktree_base: {tmp_path / 'worktrees-a'}\n"
+            "  client-b:\n"
+            f"    workspace_path: {ws_b}\n"
+            "    default_branch: main\n"
+            f"    worktree_base: {tmp_path / 'worktrees-b'}\n"
+        )
+        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        calls: list[object] = []
+
+        def _record(cfg: object) -> None:
+            calls.append(cfg)
+
+        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _record)
+        run_dispatch_loop(once=True, emit=None)
+        assert len(calls) == 1

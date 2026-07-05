@@ -108,7 +108,8 @@ CW_STATE_SCHEMA_VERSION = 11
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
 # v6: added TicketTask.regress_attempts (GitHub #770).
 # v7: added TicketTask.spawn_error_count, next_eligible_at (GitHub #868).
-DEV_QUEUE_SCHEMA_VERSION = 7
+# v8: added TicketTask.pr_state (GitHub #929).
+DEV_QUEUE_SCHEMA_VERSION = 8
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -270,6 +271,26 @@ class OrchestratorEvent(BaseModel):
     consumed_at: datetime | None = None
 
 
+class PrState(BaseModel):
+    """Hydrated GitHub PR state persisted on a TicketTask (GitHub #929).
+
+    Populated by the serve-tick hydration pass (``cw.pr_hydrate``) from a
+    ``gh pr view --json`` response. ``attention_state`` is the operator-facing
+    escalation signal derived by ``_compute_attention_state``; None for drafts
+    and terminal (MERGED/CLOSED) PRs. ``failing_checks`` carries the failing
+    check names for the ``pr.ci_failed`` event payload.
+    """
+
+    state: str = "OPEN"
+    mergeable: str | None = None
+    merge_state_status: str = "UNKNOWN"
+    ci_ok: bool = True
+    review_decision: str = ""
+    attention_state: str | None = None
+    failing_checks: list[str] = Field(default_factory=list)
+    hydrated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class TicketTask(BaseModel):
     """A ticket queued for dispatch to a Claude session."""
 
@@ -336,6 +357,10 @@ class TicketTask(BaseModel):
     # Both are cleared atomically on a successful spawn.
     spawn_error_count: int = 0
     next_eligible_at: datetime | None = None
+    # Hydrated GitHub PR state (merge/CI/review) persisted by the serve-tick
+    # hydration pass (cw.pr_hydrate). None until first hydration or for pre-v8
+    # legacy tasks. See GitHub #929.
+    pr_state: PrState | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -517,6 +542,10 @@ class OrchestratorConfig(BaseModel):
     # aliases for one release.
     per_client_ceiling: dict[str, int] = Field(default_factory=dict)
     default_ceiling: int = 1
+    # Minimum elapsed seconds between PR-state hydration passes in the serve
+    # tick. Gated off max(pr_state.hydrated_at) across tasks (no separate timer
+    # state). See GitHub #929.
+    pr_hydration_interval_seconds: int = 150
 
     @model_validator(mode="before")
     @classmethod
