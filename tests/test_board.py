@@ -9,7 +9,6 @@ from pathlib import Path
 from rich.console import Console
 
 from cw.board import BoardState, render_board, run_board
-from cw.orchestrate import SessionSummary, TicketSummary
 from cw.models import (
     CwState,
     DevQueueStore,
@@ -26,6 +25,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.orchestrate import SessionSummary, TicketSummary
 
 
 def _render(
@@ -364,6 +364,27 @@ class TestRenderBoardSynthesisedLaneSkip:
         assert "MW-900" not in output
 
 
+class TestShortenWorktree:
+    def test_home_collapsed_to_tilde(self) -> None:
+        from cw.board import _shorten_worktree
+
+        out = _shorten_worktree(Path("/home/u/wt/dev-1"), "/home/u")
+        assert out == "~/wt/dev-1"
+
+    def test_long_path_capped(self) -> None:
+        from cw.board import _shorten_worktree
+
+        long_path = "/very/long/worktree/path/" + ("segment/" * 8) + "end"
+        out = _shorten_worktree(long_path, "")
+        assert out.startswith("…")
+        assert len(out) <= 40
+
+    def test_none_renders_dash(self) -> None:
+        from cw.board import _shorten_worktree
+
+        assert _shorten_worktree(None, "/home/u") == "—"
+
+
 def _session_summary(
     session_id: str,
     client: str = "acme",
@@ -394,9 +415,7 @@ class TestRenderBoardDetail:
     def test_detail_panel_shows_worktree_column(self) -> None:
         state = _state_with_task(
             running_sessions=[
-                _session_summary(
-                    "sess-abc", worktree_path=Path("/home/u/wt/dev-1")
-                )
+                _session_summary("sess-abc", worktree_path=Path("/home/u/wt/dev-1"))
             ],
         )
         output = _render(state, detail=True)
