@@ -8770,7 +8770,11 @@ class TestBoardCommand:
             config=OrchestratorConfig(),
             now=datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC),
         )
-        monkeypatch.setattr(board_module, "_load_board_state", lambda: fake_state)
+
+        def _fake_load_board_state(*, client_filter: str | None = None) -> BoardState:
+            return fake_state
+
+        monkeypatch.setattr(board_module, "_load_board_state", _fake_load_board_state)
         runner = CliRunner()
         result = runner.invoke(main, ["board", "--once"])
         assert result.exit_code == 0
@@ -8803,7 +8807,11 @@ class TestBoardCommand:
             config=OrchestratorConfig(),
             now=datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC),
         )
-        monkeypatch.setattr(board_module, "_load_board_state", lambda: fake_state)
+
+        def _fake_load_board_state(*, client_filter: str | None = None) -> BoardState:
+            return fake_state
+
+        monkeypatch.setattr(board_module, "_load_board_state", _fake_load_board_state)
         runner = CliRunner()
         result = runner.invoke(main, ["board", "--once"])
         assert result.exit_code == 0
