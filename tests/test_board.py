@@ -475,9 +475,13 @@ class TestSessionAgeRender:
         assert "2h" in output
 
     def test_pending_task_falls_back_to_created_at(self) -> None:
-        state = _state_with_task(status=QueueItemStatus.PENDING, created_at=NOW)
+        # created_at is distinct from NOW so this can't pass under a broken
+        # implementation that hardcodes anchor=now regardless of created_at.
+        state = _state_with_task(
+            status=QueueItemStatus.PENDING, created_at=NOW - timedelta(hours=1)
+        )
         output = _render(state)
-        assert "0m" in output
+        assert "1h" in output
 
 
 class TestPrCell:
@@ -488,6 +492,17 @@ class TestPrCell:
     def test_ci_fail_label(self) -> None:
         output = _render(_state_with_task(pr_state=PrState(ci_ok=False)))
         assert "CI-FAIL" in output
+
+    def test_ci_failing_attention_state_does_not_duplicate_ci_fail_label(self) -> None:
+        # ci_ok=False + attention_state="ci_failing" is the common pr_hydrate
+        # combination — the PR cell itself must not restate CI-FAIL as a
+        # separate "CI-FAILING" token. (The BADGE column separately falls
+        # back to attention_state by design — see _row_badge — so this
+        # asserts on _render_pr_cell directly rather than full board output.)
+        from cw.board import _render_pr_cell
+
+        cell = _render_pr_cell(PrState(ci_ok=False, attention_state="ci_failing"))
+        assert cell == "CI-FAIL"
 
     def test_approved_review_decision(self) -> None:
         output = _render(
@@ -617,8 +632,15 @@ class TestAggregateFeed:
 
     def test_burst_does_not_evict_earlier_signal(self) -> None:
         """[Round 2 Q1] aggregate-then-tail: a >20-tick burst must not evict
-        an earlier non-tick entry before aggregation collapses the burst."""
-        from cw.board import _EVENT_FEED_LIMIT, _aggregate_feed
+        an earlier non-tick entry before aggregation collapses the burst.
+
+        Exercises _build_event_feed_panel directly — the actual production
+        function that owns the aggregate-then-tail order — not just
+        _aggregate_feed, so a regression that flips the order inside
+        _build_event_feed_panel (e.g. tailing raw events before aggregating)
+        would be caught here.
+        """
+        from cw.board import _build_event_feed_panel
 
         attention_event = OrchestratorEvent(
             type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
@@ -633,18 +655,23 @@ class TestAggregateFeed:
             for i in range(25)
         ]
         events = [attention_event, *ticks]
-        aggregated = _aggregate_feed(events)
-        # Full aggregate: 1 attention entry + 1 collapsed x25 tick-run entry.
-        assert len(aggregated) == 2
-        tailed = aggregated[-_EVENT_FEED_LIMIT:]
-        texts = [e.text for e in tailed]
-        assert any("session.needs_attention" in t for t in texts)
-        assert any("x25" in t for t in texts)
+        panel = _build_event_feed_panel(events, NOW + timedelta(minutes=30), raw=False)
+        from rich.text import Text
+
+        assert isinstance(panel.renderable, Text)
+        body = panel.renderable.plain
+        assert "session.needs_attention" in body
+        assert "x25" in body
 
     def test_truncation_drops_earliest_aggregated_entries(self) -> None:
         """>20 aggregated (non-collapsible) entries: only the last
-        _EVENT_FEED_LIMIT survive tailing, proving truncation isn't a no-op."""
-        from cw.board import _EVENT_FEED_LIMIT, _aggregate_feed
+        _EVENT_FEED_LIMIT survive tailing, proving truncation isn't a no-op.
+
+        Exercises _build_event_feed_panel directly (the tail-application
+        site) and pins the exact cut boundary rather than only checking the
+        two extremes.
+        """
+        from cw.board import _EVENT_FEED_LIMIT, _build_event_feed_panel
 
         events = [
             OrchestratorEvent(
@@ -658,13 +685,17 @@ class TestAggregateFeed:
             )
             for i in range(25)
         ]
-        aggregated = _aggregate_feed(events)
-        assert len(aggregated) == 25
-        tailed = aggregated[-_EVENT_FEED_LIMIT:]
-        assert len(tailed) == _EVENT_FEED_LIMIT
-        texts = " ".join(e.text for e in tailed)
-        assert "MW-0)" not in texts
-        assert "MW-24)" in texts
+        panel = _build_event_feed_panel(events, NOW + timedelta(minutes=30), raw=False)
+        from rich.text import Text
+
+        assert isinstance(panel.renderable, Text)
+        body = panel.renderable.plain
+        assert "MW-0)" not in body
+        assert "MW-4)" not in body
+        assert "MW-5)" in body
+        assert "MW-24)" in body
+        matched_lines = sum(1 for line in body.splitlines() if "(MW-" in line)
+        assert matched_lines == _EVENT_FEED_LIMIT
 
 
 class TestEventFeedPanel:
@@ -745,16 +776,26 @@ class TestLoadBoardStateClientScoping:
         assert isinstance(result, BoardState)
 
     def test_client_scoped_feed_panel_end_to_end(self) -> None:
-        """Pre-scoped BoardState.events (as _load_board_state(client_filter=...)
-        would produce) renders only that client's events in the feed panel."""
+        """A multi-client BoardState.events list renders only the filtered
+        client's events in the feed panel — proving render_board's own
+        client scoping actually excludes other clients' events, not just
+        that _load_board_state's read_events call args are correct in
+        isolation (which a single-client fixture cannot distinguish from a
+        no-op filter)."""
         acme_event = OrchestratorEvent(
             type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             payload={"client": "acme", "ticket_id": "MW-1"},
             created_at=NOW,
         )
-        state = _state_with_task(client="acme", events=[acme_event])
+        other_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_REAP_PROPOSED,
+            payload={"client": "other-client", "ticket_id": "MW-2"},
+            created_at=NOW,
+        )
+        state = _state_with_task(client="acme", events=[acme_event, other_event])
         output = _render(state, client_filter="acme")
         assert "session.needs_attention" in output
+        assert "session.reap_proposed" not in output
 
 
 class TestBoardCliSmoke:

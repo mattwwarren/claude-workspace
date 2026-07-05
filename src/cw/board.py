@@ -67,6 +67,10 @@ _SECONDS_PER_DAY = 86400
 
 _PR_CI_OK = "CI-OK"
 _PR_CI_FAIL = "CI-FAIL"
+# Why: keys must mirror pr_hydrate._compute_attention_state's literal return
+# values exactly ("merge_blocked"/"ci_failing"/"changes_requested"/
+# "no_reviewer"/"ready_to_approve") — update both sites together if that
+# function's contract changes.
 _PR_ATTENTION_LABELS: dict[str, str] = {
     "merge_blocked": "MERGE-BLOCKED",
     "ci_failing": "CI-FAILING",
@@ -153,7 +157,12 @@ def _render_pr_cell(pr_state: PrState | None) -> str:
     parts = [_PR_CI_OK if pr_state.ci_ok else _PR_CI_FAIL]
     if pr_state.review_decision:
         parts.append(pr_state.review_decision)
-    if pr_state.attention_state:
+    # Why: "ci_failing" restates the CI-FAIL token already added above —
+    # skip it here to avoid a redundant "CI-FAIL CI-FAILING" cell.
+    redundant_with_ci_status = (
+        pr_state.attention_state == "ci_failing" and not pr_state.ci_ok
+    )
+    if pr_state.attention_state and not redundant_with_ci_status:
         parts.append(
             _PR_ATTENTION_LABELS.get(pr_state.attention_state, pr_state.attention_state)
         )
@@ -196,6 +205,10 @@ def _row_badge(
     if ticket_id in badge_index:
         return badge_index[ticket_id]
     if pr_state is not None and pr_state.attention_state:
+        # Why: pr_state.attention_state is intentionally surfaced both here
+        # (lowest-precedence badge fallback) and in the PR cell
+        # (_render_pr_cell) — two different columns showing the same signal
+        # by design (R1 PR column + R4 badge precedence), not a duplication bug.
         attention_state = pr_state.attention_state
         return _PR_ATTENTION_LABELS.get(attention_state, attention_state)
     return _DASH
@@ -342,7 +355,7 @@ def _build_lane_panel(
             task.stage.value,
             status_label,
             model_display,
-            _format_age(now, anchor),
+            _format_age(now=now, anchor=anchor),
             _render_pr_cell(task.pr_state),
             _row_badge(task.ticket_id, task.pr_state, badge_index),
         )
@@ -376,9 +389,16 @@ def render_board(
         if client_filter is None or t.client == client_filter
     }
     started_map = _session_started_map(board_state.cw_state)
-    badge_index = _index_badge_events(
-        board_state.events, board_state.now, known_ticket_ids
+    # Why: self-scope events here (not just rely on _load_board_state's
+    # read_events(client_names=...) filter) so render_board stays correct
+    # under --client even when called directly with an un-prescoped
+    # BoardState — mirrors the known_ticket_ids client-scoping above.
+    scoped_events = (
+        board_state.events
+        if client_filter is None
+        else [e for e in board_state.events if e.payload.get("client") == client_filter]
     )
+    badge_index = _index_badge_events(scoped_events, board_state.now, known_ticket_ids)
 
     for client_name in all_clients:
         client_cfg = board_state.clients.get(client_name)
@@ -417,9 +437,7 @@ def render_board(
             )
             panels.append(panel)
 
-    feed_panel = _build_event_feed_panel(
-        board_state.events, board_state.now, raw=raw_events
-    )
+    feed_panel = _build_event_feed_panel(scoped_events, board_state.now, raw=raw_events)
 
     # Footer: active sessions vs total ceiling.
     active_count = len(board_state.cw_state.active_sessions())
@@ -461,9 +479,9 @@ def run_board(
     if console is None:
         console = Console()
     if loader_fn is None:
-        # [Round 2 Q2] Zero-arg closure over client_filter — loader_fn's public
-        # type (Callable[[], BoardState]) and every existing test override
-        # stay unchanged; only this default path threads client-scoping in.
+        # Zero-arg closure over client_filter — loader_fn's public type
+        # (Callable[[], BoardState]) and every existing test override stay
+        # unchanged; only this default path threads client-scoping in.
         def _default_loader() -> BoardState:
             return _load_board_state(client_filter=client_filter)
 
