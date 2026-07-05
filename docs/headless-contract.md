@@ -581,7 +581,7 @@ cw event record stage.entered \
 
 ### 10.5 Consumer Behavior
 
-cw surfaces `last_stage` per running session in `cw orchestrate status` (text output) and the TUI sessions table (rendered by `cw orchestrate watch`). The value is derived at render time by filtering recorded events to `STAGE_ENTERED` and mapping `payload.session_id → payload.stage` (latest event wins). `STAGE_ERRORED` events are visible in `cw event tail` and `recent_events` but do NOT redefine `last_stage`. Sessions with no stage events render as `—` in the TUI and omit the `last_stage=…` token in the text output.
+cw surfaces `last_stage` per running session in `cw orchestrate status` (text output). The value is derived at render time by filtering recorded events to `STAGE_ENTERED` and mapping `payload.session_id → payload.stage` (latest event wins). `STAGE_ERRORED` events are visible in `cw event tail` and `recent_events` but do NOT redefine `last_stage`. Sessions with no stage events omit the `last_stage=…` token in the text output.
 
 ### 10.6 Cross-Repo Status
 

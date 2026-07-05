@@ -144,8 +144,8 @@ A monitored PR was merged.
 ### `stage.entered`
 
 The headless `/auto-dev` worker entered a new stage of its pipeline. Used
-by `cw orchestrate status` / `watch` to derive a per-session `last_stage`
-display. Producer contract is in
+by `cw orchestrate status` to derive a per-session `last_stage` display.
+Producer contract is in
 [`headless-contract.md` §10](headless-contract.md#10-stage-event-taxonomy-producer-contract);
 the invariant that `STAGE_ERRORED` does not redefine `last_stage` is
 captured in [ADR-0004](adr/0004-stage-events-on-orchestrator-bus.md).
