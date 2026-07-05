@@ -3004,7 +3004,13 @@ class TestDispatchTickEvents:
         # Payload shape is consistent across all emit sites (#558 PM review):
         # the freshness-gate event carries the per-lane breakdown too.
         assert p["lanes"] == {
-            "default": {"claimed": 0, "running": 0, "blocked": 0, "pending": 2}
+            "default": {
+                "claimed": 0,
+                "running": 0,
+                "blocked": 0,
+                "signoff": 0,
+                "pending": 2,
+            }
         }
 
     def test_skip_reason_spawn_error_on_spawn_failure(
@@ -4532,6 +4538,178 @@ class TestLaneCapBlockedSkipReason:
 
 
 # ---------------------------------------------------------------------------
+# TestLaneCapCountingWithAwaitingSignoff (#990)
+# ---------------------------------------------------------------------------
+
+
+class TestLaneCapCountingWithAwaitingSignoff:
+    """AWAITING_OPERATOR_SIGNOFF occupies its lane slot like BLOCKED_ON_USER."""
+
+    def _setup_signoff_lane(
+        self, tmp_dispatch_dirs: Path, workspace_path: Path
+    ) -> None:
+        """One impl lane (max_parallel=1), one AWAITING_OPERATOR_SIGNOFF task
+        filling it (no active session), and one PENDING task waiting."""
+        lanes = [LaneConfig(name="impl", max_parallel=1)]
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=workspace_path,
+            default_branch="main",
+            lanes=lanes,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+
+        signoff_task = TicketTask(
+            ticket_id="SIGNOFF-BLOCKED",
+            client="test-client",
+            lane="impl",
+        )
+        signoff_task.status = QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        signoff_task.session_id = "sess-signoff-1"
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(signoff_task)
+            save_dev_queue(store)
+
+        add_ticket(
+            TicketTask(ticket_id="SIGNOFF-PENDING", client="test-client", lane="impl")
+        )
+
+    def test_dispatch_client_lanes_signoff_counted_occupied_not_running(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF fills lane cap -> skip_reason=lane_cap_blocked."""
+        self._setup_signoff_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+
+        daemon = FakeNativeDaemonClient()
+        config = OrchestratorConfig(default_ceiling=2)
+        result = dispatch_tick(config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        events = read_events(
+            consumer="test-signoff-skip-reason",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == DispatchSkipReason.LANE_CAP_BLOCKED
+        assert p["pending"] == 1
+
+    def test_dispatch_client_lanes_event_payload_includes_signoff_bucket(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """dispatch.tick lane stats split running vs signoff for operators."""
+        self._setup_signoff_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+
+        daemon = FakeNativeDaemonClient()
+        config = OrchestratorConfig(default_ceiling=2)
+        dispatch_tick(config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-signoff-lane-stats",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        lane = events[0].payload["lanes"]["impl"]
+        assert lane["running"] == 0
+        assert lane["blocked"] == 0
+        assert lane["signoff"] == 1
+        assert lane["pending"] == 1
+
+    def test_running_by_lane_counts_signoff_as_occupied(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """A signoff-parked task with active session occupies lane; no over-spawn."""
+        lanes = [LaneConfig(name="impl", max_parallel=1)]
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=sample_client_config.workspace_path,
+            default_branch="main",
+            lanes=lanes,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+
+        signoff_task = TicketTask(
+            ticket_id="SIGNOFF-2",
+            client="test-client",
+            lane="impl",
+        )
+        signoff_task.status = QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        signoff_task.session_id = "sess-signoff-2"
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(signoff_task)
+            save_dev_queue(store)
+
+        sess = Session(
+            id="sess-signoff-2",
+            name="test-client/auto-dev/SIGNOFF-2",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        add_ticket(
+            TicketTask(ticket_id="IMPL-NEW-2", client="test-client", lane="impl")
+        )
+
+        config = OrchestratorConfig(default_ceiling=1)
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(config, native_daemon=daemon)
+
+        # Lane is full (AWAITING_OPERATOR_SIGNOFF counts) — should NOT spawn
+        assert result.spawned == 0
+
+        events = read_events(
+            consumer="test-signoff-counts-lane-skip",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.CAP_FULL
+
+    def test_lane_stats_for_client_signoff_bucket(self, tmp_path: Path) -> None:
+        """_lane_stats_for_client reports a distinct signoff count (#990)."""
+        from cw.dispatch import _lane_stats_for_client
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name="impl", max_parallel=2)],
+        )
+        tasks = [
+            TicketTask(
+                ticket_id="T1",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            ),
+            TicketTask(
+                ticket_id="T2",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.RUNNING,
+            ),
+        ]
+        stats = _lane_stats_for_client(client, DevQueueStore(tasks=tasks))
+        assert stats["impl"] == {
+            "claimed": 0,
+            "running": 1,
+            "blocked": 0,
+            "signoff": 1,
+            "pending": 0,
+        }
+
+
+# ---------------------------------------------------------------------------
 # TestSingleLaneBackwardCompat (#558)
 # ---------------------------------------------------------------------------
 
@@ -5487,6 +5665,195 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "plan_pending_approval"
         assert task.stage == Stage.PLAN
+
+    # -- Operator-signoff gates (RFC 0007 Phase 3, #990) ---------------------
+
+    def test_small_tier_with_signoff_parks_awaiting_signoff(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 1 small-tier + ticket-level signoff -> parks, does not advance."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SIGNOFF-1", stage=Stage.PLAN)
+        task.signoff = "operator"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert task.disposition == "signoff_gate"
+        assert task.stage == Stage.PLAN  # not advanced -- gate fired first
+
+    def test_small_tier_without_signoff_advances_unchanged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Regression: no signoff configured -> small tier advances as before."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SIGNOFF-2", stage=Stage.PLAN)
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+
+    def test_review_pending_approval_downgraded_small_with_signoff_parks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """review_pending_approval downgraded to small tier + signoff -> parks."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SIGNOFF-3", stage=Stage.REVIEW)
+        task.signoff = "operator"
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert task.disposition == "signoff_gate"
+        assert task.stage == Stage.REVIEW
+
+    def test_stage_complete_at_review_stage_with_signoff_parks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 3 stage_complete at REVIEW + signoff -> parks before FINALIZE."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SIGNOFF-4", stage=Stage.REVIEW)
+        task.signoff = "operator"
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert task.disposition == "signoff_gate"
+        assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+    def test_stage_complete_at_non_review_stage_ignores_signoff(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 3 stage_complete at non-REVIEW stage ignores signoff scoping.
+
+        Signoff is the ship checkpoint (REVIEW->FINALIZE); ordinary
+        mid-pipeline stage_complete advances (IMPL->REVIEW here) unattended
+        even when signoff is configured on the ticket.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("SIGNOFF-5", stage=Stage.IMPL)
+        task.signoff = "operator"
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.REVIEW
+
+    def test_resolve_signoff_ticket_beats_lane_beats_global(
+        self, tmp_path: Path
+    ) -> None:
+        """3-tier resolution: ticket > lane > global default (#990)."""
+        from cw.dispatch import resolve_signoff
+
+        client_with_lane_signoff = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name=DEFAULT_LANE, signoff="operator")],
+        )
+        clients_lane = {"test-client": client_with_lane_signoff}
+        config_none = OrchestratorConfig(default_signoff="none")
+        config_operator = OrchestratorConfig(default_signoff="operator")
+
+        # Tier 1: ticket-level override wins even when lane/global say "none".
+        task_ticket = TicketTask(
+            ticket_id="T1", client="test-client", lane=DEFAULT_LANE, signoff="operator"
+        )
+        assert resolve_signoff(task_ticket, clients_lane, config_none) == "operator"
+
+        # Tier 2: lane wins when the ticket itself has no override.
+        task_lane = TicketTask(ticket_id="T2", client="test-client", lane=DEFAULT_LANE)
+        assert resolve_signoff(task_lane, clients_lane, config_none) == "operator"
+
+        # Tier 3: global default applies when neither ticket nor lane set it.
+        client_no_lane_signoff = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name=DEFAULT_LANE)],
+        )
+        clients_no_lane = {"test-client": client_no_lane_signoff}
+        task_global = TicketTask(
+            ticket_id="T3", client="test-client", lane=DEFAULT_LANE
+        )
+        assert resolve_signoff(task_global, clients_no_lane, config_operator) == (
+            "operator"
+        )
+        assert resolve_signoff(task_global, clients_no_lane, config_none) is None
+
+    def test_resolve_signoff_falls_through_for_unknown_client_or_lane(
+        self, tmp_path: Path
+    ) -> None:
+        """Unresolvable client/lane falls through to the global default (#990)."""
+        from cw.dispatch import resolve_signoff
+
+        config = OrchestratorConfig(default_signoff="operator")
+
+        task_unknown_client = TicketTask(
+            ticket_id="U1", client="ghost-client", lane=DEFAULT_LANE
+        )
+        assert resolve_signoff(task_unknown_client, {}, config) == "operator"
+
+        client_cfg = ClientConfig(name="test-client", workspace_path=tmp_path)
+        task_unknown_lane = TicketTask(
+            ticket_id="U2", client="test-client", lane="no-such-lane"
+        )
+        assert (
+            resolve_signoff(task_unknown_lane, {"test-client": client_cfg}, config)
+            == "operator"
+        )
+
+    def test_should_gate_for_signoff_loads_config_without_signature_change(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """_should_gate_for_signoff reachable via (task, clients); staged-decision
+        signatures stay unchanged (#990)."""
+        import inspect
+
+        from cw.dispatch import (
+            _route_staged_decision,
+            _should_gate_for_signoff,
+            apply_staged_decision,
+        )
+
+        task = self._make_running_task("SIGNOFF-SIG-1", stage=Stage.REVIEW)
+        task.signoff = "operator"
+        assert _should_gate_for_signoff(task, self._clients(tmp_path)) is True
+
+        no_signoff_task = self._make_running_task("SIGNOFF-SIG-2", stage=Stage.REVIEW)
+        assert _should_gate_for_signoff(no_signoff_task, self._clients(tmp_path)) is (
+            False
+        )
+
+        assert list(inspect.signature(apply_staged_decision).parameters) == [
+            "task",
+            "status",
+            "last_result",
+            "clients",
+        ]
+        assert list(inspect.signature(_route_staged_decision).parameters) == [
+            "task",
+            "status",
+            "last_result",
+            "clients",
+        ]
 
 
 # ---------------------------------------------------------------------------

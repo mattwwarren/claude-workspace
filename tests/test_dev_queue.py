@@ -1862,7 +1862,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 8
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 9
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -1885,6 +1885,45 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"]["state"] == "OPEN"
+
+    def test_migrate_dev_queue_fills_signoff_default(self) -> None:
+        """migrate_dev_queue fills signoff=None on tasks missing the key (v9)."""
+        raw: dict[str, object] = {
+            "schema_version": 8,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-50",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["signoff"] is None
+
+    def test_migrate_dev_queue_bumps_to_v9(self) -> None:
+        """migrate_dev_queue bumps schema_version to 9 regardless of input."""
+        raw: dict[str, object] = {"schema_version": 1, "tasks": []}
+        migrated = migrate_dev_queue(raw)
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 9
+
+    def test_v9_signoff_preserved_idempotently(self) -> None:
+        """Existing signoff value survives a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 9,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-51",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "signoff": "operator",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["signoff"] == "operator"
 
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""

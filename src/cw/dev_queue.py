@@ -62,6 +62,7 @@ _TERMINAL_STATUSES: frozenset[QueueItemStatus] = frozenset(
         QueueItemStatus.FAILED,
         QueueItemStatus.CANCELLED,
         QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
     ]
 )
 
@@ -71,8 +72,16 @@ _TERMINAL_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
         QueueItemStatus.COMPLETED,
         QueueItemStatus.BLOCKED_ON_USER,
         QueueItemStatus.FAILED,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
     ]
 )
+
+# Disposition stamped when a ticket is parked AWAITING_OPERATOR_SIGNOFF by
+# either dispatch's staged-decision routing (RFC 0007 Phase 3, dispatch.py) or
+# approve_ticket's own REVIEW-stage re-check below. Imported by dispatch.py via
+# a function-level import to break the dev_queue<->dispatch circularity
+# (mirrors reconcile/_shared.py's precedent for the same import shape).
+SIGNOFF_GATE_DISPOSITION = "signoff_gate"
 
 # Statuses that should clear disposition/pr_url/completed_at (requeue/cancel).
 _RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
@@ -269,6 +278,12 @@ def _fill_pr_state_default(task_raw: dict[str, Any]) -> None:
         task_raw["pr_state"] = None
 
 
+def _fill_signoff_default(task_raw: dict[str, Any]) -> None:
+    """Fill signoff introduced in dev-queue schema v9 (GitHub #990). Idempotent."""
+    if "signoff" not in task_raw:
+        task_raw["signoff"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -285,6 +300,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_regress_attempts_default(task_raw)
                 _fill_spawn_error_backoff_default(task_raw)
                 _fill_pr_state_default(task_raw)
+                _fill_signoff_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 
@@ -425,7 +441,17 @@ def cancel_task_for_session(session_id: str) -> bool:
 
 
 _UNMOVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [QueueItemStatus.RUNNING, QueueItemStatus.BLOCKED_ON_USER]
+    [
+        QueueItemStatus.RUNNING,
+        QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+    ]
+)
+
+# Statuses eligible for approve_ticket (an existing BLOCKED_ON_USER approval
+# gate, or a parked operator-signoff gate to clear). See GitHub #990.
+_APPROVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF]
 )
 
 
@@ -576,7 +602,12 @@ def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTas
             )
         return max(live, key=lambda t: t.created_at)
 
-    blocked = [t for t in matches if t.status == QueueItemStatus.BLOCKED_ON_USER]
+    blocked = [
+        t
+        for t in matches
+        if t.status
+        in {QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF}
+    ]
     if blocked:
         return max(blocked, key=lambda t: t.created_at)
 
@@ -662,29 +693,78 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     task.stage_base_ref = None
 
 
-def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
-    """Approve a plan_pending_approval or review_pending_approval gate.
+def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
+    """Clear an operator-signoff gate parked on *task*, advancing the pipeline.
 
-    Returns dict with from_stage, to_stage, ticket_id, client for event emission.
+    The gate was parked *before* the terminal/non-terminal advance decision
+    was made (dispatch's ``_stage_advance_unchecked`` was skipped in favor of
+    the park), so this helper makes that decision now: complete at the
+    pipeline's terminal stage, otherwise advance the stage pointer -- mirrors
+    ``_stage_advance_unchecked``'s branch shape. Mutates task in place.
+    See GitHub #990.
+    """
+    if task.stage == stages[-1]:
+        transition_task_status(
+            task, QueueItemStatus.COMPLETED, disposition=SIGNOFF_GATE_DISPOSITION
+        )
+    else:
+        _advance_task_pointer(task, stages)
+
+
+def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
+    """Approve a plan/review approval gate, or clear an operator-signoff gate.
+
+    Two distinct gates share this entry point (GitHub #990):
+      - BLOCKED_ON_USER: the existing plan_pending_approval/review_pending_approval
+        approval gate. Validates the owning session's last_result. When the
+        ticket is at Stage.REVIEW and the resolved signoff policy requires an
+        operator signoff, this approval re-routes the ticket to
+        AWAITING_OPERATOR_SIGNOFF instead of advancing straight to FINALIZE --
+        a second, explicit `approve` clears it.
+      - AWAITING_OPERATOR_SIGNOFF: a ticket already parked for signoff (by
+        dispatch's staged-decision routing, or by the re-route above). No
+        session/last_result validation -- clears via ``_clear_signoff_gate``.
+
+    Returns dict with from_stage, to_stage, ticket_id, client, and
+    awaiting_signoff (True iff *this* call parked the ticket at
+    AWAITING_OPERATOR_SIGNOFF rather than advancing/completing it).
 
     Raises:
-        ApproveGateError: if ticket is not at an approval gate, session is missing,
+        ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, or last_result status is not an approval gate.
         CwError: if no matching task is found.
     """
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.config import load_state
+    from cw.dispatch import _should_gate_for_signoff
 
     with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
 
-        if task.status != QueueItemStatus.BLOCKED_ON_USER:
+        if task.status not in _APPROVABLE_STATUSES:
             msg = (
                 f"Cannot approve ticket '{ticket_id}': status is {task.status.value!r},"
-                " expected BLOCKED_ON_USER. Use 'requeue' to re-run a stage."
+                " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF."
+                " Use 'requeue' to re-run a stage."
             )
             raise ApproveGateError(msg)
+
+        client_cfg = get_client(client_name)
+        stages = client_cfg.pipeline.stages
+
+        if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
+            from_stage = task.stage.value
+            _clear_signoff_gate(task, stages)
+            to_stage = task.stage.value
+            save_dev_queue(store)
+            return {
+                "from_stage": from_stage,
+                "to_stage": to_stage,
+                "ticket_id": ticket_id,
+                "client": client_name,
+                "awaiting_signoff": False,
+            }
 
         state = load_state()
         session = None
@@ -712,9 +792,6 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
             )
             raise ApproveGateError(msg)
 
-        client_cfg = get_client(client_name)
-        stages = client_cfg.pipeline.stages
-
         if task.stage not in stages:
             msg = (
                 f"Cannot approve ticket '{ticket_id}':"
@@ -730,7 +807,21 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
             raise ApproveGateError(msg)
 
         from_stage = task.stage.value
-        _advance_task_pointer(task, stages)
+        awaiting_signoff = False
+        # Why REVIEW-scoped: signoff is the ship checkpoint (RFC 0007's "gate a
+        # ticket before it ships"); it never reroutes the earlier
+        # plan_pending_approval->IMPL advance, only the review->FINALIZE one.
+        if task.stage == Stage.REVIEW and _should_gate_for_signoff(
+            task, {client_name: client_cfg}
+        ):
+            transition_task_status(
+                task,
+                QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+                disposition=SIGNOFF_GATE_DISPOSITION,
+            )
+            awaiting_signoff = True
+        else:
+            _advance_task_pointer(task, stages)
         to_stage = task.stage.value
 
         save_dev_queue(store)
@@ -740,6 +831,7 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
         "to_stage": to_stage,
         "ticket_id": ticket_id,
         "client": client_name,
+        "awaiting_signoff": awaiting_signoff,
     }
 
 
@@ -789,11 +881,12 @@ def _apply_requeue_stage(
                 " Use --regress to move backward."
             )
             raise RequeueStageError(msg)
-        if task.status != QueueItemStatus.BLOCKED_ON_USER:
+        if task.status not in _APPROVABLE_STATUSES:
             msg = (
                 f"Cannot regress ticket '{task.ticket_id}'"
                 f" to stage '{stage_override}': status is"
-                f" {task.status.value!r}, expected BLOCKED_ON_USER."
+                f" {task.status.value!r}, expected BLOCKED_ON_USER or"
+                " AWAITING_OPERATOR_SIGNOFF."
             )
             raise RequeueStageError(msg)
         _stage_regress(task, target_stage)
@@ -847,12 +940,13 @@ def requeue_ticket(
 
         if not regressed:
             # Forward/same-stage path (including inert allow_regress forward
-            # targets) requires the ticket to be at a BLOCKED_ON_USER gate.
-            if task.status != QueueItemStatus.BLOCKED_ON_USER:
+            # targets) requires the ticket to be at a BLOCKED_ON_USER or
+            # AWAITING_OPERATOR_SIGNOFF gate.
+            if task.status not in _APPROVABLE_STATUSES:
                 msg = (
                     f"Cannot requeue ticket '{ticket_id}':"
                     f" status is {task.status.value!r},"
-                    " expected BLOCKED_ON_USER."
+                    " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF."
                 )
                 raise RequeueStateError(msg)
             transition_task_status(task, QueueItemStatus.PENDING)

@@ -592,8 +592,9 @@ class TestQueueItemStatusBlockedOnUser:
         assert QueueItemStatus.BLOCKED_ON_USER.value == "blocked_on_user"
 
     def test_all_queue_statuses(self) -> None:
-        # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER
-        assert len(QueueItemStatus) == 6
+        # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER,
+        # AWAITING_OPERATOR_SIGNOFF (#990)
+        assert len(QueueItemStatus) == 7
 
     def test_blocked_on_user_not_in_running(self) -> None:
         store = DevQueueStore(
