@@ -1563,6 +1563,70 @@ def apply_staged_decision(
     _route_staged_decision(task, status, last_result, clients)
 
 
+def _route_scope_gated_approval(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    last_result: dict[str, object] | None,
+    disposition: str | None,
+    pr_url: str | None,
+) -> None:
+    """Rule 1 body: scope-gated approval -- small tier auto-advances, large blocks.
+
+    Small tier additionally checks the operator-signoff gate before advancing
+    (RFC 0007 Phase 3, #990). Tier resolution is escalate-only -- see
+    ``_resolve_scope_tier`` docstring (#696, #926). Extracted from
+    ``_route_staged_decision`` to keep that function under the PLR0912
+    branch ceiling.
+    """
+    tier = _resolve_scope_tier(last_result, task)
+    if tier != SCOPE_TIER_SMALL:
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+        )
+        return
+    if _should_gate_for_signoff(task, clients):
+        # Why: the operator-signoff gate takes precedence over the small-tier
+        # auto-advance -- the ticket parks for an explicit operator approval
+        # before continuing the pipeline, rather than advancing unattended
+        # (RFC 0007 Phase 3, #990).
+        transition_task_status(
+            task,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            disposition=SIGNOFF_GATE_DISPOSITION,
+        )
+    else:
+        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+
+
+def _route_stage_success(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    disposition: str | None,
+    pr_url: str | None,
+) -> None:
+    """Rule 3 body: shipped/stage_complete -- advance or complete.
+
+    Why REVIEW-scoped: STAGE_SUCCESS_STATUSES fires at every pipeline stage as
+    the ordinary staged-advance signal (each of HARDEN/PLAN/IMPL/REVIEW's
+    "stage_complete", plus terminal "shipped"); gating every one of those
+    would pause the ticket at every stage. Signoff is the ship checkpoint
+    only -- the REVIEW->FINALIZE transition -- so the gate applies only when
+    task.stage is REVIEW. This relies on an unenforced producer contract that
+    only REVIEW's advance represents "ready to ship"; dispatch does not
+    otherwise verify it (RFC 0007 Phase 3, #990). Extracted from
+    ``_route_staged_decision`` to keep that function under the PLR0912
+    branch ceiling.
+    """
+    if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
+        transition_task_status(
+            task,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            disposition=SIGNOFF_GATE_DISPOSITION,
+        )
+    else:
+        _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+
+
 def _route_staged_decision(
     task: TicketTask,
     status: str | None,
@@ -1583,28 +1647,7 @@ def _route_staged_decision(
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
-        # Tier resolution is escalate-only -- see _resolve_scope_tier docstring
-        # (#696, #926).
-        tier = _resolve_scope_tier(last_result, task)
-        if tier == SCOPE_TIER_SMALL:
-            if _should_gate_for_signoff(task, clients):
-                # Why: the operator-signoff gate takes precedence over the
-                # small-tier auto-advance -- the ticket parks for an explicit
-                # operator approval before continuing the pipeline, rather
-                # than advancing unattended (RFC 0007 Phase 3, #990).
-                transition_task_status(
-                    task,
-                    QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-                    disposition=SIGNOFF_GATE_DISPOSITION,
-                )
-            else:
-                _stage_advance_unchecked(
-                    task, clients, disposition=disposition, pr_url=pr_url
-                )
-        else:
-            transition_task_status(
-                task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
-            )
+        _route_scope_gated_approval(task, clients, last_result, disposition, pr_url)
     elif status in PAUSED_FOR_USER_INPUT_STATUSES:
         # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
         # premises_pending_verification). Scope-gated statuses caught by Rule 1.
@@ -1626,26 +1669,9 @@ def _route_staged_decision(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
     elif status in STAGE_SUCCESS_STATUSES:
-        # Rule 3: shipped -- advance or complete.
-        # Why REVIEW-scoped: STAGE_SUCCESS_STATUSES fires at every pipeline
-        # stage as the ordinary staged-advance signal (each of HARDEN/PLAN/
-        # IMPL/REVIEW's "stage_complete", plus terminal "shipped"); gating
-        # every one of those would pause the ticket at every stage. Signoff
-        # is the ship checkpoint only -- the REVIEW->FINALIZE transition --
-        # so the gate applies only when task.stage is REVIEW. This relies on
-        # an unenforced producer contract that only REVIEW's advance
-        # represents "ready to ship"; dispatch does not otherwise verify it
-        # (RFC 0007 Phase 3, #990).
-        if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
-            transition_task_status(
-                task,
-                QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-                disposition=SIGNOFF_GATE_DISPOSITION,
-            )
-        else:
-            _stage_advance_unchecked(
-                task, clients, disposition=disposition, pr_url=pr_url
-            )
+        # Rule 3: shipped -- advance or complete (REVIEW-scoped signoff gate;
+        # see _route_stage_success docstring).
+        _route_stage_success(task, clients, disposition, pr_url)
     elif status == "merge_pending":
         # Rule 3b: PR created but awaiting CI/merge gate (#899). Not a failure
         # — preserve pr_url so operator can monitor/merge. Do not re-dispatch.

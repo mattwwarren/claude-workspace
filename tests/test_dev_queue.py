@@ -2385,7 +2385,10 @@ class TestFindTicket:
     def test_find_ticket_prefers_awaiting_signoff_over_terminal_duplicate(
         self, tmp_config_dir: Path
     ) -> None:
-        """AWAITING_OPERATOR_SIGNOFF wins over CANCELLED (mirrors BLOCKED_ON_USER, #990)."""
+        """AWAITING_OPERATOR_SIGNOFF wins over CANCELLED (mirrors BLOCKED_ON_USER).
+
+        See GitHub #990.
+        """
         from datetime import UTC, datetime, timedelta
 
         old_ts = datetime(2025, 5, 1, tzinfo=UTC)
@@ -2908,6 +2911,36 @@ class TestApproveTicket:
         t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
         assert t.status == QueueItemStatus.PENDING
         assert t.stage == Stage.FINALIZE
+
+    def test_approve_signoff_parked_at_terminal_stage_completes(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """AWAITING_OPERATOR_SIGNOFF already at the terminal stage -> COMPLETED.
+
+        Exercises _clear_signoff_gate's terminal-stage branch (mirrors
+        _stage_advance_unchecked's COMPLETED arm) -- this is the second
+        approve in the large-ticket two-approval flow once the stage pointer
+        has already been advanced to the pipeline's last stage.
+        """
+        from cw.dev_queue import approve_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.FINALIZE,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is False
+        assert result["from_stage"] == "finalize"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "signoff_gate"
 
     def test_approve_large_review_pending_with_signoff_parks(
         self, tmp_config_dir: Path, tmp_path: Path

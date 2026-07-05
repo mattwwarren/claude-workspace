@@ -486,6 +486,43 @@ Emitted on every BLOCKED_ON_USER transition.
 
 **Re-dispatch rule:** never auto-retry BLOCKED_ON_USER tasks. Human must review the Linear/GitHub issue for the posted ambiguities/premises, resolve them, and then re-dispatch manually.
 
+## AWAITING_OPERATOR_SIGNOFF Queue Task Status (RFC 0007 Phase 3, GitHub #990)
+
+`QueueItemStatus.AWAITING_OPERATOR_SIGNOFF` marks a ticket parked for an
+explicit operator signoff before it ships. Distinct from `BLOCKED_ON_USER`:
+the ticket isn't blocked on a producer-emitted approval-gate sentinel or a
+watchdog condition — it's an operator policy decision, resolved entirely by
+`cw` from configuration, with no session/last_result validation on the
+clearing path.
+
+**Resolution (3-tier precedence, highest first)** via `resolve_signoff`:
+
+1. **Per-ticket** — `TicketTask.signoff` (`cw dev-queue add --signoff operator`).
+2. **Per-lane** — `LaneConfig.signoff` on the ticket's declared lane.
+3. **Global default** — `OrchestratorConfig.default_signoff` (`"none"` or `"operator"`).
+
+**Where the gate fires:** only at the REVIEW→FINALIZE checkpoint — the point
+a ticket would otherwise auto-advance (small-tier `plan_pending_approval` /
+`review_pending_approval`) or complete (`stage_complete` fired while the task
+is at `Stage.REVIEW`). Ordinary mid-pipeline `stage_complete` advances
+(HARDEN→PLAN, PLAN→IMPL, IMPL→REVIEW) are never gated, even when signoff is
+configured — the gate is a ship checkpoint, not a per-stage checkpoint.
+
+**Clearing the gate:** `cw dev-queue approve` on an `AWAITING_OPERATOR_SIGNOFF`
+ticket advances (or completes, at the pipeline's terminal stage) unconditionally
+— no re-check. A large-tier ticket with signoff configured needs **two**
+approvals at REVIEW: the first (ordinary `review_pending_approval` approval)
+re-routes to `AWAITING_OPERATOR_SIGNOFF` instead of advancing to FINALIZE; the
+second clears it. To reject instead of clearing forward, `cw dev-queue requeue
+--stage <earlier> --regress` moves a signoff-parked ticket backward.
+
+**Lane occupancy:** `AWAITING_OPERATOR_SIGNOFF` occupies its lane slot the same
+as `BLOCKED_ON_USER` (`OCCUPIED_LANE_STATUSES`) — it is not eligible for
+re-dispatch and must not be double-counted as free capacity.
+
+**`cw dev-queue wait` exit code:** `4` (distinct from `2` for an ordinary
+`BLOCKED_ON_USER` block) — see the exit-code table in `cw dev-queue wait --help`.
+
 ### queue.session_reaped Bus Event (GitHub #380)
 
 Emitted on the **queue-events bus** (`cw event tail`, MCP `queue.session_reaped`) whenever reconcile disposes of a session. The bus server polls `session.reap_reason` off the state snapshot and fires exactly once per new reason stamp.

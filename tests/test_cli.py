@@ -6568,7 +6568,9 @@ class TestDevQueueStatusWithTick:
             "    lane slow: pending=1 running=0 blocked=0 signoff=0 [PAUSED]"
             in result.output
         )
-        assert "    lane fast: pending=1 running=0 blocked=0 signoff=0\n" in result.output
+        assert (
+            "    lane fast: pending=1 running=0 blocked=0 signoff=0\n" in result.output
+        )
 
     def test_dev_queue_status_single_default_lane_no_indented_lines(
         self, tmp_config_dir: Path
@@ -6887,7 +6889,10 @@ class TestDevQueueTasksPrState:
     def test_tasks_json_includes_signoff_null_by_default(
         self, tmp_config_dir: Path
     ) -> None:
-        """_task_to_dict's JSON contract carries a signoff key, null by default (#990)."""
+        """_task_to_dict's JSON contract carries a signoff key, null by default.
+
+        See GitHub #990.
+        """
         import json as _json
 
         from cw.dev_queue import add_ticket

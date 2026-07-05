@@ -829,12 +829,15 @@ class TestOperatorSignoffGates:
     def test_occupied_lane_statuses_includes_signoff(self) -> None:
         from cw.models import OCCUPIED_LANE_STATUSES
 
-        assert OCCUPIED_LANE_STATUSES == frozenset(
-            [
-                QueueItemStatus.RUNNING,
-                QueueItemStatus.BLOCKED_ON_USER,
-                QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-            ]
+        assert (
+            frozenset(
+                [
+                    QueueItemStatus.RUNNING,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+                ]
+            )
+            == OCCUPIED_LANE_STATUSES
         )
 
     def test_ticket_task_signoff_defaults_none(self) -> None:

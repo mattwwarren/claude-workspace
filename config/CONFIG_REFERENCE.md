@@ -49,7 +49,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`, `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below). |
 | `pipeline` | PipelineConfig \| null | `null` | Per-stage executor configuration (RFC 0005). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -299,6 +299,16 @@ reap_policy: signal_only
 # no separate timer state. Each pass fetches `gh pr view` for every open PR
 # referenced by a dev-queue task, so lowering this increases gh API load.
 pr_hydration_interval_seconds: 150
+
+# Global default operator-signoff gate (RFC 0007 Phase 3, GitHub #990).
+# "none" (default): no gate — the existing staged-advance rules apply.
+# "operator": every ticket pauses at AWAITING_OPERATOR_SIGNOFF at the
+#   REVIEW->FINALIZE checkpoint (the ship point) pending an explicit
+#   `cw dev-queue approve`, unless overridden per-lane or per-ticket.
+# Unlike reap_policy, an invalid value here raises loudly rather than
+# silently falling back — a config typo must never silently disable the
+# gate an operator is relying on. See Operator Signoff Gates below.
+default_signoff: none
 ```
 
 Override a single ticket's budget at enqueue time:
@@ -306,6 +316,38 @@ Override a single ticket's budget at enqueue time:
 ```bash
 cw dev-queue add GEN-123 --client my-project --timeout 7200
 cw dev-queue add GEN-456 --client my-project --idle-watchdog 600
+```
+
+## Operator Signoff Gates (RFC 0007 Phase 3)
+
+Lets an operator require an explicit signoff before a ticket ships, gating the
+REVIEW→FINALIZE transition (the point at which a ticket would otherwise
+auto-advance or complete unattended). Resolved with 3-tier precedence,
+highest first:
+
+1. **Per-ticket** — `cw dev-queue add GEN-123 --client my-project --signoff operator`
+2. **Per-lane** — `signoff: operator` on a `LaneConfig` entry (see the `lanes`
+   field above)
+3. **Global default** — `default_signoff: operator` in `orchestrator.yaml`
+   (see above)
+
+When a ticket is gated, it parks at `AWAITING_OPERATOR_SIGNOFF` instead of
+advancing (`cw dev-queue wait` exits `4`; `cw dev-queue status`'s lane
+breakdown shows a `signoff=N` count alongside `blocked=N`). Clear the gate
+with the same command used for an ordinary approval gate:
+
+```bash
+cw dev-queue approve GEN-123 --client my-project
+```
+
+A large-tier ticket with signoff configured requires **two** approvals at the
+REVIEW stage: the first (ordinary `review_pending_approval`) approval re-routes
+it to `AWAITING_OPERATOR_SIGNOFF` instead of advancing straight to FINALIZE; a
+second `approve` clears the gate. To reject a signoff-parked ticket instead of
+clearing it forward, regress it back to an earlier stage:
+
+```bash
+cw dev-queue requeue GEN-123 --client my-project --stage impl --regress
 ```
 
 ## Worktree Context File (`.claude/cw-context.json`)
