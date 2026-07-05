@@ -538,6 +538,29 @@ class TestBadges:
         output = _render(state)
         assert "REAP" in output
 
+    def test_reap_beats_attention_regardless_of_event_order(self) -> None:
+        # Reversed order vs test_reap_beats_attention_and_pr_state above —
+        # precedence must hold independent of event order (see
+        # _index_badge_events's `elif ticket_id not in result` guard).
+        events = [
+            OrchestratorEvent(
+                type=OrchestratorEventType.SESSION_REAP_PROPOSED,
+                payload={"ticket_id": "MW-100"},
+                created_at=NOW,
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                payload={"ticket_id": "MW-100"},
+                created_at=NOW,
+            ),
+        ]
+        state = _state_with_task(
+            pr_state=PrState(attention_state="ready_to_approve"),
+            events=events,
+        )
+        output = _render(state)
+        assert "REAP" in output
+
     def test_needs_attention_only(self) -> None:
         events = [
             OrchestratorEvent(
@@ -556,8 +579,9 @@ class TestBadges:
         assert "READY-TO-APPROVE" in output
 
     def test_no_badge_when_none_present(self) -> None:
-        output = _render(_state_with_task())
-        assert isinstance(output, str)
+        from cw.board import _DASH, _row_badge
+
+        assert _row_badge(ticket_id="MW-100", pr_state=None, badge_index={}) == _DASH
 
     def test_event_older_than_window_dropped(self) -> None:
         old_event = OrchestratorEvent(
@@ -631,8 +655,8 @@ class TestAggregateFeed:
         assert result[0].text == "dispatch.tick x1 over 0m"
 
     def test_burst_does_not_evict_earlier_signal(self) -> None:
-        """[Round 2 Q1] aggregate-then-tail: a >20-tick burst must not evict
-        an earlier non-tick entry before aggregation collapses the burst.
+        """Aggregate-then-tail: a >20-tick burst must not evict an earlier
+        non-tick entry before aggregation collapses the burst.
 
         Exercises _build_event_feed_panel directly — the actual production
         function that owns the aggregate-then-tail order — not just
@@ -721,7 +745,9 @@ class TestEventFeedPanel:
             ),
         ]
         output = _render(_state_with_task(events=tick_events), raw_events=True)
-        assert "x" not in output
+        # Two ticks stay two separate raw lines — no "dispatch.tick xN" collapse.
+        assert output.count("dispatch.tick") == 2
+        assert "dispatch.tick x" not in output
 
     def test_empty_queue_and_events_renders_without_raising(self) -> None:
         output = _render(_empty_state())

@@ -62,6 +62,7 @@ _STATUS_LABEL: dict[QueueItemStatus, str] = {
 _EVENT_FEED_WINDOW = timedelta(hours=24)
 _EVENT_FEED_LIMIT = 20
 
+_SECONDS_PER_MINUTE = 60
 _SECONDS_PER_HOUR = 3600
 _SECONDS_PER_DAY = 86400
 
@@ -87,6 +88,12 @@ _BADGE_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
     }
 )
+
+
+def _pr_attention_label(attention_state: str) -> str:
+    """Map a pr_hydrate attention_state literal to its display label,
+    falling back to the raw string for forward-compat with unknown values."""
+    return _PR_ATTENTION_LABELS.get(attention_state, attention_state)
 
 
 @dataclass
@@ -137,7 +144,7 @@ def _format_age(now: datetime, anchor: datetime | None) -> str:
         return _DASH
     total_seconds = (now - anchor).total_seconds()
     if total_seconds < _SECONDS_PER_HOUR:
-        return f"{int(total_seconds // 60)}m"
+        return f"{int(total_seconds // _SECONDS_PER_MINUTE)}m"
     if total_seconds < _SECONDS_PER_DAY:
         return f"{int(total_seconds // _SECONDS_PER_HOUR)}h"
     return f"{int(total_seconds // _SECONDS_PER_DAY)}d"
@@ -163,9 +170,7 @@ def _render_pr_cell(pr_state: PrState | None) -> str:
         pr_state.attention_state == "ci_failing" and not pr_state.ci_ok
     )
     if pr_state.attention_state and not redundant_with_ci_status:
-        parts.append(
-            _PR_ATTENTION_LABELS.get(pr_state.attention_state, pr_state.attention_state)
-        )
+        parts.append(_pr_attention_label(pr_state.attention_state))
     return " ".join(parts)
 
 
@@ -209,8 +214,7 @@ def _row_badge(
         # (lowest-precedence badge fallback) and in the PR cell
         # (_render_pr_cell) — two different columns showing the same signal
         # by design (R1 PR column + R4 badge precedence), not a duplication bug.
-        attention_state = pr_state.attention_state
-        return _PR_ATTENTION_LABELS.get(attention_state, attention_state)
+        return _pr_attention_label(pr_state.attention_state)
     return _DASH
 
 
@@ -228,7 +232,7 @@ def _aggregate_feed(events: list[OrchestratorEvent]) -> list[_FeedEntry]:
         if not run:
             return
         span_seconds = (run[-1].created_at - run[0].created_at).total_seconds()
-        span_minutes = int(span_seconds // 60)
+        span_minutes = int(span_seconds // _SECONDS_PER_MINUTE)
         entries.append(
             _FeedEntry(
                 text=f"dispatch.tick x{len(run)} over {span_minutes}m",
@@ -357,7 +361,11 @@ def _build_lane_panel(
             model_display,
             _format_age(now=now, anchor=anchor),
             _render_pr_cell(task.pr_state),
-            _row_badge(task.ticket_id, task.pr_state, badge_index),
+            _row_badge(
+                ticket_id=task.ticket_id,
+                pr_state=task.pr_state,
+                badge_index=badge_index,
+            ),
         )
 
     return Panel(table, title=title)
@@ -398,7 +406,9 @@ def render_board(
         if client_filter is None
         else [e for e in board_state.events if e.payload.get("client") == client_filter]
     )
-    badge_index = _index_badge_events(scoped_events, board_state.now, known_ticket_ids)
+    badge_index = _index_badge_events(
+        events=scoped_events, now=board_state.now, known_ticket_ids=known_ticket_ids
+    )
 
     for client_name in all_clients:
         client_cfg = board_state.clients.get(client_name)
@@ -437,7 +447,9 @@ def render_board(
             )
             panels.append(panel)
 
-    feed_panel = _build_event_feed_panel(scoped_events, board_state.now, raw=raw_events)
+    feed_panel = _build_event_feed_panel(
+        events=scoped_events, now=board_state.now, raw=raw_events
+    )
 
     # Footer: active sessions vs total ceiling.
     active_count = len(board_state.cw_state.active_sessions())
