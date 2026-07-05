@@ -258,7 +258,7 @@ def _build_event_feed_panel(
     """One global bounded event-feed panel. Aggregates dispatch.tick runs by
     default; --raw-events (raw=True) restores the unaggregated stream.
 
-    [Round 2 Q1] Aggregate-then-tail: the full windowed event list is
+    Aggregate-then-tail: the full windowed event list is
     aggregated first, then the *aggregated* entries are tailed to
     _EVENT_FEED_LIMIT — not the other way around, so a tick burst can't evict
     earlier non-tick signal before aggregation ever runs.
