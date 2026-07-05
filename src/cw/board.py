@@ -14,6 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from cw._util import _shorten_worktree
 from cw.config import (
     load_effective_clients,
     load_effective_config,
@@ -44,6 +45,7 @@ from cw.orchestrate import (
     summarise_ticket,
 )
 from cw.session_groups import (
+    CONTENTION_THRESHOLD,
     group_by_client,
     sessions_by_client,
     worktree_contention,
@@ -78,10 +80,6 @@ _EVENT_FEED_LIMIT = 20
 _SECONDS_PER_MINUTE = 60
 _SECONDS_PER_HOUR = 3600
 _SECONDS_PER_DAY = 86400
-
-# Detail-panel worktree column: display cap + contention threshold.
-_WORKTREE_DISPLAY_MAX = 40
-_CONTENTION_THRESHOLD = 2
 
 _PR_CI_OK = "CI-OK"
 _PR_CI_FAIL = "CI-FAIL"
@@ -417,19 +415,6 @@ def _build_lane_panel(
     return Panel(table, title=title)
 
 
-def _shorten_worktree(path_value: object, home: str) -> str:
-    """Display a worktree path relative to ``$HOME`` and capped in length. Pure."""
-    if path_value is None:
-        return _DASH
-    as_str = str(path_value)
-    if home and as_str.startswith(home):
-        as_str = "~" + as_str[len(home) :]
-    if len(as_str) > _WORKTREE_DISPLAY_MAX:
-        keep = _WORKTREE_DISPLAY_MAX - 1
-        as_str = "…" + as_str[-keep:]
-    return as_str
-
-
 def _build_detail_panel(board_state: BoardState) -> Panel:
     """Session-grouped detail panel with a worktree-contention column.
 
@@ -459,7 +444,7 @@ def _build_detail_panel(board_state: BoardState) -> Panel:
                 str(sess.worktree_path) if sess.worktree_path is not None else None
             )
             count = contention.get(path_key, 0) if path_key is not None else 0
-            marker = f"⚠x{count}" if count >= _CONTENTION_THRESHOLD else _DASH
+            marker = f"⚠x{count}" if count >= CONTENTION_THRESHOLD else _DASH
             table.add_row(
                 client,
                 sess.id,

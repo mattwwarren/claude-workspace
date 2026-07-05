@@ -427,10 +427,13 @@ class TestRenderBoardDetail:
             running_sessions=[
                 _session_summary("sess-a", worktree_path=shared),
                 _session_summary("sess-b", worktree_path=shared),
+                _session_summary("sess-c", worktree_path=Path("/home/u/wt/solo")),
             ],
         )
         output = _render(state, detail=True)
-        assert "⚠" in output
+        assert "⚠x2" in output
+        solo_line = next(line for line in output.splitlines() if "sess-c" in line)
+        assert "⚠" not in solo_line
 
     def test_default_board_has_no_detail_panel(self) -> None:
         state = _state_with_task(
@@ -439,6 +442,13 @@ class TestRenderBoardDetail:
         output = _render(state, detail=False)
         # The detail panel is not rendered without detail=True.
         assert "sess-abc" not in output
+        assert "Sessions (detail)" not in output
+
+    def test_detail_panel_renders_with_no_sessions(self) -> None:
+        """detail=True with empty running_sessions/pending_tickets renders."""
+        state = _state_with_task(running_sessions=[], pending_tickets=[])
+        output = _render(state, detail=True)
+        assert "Sessions (detail)" in output
 
 
 class TestRunBoard:

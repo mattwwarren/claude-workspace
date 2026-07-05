@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from cw.orchestrate import SessionSummary, TicketSummary
 
-_CONTENTION_THRESHOLD = 2
+CONTENTION_THRESHOLD = 2
 
 
 def group_by_client(
@@ -46,8 +46,9 @@ def worktree_contention(sessions: Iterable[SessionSummary]) -> dict[str, int]:
     """Map ``str(worktree_path)`` -> count of sessions on that path.
 
     Sessions with no worktree path are excluded. A path with a count of
-    ``_CONTENTION_THRESHOLD`` (2) or more is contended — two or more parallel
-    sessions share it.
+    ``CONTENTION_THRESHOLD`` (2) or more is contended — two or more parallel
+    sessions share it. Callers (e.g. ``cw.board``) compare returned counts
+    against ``CONTENTION_THRESHOLD`` to decide whether to render a marker.
     """
     counts: dict[str, int] = {}
     for sess in sessions:

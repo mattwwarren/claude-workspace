@@ -29,6 +29,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
+from cw._util import _shorten_worktree
 from cw.orchestrate import (
     OrchestratorStatus,
     SessionSummary,
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
 
 _MIN_INTERVAL_SECONDS = 1
 _MAX_INTERVAL_SECONDS = 60
-_WORKTREE_DISPLAY_MAX = 40
 
 _SECONDS_PER_MINUTE = 60
 _SECONDS_PER_HOUR = 3600
@@ -61,19 +61,6 @@ def _format_elapsed(started_at: datetime, now: datetime) -> str:
     hours, remainder = divmod(total_seconds, _SECONDS_PER_HOUR)
     minutes = remainder // _SECONDS_PER_MINUTE
     return f"{hours}h{minutes:02d}m"
-
-
-def _shorten_worktree(path_value: object, home: str) -> str:
-    """Display a worktree path relative to ``$HOME`` and capped in length."""
-    if path_value is None:
-        return "—"
-    as_str = str(path_value)
-    if home and as_str.startswith(home):
-        as_str = "~" + as_str[len(home) :]
-    if len(as_str) > _WORKTREE_DISPLAY_MAX:
-        keep = _WORKTREE_DISPLAY_MAX - 1
-        as_str = "…" + as_str[-keep:]
-    return as_str
 
 
 # ── flat watch board ──────────────────────────────────────────────────────────

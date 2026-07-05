@@ -121,8 +121,7 @@ class TestWorktreeContention:
             _session("s2", "acme", worktree_path=Path("/home/u/wt/a")),
         ]
         counts = worktree_contention(sessions)
-        assert str(None) not in counts
-        assert len(counts) == 1
+        assert counts == {str(Path("/home/u/wt/a")): 1}
 
     def test_empty_returns_empty_dict(self) -> None:
         assert worktree_contention([]) == {}
