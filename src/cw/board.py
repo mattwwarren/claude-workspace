@@ -62,6 +62,9 @@ _STATUS_LABEL: dict[QueueItemStatus, str] = {
 _EVENT_FEED_WINDOW = timedelta(hours=24)
 _EVENT_FEED_LIMIT = 20
 
+_SECONDS_PER_HOUR = 3600
+_SECONDS_PER_DAY = 86400
+
 _PR_CI_OK = "CI-OK"
 _PR_CI_FAIL = "CI-FAIL"
 _PR_ATTENTION_LABELS: dict[str, str] = {
@@ -110,6 +113,7 @@ def _load_board_state(*, client_filter: str | None = None) -> BoardState:
     # dev-queue state, violating lock-free observer contract.
     """
     now = datetime.now(UTC)
+    client_names = frozenset({client_filter}) if client_filter is not None else None
     return BoardState(
         cw_state=load_state(),
         dev_queue=load_dev_queue(),
@@ -118,7 +122,7 @@ def _load_board_state(*, client_filter: str | None = None) -> BoardState:
         now=now,
         events=read_events(
             since_ts=now - _EVENT_FEED_WINDOW,
-            client_names=frozenset({client_filter}) if client_filter is not None else None,
+            client_names=client_names,
         ),
     )
 
@@ -128,11 +132,11 @@ def _format_age(now: datetime, anchor: datetime | None) -> str:
     if anchor is None:
         return _DASH
     total_seconds = (now - anchor).total_seconds()
-    if total_seconds < 3600:
+    if total_seconds < _SECONDS_PER_HOUR:
         return f"{int(total_seconds // 60)}m"
-    if total_seconds < 86400:
-        return f"{int(total_seconds // 3600)}h"
-    return f"{int(total_seconds // 86400)}d"
+    if total_seconds < _SECONDS_PER_DAY:
+        return f"{int(total_seconds // _SECONDS_PER_HOUR)}h"
+    return f"{int(total_seconds // _SECONDS_PER_DAY)}d"
 
 
 def _session_started_map(cw_state: CwState) -> dict[str, datetime]:
@@ -192,7 +196,8 @@ def _row_badge(
     if ticket_id in badge_index:
         return badge_index[ticket_id]
     if pr_state is not None and pr_state.attention_state:
-        return _PR_ATTENTION_LABELS.get(pr_state.attention_state, pr_state.attention_state)
+        attention_state = pr_state.attention_state
+        return _PR_ATTENTION_LABELS.get(attention_state, attention_state)
     return _DASH
 
 
@@ -209,10 +214,11 @@ def _aggregate_feed(events: list[OrchestratorEvent]) -> list[_FeedEntry]:
     def _flush_tick_run() -> None:
         if not run:
             return
-        span_minutes = int((run[-1].created_at - run[0].created_at).total_seconds() // 60)
+        span_seconds = (run[-1].created_at - run[0].created_at).total_seconds()
+        span_minutes = int(span_seconds // 60)
         entries.append(
             _FeedEntry(
-                text=f"dispatch.tick ×{len(run)} over {span_minutes}m",
+                text=f"dispatch.tick x{len(run)} over {span_minutes}m",
                 created_at=run[-1].created_at,
             )
         )
@@ -249,7 +255,9 @@ def _build_event_feed_panel(
 
     if raw:
         display = windowed[-_EVENT_FEED_LIMIT:]
-        lines = [f"{e.created_at.strftime('%H:%M:%S')}  {e.type.value}" for e in display]
+        lines = [
+            f"{e.created_at.strftime('%H:%M:%S')}  {e.type.value}" for e in display
+        ]
     else:
         aggregated = _aggregate_feed(windowed)
         tailed = aggregated[-_EVENT_FEED_LIMIT:]
@@ -324,7 +332,9 @@ def _build_lane_panel(
         # (Phase 3). This fallback covers it forward-compat without a new
         # literal today.
         status_label = _STATUS_LABEL.get(task.status, str(task.status))
-        anchor = started_map.get(task.session_id) if task.session_id is not None else None
+        anchor = (
+            started_map.get(task.session_id) if task.session_id is not None else None
+        )
         if anchor is None:
             anchor = task.created_at
         table.add_row(

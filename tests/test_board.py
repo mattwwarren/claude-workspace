@@ -580,7 +580,7 @@ class TestAggregateFeed:
         ]
         result = _aggregate_feed(events)
         assert len(result) == 1
-        assert "×3" in result[0].text
+        assert "x3" in result[0].text
         assert "2m" in result[0].text
 
     def test_non_tick_breaks_run(self) -> None:
@@ -603,8 +603,8 @@ class TestAggregateFeed:
         ]
         result = _aggregate_feed(events)
         texts = [e.text for e in result]
-        assert any("×2" in t for t in texts)
-        assert any("×1" in t for t in texts)
+        assert any("x2" in t for t in texts)
+        assert any("x1" in t for t in texts)
 
     def test_single_tick_exact_label(self) -> None:
         from cw.board import _aggregate_feed
@@ -613,12 +613,12 @@ class TestAggregateFeed:
             OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW)
         ]
         result = _aggregate_feed(events)
-        assert result[0].text == "dispatch.tick ×1 over 0m"
+        assert result[0].text == "dispatch.tick x1 over 0m"
 
     def test_burst_does_not_evict_earlier_signal(self) -> None:
         """[Round 2 Q1] aggregate-then-tail: a >20-tick burst must not evict
         an earlier non-tick entry before aggregation collapses the burst."""
-        from cw.board import _aggregate_feed, _EVENT_FEED_LIMIT
+        from cw.board import _EVENT_FEED_LIMIT, _aggregate_feed
 
         attention_event = OrchestratorEvent(
             type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
@@ -634,17 +634,17 @@ class TestAggregateFeed:
         ]
         events = [attention_event, *ticks]
         aggregated = _aggregate_feed(events)
-        # Full aggregate: 1 attention entry + 1 collapsed ×25 tick-run entry.
+        # Full aggregate: 1 attention entry + 1 collapsed x25 tick-run entry.
         assert len(aggregated) == 2
         tailed = aggregated[-_EVENT_FEED_LIMIT:]
         texts = [e.text for e in tailed]
         assert any("session.needs_attention" in t for t in texts)
-        assert any("×25" in t for t in texts)
+        assert any("x25" in t for t in texts)
 
     def test_truncation_drops_earliest_aggregated_entries(self) -> None:
         """>20 aggregated (non-collapsible) entries: only the last
         _EVENT_FEED_LIMIT survive tailing, proving truncation isn't a no-op."""
-        from cw.board import _aggregate_feed, _EVENT_FEED_LIMIT
+        from cw.board import _EVENT_FEED_LIMIT, _aggregate_feed
 
         events = [
             OrchestratorEvent(
@@ -690,7 +690,7 @@ class TestEventFeedPanel:
             ),
         ]
         output = _render(_state_with_task(events=tick_events), raw_events=True)
-        assert "×" not in output
+        assert "x" not in output
 
     def test_empty_queue_and_events_renders_without_raising(self) -> None:
         output = _render(_empty_state())
