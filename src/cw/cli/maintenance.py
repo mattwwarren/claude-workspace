@@ -371,8 +371,16 @@ def schema_stage_output(stage: str) -> None:
     shell_complete=_complete_client,
     help="Only render this client.",
 )
+@click.option(
+    "--raw-events",
+    is_flag=True,
+    default=False,
+    help="Show raw event stream instead of aggregated ticks.",
+)
 @handle_errors
-def board(once: bool, interval: int, client_filter: str | None) -> None:
+def board(
+    once: bool, interval: int, client_filter: str | None, raw_events: bool
+) -> None:
     """Lane x stage pipeline cockpit (RFC 0005 D1).
 
     Displays all dev-queue tickets grouped by client -> lane -> stage.
@@ -380,4 +388,6 @@ def board(once: bool, interval: int, client_filter: str | None) -> None:
 
     Use --once for a static snapshot (CI-friendly).
     """
-    run_board(once=once, interval=interval, client_filter=client_filter)
+    run_board(
+        once=once, interval=interval, client_filter=client_filter, raw_events=raw_events
+    )
