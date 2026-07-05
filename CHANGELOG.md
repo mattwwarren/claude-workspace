@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-07-05
+
+**Observability sprint Phase 2 (RFC 0007 W1 — board consolidation)**: `cw board`
+becomes the primary interactive read surface; tui.py shrinks to the `cw watch`
+stack per the operator-decided usefulness bar.
+
+### Added
+
+- **Board PR/CI column, session age, attention badges, bounded event feed**
+  (#985, #987): per-ticket PR/CI cell rendered from persisted
+  `TicketTask.pr_state` (no subprocess in the render path); session-age column
+  (session `started_at` → `created_at` fallback); attention/park badges from
+  the event bus with first-match precedence `reap_proposed` >
+  `needs_attention` > `pr_state.attention_state`, joined on `ticket_id` with
+  the #857 bounded-window pattern; new global event-feed panel that aggregates
+  consecutive `dispatch.tick` runs (`dispatch.tick ×N over Xm`) *before*
+  tailing to the display limit so tick bursts cannot evict real signal
+  (absorbs the #854 tick-flood slice); `cw board --raw-events` restores the
+  raw stream; `--client` scopes the feed.
+- **`cw board --detail`** (#986, #988): session-grouped toggle panel with
+  worktree-contention column (`⚠×N` when ≥2 sessions share a path), built on
+  the new non-display `cw.session_groups` module (extracted from tui.py per
+  RFC 0007 resolved Q4); orchestrate summarizers promoted to public.
+
+### Changed
+
+- **`cw orchestrate watch` repoints to the board** (#986): the client-grouped
+  dashboard renderer and its helpers are deleted from tui.py (837 → ~420
+  lines; git history is the archive); `cw watch` keeps the flat session table;
+  `cw orchestrate status --json` contract unchanged; `--compact`/`--verbose`
+  options removed with the DetailLevel machinery. Formal deprecation notice for
+  `cw orchestrate watch` lands in Phase 4.
+- **`docs/dispatch-runbook.md` routine status reads point at `cw board`**
+  (#986); `cw dev-queue status` remains documented for scripting/parseable
+  reads (RFC 0007 resolved Q3).
+
+### Documentation
+
+- 2026-07 sprint operational lessons encoded into `cw-fanout` Step 4 and the
+  dispatch runbook §7 — liveness-first monitoring, gate workarounds, recovery
+  recipes (#984).
+
 ## [1.11.0] — 2026-07-05
 
 **Observability sprint Phase 1 (RFC 0007 W2 poll layer + W4 push completion)**:
