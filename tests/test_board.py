@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
@@ -14,7 +14,12 @@ from cw.models import (
     DevQueueStore,
     LaneConfig,
     OrchestratorConfig,
+    OrchestratorEvent,
+    OrchestratorEventType,
+    PrState,
     QueueItemStatus,
+    Session,
+    SessionPurpose,
     Stage,
     StageExecutorConfig,
     StagePipelineConfig,
@@ -22,11 +27,18 @@ from cw.models import (
 )
 
 
-def _render(board_state: BoardState, *, client_filter: str | None = None) -> str:
+def _render(
+    board_state: BoardState,
+    *,
+    client_filter: str | None = None,
+    raw_events: bool = False,
+) -> str:
     """Render board_state to a string using a captured Console."""
     buf = StringIO()
     console = Console(file=buf, no_color=True, width=200)
-    console.print(render_board(board_state, client_filter=client_filter))
+    console.print(
+        render_board(board_state, client_filter=client_filter, raw_events=raw_events)
+    )
     return buf.getvalue()
 
 
@@ -43,6 +55,39 @@ def _empty_state() -> BoardState:
     )
 
 
+def _state_with_task(
+    ticket_id: str = "MW-100",
+    stage: Stage = Stage.PLAN,
+    status: QueueItemStatus = QueueItemStatus.PENDING,
+    client: str = "acme",
+    lane: str = "default",
+    pr_state: PrState | None = None,
+    session_id: str | None = None,
+    created_at: datetime | None = None,
+    events: list[OrchestratorEvent] | None = None,
+    sessions: list[Session] | None = None,
+) -> BoardState:
+    """Build a BoardState with one TicketTask — shared builder for board tests."""
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client=client,
+        status=status,
+        stage=stage,
+        lane=lane,
+        pr_state=pr_state,
+        session_id=session_id,
+        created_at=created_at or NOW,
+    )
+    return BoardState(
+        cw_state=CwState(sessions=sessions or []),
+        dev_queue=DevQueueStore(tasks=[task]),
+        clients={},
+        config=OrchestratorConfig(),
+        now=NOW,
+        events=events or [],
+    )
+
+
 class TestRenderBoardEmpty:
     def test_renders_without_raising(self) -> None:
         output = _render(_empty_state())
@@ -55,44 +100,21 @@ class TestRenderBoardEmpty:
 
 
 class TestRenderBoardWithTickets:
-    def _state_with_task(
-        self,
-        ticket_id: str = "MW-100",
-        stage: Stage = Stage.PLAN,
-        status: QueueItemStatus = QueueItemStatus.PENDING,
-        client: str = "acme",
-        lane: str = "default",
-    ) -> BoardState:
-        task = TicketTask(
-            ticket_id=ticket_id,
-            client=client,
-            status=status,
-            stage=stage,
-            lane=lane,
-        )
-        return BoardState(
-            cw_state=CwState(),
-            dev_queue=DevQueueStore(tasks=[task]),
-            clients={},
-            config=OrchestratorConfig(),
-            now=NOW,
-        )
-
     def test_ticket_appears_in_output(self) -> None:
-        output = _render(self._state_with_task("MW-100"))
+        output = _render(_state_with_task(ticket_id="MW-100"))
         assert "MW-100" in output
 
     def test_age_renders_dash(self) -> None:
-        output = _render(self._state_with_task())
+        output = _render(_state_with_task())
         assert "—" in output
 
     def test_pr_renders_dash(self) -> None:
-        output = _render(self._state_with_task())
+        output = _render(_state_with_task())
         assert "—" in output
 
     def test_absent_client_does_not_raise(self) -> None:
         # client "acme" not in clients dict — should render "—" for model, no KeyError
-        output = _render(self._state_with_task(client="acme"))
+        output = _render(_state_with_task(client="acme"))
         assert isinstance(output, str)
 
     def test_model_derived_from_executor_config(self) -> None:
@@ -410,3 +432,337 @@ class TestRunBoard:
         ):
             result = _load_board_state()
         assert isinstance(result, BoardState)
+
+
+class TestFormatAge:
+    def test_none_anchor_renders_dash(self) -> None:
+        from cw.board import _format_age
+
+        assert _format_age(NOW, None) == "—"
+
+    def test_five_minutes(self) -> None:
+        from cw.board import _format_age
+
+        assert _format_age(NOW, NOW - timedelta(minutes=5)) == "5m"
+
+    def test_three_hours(self) -> None:
+        from cw.board import _format_age
+
+        assert _format_age(NOW, NOW - timedelta(hours=3)) == "3h"
+
+    def test_two_days(self) -> None:
+        from cw.board import _format_age
+
+        assert _format_age(NOW, NOW - timedelta(days=2)) == "2d"
+
+
+class TestSessionAgeRender:
+    def test_running_task_age_from_session(self) -> None:
+        session = Session(
+            id="sess-1",
+            name="acme/impl",
+            client="acme",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/tmp/acme"),
+            started_at=NOW - timedelta(hours=2),
+        )
+        state = _state_with_task(
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-1",
+            sessions=[session],
+        )
+        output = _render(state)
+        assert "2h" in output
+
+    def test_pending_task_falls_back_to_created_at(self) -> None:
+        state = _state_with_task(status=QueueItemStatus.PENDING, created_at=NOW)
+        output = _render(state)
+        assert "0m" in output
+
+
+class TestPrCell:
+    def test_pr_none_renders_dash(self) -> None:
+        output = _render(_state_with_task(pr_state=None))
+        assert "—" in output
+
+    def test_ci_fail_label(self) -> None:
+        output = _render(_state_with_task(pr_state=PrState(ci_ok=False)))
+        assert "CI-FAIL" in output
+
+    def test_approved_review_decision(self) -> None:
+        output = _render(
+            _state_with_task(pr_state=PrState(ci_ok=True, review_decision="APPROVED"))
+        )
+        assert "APPROVED" in output
+
+    def test_pr_attention_state_label(self) -> None:
+        output = _render(
+            _state_with_task(pr_state=PrState(attention_state="changes_requested"))
+        )
+        assert "CHANGES-REQUESTED" in output
+
+
+class TestBadges:
+    def test_reap_beats_attention_and_pr_state(self) -> None:
+        events = [
+            OrchestratorEvent(
+                type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                payload={"ticket_id": "MW-100"},
+                created_at=NOW,
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.SESSION_REAP_PROPOSED,
+                payload={"ticket_id": "MW-100"},
+                created_at=NOW,
+            ),
+        ]
+        state = _state_with_task(
+            pr_state=PrState(attention_state="ready_to_approve"),
+            events=events,
+        )
+        output = _render(state)
+        assert "REAP" in output
+
+    def test_needs_attention_only(self) -> None:
+        events = [
+            OrchestratorEvent(
+                type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                payload={"ticket_id": "MW-100"},
+                created_at=NOW,
+            ),
+        ]
+        output = _render(_state_with_task(events=events))
+        assert "ATTN" in output
+
+    def test_pr_attention_state_only(self) -> None:
+        output = _render(
+            _state_with_task(pr_state=PrState(attention_state="ready_to_approve"))
+        )
+        assert "READY-TO-APPROVE" in output
+
+    def test_no_badge_when_none_present(self) -> None:
+        output = _render(_state_with_task())
+        assert isinstance(output, str)
+
+    def test_event_older_than_window_dropped(self) -> None:
+        old_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"ticket_id": "MW-100"},
+            created_at=NOW - timedelta(hours=25),
+        )
+        output = _render(_state_with_task(events=[old_event]))
+        assert "ATTN" not in output
+
+    def test_event_ticket_mismatch_dropped(self) -> None:
+        mismatched = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"ticket_id": "MW-999"},
+            created_at=NOW,
+        )
+        output = _render(_state_with_task(events=[mismatched]))
+        assert "ATTN" not in output
+
+
+class TestAggregateFeed:
+    def test_consecutive_ticks_collapse(self) -> None:
+        from cw.board import _aggregate_feed
+
+        events = [
+            OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=1),
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=2),
+            ),
+        ]
+        result = _aggregate_feed(events)
+        assert len(result) == 1
+        assert "×3" in result[0].text
+        assert "2m" in result[0].text
+
+    def test_non_tick_breaks_run(self) -> None:
+        from cw.board import _aggregate_feed
+
+        events = [
+            OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=1),
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                created_at=NOW + timedelta(minutes=2),
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=3),
+            ),
+        ]
+        result = _aggregate_feed(events)
+        texts = [e.text for e in result]
+        assert any("×2" in t for t in texts)
+        assert any("×1" in t for t in texts)
+
+    def test_single_tick_exact_label(self) -> None:
+        from cw.board import _aggregate_feed
+
+        events = [
+            OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW)
+        ]
+        result = _aggregate_feed(events)
+        assert result[0].text == "dispatch.tick ×1 over 0m"
+
+    def test_burst_does_not_evict_earlier_signal(self) -> None:
+        """[Round 2 Q1] aggregate-then-tail: a >20-tick burst must not evict
+        an earlier non-tick entry before aggregation collapses the burst."""
+        from cw.board import _aggregate_feed, _EVENT_FEED_LIMIT
+
+        attention_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"ticket_id": "MW-1"},
+            created_at=NOW,
+        )
+        ticks = [
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=i + 1),
+            )
+            for i in range(25)
+        ]
+        events = [attention_event, *ticks]
+        aggregated = _aggregate_feed(events)
+        # Full aggregate: 1 attention entry + 1 collapsed ×25 tick-run entry.
+        assert len(aggregated) == 2
+        tailed = aggregated[-_EVENT_FEED_LIMIT:]
+        texts = [e.text for e in tailed]
+        assert any("session.needs_attention" in t for t in texts)
+        assert any("×25" in t for t in texts)
+
+    def test_truncation_drops_earliest_aggregated_entries(self) -> None:
+        """>20 aggregated (non-collapsible) entries: only the last
+        _EVENT_FEED_LIMIT survive tailing, proving truncation isn't a no-op."""
+        from cw.board import _aggregate_feed, _EVENT_FEED_LIMIT
+
+        events = [
+            OrchestratorEvent(
+                type=(
+                    OrchestratorEventType.SESSION_NEEDS_ATTENTION
+                    if i % 2 == 0
+                    else OrchestratorEventType.SESSION_REAP_PROPOSED
+                ),
+                payload={"ticket_id": f"MW-{i}"},
+                created_at=NOW + timedelta(minutes=i),
+            )
+            for i in range(25)
+        ]
+        aggregated = _aggregate_feed(events)
+        assert len(aggregated) == 25
+        tailed = aggregated[-_EVENT_FEED_LIMIT:]
+        assert len(tailed) == _EVENT_FEED_LIMIT
+        texts = " ".join(e.text for e in tailed)
+        assert "MW-0)" not in texts
+        assert "MW-24)" in texts
+
+
+class TestEventFeedPanel:
+    def test_panel_after_lane_panels_before_footer(self) -> None:
+        tick_event = OrchestratorEvent(
+            type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW
+        )
+        output = _render(_state_with_task(events=[tick_event]))
+        ticket_pos = output.find("MW-100")
+        feed_pos = output.find("dispatch.tick")
+        footer_pos = output.find("Sessions:")
+        assert ticket_pos != -1
+        assert feed_pos != -1
+        assert footer_pos != -1
+        assert ticket_pos < feed_pos < footer_pos
+
+    def test_raw_events_shows_raw_stream_no_aggregation(self) -> None:
+        tick_events = [
+            OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=1),
+            ),
+        ]
+        output = _render(_state_with_task(events=tick_events), raw_events=True)
+        assert "×" not in output
+
+    def test_empty_queue_and_events_renders_without_raising(self) -> None:
+        output = _render(_empty_state())
+        assert isinstance(output, str)
+
+
+class TestLoadBoardStateClientScoping:
+    def test_client_filter_scopes_read_events(self) -> None:
+        from unittest.mock import patch
+
+        from cw.board import _load_board_state
+
+        with (
+            patch("cw.board.load_state", return_value=CwState()),
+            patch("cw.board.load_dev_queue", return_value=DevQueueStore()),
+            patch("cw.board.load_effective_clients", return_value={}),
+            patch("cw.board.load_effective_config", return_value=OrchestratorConfig()),
+            patch("cw.board.read_events", return_value=[]) as mock_read,
+        ):
+            _load_board_state(client_filter="acme")
+        assert mock_read.call_args.kwargs["client_names"] == frozenset({"acme"})
+
+    def test_no_client_filter_reads_globally(self) -> None:
+        from unittest.mock import patch
+
+        from cw.board import _load_board_state
+
+        with (
+            patch("cw.board.load_state", return_value=CwState()),
+            patch("cw.board.load_dev_queue", return_value=DevQueueStore()),
+            patch("cw.board.load_effective_clients", return_value={}),
+            patch("cw.board.load_effective_config", return_value=OrchestratorConfig()),
+            patch("cw.board.read_events", return_value=[]) as mock_read,
+        ):
+            _load_board_state()
+        assert mock_read.call_args.kwargs["client_names"] is None
+
+    def test_bare_zero_arg_call_still_succeeds(self) -> None:
+        """Regression guard: _load_board_state() with no args must still work."""
+        from unittest.mock import patch
+
+        from cw.board import _load_board_state
+
+        with (
+            patch("cw.board.load_state", return_value=CwState()),
+            patch("cw.board.load_dev_queue", return_value=DevQueueStore()),
+            patch("cw.board.load_effective_clients", return_value={}),
+            patch("cw.board.load_effective_config", return_value=OrchestratorConfig()),
+            patch("cw.board.read_events", return_value=[]),
+        ):
+            result = _load_board_state()
+        assert isinstance(result, BoardState)
+
+    def test_client_scoped_feed_panel_end_to_end(self) -> None:
+        """Pre-scoped BoardState.events (as _load_board_state(client_filter=...)
+        would produce) renders only that client's events in the feed panel."""
+        acme_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"client": "acme", "ticket_id": "MW-1"},
+            created_at=NOW,
+        )
+        state = _state_with_task(client="acme", events=[acme_event])
+        output = _render(state, client_filter="acme")
+        assert "session.needs_attention" in output
+
+
+class TestBoardCliSmoke:
+    def test_once_with_raw_events_exits_zero(self) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["board", "--once", "--raw-events"])
+        assert result.exit_code == 0
