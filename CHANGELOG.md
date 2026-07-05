@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-07-05
+
+**Observability sprint Phase 3 (RFC 0007 W3 — operator signoff gates)**:
+`--signoff operator` reliably parks a ticket before ship, code-enforced in
+dispatch regardless of worker scope classification (the #926 lesson).
+
+### Added
+
+- **Operator signoff gates** (#990, #991): `TicketTask.signoff` /
+  `LaneConfig.signoff` (`Literal["operator"] | None`) and
+  `OrchestratorConfig.default_signoff`, resolved ticket > lane > global at
+  gate-check time by the new 3-tier `resolve_signoff` (extends the 2-tier
+  `resolve_reap_policy` shape). New `QueueItemStatus.AWAITING_OPERATOR_SIGNOFF`
+  routed from both REVIEW-exit branches of `_route_staged_decision`
+  (`stage_complete` small tier and `review_pending_approval` small-downgrade),
+  parked with disposition `signoff_gate`. `cw dev-queue approve` gains the
+  clearance arm (advance to FINALIZE, no `gh` call — the ready-flip arrives
+  with RFC 0005 C3/C2); large+signoff tickets take two approvals by design
+  (scope gate, then ship gate — the first approve says so on stdout).
+  `cw dev-queue add --signoff operator`; `signoff` in the tasks `--json`
+  contract; dev-queue schema v9 with migration fill. Invalid signoff config
+  raises loudly (no fail-safe coercion — coercing would silently disable the
+  gate).
+- **Occupancy consolidation**: new `OCCUPIED_LANE_STATUSES` constant replaces
+  four inline `(RUNNING, BLOCKED_ON_USER)` literals (dispatch lane stats,
+  board lane panel, reconcile rescue lookup, `lane rm` guard) — signoff-parked
+  tickets hold their lane slot and count as occupying, never as "running";
+  the lane breakdown line gains a `signoff=N` field. `cw dev-queue wait`
+  treats the signoff park as terminal with a new distinct exit code;
+  `requeue` accepts signoff-parked tickets (reject-via-regress lever);
+  `move` refuses them; default `status` view shows them.
+
 ## [1.12.0] — 2026-07-05
 
 **Observability sprint Phase 2 (RFC 0007 W1 — board consolidation)**: `cw board`
