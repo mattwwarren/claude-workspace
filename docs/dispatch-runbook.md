@@ -158,7 +158,10 @@ next.
 
 ### Reading the status output
 
-`cw dev-queue status` prints two distinct sections:
+For a live, human-readable cockpit use `cw board` (lane × stage panels, with
+`--detail` for a session-grouped worktree-contention view) — it is the primary
+interactive read surface. `cw dev-queue status` remains the parseable snapshot
+for scripting and field reads; it prints two distinct sections:
 
 - **Top table** — live queue state. Each row reflects the current task record
   (PENDING / RUNNING / COMPLETED / FAILED columns) at the moment the command
@@ -219,8 +222,9 @@ the task to PENDING and clears `session_id`. The wait's spawn-window grace
 (re-poll when `session_id` is None) cannot distinguish a fresh spawn from a
 just-reaped task, so ATTENTION never fires and wait rides to the `--timeout`
 ceiling (exit 124) instead. Workaround: if wait returns 124 on a run that
-should have surfaced ATTENTION, inspect `cw dev-queue status` and the
-transcript directly (see §6 in [`session-disposition.md`](session-disposition.md)).
+should have surfaced ATTENTION, inspect `cw dev-queue status` (or `cw board`
+for a live view) and the transcript directly (see §6 in
+[`session-disposition.md`](session-disposition.md)).
 
 ---
 

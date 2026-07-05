@@ -23,6 +23,22 @@ def _tail_lines(content: str, n: int) -> str:
     return content.rstrip("\n")
 
 
+_WORKTREE_DISPLAY_MAX = 40
+
+
+def _shorten_worktree(path_value: object, home: str) -> str:
+    """Display a worktree path relative to ``$HOME`` and capped in length. Pure."""
+    if path_value is None:
+        return "—"
+    as_str = str(path_value)
+    if home and as_str.startswith(home):
+        as_str = "~" + as_str[len(home) :]
+    if len(as_str) > _WORKTREE_DISPLAY_MAX:
+        keep = _WORKTREE_DISPLAY_MAX - 1
+        as_str = "…" + as_str[-keep:]
+    return as_str
+
+
 def claude_project_dir(path: str | Path) -> Path:
     """Return the Claude Code project directory for *path*.
 

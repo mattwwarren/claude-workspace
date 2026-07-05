@@ -1,14 +1,10 @@
-"""Live dashboard for the orchestrator subsystem.
+"""Flat live board for the ``cw watch`` command.
 
-Renders the output of :func:`cw.orchestrate.orchestrator_status` as a rich
-:class:`rich.console.Group` that can be passed to a static :class:`Console`
-for ``cw orchestrate status`` or wrapped in :class:`rich.live.Live` for
-``cw orchestrate watch``.
-
-Sessions are grouped by client (primary axis) so the dashboard matches
-the mental model of existing ``cw status`` / ``cw list`` output.  Worktree
-paths are surfaced as a column so contention between parallel sessions on
-overlapping branches is visible without hiding the client axis.
+Renders the output of :func:`cw.orchestrate.orchestrator_status` as a flat
+Rich table of all active work (running sessions + pending tickets), wrapped in
+:class:`rich.live.Live` with interactive key handling. The
+orchestrator-dashboard render stack moved to ``cw board`` (issue #986); only
+the ``cw watch`` flat-board surface lives here now.
 """
 
 from __future__ import annotations
@@ -23,23 +19,18 @@ import termios
 import threading
 import time
 import tty
-from datetime import UTC, datetime, timedelta
-from enum import StrEnum
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
-from rich.markup import escape as markup_escape
-from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from cw.models import DEFAULT_LANE
+from cw._util import _shorten_worktree
 from cw.orchestrate import (
-    EventSummary,
-    MonitoredPR,
     OrchestratorStatus,
     SessionSummary,
     TicketSummary,
@@ -47,22 +38,12 @@ from cw.orchestrate import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
 
     from rich.console import RenderableType
 
 _MIN_INTERVAL_SECONDS = 1
 _MAX_INTERVAL_SECONDS = 60
-_WORKTREE_DISPLAY_MAX = 40
-
-
-class DetailLevel(StrEnum):
-    """How much detail the dashboard should render per row."""
-
-    COMPACT = "compact"
-    DEFAULT = "default"
-    VERBOSE = "verbose"
-
 
 _SECONDS_PER_MINUTE = 60
 _SECONDS_PER_HOUR = 3600
@@ -80,420 +61,6 @@ def _format_elapsed(started_at: datetime, now: datetime) -> str:
     hours, remainder = divmod(total_seconds, _SECONDS_PER_HOUR)
     minutes = remainder // _SECONDS_PER_MINUTE
     return f"{hours}h{minutes:02d}m"
-
-
-def _shorten_worktree(path_value: object, home: str) -> str:
-    """Display a worktree path relative to ``$HOME`` and capped in length."""
-    if path_value is None:
-        return "—"
-    as_str = str(path_value)
-    if home and as_str.startswith(home):
-        as_str = "~" + as_str[len(home) :]
-    if len(as_str) > _WORKTREE_DISPLAY_MAX:
-        keep = _WORKTREE_DISPLAY_MAX - 1
-        as_str = "…" + as_str[-keep:]
-    return as_str
-
-
-def _group_by_client(
-    sessions: Iterable[SessionSummary],
-    tickets: Iterable[TicketSummary],
-) -> list[str]:
-    """Return client names sorted by most activity first, then alphabetically."""
-    counts: dict[str, int] = {}
-    for sess in sessions:
-        counts[sess.client] = counts.get(sess.client, 0) + 1
-    for ticket in tickets:
-        counts[ticket.client] = counts.get(ticket.client, 0) + 1
-    return sorted(counts, key=lambda c: (-counts[c], c))
-
-
-def _sessions_table(
-    sessions: list[SessionSummary],
-    *,
-    level: DetailLevel,
-    now: datetime,
-    home: str,
-) -> RenderableType:
-    """Render a table of running sessions for one client."""
-    if not sessions:
-        return Text("  (no running sessions)", style="dim")
-    table = Table(
-        show_edge=False,
-        pad_edge=False,
-        expand=True,
-        header_style="bold cyan",
-    )
-    table.add_column("ID", width=10, no_wrap=True)
-    table.add_column("PURPOSE", width=8)
-    table.add_column("WORKTREE", overflow="fold")
-    table.add_column("STAGE", width=28, no_wrap=True)
-    if level is DetailLevel.VERBOSE:
-        table.add_column("SURFACE", width=12, no_wrap=True)
-    table.add_column("ELAPSED", width=8, justify="right", no_wrap=True)
-    table.add_column("HEARTBEAT", width=10, justify="right", no_wrap=True)
-    table.add_column("SENTINEL", width=22, no_wrap=True)
-    for sess in sorted(sessions, key=lambda s: s.started_at):
-        row: list[str] = [
-            sess.id,
-            sess.purpose,
-            _shorten_worktree(sess.worktree_path, home),
-            sess.last_stage or "—",
-        ]
-        if level is DetailLevel.VERBOSE:
-            row.append(sess.surface_ref or "—")
-        row.append(_format_elapsed(sess.started_at, now))
-        if sess.transcript_age_seconds is not None:
-            fake_start = now - timedelta(seconds=sess.transcript_age_seconds)
-            row.append(_format_elapsed(fake_start, now))
-        else:
-            row.append("—")
-        row.append(sess.paused_status or "—")
-        table.add_row(*row)
-    return table
-
-
-def _tickets_table(
-    tickets: list[TicketSummary],
-    *,
-    level: DetailLevel,
-) -> RenderableType:
-    """Render a table of pending tickets for one client."""
-    if not tickets:
-        return Text("  (no pending tickets)", style="dim")
-    table = Table(
-        show_edge=False,
-        pad_edge=False,
-        expand=True,
-        header_style="bold cyan",
-    )
-    table.add_column("TICKET", width=14, no_wrap=True)
-    table.add_column("PRIORITY", width=8, justify="right")
-    if level is DetailLevel.VERBOSE:
-        table.add_column("SCOPE", overflow="fold")
-    for ticket in sorted(
-        tickets,
-        key=lambda t: (-t.priority, t.created_at),
-    ):
-        raw = (
-            ticket.ticket_id
-            if ticket.lane == DEFAULT_LANE
-            else f"{ticket.ticket_id} [{ticket.lane}]"
-        )
-        ticket_id_display = markup_escape(raw)
-        row = [ticket_id_display, str(ticket.priority)]
-        if level is DetailLevel.VERBOSE:
-            row.append(ticket.scope_hint or "—")
-        table.add_row(*row)
-    return table
-
-
-def _prs_table(prs: list[MonitoredPR], *, level: DetailLevel) -> RenderableType:
-    """Render a table of monitored PRs for one client."""
-    if not prs:
-        return Text("  (no monitored PRs)", style="dim")
-    table = Table(
-        show_edge=False,
-        pad_edge=False,
-        expand=True,
-        header_style="bold cyan",
-    )
-    table.add_column("PR", width=10, no_wrap=True)
-    table.add_column("ROLE", width=8, no_wrap=True)
-    table.add_column("STATUS", overflow="fold")
-    table.add_column("CI", width=10, no_wrap=True)
-    if level is DetailLevel.VERBOSE:
-        table.add_column("MERGEABLE", width=10, no_wrap=True)
-        table.add_column("UNRESOLVED", width=10, justify="right")
-    for pr in sorted(prs, key=lambda p: (p.repo, p.pr_number)):
-        row = [
-            f"{pr.repo}#{pr.pr_number}",
-            pr.role,
-            pr.status,
-            pr.ci_status or "—",
-        ]
-        if level is DetailLevel.VERBOSE:
-            if pr.mergeable is True:
-                mergeable_str = "✓"
-            elif pr.mergeable is False:
-                mergeable_str = "✗"
-            else:
-                mergeable_str = "—"
-            row.append(mergeable_str)
-            row.append(str(pr.unresolved_threads))
-        table.add_row(*row)
-    return table
-
-
-def _client_panel(
-    client: str,
-    *,
-    sessions: list[SessionSummary],
-    tickets: list[TicketSummary],
-    prs: list[MonitoredPR],
-    level: DetailLevel,
-    now: datetime,
-    home: str,
-) -> Panel:
-    """Build a panel with sessions, tickets, and PRs for a single client."""
-    if level is DetailLevel.COMPACT:
-        body: RenderableType = Text(
-            f"  running: {len(sessions)}   pending: {len(tickets)}   PRs: {len(prs)}",
-        )
-    else:
-        body = Group(
-            Text("Running sessions", style="bold"),
-            _sessions_table(sessions, level=level, now=now, home=home),
-            Text(""),
-            Text("Pending tickets", style="bold"),
-            _tickets_table(tickets, level=level),
-            Text(""),
-            Text("Monitored PRs", style="bold"),
-            _prs_table(prs, level=level),
-        )
-    return Panel(body, title=f"[b]{client}[/b]", title_align="left")
-
-
-class AttentionRow(BaseModel):
-    """One row in the deduped attention digest."""
-
-    key: str
-    session_counts: dict[str, int]  # paused_status -> distinct session count
-
-
-def _aggregate_attention_events(events: list[EventSummary]) -> list[AttentionRow]:
-    """Aggregate SESSION_NEEDS_ATTENTION events into deduped attention rows.
-
-    Dedup key: (session_id, paused_status) — each unique pair counted once.
-    Grouping key: ticket_id when present in payload, else client.
-    Returns one AttentionRow per distinct grouping key, sorted by key.
-    """
-    # group_key -> paused_status -> set of session_ids
-    grouped: dict[str, dict[str, set[str]]] = {}
-
-    for event in events:
-        session_id = event.payload.get("session_id")
-        paused_status = event.payload.get("paused_status")
-        if not session_id or not paused_status:
-            continue
-        ticket_id = event.payload.get("ticket_id")
-        client = event.payload.get("client")
-        group_key = str(ticket_id) if ticket_id else (str(client) if client else "")
-        if not group_key:
-            continue
-        by_status = grouped.setdefault(group_key, {})
-        by_status.setdefault(str(paused_status), set()).add(str(session_id))
-
-    return [
-        AttentionRow(
-            key=k,
-            session_counts={ps: len(sids) for ps, sids in conditions.items()},
-        )
-        for k, conditions in sorted(grouped.items())
-    ]
-
-
-def _events_panel(
-    events: list[EventSummary],
-    *,
-    attention_events: list[EventSummary] | None = None,
-    level: DetailLevel,
-) -> Panel:
-    """Render the last-N events panel, with attention digest above raw events."""
-    parts: list[RenderableType] = []
-
-    attention_rows = _aggregate_attention_events(attention_events or [])
-    if attention_rows:
-        n = len(attention_rows)
-        attn_lines: list[RenderableType] = [
-            Text.from_markup(f"[b yellow]⚠ Attention ({n})[/b yellow]"),
-        ]
-        for row in attention_rows:
-            segments = " · ".join(
-                f"{count} {status}"
-                for status, count in sorted(row.session_counts.items())
-            )
-            key_part = f"  [yellow]{markup_escape(row.key)}[/yellow]"
-            seg_part = markup_escape(segments)
-            attn_lines.append(
-                Text.from_markup(f"{key_part} ⚠ {seg_part} · needs attention")
-            )
-        parts.append(Group(*attn_lines))
-        parts.append(Text(""))
-
-    if not events:
-        parts.append(Text("(no recent events)", style="dim"))
-    else:
-        table = Table(show_edge=False, pad_edge=False, expand=True, show_header=False)
-        table.add_column("TIME", width=8, no_wrap=True, style="dim")
-        table.add_column("TYPE", width=22, no_wrap=True, style="magenta")
-        table.add_column("PAYLOAD", overflow="fold")
-        for event in events:
-            timestamp = event.created_at.astimezone().strftime("%H:%M:%S")
-            if level is DetailLevel.VERBOSE:
-                payload_text = ", ".join(f"{k}={v}" for k, v in event.payload.items())
-            else:
-                payload_text = _summarise_event_payload(event.payload)
-            table.add_row(timestamp, event.type, payload_text or "—")
-        parts.append(table)
-
-    body: RenderableType = Group(*parts) if len(parts) > 1 else parts[0]
-    title = f"[b]Recent events[/b] ({len(events)})"
-    return Panel(body, title=title, title_align="left")
-
-
-def _summarise_event_payload(payload: dict[str, object]) -> str:
-    """One-line payload summary: prefer repo/pr_number/session_id."""
-    parts: list[str] = []
-    repo = payload.get("repo")
-    if repo:
-        pr = payload.get("pr_number")
-        parts.append(f"{repo}#{pr}" if pr is not None else str(repo))
-    session_id = payload.get("session_id")
-    if session_id:
-        parts.append(f"session={session_id}")
-    reason = payload.get("reason")
-    if reason:
-        parts.append(str(reason))
-    return " ".join(parts)
-
-
-def _header(status: OrchestratorStatus, *, level: DetailLevel) -> Text:
-    """Top-line header with generation time and detail level."""
-    local_ts = status.generated_at.astimezone().strftime("%H:%M:%S")
-    return Text.from_markup(
-        f"[b]cw orchestrate[/b]  [dim]generated {local_ts} · level={level.value}[/dim]",
-    )
-
-
-def render_dashboard(
-    status: OrchestratorStatus,
-    *,
-    level: DetailLevel = DetailLevel.DEFAULT,
-    client_filter: str | None = None,
-    now: datetime | None = None,
-    home: str = "",
-) -> RenderableType:
-    """Build the full dashboard renderable from an OrchestratorStatus.
-
-    Args:
-        status: Snapshot produced by :func:`orchestrator_status`.
-        level: COMPACT / DEFAULT / VERBOSE.
-        client_filter: If set, only show this client.
-        now: Reference time for elapsed calculations.  Defaults to
-            ``datetime.now(UTC)`` — override in tests for determinism.
-        home: Home directory string used to shorten worktree paths.
-
-    Returns:
-        A rich renderable suitable for :class:`Console.print` or
-        :class:`Live`.
-    """
-    now = now or datetime.now(UTC)
-    clients = _group_by_client(status.running_sessions, status.pending_tickets)
-    if client_filter is not None:
-        clients = [c for c in clients if c == client_filter]
-
-    panels: list[RenderableType] = [_header(status, level=level)]
-    if not clients:
-        panels.append(
-            Panel(
-                Text("No active clients.", style="dim"),
-                title="[b]Clients[/b]",
-                title_align="left",
-            ),
-        )
-    for client in clients:
-        sessions = [s for s in status.running_sessions if s.client == client]
-        tickets = [t for t in status.pending_tickets if t.client == client]
-        prs = _prs_for_client(status.monitored_prs, client, status.running_sessions)
-        panels.append(
-            _client_panel(
-                client,
-                sessions=sessions,
-                tickets=tickets,
-                prs=prs,
-                level=level,
-                now=now,
-                home=home,
-            ),
-        )
-
-    panels.append(
-        _events_panel(
-            status.recent_events,
-            attention_events=status.attention_events,
-            level=level,
-        )
-    )
-    return Group(*panels)
-
-
-def _prs_for_client(
-    prs: list[MonitoredPR],
-    client: str,
-    sessions: list[SessionSummary],
-) -> list[MonitoredPR]:
-    """Filter PRs to those whose repo matches a session's name prefix.
-
-    Falls back to including every PR when no sessions exist for the client,
-    so the dashboard still surfaces PRs before any session has been spawned.
-    """
-    if not sessions:
-        return prs
-    session_clients = {s.client for s in sessions if s.client == client}
-    if not session_clients:
-        return []
-    return prs
-
-
-def watch(
-    *,
-    interval: int = 2,
-    client_filter: str | None = None,
-    level: DetailLevel = DetailLevel.DEFAULT,
-    console: Console | None = None,
-    ticks: int | None = None,
-    status_fn: Callable[[], OrchestratorStatus] | None = None,
-    home: str = "",
-) -> None:
-    """Render the dashboard live, refreshing every *interval* seconds.
-
-    Args:
-        interval: Seconds between refreshes.  Clamped to [1, 60].
-        client_filter: If set, only render the named client.
-        level: Detail level for rendered tables.
-        console: Optional :class:`Console` (tests may pass a recording one).
-        ticks: If set, render this many frames and exit — used by tests.
-            ``None`` runs until the user hits Ctrl-C.
-        status_fn: Snapshot provider.  Defaults to
-            :func:`orchestrator_status`; tests inject fakes.
-        home: Home directory string used to shorten worktree paths.
-    """
-    interval = max(_MIN_INTERVAL_SECONDS, min(_MAX_INTERVAL_SECONDS, interval))
-    console = console or Console()
-    provider = status_fn or orchestrator_status
-
-    def _build() -> RenderableType:
-        return render_dashboard(
-            provider(),
-            level=level,
-            client_filter=client_filter,
-            home=home,
-        )
-
-    if ticks is not None:
-        # Deterministic test path: render N frames directly.
-        for _ in range(ticks):
-            console.print(_build())
-        return
-
-    with Live(_build(), console=console, screen=True, refresh_per_second=4) as live:
-        try:
-            while True:
-                time.sleep(interval)
-                live.update(_build())
-        except KeyboardInterrupt:
-            return
 
 
 # ── flat watch board ──────────────────────────────────────────────────────────

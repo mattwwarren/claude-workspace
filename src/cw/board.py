@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console, Group
@@ -13,6 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from cw._util import _shorten_worktree
 from cw.config import (
     load_effective_clients,
     load_effective_config,
@@ -31,9 +33,22 @@ from cw.models import (
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
+    SessionStatus,
     Stage,
     StageExecutorConfig,
     TicketTask,
+)
+from cw.orchestrate import (
+    SessionSummary,
+    TicketSummary,
+    summarise_session,
+    summarise_ticket,
+)
+from cw.session_groups import (
+    CONTENTION_THRESHOLD,
+    group_by_client,
+    sessions_by_client,
+    worktree_contention,
 )
 
 if TYPE_CHECKING:
@@ -106,6 +121,10 @@ class BoardState:
     config: OrchestratorConfig
     now: datetime
     events: list[OrchestratorEvent] = field(default_factory=list)
+    # Detail-panel inputs (populated only when board is run with --detail);
+    # default-empty so non-detail frames and existing builders stay valid.
+    running_sessions: list[SessionSummary] = field(default_factory=list)
+    pending_tickets: list[TicketSummary] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -116,18 +135,41 @@ class _FeedEntry:
     created_at: datetime
 
 
-def _load_board_state(*, client_filter: str | None = None) -> BoardState:
+def _load_board_state(
+    *, client_filter: str | None = None, detail: bool = False
+) -> BoardState:
     """Read all state needed for one board frame.
 
     Does NOT call reconcile().
     # Why: board is read-only observer; calling reconcile() here would mutate
     # dev-queue state, violating lock-free observer contract.
+
+    When ``detail`` is set, derive the session/ticket summaries the detail
+    panel needs by reusing the already-loaded state through the orchestrate
+    summarizers — no second read, no reconcile.
     """
     now = datetime.now(UTC)
     client_names = frozenset({client_filter}) if client_filter is not None else None
+    cw_state = load_state()
+    dev_queue = load_dev_queue()
+    running_sessions: list[SessionSummary] = []
+    pending_tickets: list[TicketSummary] = []
+    if detail:
+        running_sessions = [
+            summarise_session(s, now=now)
+            for s in cw_state.sessions
+            if s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+            and (client_filter is None or s.client == client_filter)
+        ]
+        pending_tickets = [
+            summarise_ticket(t)
+            for t in dev_queue.tasks
+            if t.status == QueueItemStatus.PENDING
+            and (client_filter is None or t.client == client_filter)
+        ]
     return BoardState(
-        cw_state=load_state(),
-        dev_queue=load_dev_queue(),
+        cw_state=cw_state,
+        dev_queue=dev_queue,
         clients=load_effective_clients(),
         config=load_effective_config(),
         now=now,
@@ -135,6 +177,8 @@ def _load_board_state(*, client_filter: str | None = None) -> BoardState:
             since_ts=now - _EVENT_FEED_WINDOW,
             client_names=client_names,
         ),
+        running_sessions=running_sessions,
+        pending_tickets=pending_tickets,
     )
 
 
@@ -371,15 +415,61 @@ def _build_lane_panel(
     return Panel(table, title=title)
 
 
+def _build_detail_panel(board_state: BoardState) -> Panel:
+    """Session-grouped detail panel with a worktree-contention column.
+
+    Grouped by client (most-active first); one row per running session, sorted
+    by start time. Reads board_state.now for the AGE column — no datetime.now().
+    # Why: $HOME is read here only to tilde-collapse worktree paths for display;
+    # it is not board state or a data source, so render_board stays pure.
+    """
+    sessions = board_state.running_sessions
+    tickets = board_state.pending_tickets
+    home = str(Path.home())
+    contention = worktree_contention(sessions)
+    by_client = sessions_by_client(sessions)
+
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+    table.add_column("CLIENT", no_wrap=True)
+    table.add_column("ID", no_wrap=True)
+    table.add_column("PURPOSE", no_wrap=True)
+    table.add_column("STATUS", no_wrap=True)
+    table.add_column("WORKTREE", overflow="fold")
+    table.add_column("AGE", no_wrap=True)
+    table.add_column("CONTENTION", no_wrap=True)
+
+    for client in group_by_client(sessions, tickets):
+        for sess in sorted(by_client.get(client, []), key=lambda s: s.started_at):
+            path_key = (
+                str(sess.worktree_path) if sess.worktree_path is not None else None
+            )
+            count = contention.get(path_key, 0) if path_key is not None else 0
+            marker = f"⚠x{count}" if count >= CONTENTION_THRESHOLD else _DASH
+            table.add_row(
+                client,
+                sess.id,
+                sess.purpose,
+                sess.status,
+                _shorten_worktree(sess.worktree_path, home),
+                _format_age(now=board_state.now, anchor=sess.started_at),
+                marker,
+            )
+
+    return Panel(table, title="Sessions (detail)")
+
+
 def render_board(
     board_state: BoardState,
     *,
     client_filter: str | None = None,
     raw_events: bool = False,
+    detail: bool = False,
 ) -> RenderableType:
     """Render a full board frame as a Rich renderable.
 
-    Pure function - no I/O, no datetime.now() calls inside.
+    Pure function - no I/O, no datetime.now() calls inside. When ``detail`` is
+    set, a session-grouped detail panel (with worktree contention) is appended
+    before the event feed.
     """
     panels: list[RenderableType] = []
 
@@ -462,9 +552,14 @@ def render_board(
         f"|  Refreshed: {board_state.now.strftime('%H:%M:%S')} UTC"
     )
 
+    tail: list[RenderableType] = []
+    if detail:
+        tail.append(_build_detail_panel(board_state))
+    tail.extend((feed_panel, footer_text))
+
     if panels:
-        return Group(*panels, feed_panel, footer_text)
-    return Group(Text("No tickets in queue."), feed_panel, footer_text)
+        return Group(*panels, *tail)
+    return Group(Text("No tickets in queue."), *tail)
 
 
 def run_board(
@@ -476,6 +571,7 @@ def run_board(
     ticks: int | None = None,
     loader_fn: Callable[[], BoardState] | None = None,
     raw_events: bool = False,
+    detail: bool = False,
 ) -> None:
     """Run the board - either a Live loop or a one-shot snapshot.
 
@@ -487,6 +583,7 @@ def run_board(
         ticks: Test shim - render this many frames then return.
         loader_fn: Override the state loader (defaults to _load_board_state).
         raw_events: Show the raw event stream instead of aggregated ticks.
+        detail: Append the session-grouped detail panel (worktree contention).
     """
     if console is None:
         console = Console()
@@ -495,7 +592,7 @@ def run_board(
         # (Callable[[], BoardState]) and every existing test override stay
         # unchanged; only this default path threads client-scoping in.
         def _default_loader() -> BoardState:
-            return _load_board_state(client_filter=client_filter)
+            return _load_board_state(client_filter=client_filter, detail=detail)
 
         loader_fn = _default_loader
 
@@ -503,7 +600,10 @@ def run_board(
 
     def _build() -> RenderableType:
         return render_board(
-            loader_fn(), client_filter=client_filter, raw_events=raw_events
+            loader_fn(),
+            client_filter=client_filter,
+            raw_events=raw_events,
+            detail=detail,
         )
 
     # Single-frame paths (once or ticks=1).

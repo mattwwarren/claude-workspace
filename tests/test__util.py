@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 
@@ -310,3 +309,26 @@ class TestParseSentinelFromTranscriptToolResult:
         (project_dir / "uuid-774b.jsonl").write_text(json.dumps(record) + "\n")
 
         assert _parse_sentinel_from_transcript(str(worktree), "uuid-774b") is None
+
+
+class TestShortenWorktree:
+    """Tests for _shorten_worktree (shared worktree-path display helper)."""
+
+    def test_home_collapsed_to_tilde(self) -> None:
+        from cw._util import _shorten_worktree
+
+        out = _shorten_worktree(Path("/home/u/wt/dev-1"), "/home/u")
+        assert out == "~/wt/dev-1"
+
+    def test_long_path_capped(self) -> None:
+        from cw._util import _shorten_worktree
+
+        long_path = "/very/long/worktree/path/" + ("segment/" * 8) + "end"
+        out = _shorten_worktree(long_path, "")
+        assert out.startswith("…")
+        assert len(out) <= 40
+
+    def test_none_renders_dash(self) -> None:
+        from cw._util import _shorten_worktree
+
+        assert _shorten_worktree(None, "/home/u") == "—"

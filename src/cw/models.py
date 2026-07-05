@@ -84,7 +84,8 @@ class ReapReason(StrEnum):
 
 
 class Stage(StrEnum):
-    """RFC 0005 pipeline stage. Dormant in A1 — no dispatch wiring yet."""
+    """RFC 0005 pipeline stage. Mutated live by dispatch via
+    ``_stage_advance_unchecked`` as a task moves through the pipeline."""
 
     HARDEN = "harden"
     PLAN = "plan"
