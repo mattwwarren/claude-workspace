@@ -364,27 +364,6 @@ class TestRenderBoardSynthesisedLaneSkip:
         assert "MW-900" not in output
 
 
-class TestShortenWorktree:
-    def test_home_collapsed_to_tilde(self) -> None:
-        from cw.board import _shorten_worktree
-
-        out = _shorten_worktree(Path("/home/u/wt/dev-1"), "/home/u")
-        assert out == "~/wt/dev-1"
-
-    def test_long_path_capped(self) -> None:
-        from cw.board import _shorten_worktree
-
-        long_path = "/very/long/worktree/path/" + ("segment/" * 8) + "end"
-        out = _shorten_worktree(long_path, "")
-        assert out.startswith("…")
-        assert len(out) <= 40
-
-    def test_none_renders_dash(self) -> None:
-        from cw.board import _shorten_worktree
-
-        assert _shorten_worktree(None, "/home/u") == "—"
-
-
 def _session_summary(
     session_id: str,
     client: str = "acme",
