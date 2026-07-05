@@ -289,6 +289,60 @@ When the pipeline bounces on an intricate cross-module ticket (repeated
 This keeps orchestrator context lean and avoids endless pipeline retries on
 tickets that require human judgment at the planning stage.
 
+### Liveness before state (2026-07 sprint lesson)
+
+Task rows are authoritative for *queue* state; **transcript mtime is
+authoritative for *worker* state**. Rows have been observed parked
+`blocked_on_user` while sessions were actively committing (#976), and deleted
+outright under a live worker (#978). Before any park/requeue decision, check
+the newest `*.jsonl` under `~/.claude/projects/<slug>-dev-<T>/`:
+
+- **< 2 min old** → session ALIVE; do NOT requeue (double-spawn risk, #919
+  class). Wait for its sentinel — the #918 rescue recovers a false park.
+- **flat ≥ 45 min** → dead regardless of a `running` row. Adopt-check the
+  worktree, `cw spawn close <sid> --confirmed-dead`, requeue.
+- In between → bounded deadline check; review/plan stages go parent-silent
+  for ~20 min during subagent cycles, so a single 20-min gap is not death.
+
+### Attempt-cap reset (environmental burn)
+
+A quota window or hang loop (#979) grinds a ticket to
+`attempt_cap_blocked` (`attempts` bumps on every claim AND stage transition).
+Reset recipe — the file-edit steps are only safe with ZERO loops alive:
+
+```bash
+pkill -f "cw dev-queue run"        # TaskStop on a wrapper does NOT reliably
+pgrep -f "cw dev-queue run"        # kill the python child — verify EMPTY
+# edit ~/.local/share/cw/dev_queue.json: attempts=0, disposition=null
+# re-read the file to verify the write landed
+cw dev-queue requeue <T> -c <CLIENT>
+cw dev-queue run &                  # restart, verify fresh tick (no [STALE])
+```
+
+Editing that file with a loop alive silently loses the edit to a tick's
+read-modify-write (observed twice, 2026-07-04).
+
+### Circuit-breaker pause and held slots
+
+- `cw dev-queue status` lane line shows `[PAUSED]` → the #875 per-lane
+  breaker tripped on consecutive spawn errors. `cw lane resume <CLIENT>
+  <lane>` resumes AND resets the counter. The pause is silent today — check
+  for it whenever pending tickets sit unclaimed.
+- `BLOCKED_ON_USER` rows hold lane slots by design; a parked ticket can
+  starve its lane. Requeue or remove to free the slot.
+- A session wedged in `needs_salvage` with a park marker poisons every
+  respawn of its ticket (claim → revert → attempts+1, plus per-tick
+  `session.salvage_skipped` noise): `cw spawn close <sid> --confirmed-dead`
+  clears it.
+
+### Quota walls: probe before pausing
+
+Worker transcripts ending in "You've hit your session limit" are evidence of
+a PAST window, not the current one. Before pausing a wave:
+`claude -p "Reply with exactly: WORKER-OK" --model <worker-model>` — if it
+answers, the wall is gone. During a genuine wall, STOP the dispatch loop
+(each tick burns an attempt per pending ticket into the wall).
+
 ---
 
 ## 8. Related docs
