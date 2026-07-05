@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -61,6 +61,25 @@ class QueueItemStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     BLOCKED_ON_USER = "blocked_on_user"
+    # RFC 0007 Phase 3 (W3): a ticket parked for an explicit operator signoff
+    # before it ships (occupies its lane slot the same as BLOCKED_ON_USER).
+    # See GitHub #990.
+    AWAITING_OPERATOR_SIGNOFF = "awaiting_operator_signoff"
+
+
+# Statuses that occupy a lane's concurrency slot (RUNNING/BLOCKED_ON_USER
+# already did per ADR-0006; AWAITING_OPERATOR_SIGNOFF joins them in #990 --
+# a signoff-parked ticket is not eligible for re-dispatch, so it must not be
+# double-counted as free capacity). Single source of truth for the 4+
+# occupancy-membership tests duplicated across dispatch.py/board.py/
+# config_cmds.py prior to this ticket.
+OCCUPIED_LANE_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [
+        QueueItemStatus.RUNNING,
+        QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+    ]
+)
 
 
 class ReapReason(StrEnum):
@@ -110,7 +129,8 @@ CW_STATE_SCHEMA_VERSION = 11
 # v6: added TicketTask.regress_attempts (GitHub #770).
 # v7: added TicketTask.spawn_error_count, next_eligible_at (GitHub #868).
 # v8: added TicketTask.pr_state (GitHub #929).
-DEV_QUEUE_SCHEMA_VERSION = 8
+# v9: added TicketTask.signoff (GitHub #990).
+DEV_QUEUE_SCHEMA_VERSION = 9
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -362,6 +382,12 @@ class TicketTask(BaseModel):
     # hydration pass (cw.pr_hydrate). None until first hydration or for pre-v8
     # legacy tasks. See GitHub #929.
     pr_state: PrState | None = None
+    # Ticket-level operator-signoff override (RFC 0007 Phase 3). Takes
+    # precedence over LaneConfig.signoff and OrchestratorConfig.default_signoff
+    # in resolve_signoff's 3-tier resolution. None means "no ticket-level
+    # override -- fall through to lane/global". Set via
+    # ``cw dev-queue add --signoff operator``. See GitHub #990.
+    signoff: Literal["operator"] | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -448,6 +474,9 @@ class LaneConfig(BaseModel):
     description: str = ""
     reap_policy: ReapPolicy | None = None
     pipeline: StagePipelineConfig | None = None
+    # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
+    # OrchestratorConfig.default_signoff. See GitHub #990.
+    signoff: Literal["operator"] | None = None
 
     @field_validator("name")
     @classmethod
@@ -547,6 +576,21 @@ class OrchestratorConfig(BaseModel):
     # tick. Gated off max(pr_state.hydrated_at) across tasks (no separate timer
     # state). See GitHub #929.
     pr_hydration_interval_seconds: int = 150
+    # Global default for the operator-signoff gate (RFC 0007 Phase 3), used
+    # when neither the ticket (TicketTask.signoff) nor its lane
+    # (LaneConfig.signoff) sets an override. "none" == no gate (today's
+    # behavior); "operator" gates every ticket at the REVIEW->FINALIZE
+    # checkpoint pending an explicit ``cw dev-queue approve``.
+    # Why no coercion validator (asymmetry with reap_policy): reap_policy has
+    # a fail-safe `_coerce_reap_policy` validator because ADR-0006 requires an
+    # invalid/missing value to silently degrade to the non-destructive
+    # SIGNAL_ONLY default -- a config typo must never accidentally enable
+    # destructive auto-reap. default_signoff has the opposite risk profile: a
+    # config typo silently coercing to "none" would silently DISABLE an
+    # operator's ship gate, which is the one thing this field exists to
+    # guarantee. Pydantic's Literal validation already raises loudly on an
+    # invalid value, which is the correct fail-closed behavior here.
+    default_signoff: Literal["none", "operator"] = "none"
 
     @model_validator(mode="before")
     @classmethod
