@@ -208,6 +208,7 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
             "client": resolved,
             "from_stage": result["from_stage"],
             "to_stage": result["to_stage"],
+            "awaiting_signoff": result["awaiting_signoff"],
         },
     )
     if result["awaiting_signoff"]:

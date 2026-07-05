@@ -102,9 +102,9 @@ def transition_task_status(
     """Single authority for TicketTask status transitions. Mutates in place.
 
     Stamps disposition/pr_url/completed_at on terminal transitions
-    (COMPLETED/BLOCKED_ON_USER/FAILED); clears them on PENDING/CANCELLED
-    (requeue/cancel).  Companion field resets (session_id, stage_base_ref)
-    stay at call sites.  GitHub #310.
+    (COMPLETED/BLOCKED_ON_USER/FAILED/AWAITING_OPERATOR_SIGNOFF); clears them
+    on PENDING/CANCELLED (requeue/cancel).  Companion field resets (session_id,
+    stage_base_ref) stay at call sites.  GitHub #310, #990.
     """
     task.status = new_status
     if new_status in _TERMINAL_DISPOSITION_STATUSES:
@@ -603,12 +603,7 @@ def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTas
             )
         return max(live, key=lambda t: t.created_at)
 
-    blocked = [
-        t
-        for t in matches
-        if t.status
-        in {QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF}
-    ]
+    blocked = [t for t in matches if t.status in _APPROVABLE_STATUSES]
     if blocked:
         return max(blocked, key=lambda t: t.created_at)
 
