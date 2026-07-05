@@ -377,9 +377,19 @@ def schema_stage_output(stage: str) -> None:
     default=False,
     help="Show raw event stream instead of aggregated ticks.",
 )
+@click.option(
+    "--detail",
+    is_flag=True,
+    default=False,
+    help="Append a session-grouped detail panel (worktree contention).",
+)
 @handle_errors
 def board(
-    once: bool, interval: int, client_filter: str | None, raw_events: bool
+    once: bool,
+    interval: int,
+    client_filter: str | None,
+    raw_events: bool,
+    detail: bool,
 ) -> None:
     """Lane x stage pipeline cockpit (RFC 0005 D1).
 
@@ -389,5 +399,9 @@ def board(
     Use --once for a static snapshot (CI-friendly).
     """
     run_board(
-        once=once, interval=interval, client_filter=client_filter, raw_events=raw_events
+        once=once,
+        interval=interval,
+        client_filter=client_filter,
+        raw_events=raw_events,
+        detail=detail,
     )

@@ -8790,7 +8790,9 @@ class TestBoardCommand:
             now=datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC),
         )
 
-        def _fake_load_board_state(*, client_filter: str | None = None) -> BoardState:
+        def _fake_load_board_state(
+            *, client_filter: str | None = None, detail: bool = False
+        ) -> BoardState:
             return fake_state
 
         monkeypatch.setattr(board_module, "_load_board_state", _fake_load_board_state)
@@ -8827,7 +8829,9 @@ class TestBoardCommand:
             now=datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC),
         )
 
-        def _fake_load_board_state(*, client_filter: str | None = None) -> BoardState:
+        def _fake_load_board_state(
+            *, client_filter: str | None = None, detail: bool = False
+        ) -> BoardState:
             return fake_state
 
         monkeypatch.setattr(board_module, "_load_board_state", _fake_load_board_state)

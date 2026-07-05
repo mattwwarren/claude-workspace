@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import time
-from pathlib import Path
 
 import click
 
+from cw.board import run_board
 from cw.cli._base import _complete_client, _resolve_client, handle_errors, main
 from cw.config import load_state
 from cw.doctor import _reap_session_by_selector
@@ -32,8 +32,6 @@ from cw.orchestrate import (
 )
 from cw.reconcile import ProposedAction
 from cw.spawn import spawn_create_impl
-from cw.tui import DetailLevel
-from cw.tui import watch as tui_watch
 
 logger = logging.getLogger(__name__)
 
@@ -161,47 +159,17 @@ def orchestrate_retire() -> None:
     shell_complete=_complete_client,
     help="Only render this client.",
 )
-@click.option(
-    "--compact",
-    "level_compact",
-    is_flag=True,
-    default=False,
-    help="One-line per-client summary (counts only).",
-)
-@click.option(
-    "--verbose",
-    "level_verbose",
-    is_flag=True,
-    default=False,
-    help="Show extra columns: surface_ref, scope_hint, unresolved threads.",
-)
 @handle_errors
 def orchestrate_watch(
     interval: int,
     client_filter: str | None,
-    level_compact: bool,
-    level_verbose: bool,
 ) -> None:
-    """Render the orchestrator dashboard live, refreshing on an interval.
+    """Render the lane x stage board live, refreshing on an interval.
 
-    Groups sessions, tickets, and PRs by client.  Press Ctrl-C to exit.
+    Repointed to the `cw board` render surface (issue #986). Press Ctrl-C
+    to exit.
     """
-    if level_compact and level_verbose:
-        msg = "Pass at most one of --compact / --verbose."
-        raise click.ClickException(msg)
-
-    level = DetailLevel.DEFAULT
-    if level_compact:
-        level = DetailLevel.COMPACT
-    elif level_verbose:
-        level = DetailLevel.VERBOSE
-
-    tui_watch(
-        interval=interval,
-        client_filter=client_filter,
-        level=level,
-        home=str(Path.home()),
-    )
+    run_board(interval=interval, client_filter=client_filter)
 
 
 def _format_workers_human(
