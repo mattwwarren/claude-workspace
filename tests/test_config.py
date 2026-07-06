@@ -1548,6 +1548,16 @@ class TestOrchestratorConfigLaneCircuitBreaker:
         assert OrchestratorConfig().lane_circuit_breaker_threshold == 3
 
 
+class TestOrchestratorConfigLivenessFirstBucketByStage:
+    """OrchestratorConfig.liveness_first_bucket_by_stage field (#1001)."""
+
+    def test_default_is_impl_35(self) -> None:
+        from cw.models import OrchestratorConfig, Stage
+
+        config = OrchestratorConfig()
+        assert config.liveness_first_bucket_by_stage == {Stage.IMPL: 35}
+
+
 # ---------------------------------------------------------------------------
 # TestUsageLimitedUntilPersistence
 # ---------------------------------------------------------------------------
