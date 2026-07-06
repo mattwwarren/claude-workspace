@@ -5384,9 +5384,7 @@ class TestApplyStagedDecision:
         """
         from cw.dispatch import apply_staged_decision
 
-        requeued = capture_events(
-            "cw.dispatch", OrchestratorEventType.TICKET_REQUEUED
-        )
+        requeued = capture_events("cw.dispatch", OrchestratorEventType.TICKET_REQUEUED)
         stage_changed = capture_events(
             "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
         )

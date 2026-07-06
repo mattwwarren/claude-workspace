@@ -1284,9 +1284,7 @@ class TestRemoveTicket:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """remove_ticket emits task.deleted reason=operator_remove with payload."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
         task = TicketTask(
             ticket_id="TKT-DEL1",
             client="genhealth",
@@ -1311,9 +1309,7 @@ class TestRemoveTicket:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """remove_all removing N tasks emits N task.deleted events (Decision 2)."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
         tasks = [
             TicketTask(ticket_id="TKT-DUP", client="genhealth"),
             TicketTask(ticket_id="TKT-DUP", client="genhealth"),
@@ -1385,9 +1381,7 @@ class TestClearTickets:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """clear_tickets emits one task.deleted (reason=operator_clear) per removed."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
         tasks = [
             TicketTask(ticket_id="TKT-CL1", client="genhealth"),
             TicketTask(ticket_id="TKT-CL2", client="genhealth"),
@@ -1408,9 +1402,7 @@ class TestClearTickets:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """Status-filtered clear emits task.deleted only for removed tasks."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
         tasks = [
             TicketTask(
                 ticket_id="TKT-SP",
@@ -4176,9 +4168,7 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """A RUNNING→COMPLETED move emits one task.transition with full payload."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
         task = TicketTask(
             ticket_id="T-TR1",
             client="genhealth",
@@ -4211,9 +4201,7 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """new_status == old_status emits nothing (Decision 6, no-op guard)."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
         task = TicketTask(
             ticket_id="T-TR2",
             client="genhealth",
@@ -4226,9 +4214,7 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """A terminal→PENDING (reset) move emits task.transition."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
         task = TicketTask(
             ticket_id="T-TR3",
             client="genhealth",
@@ -4244,9 +4230,7 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """A RUNNING→AWAITING_OPERATOR_SIGNOFF (park) move emits task.transition."""
-        events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
-        )
+        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
         task = TicketTask(
             ticket_id="T-TR4",
             client="genhealth",
