@@ -7,7 +7,7 @@ import fcntl
 import json
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import (
@@ -389,6 +389,31 @@ def add_ticket(task: TicketTask) -> bool:
     return True
 
 
+def _emit_task_deleted(
+    removed: TicketTask, reason: Literal["operator_remove", "operator_clear"]
+) -> None:
+    """Emit a ``task.deleted`` event for a single removed row.
+
+    Shared chokepoint for both row-removal sites (RFC 0008 W1, closes #978):
+    called from ``remove_ticket`` (``operator_remove``) and ``clear_tickets``
+    (``operator_clear``), once per removed row.
+    """
+    # Why: emit inline under dev_queue_lock — one task.deleted per removed
+    # row (not per API call). record_event nests _inbox_lock INSIDE
+    # dev_queue_lock; the reverse never happens, so this is deadlock-safe.
+    record_event(
+        OrchestratorEventType.TASK_DELETED,
+        {
+            "ticket_id": removed.ticket_id,
+            "client": removed.client,
+            "stage": removed.stage,
+            "status_at_deletion": removed.status,
+            "reason": reason,
+        },
+        correlation_id=removed.ticket_id,
+    )
+
+
 def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> None:
     """Remove one (or all) matching TicketTask(s) from the dev queue.
 
@@ -417,21 +442,7 @@ def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> N
         store.tasks = [t for t in store.tasks if id(t) not in match_set]
         save_dev_queue(store)
         for removed in matches:
-            # Why: emit inline under dev_queue_lock — one task.deleted per removed
-            # row (not per API call), so an --all remove of N rows emits N events.
-            # record_event nests _inbox_lock INSIDE dev_queue_lock; the reverse
-            # never happens, so this is deadlock-safe. Closes #978 (RFC 0008 W1).
-            record_event(
-                OrchestratorEventType.TASK_DELETED,
-                {
-                    "ticket_id": removed.ticket_id,
-                    "client": removed.client,
-                    "stage": removed.stage,
-                    "status_at_deletion": removed.status,
-                    "reason": "operator_remove",
-                },
-                correlation_id=removed.ticket_id,
-            )
+            _emit_task_deleted(removed, "operator_remove")
 
 
 def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
@@ -568,21 +579,7 @@ def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
         store.tasks = [t for t in store.tasks if id(t) not in removed_ids]
         save_dev_queue(store)
         for task in removed_tasks:
-            # Why: emit inline under dev_queue_lock — one task.deleted per removed
-            # row (not per API call), so clearing N tasks emits N events.
-            # record_event nests _inbox_lock INSIDE dev_queue_lock; the reverse
-            # never happens, so this is deadlock-safe. Closes #978 (RFC 0008 W1).
-            record_event(
-                OrchestratorEventType.TASK_DELETED,
-                {
-                    "ticket_id": task.ticket_id,
-                    "client": task.client,
-                    "stage": task.stage,
-                    "status_at_deletion": task.status,
-                    "reason": "operator_clear",
-                },
-                correlation_id=task.ticket_id,
-            )
+            _emit_task_deleted(task, "operator_clear")
     return len(removed_tasks)
 
 
@@ -721,7 +718,7 @@ def _emit_stage_change(
     task: TicketTask,
     old_stage: Stage,
     new_stage: Stage,
-    direction: str,
+    direction: Literal["advance", "regress"],
 ) -> None:
     """Emit a ``task.stage_changed`` event for a single real stage move.
 
