@@ -41,6 +41,7 @@ from cw.pr_events_auth import (
     SIGNATURE_HEADER,
     SIGNATURE_PREFIX,
 )
+from cw.pr_hydrate import observe_pushed_event
 
 
 def _sign(secret: str, body: bytes) -> str:
@@ -952,7 +953,21 @@ class TestAsyncOffloadSeam:
         client = TestClient(make_app())
         resp = client.post(
             "/pr-event",
-            json={"repo": "owner/repo", "pr_number": 1, "event_type": "merged"},
+            json={
+                "repo": "owner/repo",
+                "pr_number": 1,
+                "event_type": "merged",
+                "payload": {"foo": "bar"},
+            },
         )
         assert resp.status_code == 200
         assert len(calls) == 1
+        offloaded_func, offloaded_args = calls[0]
+        assert offloaded_args == ()
+        assert offloaded_func.func is observe_pushed_event
+        assert offloaded_func.keywords == {
+            "repo": "owner/repo",
+            "pr_number": 1,
+            "wire_event_type": "merged",
+            "payload": {"foo": "bar"},
+        }

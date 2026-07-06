@@ -240,7 +240,7 @@ async def handle_post_pr_event(request: Request) -> Response:
     raw_body = await request.body()
     secret = os.environ.get(CW_PR_EVENTS_HMAC_SECRET_ENV)
     if secret and not verify_signature(
-        raw_body, request.headers.get(SIGNATURE_HEADER), secret
+        raw_body, header_value=request.headers.get(SIGNATURE_HEADER), secret=secret
     ):
         logger.warning("pr-event rejected: invalid or missing signature")
         return JSONResponse({"error": "invalid signature"}, status_code=401)

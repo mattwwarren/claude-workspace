@@ -25,12 +25,17 @@ SIGNATURE_HEADER = "X-Cw-Signature"
 SIGNATURE_PREFIX = "sha256="
 
 
-def verify_signature(raw_body: bytes, header_value: str | None, secret: str) -> bool:
+def verify_signature(raw_body: bytes, *, header_value: str | None, secret: str) -> bool:
     """Return True iff *header_value* is a valid HMAC-SHA256 signature of *raw_body*.
 
     *header_value* must start with ``SIGNATURE_PREFIX``; a missing header or a
     malformed prefix is rejected (returns False), never raises. Uses
     ``hmac.compare_digest`` for constant-time comparison.
+
+    Why: *header_value* and *secret* are both keyword-only despite sharing a
+    ``str | None`` / ``str`` shape -- a positional call site could transpose
+    them and still type-check, silently comparing the wrong values in this
+    security-critical check (#930 review finding).
     """
     if header_value is None or not header_value.startswith(SIGNATURE_PREFIX):
         return False
