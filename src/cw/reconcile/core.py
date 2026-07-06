@@ -38,6 +38,7 @@ from cw.reconcile._shared import (
     ticket_id_for_session,
 )
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
+from cw.reconcile.liveness import record_session_liveness_changes
 from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
@@ -395,6 +396,18 @@ def _reconcile_locked(
         and s.id not in pre_watchdog_timed_out_ids
         and _shared.detect_usage_limit(s)
         for s in state.sessions
+    )
+
+    # Pure-observation liveness-bucket sweep (RFC 0008 W2): latches
+    # Session.liveness_bucket transitions and emits session.liveness_changed.
+    # No disposition, no queue mutation — runs alongside the idle sweep so it
+    # sees the same native_live set this tick. See GitHub #1001.
+    record_session_liveness_changes(
+        state,
+        now=now,
+        native_live=native_live,
+        config=orchestrator_config,
+        task_by_ticket=shared_task_by_ticket,
     )
 
     drift = compute_drift(state, native_live, now=now)
