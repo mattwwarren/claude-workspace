@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`cw orchestrate watch`** (RFC 0007 Phase 4): prints a deprecation
+  notice to stderr on every invocation before launching the board as
+  today. `cw orchestrate watch` has been board-backed since #986
+  (v1.12.0); removal targeted for the release after v1.14.0. Use
+  `cw board` instead. `cw watch` (the flat table) is unaffected.
+
 ## [1.13.0] — 2026-07-05
 
 **Observability sprint Phase 3 (RFC 0007 W3 — operator signoff gates)**:
