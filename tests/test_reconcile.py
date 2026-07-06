@@ -9006,7 +9006,9 @@ class TestSalvageCommittedNoPrSessions:
             MagicMock,
         )
 
-        candidates = [("sess-high", ticket_id, "dev/high-branch", str(worktree), True)]
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            ("sess-high", ticket_id, "dev/high-branch", str(worktree), True)
+        ]
         completed = salvage_committed_no_pr_sessions(candidates)
 
         assert ticket_id in completed
@@ -9071,7 +9073,9 @@ class TestSalvageCommittedNoPrSessions:
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
 
-        candidates = [("sess-low", ticket_id, "dev/low-branch", str(worktree), False)]
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            ("sess-low", ticket_id, "dev/low-branch", str(worktree), False)
+        ]
         completed = salvage_committed_no_pr_sessions(candidates)
 
         assert completed == []
@@ -9207,7 +9211,9 @@ class TestSalvageCommittedNoPrSessions:
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
 
-        candidates = [("sess-idem", ticket_id, "dev/idem-branch", str(worktree), True)]
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            ("sess-idem", ticket_id, "dev/idem-branch", str(worktree), True)
+        ]
         completed = salvage_committed_no_pr_sessions(candidates)
 
         # Downgraded to LOW — no PR created, task blocked
@@ -10659,7 +10665,9 @@ def test_reap_reason_salvage_completed(
     monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_subprocess_run)
     monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
-    candidates = [("salv-comp-1", ticket_id, "dev/salv-comp", str(worktree), True)]
+    candidates: list[tuple[str, str | None, str, str, bool]] = [
+        ("salv-comp-1", ticket_id, "dev/salv-comp", str(worktree), True)
+    ]
     salvage_committed_no_pr_sessions(candidates)
 
     reloaded = load_state()
@@ -10715,7 +10723,9 @@ def test_reap_reason_salvage_parked(
         "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
     )
 
-    candidates = [("salv-park-1", ticket_id, "dev/salv-park", str(worktree), False)]
+    candidates: list[tuple[str, str | None, str, str, bool]] = [
+        ("salv-park-1", ticket_id, "dev/salv-park", str(worktree), False)
+    ]
     salvage_committed_no_pr_sessions(candidates)
 
     reloaded = load_state()
@@ -16256,7 +16266,7 @@ class TestVerifySupervisorSessionId:
         called: list[str] = []
         monkeypatch.setattr(
             "cw.reconcile._deps.read_supervisor_resume_session_id",
-            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+            lambda sid, **_kw: called.append(sid) or None,
         )
         cleared = _verify_supervisor_session_id(load_state())
         assert cleared == 0
@@ -16274,7 +16284,7 @@ class TestVerifySupervisorSessionId:
         called: list[str] = []
         monkeypatch.setattr(
             "cw.reconcile._deps.read_supervisor_resume_session_id",
-            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+            lambda sid, **_kw: called.append(sid) or None,
         )
         cleared = _verify_supervisor_session_id(load_state())
         assert cleared == 0
@@ -16295,7 +16305,7 @@ class TestVerifySupervisorSessionId:
         called: list[str] = []
         monkeypatch.setattr(
             "cw.reconcile._deps.read_supervisor_resume_session_id",
-            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+            lambda sid, **_kw: called.append(sid) or None,
         )
         cleared = _verify_supervisor_session_id(load_state())
         assert cleared == 0
@@ -16327,7 +16337,7 @@ class TestVerifySupervisorSessionId:
         called: list[str] = []
         monkeypatch.setattr(
             "cw.reconcile._deps.read_supervisor_resume_session_id",
-            lambda sid, **_kw: called.append(sid) or None,  # type: ignore[return-value]
+            lambda sid, **_kw: called.append(sid) or None,
         )
         cleared = _verify_supervisor_session_id(load_state())
         assert cleared == 0
