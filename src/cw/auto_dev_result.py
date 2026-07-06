@@ -22,9 +22,12 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -1101,54 +1104,56 @@ def _coerce_empty_pending_array(
         payload[key] = placeholder if placeholder is not None else [{}]
 
 
-def _filter_empty_question_ambiguities(payload: dict[str, Any]) -> None:
-    """Drop ambiguity items with an empty/missing question (issue #953).
+def _filter_empty_pending_items(
+    payload: dict[str, Any],
+    key: str,
+    predicate: Callable[[dict[str, Any]], bool],
+    empty_desc: str,
+    issue_ref: str,
+) -> None:
+    """Drop *key* items failing *predicate*, generalized across #953/#962.
 
     Non-dict items are left in place (isinstance guard) so they fail loudly
     at strict model_validate rather than being silently dropped.
     """
-    raw = payload.get("ambiguities")
+    raw = payload.get(key)
     if not isinstance(raw, list):
         return
-    filtered = [
-        item for item in raw if not isinstance(item, dict) or _has_usable_question(item)
-    ]
+    filtered = [item for item in raw if not isinstance(item, dict) or predicate(item)]
     if len(filtered) != len(raw):
         _log.warning(
-            "auto-dev: dropped %d ambiguity item(s) with empty/missing "
-            "'question' at parse boundary (ticket=%s, schema_version=%s); "
-            "see #953",
+            "auto-dev: dropped %d %s item(s) with %s at parse boundary "
+            "(ticket=%s, schema_version=%s); see %s",
             len(raw) - len(filtered),
+            key,
+            empty_desc,
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            issue_ref,
         )
-    payload["ambiguities"] = filtered
+    payload[key] = filtered
+
+
+def _filter_empty_question_ambiguities(payload: dict[str, Any]) -> None:
+    """Drop ambiguity items with an empty/missing question (issue #953)."""
+    _filter_empty_pending_items(
+        payload,
+        "ambiguities",
+        _has_usable_question,
+        "empty/missing 'question'",
+        "#953",
+    )
 
 
 def _filter_empty_claim_premises(payload: dict[str, Any]) -> None:
-    """Drop premise items with no usable claim/premise text (issue #962).
-
-    Non-dict items are left in place (isinstance guard) so they fail loudly
-    at strict model_validate rather than being silently dropped.
-    """
-    raw = payload.get("premises")
-    if not isinstance(raw, list):
-        return
-    filtered = [
-        item
-        for item in raw
-        if not isinstance(item, dict) or _has_usable_premise_text(item)
-    ]
-    if len(filtered) != len(raw):
-        _log.warning(
-            "auto-dev: dropped %d premise item(s) with no usable "
-            "'claim'/'premise' text at parse boundary (ticket=%s, "
-            "schema_version=%s); see #962",
-            len(raw) - len(filtered),
-            payload.get("ticket_id", "unknown"),
-            payload.get("schema_version"),
-        )
-    payload["premises"] = filtered
+    """Drop premise items with no usable claim/premise text (issue #962)."""
+    _filter_empty_pending_items(
+        payload,
+        "premises",
+        _has_usable_premise_text,
+        "no usable 'claim'/'premise' text",
+        "#962",
+    )
 
 
 def _coerce_blocked_next_actions(payload: dict[str, Any]) -> None:
