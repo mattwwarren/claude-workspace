@@ -429,6 +429,7 @@ FRESHNESS_NON_MAIN_HEAD = "non_main_head"
 FRESHNESS_MAIN_BEHIND = "main_behind_origin"
 FRESHNESS_MAIN_DIRTY_CHECKOUT = "main_dirty_checkout"
 FRESHNESS_MAIN_DIVERGED = "main_diverged_from_origin"
+FRESHNESS_MAIN_DETACHED = "main_detached_head"
 
 
 def _resolve_freshness(
@@ -477,6 +478,8 @@ def _resolve_freshness(
 
     if stale and auto_ff:
         ff_safety = check_main_ff_safety(client)
+        if ff_safety == "detached":
+            return (True, FRESHNESS_MAIN_DETACHED)
         # "ahead" is theoretically unreachable here: stale=True requires
         # is_main_behind_origin to return behind_count>0, which means local
         # is behind origin — not ahead. The guard is kept for defensive
@@ -527,7 +530,8 @@ def _emit_stale_skip(
     operator WARN via ``warned_stale``), then a single dispatch.tick with
     ``skip_reason=FRESHNESS_GATE`` and ``freshness_detail`` set to the
     provided value (``"non_main_head"``, ``"main_behind_origin"``,
-    ``"main_dirty_checkout"``, or ``"main_diverged_from_origin"``).
+    ``"main_dirty_checkout"``, ``"main_diverged_from_origin"``, or
+    ``"main_detached_head"``).
     """
     stale_tasks = [
         {"ticket_id": t.ticket_id, "client": client.name, "lane": t.lane}
@@ -557,6 +561,13 @@ def _emit_stale_skip(
                         f"WARN {client.name}/{payload['ticket_id']}:"
                         " main checkout has uncommitted changes, ticket skipped"
                         f" — commit or stash changes in {client.workspace_path}"
+                    )
+                elif freshness_detail == FRESHNESS_MAIN_DETACHED:
+                    emit(
+                        f"WARN {client.name}/{payload['ticket_id']}:"
+                        " main checkout has a detached HEAD, ticket skipped"
+                        f" — run: git -C {client.workspace_path}"
+                        f" checkout {client.default_branch}"
                     )
                 elif freshness_detail == FRESHNESS_MAIN_DIVERGED:
                     emit(
