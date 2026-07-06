@@ -413,8 +413,7 @@ _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION = (
 # Parks the ticket visibly as a producer glitch rather than silently with no
 # usable claim to verify.
 _PREMISE_GLITCH_PLACEHOLDER_CLAIM = (
-    "(producer emitted no usable premise — operator: requeue or "
-    "investigate; see #962)"
+    "(producer emitted no usable premise — operator: requeue or investigate; see #962)"
 )
 
 
