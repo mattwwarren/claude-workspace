@@ -653,6 +653,10 @@ understand the payload shape.
 
 ### 10.2 Secret wiring
 
+**Set `CW_PR_EVENTS_HMAC_SECRET` on the server BEFORE provisioning the relay
+tunnel from §10.1.** Standing up the tunnel first, even briefly, opens an
+unauthenticated internet-facing window (see the blast-radius note below).
+
 Two repo-level settings gate the workflow (`.github/workflows/pr-events.yml`):
 
 - **`CW_PR_EVENTS_RELAY_URL`** (repo **variable**, not secret — it's a URL,
@@ -671,8 +675,21 @@ Two repo-level settings gate the workflow (`.github/workflows/pr-events.yml`):
   If `CW_PR_EVENTS_HMAC_SECRET` is unset server-side, `/pr-event` accepts
   **unsigned** requests (pre-#930 behavior) and `serve()` logs a startup
   warning ("accepts unsigned requests") so the unauthenticated posture is
-  visible in the server logs, not silent. Relaying a webhook endpoint over
-  the open internet without this secret set is not recommended.
+  visible in the server logs, not silent. **Blast radius of running
+  unsigned behind a public tunnel**: any POST reaching the relay can mutate
+  `pr_state` for *any* `(repo, pr_number)` currently tracked across *all*
+  clients in `dev_queue.json`, with no rate limiting or origin check beyond
+  JSON shape. Relaying this endpoint over the open internet without the
+  secret set is not recommended.
+- **Fork PRs cannot authenticate.** `pull_request`/`pull_request_review`
+  events triggered by a fork-originated PR run with no access to repo
+  secrets, so `secrets.CW_PR_EVENTS_HMAC_SECRET` resolves empty and the
+  workflow falls through to the unsigned `curl` branch (a `::warning::`
+  annotation on the run, nothing louder). This is a known, accepted
+  limitation (#930) — not worked around via `pull_request_target`, since
+  that would expose secrets to untrusted fork checkout content — because
+  this pipeline's tracked PRs are same-repo/bot-originated, never forks.
+  The poll producer still covers fork PRs on its own schedule regardless.
 
 ### 10.3 Config
 
