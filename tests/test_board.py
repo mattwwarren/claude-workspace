@@ -815,6 +815,7 @@ class TestBadges:
         acme_title_end = output.index("\n", acme_idx)
         assert "[ATTN]" not in output[acme_idx:acme_title_end]
         assert "[REAP]" not in output[acme_idx:acme_title_end]
+        assert "REAP" in output  # still shows via the per-ticket row badge
 
 
 class TestAggregateFeed:
