@@ -355,6 +355,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _fill_session_lane_default(session_raw)
             _fill_session_stage_default(session_raw)
             _fill_session_consecutive_salvage_skips_default(session_raw)
+            _fill_session_liveness_bucket_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -450,6 +451,15 @@ def _fill_session_consecutive_salvage_skips_default(
     """
     if "consecutive_salvage_skips" not in session_raw:
         session_raw["consecutive_salvage_skips"] = 0
+
+
+def _fill_session_liveness_bucket_default(session_raw: dict[str, Any]) -> None:
+    """Fill Session.liveness_bucket introduced in schema v13 (GitHub #1001).
+
+    Idempotent.
+    """
+    if "liveness_bucket" not in session_raw:
+        session_raw["liveness_bucket"] = "live"
 
 
 def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:

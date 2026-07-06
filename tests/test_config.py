@@ -928,6 +928,53 @@ class TestMigrateCwState:
         session = migrated["sessions"][0]
         assert session["consecutive_salvage_skips"] == 3
 
+    def test_v12_to_v13_fills_liveness_bucket_default(self) -> None:
+        """migrate_cw_state fills liveness_bucket='live' on v12 sessions
+        that lack the key (GitHub #1001)."""
+        raw = {
+            "schema_version": 12,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["liveness_bucket"] == "live"
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v13_liveness_bucket_preserved_idempotently(self) -> None:
+        """Existing non-default liveness_bucket survives a migration pass."""
+        raw = {
+            "schema_version": 13,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "stale_30m",
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["liveness_bucket"] == "stale_30m"
+
     # -----------------------------------------------------------------------
     # Phase F: cmux surface_ref migration tests (schema v5)
     # -----------------------------------------------------------------------
@@ -1499,6 +1546,16 @@ class TestOrchestratorConfigLaneCircuitBreaker:
         from cw.models import OrchestratorConfig
 
         assert OrchestratorConfig().lane_circuit_breaker_threshold == 3
+
+
+class TestOrchestratorConfigLivenessFirstBucketByStage:
+    """OrchestratorConfig.liveness_first_bucket_by_stage field (#1001)."""
+
+    def test_default_is_impl_35(self) -> None:
+        from cw.models import OrchestratorConfig, Stage
+
+        config = OrchestratorConfig()
+        assert config.liveness_first_bucket_by_stage == {Stage.IMPL: 35}
 
 
 # ---------------------------------------------------------------------------

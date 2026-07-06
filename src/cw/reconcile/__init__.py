@@ -47,6 +47,8 @@ re-exports. Submodules:
 - ``_shared`` — constants, dataclasses/enums, and cross-cutting leaf helpers.
 - ``stalled`` — wall-clock-budget stalled-headless sweep.
 - ``idle`` — idle-watchdog (silently idle) sweep.
+- ``liveness`` — transcript-staleness bucket sweep (RFC 0008 W2, pure
+  observation, no disposition).
 - ``phantom`` — phantom (dead-surface) sweep.
 - ``salvage`` — git-state salvage post-pass (draft PR / flag).
 - ``tasks`` — dev-queue revert backstops and timed-out-merged completion.
@@ -122,6 +124,13 @@ from cw.reconcile.idle import (
     _detect_idle_candidates,
     flag_silently_idle_daemon_sessions,
 )
+from cw.reconcile.liveness import (
+    LivenessCandidate,
+    _act_on_liveness_candidates,
+    _classify_liveness_bucket,
+    _detect_liveness_candidates,
+    record_session_liveness_changes,
+)
 from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
@@ -174,10 +183,12 @@ __all__ = [
     "_STAGE_REVIEW_COMPLETE",
     "_STALLED_CAP_PARKED_REASON",
     "_VALIDATION_FAILED_MAX_ATTEMPTS",
+    "LivenessCandidate",
     "ProposedAction",
     "ReapCandidate",
     "ReconcileReport",
     "_act_on_idle_candidates",
+    "_act_on_liveness_candidates",
     "_act_on_local_harvest_candidates",
     "_act_on_main_drift_candidates",
     "_act_on_phantom_candidates",
@@ -187,10 +198,12 @@ __all__ = [
     "_assistant_text_from_transcript",
     "_awaiting_subagent",
     "_backfill_claude_session_ids",
+    "_classify_liveness_bucket",
     "_claude_agents_json",
     "_compute_worktree_dirty",
     "_csid_from_transcript",
     "_detect_idle_candidates",
+    "_detect_liveness_candidates",
     "_detect_local_harvest_candidates",
     "_detect_main_drift_candidates",
     "_detect_phantom_candidates",
@@ -216,6 +229,7 @@ __all__ = [
     "flag_silently_idle_daemon_sessions",
     "park_terminal_sibling_tasks",
     "reconcile",
+    "record_session_liveness_changes",
     "rescue_finalize_blocked_sessions",
     "resolve_headless_budget",
     "resolve_idle_retry_cap",

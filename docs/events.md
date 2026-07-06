@@ -511,6 +511,68 @@ was **not** retrofitted in this change to avoid touching unrelated emit sites.
 Consumers that need to correlate a `ticket.*` event to a ticket must read
 `payload["ticket_id"]`, not `correlation_id`.
 
+### `session.liveness_changed`
+
+**Emitter:** `record_session_liveness_changes` (`cw.reconcile.liveness`)
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "ticket_id": "<str | null>",
+  "client": "<str | null>",
+  "stage": "harden | plan | impl | review | finalize",
+  "old_bucket": "live | stale_15m | stale_30m | stale_45m",
+  "new_bucket": "live | stale_15m | stale_30m | stale_45m",
+  "stale_minutes": "<float>"
+}
+```
+**Semantics:** Emitted whenever a live DAEMON session's
+`Session.liveness_bucket` crosses to a new value — an edge-detect latch (no
+per-observation counter, unlike `idle_observation_count`): the sweep runs
+every reconcile tick but only emits, and only mutates
+`Session.liveness_bucket`, when the newly-classified bucket differs from
+what is already persisted. Pure observation: this sweep never dispositions
+a session or mutates the dev queue.
+
+Gating mirrors the idle-watchdog sweep's 3-condition gate (DAEMON origin +
+`_LIVE_STATUSES` + `surface_ref` present in the daemon's live roster) but
+deliberately omits its `_has_terminal_sentinel` check — a session that
+already emitted a sentinel this tick can still cross a staleness bucket
+before its task routes. A session whose transcript cannot be located is
+skipped for the tick (fail-open; no bucket assigned without positive
+staleness evidence).
+
+`stage` is resolved via the owning `TicketTask.stage` (looked up through
+`task_by_ticket`), **not** `Session.stage` (RFC 0005 A1, dormant). `stage`
+falls back to `DEFAULT_STAGE` when no owning task is found.
+
+Classification uses floor-suppression
+(`OrchestratorConfig.liveness_buckets_minutes`, default `[15, 30, 45]`
+minutes, and the per-stage `liveness_first_bucket_by_stage` override): a
+stage's effective floor is the entry point below which a session is always
+`live`, regardless of the global thresholds. Per-stage floors may raise the
+entry point above a global threshold, in which case that threshold's rung
+is entirely swallowed and simply never emitted for that stage — labels
+always keep their global-threshold identity (`stale_15m`/`stale_30m`/
+`stale_45m` never get renamed or reassigned to a different minute value);
+only the entry point moves. For example, an IMPL session with a 35-minute
+floor (default global stale_30m threshold is 30) ascends straight from
+`live` (<35m) to `stale_15m` (>=35m, <45m) — it never emits `stale_30m`,
+since 30 < 35 is unreachable once the floor has already been crossed.
+`stale_45m` needs no such guard: it is always the top rung, so crossing it
+is correct regardless of where the floor sits.
+
+The IMPL 35-minute floor (and the 15/30/45-minute global ladder) are derived
+from empirical stage-timing baselines (wiki `cw-stage-timing-baselines-2026-07-05`,
+n=739 legs): p95 intra-session gap ≤1m in every stage; IMPL p99 gap 31m vs
+REVIEW p95 9m; real session deaths cluster ≥60m. The IMPL floor sits above its
+p99 gap so normal idling doesn't cross into `stale_15m`.
+
+`stale_minutes` mirrors the existing `elapsed_seconds` convention (float,
+not integer) used elsewhere in this file, derived from
+`_transcript_age_seconds` divided by 60.
+
+`correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 ## CLI
 
 ### Record an event

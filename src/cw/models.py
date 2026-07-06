@@ -113,6 +113,22 @@ class Stage(StrEnum):
     FINALIZE = "finalize"
 
 
+class LivenessBucket(StrEnum):
+    """RFC 0008 W2 transcript-staleness bucket, latched onto ``Session``.
+
+    Closed 4-value set: per-stage overrides
+    (``OrchestratorConfig.liveness_first_bucket_by_stage``) move the
+    entry-point threshold for a stage, but never rename or add labels.
+    Downstream consumers of ``session.liveness_changed`` match these
+    literals directly without reading config. See GitHub #1001.
+    """
+
+    LIVE = "live"
+    STALE_15M = "stale_15m"
+    STALE_30M = "stale_30m"
+    STALE_45M = "stale_45m"
+
+
 # Schema versions for persisted state. Bump when making a breaking change
 # to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
@@ -123,7 +139,8 @@ class Stage(StrEnum):
 # v10: added Session.stage (GitHub #612).
 # v11: added Session.local_liveness (GitHub #888).
 # v12: added Session.consecutive_salvage_skips (#974).
-CW_STATE_SCHEMA_VERSION = 12
+# v13: added Session.liveness_bucket (GitHub #1001, RFC 0008 W2).
+CW_STATE_SCHEMA_VERSION = 13
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
@@ -261,6 +278,9 @@ class OrchestratorEventType(StrEnum):
     TASK_TRANSITION = "task.transition"
     TASK_STAGE_CHANGED = "task.stage_changed"
     TASK_DELETED = "task.deleted"
+    # RFC 0008 W2 liveness producer (#1001): latched transcript-staleness
+    # bucket crossings from the reconcile idle-watchdog pass.
+    SESSION_LIVENESS_CHANGED = "session.liveness_changed"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
@@ -612,6 +632,25 @@ class OrchestratorConfig(BaseModel):
     # guarantee. Pydantic's Literal validation already raises loudly on an
     # invalid value, which is the correct fail-closed behavior here.
     default_signoff: Literal["none", "operator"] = "none"
+    # RFC 0008 W2 — global ladder of transcript-staleness thresholds (minutes),
+    # ordered [stale_15m, stale_30m, stale_45m]. A session's transcript-mtime
+    # age is compared against these to classify Session.liveness_bucket.
+    # See GitHub #1001.
+    liveness_buckets_minutes: list[int] = Field(default_factory=lambda: [15, 30, 45])
+    # Per-stage override of the ENTRY-POINT threshold (the effective "floor"
+    # below which a session is LIVE) for the liveness ladder above. Keyed by
+    # Stage; a stage absent from this dict uses liveness_buckets_minutes[0] as
+    # its floor. Raising a stage's floor above a global threshold makes that
+    # threshold unreachable for sessions at that stage (labels keep their
+    # global-threshold identity; only the entry point moves) — e.g. an IMPL
+    # session with floor=35 never emits stale_30m (global threshold 30 < 35).
+    # Defaults to IMPL: 35 per the RFC 0008 W2 empirical baselines (impl p99
+    # gap 31m vs review p95 9m) — without this default every client config
+    # would need a manual override just to avoid spurious stale_15m noise on
+    # normal impl-stage idling. See GitHub #1001.
+    liveness_first_bucket_by_stage: dict[Stage, int] = Field(
+        default_factory=lambda: {Stage.IMPL: 35}
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -778,6 +817,12 @@ class Session(BaseModel):
     # process and synthesize the git-based completion. None for every non-LOCAL
     # session (surface_ref-backed sessions use daemon-roster liveness). See #888.
     local_liveness: LocalLivenessHandle | None = None
+    # RFC 0008 W2 — latched transcript-staleness bucket, edge-triggered by
+    # cw.reconcile.liveness on each crossing (no per-observation counter, unlike
+    # idle_observation_count above). Session.stage is NOT used to resolve the
+    # per-stage floor; the owning TicketTask.stage is (see
+    # cw.reconcile.liveness._detect_liveness_candidates). See GitHub #1001.
+    liveness_bucket: LivenessBucket = LivenessBucket.LIVE
 
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
