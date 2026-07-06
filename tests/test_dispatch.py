@@ -6442,8 +6442,7 @@ class TestLaneCircuitBreaker:
 
         saves: list[object] = []
         import cw.dispatch as dispatch_mod
-
-        real_save = dispatch_mod._save_concurrency_overrides
+        from cw.config import _save_concurrency_overrides as real_save
 
         def _counting_save(overrides: object) -> None:
             saves.append(overrides)
@@ -7018,8 +7017,7 @@ class TestFreshnessBlockAttentionLatch:
 
         saves: list[object] = []
         import cw.dispatch as dispatch_mod
-
-        real_save = dispatch_mod._save_concurrency_overrides
+        from cw.config import _save_concurrency_overrides as real_save
 
         def _counting_save(overrides: object) -> None:
             saves.append(overrides)

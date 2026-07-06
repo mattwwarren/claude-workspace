@@ -13134,7 +13134,9 @@ class TestSalvageSkipAttentionLatch:
             "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
         )
         branch = f"dev/{ticket_id}"
-        finalize_pr_by_branch = {branch: (False, True)}
+        finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] = {
+            branch: (False, True)
+        }
 
         candidates = _detect_stalled_candidates(
             state,
