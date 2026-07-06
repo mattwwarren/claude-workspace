@@ -1370,13 +1370,24 @@ class TestStartPollerConfigValidation:
             _server_mod._start_poller()
         assert _server_mod._poller_started[0] is False
 
-    def test_valid_config_starts_poller(self) -> None:
+    def test_valid_config_starts_poller(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Why: _start_poller spawns a REAL daemon thread whose target loops
+        # every POLL_INTERVAL_SECONDS. Left running for real, it outlives this
+        # test and can race broadcast()/subscribe() calls in later tests
+        # (confirmed: an earlier draft of this test leaked a live poller
+        # thread that corrupted TestSubscriberRegistry in a full-suite run).
+        # Neuter the thread's target so .start() spawns a thread that exits
+        # immediately, without touching the global threading.Thread class.
+        monkeypatch.setattr(_server_mod, "_run_poller", lambda: None)
         _server_mod._start_poller()
         assert _server_mod._poller_started[0] is True
 
-    def test_revalidates_on_every_call_even_when_already_started(self) -> None:
+    def test_revalidates_on_every_call_even_when_already_started(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from cw.config import orchestrator_config_file
 
+        monkeypatch.setattr(_server_mod, "_run_poller", lambda: None)
         _server_mod._start_poller()
         assert _server_mod._poller_started[0] is True
 
