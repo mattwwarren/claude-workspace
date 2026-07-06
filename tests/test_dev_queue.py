@@ -34,6 +34,7 @@ from cw.dev_queue import (
 )
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DETACHED,
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
@@ -902,6 +903,36 @@ class TestStatusFreshnessSubline:
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
         assert "diverged" in result.output
+
+    def test_detached_subline(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """freshness_detail='main_detached_head' → subline mentions detached (#964)."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-112", client="my-client"))
+        now = datetime.now(UTC)
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason=DispatchSkipReason.FRESHNESS_GATE,
+            tick_at=now,
+            freshness_detail=FRESHNESS_MAIN_DETACHED,
+            blocked_branch=None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            lambda: {"my-client": tick},
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "detached" in result.output
 
 
 # ---------------------------------------------------------------------------
