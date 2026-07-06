@@ -56,8 +56,25 @@ If you (operator or agent) add tickets to the queue, **you own watching them to
 terminal.** Don't hand-read `cw dev-queue status` att/status columns — they are
 pipeline mechanics and misread easily (a rising `att` + a `running → pending`
 flip is normal stage advancement, **not** churn; see
-[`session-disposition.md §4`](session-disposition.md)). Use the purpose-built
-monitor skills:
+[`session-disposition.md §4`](session-disposition.md)).
+
+**Primary: subscribe to the operator channel.** With `cw queue-channel serve`
+running and the `cw-operator` MCP server wired into `.mcp.json` (see the
+[operator channel](operator-channel.md) doc for the wiring), terminal
+`task.transition` pushes (read `disposition` off the payload) and
+`session.needs_attention` pushes arrive on `<channel source="cw-operator">` —
+drive the wave-watch loop off those pushes and the primary path needs zero
+poll turns. A `cancelled` transition also forwards through the channel but
+always carries `disposition: null`; handle it as its own case ("cancelled, no
+disposition to report"), not an error.
+
+### Fallback: Poll Ladder
+
+Use this ladder when `cw queue-channel serve` is down, `cw-operator` isn't
+wired into `.mcp.json`, or you need recovery forensics — see
+[§7 "Liveness before state"](#liveness-before-state-2026-07-sprint-lesson) for
+why transcript mtime, not queue rows, is authoritative for worker state on
+this path. Use the purpose-built monitor skills:
 
 - **In-flight wave watch** → the **`cw-queue-peek`** skill (`cw queue peek
   --client <client> [--json]`). Per running task it parses the last sentinel
@@ -183,6 +200,9 @@ for scripting and field reads; it prints two distinct sections:
 This section covers the **single-ticket blocking wait**. For multi-ticket wave
 monitoring use the `cw-queue-peek` skill; for terminal/attention state use `cw
 event tail` or the `cw-session-watch` skill (see the breadcrumb under §2).
+
+Primary wave-level monitoring is now subscribe-first — see §2's operator
+channel flow; this section is the single-ticket blocking-wait contract.
 
 Use `cw dev-queue wait` — the sentinel-aware monitor (#535):
 
