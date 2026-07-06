@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`session.liveness_changed` producer** (#1001, RFC 0008 W2): a new
+  `cw.reconcile.liveness` sweep classifies each live DAEMON session's
+  transcript-mtime staleness into a latched `Session.liveness_bucket`
+  (`live` / `stale_15m` / `stale_30m` / `stale_45m`), edge-triggering
+  `session.liveness_changed` only on a bucket crossing. Per-stage floor
+  overrides (`OrchestratorConfig.liveness_first_bucket_by_stage`) can raise
+  the entry-point threshold for a pipeline stage without renaming or
+  reassigning the global bucket labels — see `docs/events.md` for the
+  floor-suppression semantics. Pure observation: no disposition, no queue
+  mutation. `CW_STATE_SCHEMA_VERSION` bumped 12 → 13.
+
 ## [1.14.0] — 2026-07-06
 
 **Observability sprint Phase 4 (RFC 0007 W2 push + deprecation) — sprint
