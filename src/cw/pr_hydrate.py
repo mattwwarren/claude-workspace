@@ -26,6 +26,8 @@ from cw.gh import _GH_PR_STATE_MERGED, fetch_pr_view
 from cw.models import OrchestratorEventType, PrState
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cw.models import DevQueueStore, OrchestratorConfig, TicketTask
 
 logger = logging.getLogger(__name__)
@@ -273,7 +275,11 @@ def _throttled(tasks: list[TicketTask], interval_seconds: int) -> bool:
 
 
 def apply_pr_state_observation(
-    *, client: str, ticket_id: str, new_state: PrState
+    *,
+    client: str,
+    ticket_id: str,
+    new_state: PrState | None = None,
+    overlay: Callable[[PrState | None], PrState] | None = None,
 ) -> None:
     """Persist one observed ``PrState`` under the queue lock, then emit events.
 
@@ -282,23 +288,47 @@ def apply_pr_state_observation(
     (``observe_pushed_event``) share the exact same persist/diff/emit
     semantics and transition-dedup.
 
-    Transitions are diffed against the task re-read INSIDE ``dev_queue_lock()``
-    — not any pre-lock snapshot the caller may hold — so a writer that touched
-    this task's ``pr_state`` between observation and this call can't produce a
-    stale diff or a duplicate emit. The durable baseline is written first
-    (at-most-once emit); events fire OUTSIDE the queue lock so
-    ``record_event``'s inbox lock never nests inside ``dev_queue_lock``.
+    Exactly one of *new_state* or *overlay* must be given. The poll producer
+    passes *new_state* (always a complete state freshly fetched from ``gh``,
+    so there is nothing to overlay). The push producer passes *overlay*: a
+    callable invoked with the task's ``pr_state`` as re-read INSIDE
+    ``dev_queue_lock()`` -- not any pre-lock snapshot the caller may hold --
+    so a concurrent writer that touched this task's ``pr_state`` between the
+    caller's initial observation and this call can't be silently clobbered
+    (#930 fix: the original push path built its overlay from a pre-lock
+    snapshot and persisted that stale result unconditionally, discarding any
+    write that landed in the meantime).
+
+    Transitions are diffed against that same freshly-locked baseline, so a
+    concurrent writer can't produce a stale diff or a duplicate emit either.
+    The durable baseline is written first (at-most-once emit); events fire
+    OUTSIDE the queue lock so ``record_event``'s inbox lock never nests inside
+    ``dev_queue_lock``.
 
     A ``(client, ticket_id)`` with no matching task is a silent no-op (the
     task may have been cancelled/removed between observation and this call).
     """
+    exactly_one_msg = "exactly one of new_state or overlay must be given"
+    if (new_state is None) == (overlay is None):
+        raise ValueError(exactly_one_msg)
+
+    def _resolve(old: PrState | None) -> PrState:
+        if overlay is not None:
+            return overlay(old)
+        if new_state is not None:
+            return new_state
+        raise ValueError(exactly_one_msg)  # unreachable given the check above
+
     pending_events: list[tuple[OrchestratorEventType, dict[str, object]]] = []
 
     with dev_queue_lock():
         store = load_dev_queue()
+        matched = False
         for task in store.tasks:
             if task.client != client or task.ticket_id != ticket_id:
                 continue
+            matched = True
+            resolved_state = _resolve(task.pr_state)
             parsed = _parse_pr_url(task.pr_url or "")
             if parsed is not None:
                 repo, pr_number = parsed
@@ -309,11 +339,12 @@ def apply_pr_state_observation(
                     "client": task.client,
                 }
                 pending_events = _diff_transitions(
-                    old=task.pr_state, new=new_state, base=base
+                    old=task.pr_state, new=resolved_state, base=base
                 )
-            task.pr_state = new_state
+            task.pr_state = resolved_state
             break
-        save_dev_queue(store)
+        if matched:
+            save_dev_queue(store)
 
     for event_type, payload in pending_events:
         record_event(event_type, payload, correlation_id=ticket_id)
@@ -333,8 +364,13 @@ def _persist_and_emit(derived: list[tuple[TicketTask, PrState]]) -> None:
         )
 
 
+# Wire-level review_decision value for a comment-only review (#930). Not a
+# merge-gate signal -- see the "Why" note on _emit_commented_review below.
+_REVIEW_DECISION_COMMENTED = "COMMENTED"
+
+
 def _resolve_task_by_pr_ref(
-    store: DevQueueStore, repo: str, pr_number: int
+    store: DevQueueStore, *, repo: str, pr_number: int
 ) -> TicketTask | None:
     """Return the dev-queue task whose ``pr_url`` matches ``(repo, pr_number)``.
 
@@ -349,7 +385,7 @@ def _resolve_task_by_pr_ref(
 
 
 def _overlay_push_observation(
-    old: PrState | None, event_type: OrchestratorEventType, payload: dict[str, Any]
+    old: PrState | None, *, event_type: OrchestratorEventType, payload: dict[str, Any]
 ) -> PrState:
     """Build the overlay ``PrState`` for one pushed webhook event (#930).
 
@@ -359,11 +395,15 @@ def _overlay_push_observation(
     no-op for that field — the webhook handler must never reject a request
     for an unexpected payload shape, it just skips the mutation and leaves the
     prior value (or the fresh-baseline default) in place.
+
+    Called from inside ``apply_pr_state_observation``'s ``dev_queue_lock()``
+    with the freshly-locked task state as *old* — never a pre-lock snapshot —
+    so this overlay can't clobber a concurrent writer (#930 fix).
     """
     base = old if old is not None else PrState()
     updates: dict[str, Any] = {"hydrated_at": datetime.now(UTC)}
     if event_type == OrchestratorEventType.PR_MERGED:
-        updates["state"] = "MERGED"
+        updates["state"] = _GH_PR_STATE_MERGED
     elif event_type == OrchestratorEventType.PR_CI_FAILED:
         updates["ci_ok"] = False
         failing_checks = payload.get("failing_checks")
@@ -378,6 +418,31 @@ def _overlay_push_observation(
         if merge_state_status is not None:
             updates["merge_state_status"] = str(merge_state_status)
     return base.model_copy(update=updates)
+
+
+def _emit_commented_review(*, repo: str, pr_number: int, task: TicketTask) -> None:
+    """Emit ``pr.review_received`` for a COMMENTED review, unconditionally.
+
+    Why (#930 operator correction #2): COMMENTED reviews are not a
+    merge-gate signal, so they never mutate PrState (only APPROVED/
+    CHANGES_REQUESTED do) -- but the operator still wants an event emitted
+    for every COMMENTED webhook delivery, INCLUDING duplicate/redelivered
+    ones. There is no PrState field change to compare for COMMENTED, so
+    apply_pr_state_observation's diff-based dedup can't apply here (and
+    would wrongly suppress it) -- this path bypasses it entirely and always
+    emits.
+    """
+    record_event(
+        OrchestratorEventType.PR_REVIEW_RECEIVED,
+        {
+            "repo": repo,
+            "pr_number": pr_number,
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "review_decision": _REVIEW_DECISION_COMMENTED,
+        },
+        correlation_id=task.ticket_id,
+    )
 
 
 def observe_pushed_event(
@@ -396,7 +461,11 @@ def observe_pushed_event(
     upstream via ``PREventRequest``).
 
     Resolving ``(repo, pr_number)`` to no task is a silent no-op (an untracked
-    PR is not an error), logged at debug level.
+    PR is not an error), logged at debug level. The initial lookup below is
+    used only to obtain the ``(client, ticket_id)`` routing key and to decide
+    the COMMENTED bypass; the actual persisted state is always computed from
+    the freshly-locked baseline inside ``apply_pr_state_observation`` (#930
+    fix), not from this pre-lock snapshot.
     """
     try:
         event_type = OrchestratorEventType("pr." + wire_event_type)
@@ -407,7 +476,7 @@ def observe_pushed_event(
         return
 
     store = load_dev_queue()
-    task = _resolve_task_by_pr_ref(store, repo, pr_number)
+    task = _resolve_task_by_pr_ref(store, repo=repo, pr_number=pr_number)
     if task is None:
         logger.debug(
             "observe_pushed_event: no task tracks %s#%d, ignoring push",
@@ -416,34 +485,20 @@ def observe_pushed_event(
         )
         return
 
-    # Why (#930 operator correction #2): COMMENTED reviews are not a
-    # merge-gate signal, so they never mutate PrState (only APPROVED/
-    # CHANGES_REQUESTED do) -- but the operator still wants an event emitted
-    # for every COMMENTED webhook delivery, INCLUDING duplicate/redelivered
-    # ones. There is no PrState field change to compare for COMMENTED, so
-    # apply_pr_state_observation's diff-based dedup can't apply here (and
-    # would wrongly suppress it) -- this path bypasses it entirely and always
-    # emits.
     if (
         event_type == OrchestratorEventType.PR_REVIEW_RECEIVED
-        and str(payload.get("review_decision", "")).upper() == "COMMENTED"
+        and str(payload.get("review_decision", "")).upper()
+        == _REVIEW_DECISION_COMMENTED
     ):
-        record_event(
-            event_type,
-            {
-                "repo": repo,
-                "pr_number": pr_number,
-                "ticket_id": task.ticket_id,
-                "client": task.client,
-                "review_decision": "COMMENTED",
-            },
-            correlation_id=task.ticket_id,
-        )
+        _emit_commented_review(repo=repo, pr_number=pr_number, task=task)
         return
 
-    new_state = _overlay_push_observation(task.pr_state, event_type, payload)
     apply_pr_state_observation(
-        client=task.client, ticket_id=task.ticket_id, new_state=new_state
+        client=task.client,
+        ticket_id=task.ticket_id,
+        overlay=lambda old: _overlay_push_observation(
+            old, event_type=event_type, payload=payload
+        ),
     )
 
 

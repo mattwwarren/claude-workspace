@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+import pytest
 from freezegun import freeze_time
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -27,9 +28,6 @@ from cw.pr_hydrate import (
     hydrate_pr_states,
     observe_pushed_event,
 )
-
-if TYPE_CHECKING:
-    import pytest
 
 _URL = "https://github.com/acme/widgets/pull/42"
 
@@ -828,7 +826,7 @@ class TestResolveTaskByPrRef:
         store = DevQueueStore(
             tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
         )
-        task = _resolve_task_by_pr_ref(store, "acme/widgets", 42)
+        task = _resolve_task_by_pr_ref(store, repo="acme/widgets", pr_number=42)
         assert task is not None
         assert task.ticket_id == "GEN-1"
 
@@ -836,11 +834,16 @@ class TestResolveTaskByPrRef:
         store = DevQueueStore(
             tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
         )
-        assert _resolve_task_by_pr_ref(store, "acme/widgets", 999) is None
+        assert (
+            _resolve_task_by_pr_ref(store, repo="acme/widgets", pr_number=999) is None
+        )
 
     def test_returns_none_for_empty_store(self) -> None:
         empty_store = DevQueueStore(tasks=[])
-        assert _resolve_task_by_pr_ref(empty_store, "acme/widgets", 42) is None
+        assert (
+            _resolve_task_by_pr_ref(empty_store, repo="acme/widgets", pr_number=42)
+            is None
+        )
 
     def test_returns_first_match_when_multiple_tasks_share_pr(self) -> None:
         store = DevQueueStore(
@@ -849,7 +852,7 @@ class TestResolveTaskByPrRef:
                 TicketTask(ticket_id="GEN-2", client="acme", pr_url=_URL),
             ]
         )
-        task = _resolve_task_by_pr_ref(store, "acme/widgets", 42)
+        task = _resolve_task_by_pr_ref(store, repo="acme/widgets", pr_number=42)
         assert task is not None
         assert task.ticket_id == "GEN-1"
 
@@ -861,20 +864,26 @@ class TestOverlayPushObservation:
 
     def test_merged_sets_state(self) -> None:
         old = _pr_state(state="OPEN")
-        new = _overlay_push_observation(old, OrchestratorEventType.PR_MERGED, {})
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGED, payload={}
+        )
         assert new.state == "MERGED"
 
     def test_ci_failed_sets_ci_ok_false_and_failing_checks(self) -> None:
         old = _pr_state(ci_ok=True, failing_checks=[])
         new = _overlay_push_observation(
-            old, OrchestratorEventType.PR_CI_FAILED, {"failing_checks": ["lint"]}
+            old,
+            event_type=OrchestratorEventType.PR_CI_FAILED,
+            payload={"failing_checks": ["lint"]},
         )
         assert new.ci_ok is False
         assert new.failing_checks == ["lint"]
 
     def test_ci_failed_missing_failing_checks_key_leaves_field_untouched(self) -> None:
         old = _pr_state(ci_ok=True, failing_checks=["stale"])
-        new = _overlay_push_observation(old, OrchestratorEventType.PR_CI_FAILED, {})
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_CI_FAILED, payload={}
+        )
         assert new.ci_ok is False
         assert new.failing_checks == ["stale"]
 
@@ -882,15 +891,15 @@ class TestOverlayPushObservation:
         old = _pr_state(review_decision="REVIEW_REQUIRED")
         new = _overlay_push_observation(
             old,
-            OrchestratorEventType.PR_REVIEW_RECEIVED,
-            {"review_decision": "APPROVED"},
+            event_type=OrchestratorEventType.PR_REVIEW_RECEIVED,
+            payload={"review_decision": "APPROVED"},
         )
         assert new.review_decision == "APPROVED"
 
     def test_review_received_missing_key_leaves_field_untouched(self) -> None:
         old = _pr_state(review_decision="REVIEW_REQUIRED")
         new = _overlay_push_observation(
-            old, OrchestratorEventType.PR_REVIEW_RECEIVED, {}
+            old, event_type=OrchestratorEventType.PR_REVIEW_RECEIVED, payload={}
         )
         assert new.review_decision == "REVIEW_REQUIRED"
 
@@ -898,18 +907,22 @@ class TestOverlayPushObservation:
         old = _pr_state(merge_state_status="BLOCKED")
         new = _overlay_push_observation(
             old,
-            OrchestratorEventType.PR_MERGEABLE,
-            {"merge_state_status": "CLEAN"},
+            event_type=OrchestratorEventType.PR_MERGEABLE,
+            payload={"merge_state_status": "CLEAN"},
         )
         assert new.merge_state_status == "CLEAN"
 
     def test_mergeable_missing_key_leaves_field_untouched(self) -> None:
         old = _pr_state(merge_state_status="BLOCKED")
-        new = _overlay_push_observation(old, OrchestratorEventType.PR_MERGEABLE, {})
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGEABLE, payload={}
+        )
         assert new.merge_state_status == "BLOCKED"
 
     def test_no_prior_baseline_starts_fresh(self) -> None:
-        new = _overlay_push_observation(None, OrchestratorEventType.PR_MERGED, {})
+        new = _overlay_push_observation(
+            None, event_type=OrchestratorEventType.PR_MERGED, payload={}
+        )
         assert new.state == "MERGED"
         assert new.ci_ok is True  # PrState() default, untouched
 
@@ -920,7 +933,9 @@ class TestOverlayPushObservation:
             failing_checks=["x"],
             review_decision="APPROVED",
         )
-        new = _overlay_push_observation(old, OrchestratorEventType.PR_MERGED, {})
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGED, payload={}
+        )
         assert new.state == "MERGED"
         assert new.ci_ok is False
         assert new.failing_checks == ["x"]
@@ -929,7 +944,9 @@ class TestOverlayPushObservation:
     def test_hydrated_at_refreshed(self) -> None:
         old = _pr_state(hydrated_at=datetime(2000, 1, 1, tzinfo=UTC))
         with freeze_time("2026-07-06 12:00:00"):
-            new = _overlay_push_observation(old, OrchestratorEventType.PR_MERGED, {})
+            new = _overlay_push_observation(
+                old, event_type=OrchestratorEventType.PR_MERGED, payload={}
+            )
         assert new.hydrated_at == datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
 
@@ -1054,3 +1071,96 @@ class TestObservePushedEvent:
         )
         task = load_dev_queue().tasks[0]
         assert task.pr_state is None
+
+    def test_uses_overlay_not_prebuilt_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """observe_pushed_event must call apply_pr_state_observation with
+        overlay=, never a pre-built new_state= — passing new_state would mean
+        the overlay was computed from a pre-lock snapshot, reintroducing the
+        #930 TOCTOU lost-update bug (a concurrent writer between this
+        function's initial task lookup and apply_pr_state_observation's lock
+        acquisition would be silently clobbered).
+        """
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
+            )
+        )
+        captured: dict[str, Any] = {}
+
+        def _fake_apply(**kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        monkeypatch.setattr("cw.pr_hydrate.apply_pr_state_observation", _fake_apply)
+        observe_pushed_event(
+            repo="acme/widgets", pr_number=42, wire_event_type="merged", payload={}
+        )
+        assert captured["client"] == "acme"
+        assert captured["ticket_id"] == "GEN-1"
+        assert callable(captured["overlay"])
+        assert "new_state" not in captured
+
+
+class TestApplyPrStateObservationOverlayFreshness:
+    """apply_pr_state_observation's *overlay* callable must be invoked with
+    the task state re-read INSIDE dev_queue_lock(), never a snapshot the
+    caller captured earlier (#930 fix for observe_pushed_event's original
+    TOCTOU lost-update bug: the push path used to build its full replacement
+    PrState from an unlocked pre-lock read, then persist it unconditionally,
+    silently discarding any write that landed in the meantime).
+    """
+
+    def test_overlay_sees_freshest_persisted_state(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=_pr_state(ci_ok=True, review_decision=""),
+                    )
+                ]
+            )
+        )
+
+        # Simulate a concurrent writer (e.g. a poll tick, or another webhook
+        # delivery) landing a durable change to a DIFFERENT field.
+        apply_pr_state_observation(
+            client="acme",
+            ticket_id="GEN-1",
+            new_state=_pr_state(ci_ok=True, review_decision="APPROVED"),
+        )
+
+        def _overlay(old: PrState | None) -> PrState:
+            assert old is not None
+            # If apply_pr_state_observation regressed to invoking overlay()
+            # against a pre-lock snapshot instead of the freshly-locked
+            # state, this would observe the pre-concurrent-write value
+            # ("") instead of "APPROVED".
+            assert old.review_decision == "APPROVED", (
+                "overlay received a stale baseline, not the freshly-locked "
+                "state — the #930 TOCTOU fix has regressed"
+            )
+            return old.model_copy(update={"ci_ok": False})
+
+        apply_pr_state_observation(client="acme", ticket_id="GEN-1", overlay=_overlay)
+
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.ci_ok is False
+        assert task.pr_state.review_decision == "APPROVED"
+
+    def test_new_state_and_overlay_both_given_raises(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            apply_pr_state_observation(
+                client="acme",
+                ticket_id="GEN-1",
+                new_state=_pr_state(),
+                overlay=lambda _old: _pr_state(),
+            )
+
+    def test_neither_new_state_nor_overlay_given_raises(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            apply_pr_state_observation(client="acme", ticket_id="GEN-1")
