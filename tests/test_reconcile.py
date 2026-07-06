@@ -12605,6 +12605,586 @@ class TestActOnStalledCandidatesSignalOnly:
         assert t.status == QueueItemStatus.PENDING
 
 
+class TestSalvageSkipAttentionLatch:
+    """Per-session consecutive salvage-skip latch (RFC 0007 Phase 4, closes #974).
+
+    Sibling of TestActOnIdleCandidatesSignalOnly / TestActOnStalledCandidatesSignalOnly:
+    the session-keyed counter increments once per SKIP_PARKED candidate, fires
+    session.needs_attention exactly once at the configured threshold (latch: no
+    re-fire while still at/above threshold), and resets to 0 on any of the 5
+    non-SKIP_PARKED detect-phase exits.
+    """
+
+    # --- act phase: _process_salvage_skip_candidate via _act_on_stalled_candidates ---
+
+    def test_skip_below_threshold_no_attention_emit(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """One SKIP_PARKED candidate below threshold increments but does not emit."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-sk-below"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("sk-below-1", worktree, started_at)
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="sk-below-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="sk-below-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+        config = OrchestratorConfig(salvage_skip_attention_threshold=2)
+
+        _act_on_stalled_candidates(state, [candidate], now=now, config=config)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sk-below-1")
+        assert s.consecutive_salvage_skips == 1
+
+        events = read_events(
+            consumer="test-974-below",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_skip_threshold_emits_full_payload(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Reaching the threshold emits session.needs_attention with all 8 fields."""
+        from cw.reconcile import (
+            _SALVAGE_SKIP_ESCALATED_REASON,
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-sk-thresh"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("sk-thresh-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 1
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="sk-thresh-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="sk-thresh-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+        config = OrchestratorConfig(salvage_skip_attention_threshold=2)
+
+        _act_on_stalled_candidates(state, [candidate], now=now, config=config)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sk-thresh-1")
+        assert s.consecutive_salvage_skips == 2
+
+        events = read_events(
+            consumer="test-974-threshold",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        assert events[0].payload == {
+            "session_id": "sk-thresh-1",
+            "session_name": sess.name,
+            "client": "client-a",
+            "ticket_id": "sk-thresh-1",
+            "claude_session_id": None,
+            "paused_status": _SALVAGE_SKIP_ESCALATED_REASON,
+            "breadcrumbs": (
+                f"2 consecutive salvage-skips; last reason: {_SALVAGE_SKIP_REASON}"
+            ),
+            "crashed": False,
+        }
+        assert events[0].correlation_id == "sk-thresh-1"
+
+    def test_no_refire_while_latched(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """A session already at/above threshold does not re-emit on a later skip."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-sk-latch"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("sk-latch-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 2  # already at threshold
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="sk-latch-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="sk-latch-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+        config = OrchestratorConfig(salvage_skip_attention_threshold=2)
+
+        _act_on_stalled_candidates(state, [candidate], now=now, config=config)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sk-latch-1")
+        assert s.consecutive_salvage_skips == 3
+
+        events = read_events(
+            consumer="test-974-latched",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_no_push_notification_on_threshold_emit(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The salvage-skip escalation never calls fire_push_notification."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-sk-nopush"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("sk-nopush-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 1
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        push_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification",
+            lambda *a, **kw: push_calls.append((a, kw)),
+        )
+
+        candidate = ReapCandidate(
+            session_id="sk-nopush-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="sk-nopush-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+        config = OrchestratorConfig(salvage_skip_attention_threshold=2)
+
+        _act_on_stalled_candidates(state, [candidate], now=now, config=config)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sk-nopush-1")
+        assert s.consecutive_salvage_skips == 2
+        assert push_calls == []
+
+    def test_reset_candidate_zeroes_counter(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """A RESET_SALVAGE_SKIP_COUNTER candidate zeroes the session's counter."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-reset-1"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)  # under budget
+
+        sess = _mk_headless_daemon_session("reset-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 3
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="reset-1",
+            proposed_action=ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+            ticket_id="reset-1",
+        )
+
+        _act_on_stalled_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "reset-1")
+        assert s.consecutive_salvage_skips == 0
+
+    def test_act_on_stalled_candidates_zeroes_counter_when_reset_is_sole_candidate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Regression lock (#974 plan-review bug fix): a RESET-only tick must
+        still reach save_state — verified via a real load_state() round trip,
+        not just inspecting the in-memory candidate list."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-reset-sole"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("reset-sole-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 4
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="reset-sole-1",
+            proposed_action=ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+            ticket_id="reset-sole-1",
+        )
+
+        result = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+        assert result == ([], [])
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "reset-sole-1")
+        assert s.consecutive_salvage_skips == 0
+
+    def test_act_on_stalled_candidates_persists_increment_when_skip_is_sole_candidate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Regression lock (#974 plan-review bug fix): a SKIP_PARKED-only tick
+        must still reach save_state — verified via a real load_state() round
+        trip (this was the original silently-dropped-mutation bug)."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-skip-sole"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("skip-sole-1", worktree, started_at)
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="skip-sole-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="skip-sole-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+
+        result = _act_on_stalled_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+        assert result == ([], [])
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "skip-sole-1")
+        assert s.consecutive_salvage_skips == 1
+
+    # --- detect phase: RESET_SALVAGE_SKIP_COUNTER appended at all 5 exits ---
+
+    def test_detect_reset_appended_when_under_budget_and_nonzero(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Exit 1/5 (bare `continue`, elapsed < budget) appends a reset candidate."""
+        from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+        worktree = tmp_path / "wt-detect-reset-under"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("detect-reset-under-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 2
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidates = _detect_stalled_candidates(
+            state, now=now, config=_auto_config(), task_by_ticket={}
+        )
+
+        assert len(candidates) == 1
+        assert (
+            candidates[0].proposed_action == ProposedAction.RESET_SALVAGE_SKIP_COUNTER
+        )
+        assert candidates[0].session_id == "detect-reset-under-1"
+
+    def test_detect_no_reset_when_under_budget_and_zero(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """A session already at 0 does not grow the candidate list (exit 1/5)."""
+        from cw.reconcile import _detect_stalled_candidates
+
+        worktree = tmp_path / "wt-detect-noreset-under"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session(
+            "detect-noreset-under-1", worktree, started_at
+        )
+        assert sess.consecutive_salvage_skips == 0
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidates = _detect_stalled_candidates(
+            state, now=now, config=_auto_config(), task_by_ticket={}
+        )
+
+        assert candidates == []
+
+    def test_detect_reset_appended_alongside_salvage_completion(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exit 2/5 (SALVAGE_COMPLETION) also appends a reset candidate."""
+        from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-detect-reset-salvage"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("detect-reset-salv-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 1
+        payload = _shipped_salvage_payload()
+        payload["ticket_id"] = "detect-reset-salv-1"
+        _write_salvage_transcript(home, worktree, "csid-uuid-974", payload)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidates = _detect_stalled_candidates(
+            state, now=now, config=_auto_config(), task_by_ticket={}
+        )
+
+        assert len(candidates) == 2
+        actions = {c.proposed_action for c in candidates}
+        assert actions == {
+            ProposedAction.SALVAGE_COMPLETION,
+            ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+        }
+
+    def test_detect_reset_appended_alongside_revert_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Exit 5/5 (REVERT_TASK, loop falls through) also appends a reset."""
+        from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+        worktree = tmp_path / "wt-detect-reset-revert"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session(
+            "detect-reset-revert-1", worktree, started_at
+        )
+        sess.consecutive_salvage_skips = 1
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        task = TicketTask(
+            ticket_id="detect-reset-revert-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="detect-reset-revert-1",
+        )
+        candidates = _detect_stalled_candidates(
+            state,
+            now=now,
+            config=_auto_config(),
+            task_by_ticket={"detect-reset-revert-1": task},
+        )
+
+        assert len(candidates) == 2
+        actions = {c.proposed_action for c in candidates}
+        assert actions == {
+            ProposedAction.REVERT_TASK,
+            ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+        }
+
+    def test_detect_reset_appended_alongside_park_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Exit 4/5 (PARK_BLOCKED_ON_USER, retry cap) also appends a reset."""
+        from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+        worktree = tmp_path / "wt-detect-reset-park"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("detect-reset-park-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 1
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        task = TicketTask(
+            ticket_id="detect-reset-park-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="detect-reset-park-1",
+            attempts=99,  # >= DEFAULT_STALLED_RETRY_CAP
+        )
+        candidates = _detect_stalled_candidates(
+            state,
+            now=now,
+            config=_auto_config(),
+            task_by_ticket={"detect-reset-park-1": task},
+        )
+
+        assert len(candidates) == 2
+        actions = {c.proposed_action for c in candidates}
+        assert actions == {
+            ProposedAction.PARK_BLOCKED_ON_USER,
+            ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+        }
+
+    def test_detect_reset_appended_alongside_park_finalize_blocked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exit 3/5 (PARK_FINALIZE_BLOCKED) also appends a reset candidate."""
+        from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+        worktree = tmp_path / "wt-detect-reset-fb"
+        worktree.mkdir(parents=True)
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+        ticket_id = "detect-reset-fb-1"
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = Session(
+            id="fb-sess-974",
+            name=f"client-a/auto-dev/{ticket_id}",
+            client="client-a",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=Path("/tmp/ws"),
+            worktree_path=worktree,
+            surface_ref="surf-ref-974",
+            started_at=started_at,
+            consecutive_salvage_skips=1,
+        )
+        context_dir = worktree / ".claude"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "cw-context.json").write_text(
+            '{"headless": true, "session_id": "fb-sess-974"}'
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="fb-sess-974",
+            stage=Stage.FINALIZE,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+        )
+        branch = f"dev/{ticket_id}"
+        finalize_pr_by_branch = {branch: (False, True)}
+
+        candidates = _detect_stalled_candidates(
+            state,
+            now=now,
+            config=_auto_config(),
+            task_by_ticket={ticket_id: task},
+            finalize_pr_by_branch=finalize_pr_by_branch,
+        )
+
+        assert len(candidates) == 2
+        actions = {c.proposed_action for c in candidates}
+        assert actions == {
+            ProposedAction.PARK_FINALIZE_BLOCKED,
+            ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+        }
+
+    def test_reset_candidate_passes_through_signal_only_routing_unchanged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """RESET_SALVAGE_SKIP_COUNTER is not REVERT_TASK, so SIGNAL_ONLY routing
+        (which only re-routes REVERT_TASK) must not touch it."""
+        from cw.reconcile import ProposedAction, ReapCandidate
+        from cw.reconcile.stalled import _route_stalled_by_policy
+
+        reset_candidate = ReapCandidate(
+            session_id="route-reset-1",
+            proposed_action=ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+            ticket_id="route-reset-1",
+        )
+
+        routed = _route_stalled_by_policy(
+            [reset_candidate],
+            config=OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY),
+            merged_ticket_ids=frozenset(),
+            gh_blocked_ticket_ids=frozenset(),
+        )
+
+        assert routed == [reset_candidate]
+
+    def test_main_drift_module_docstring_no_stale_929_citation(self) -> None:
+        """main_drift.py's docstring must not attribute the counter to #929 (#974)."""
+        import cw.reconcile.main_drift as main_drift_mod
+
+        assert main_drift_mod.__doc__ is not None
+        assert "#929" not in main_drift_mod.__doc__
+        assert "consecutive_freshness_blocks" in main_drift_mod.__doc__
+
+
 class TestActOnIdleCandidatesSignalOnly:
     """Under signal_only policy, REVERT_TASK idle candidates → BLOCKED_ON_USER."""
 
