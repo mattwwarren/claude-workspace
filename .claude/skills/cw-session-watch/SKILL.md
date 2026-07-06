@@ -204,6 +204,10 @@ result`):
   (so the user knows what unblocks it).
 - **If `status == "no_op"`**: explain why no work was needed (often "already
   done in upstream PR" or similar).
+- **If the queue transition is `cancelled`**: this is an operator-initiated
+  task cancel (`cw spawn close` / `cancel_ticket`), not a sentinel outcome —
+  `disposition` is always null. Report "cancelled, nothing to report" rather
+  than waiting on a sentinel or treating the null as an error.
 - **If the session `status` is `timed_out` and no sentinel was recorded**:
   the session never emitted a sentinel; elapsed time hit the headless budget.
   **Before recommending re-dispatch, check the impl branch for un-PR'd
@@ -237,6 +241,7 @@ result`):
 | `ambiguities_pending_resolution` | `completed` | `pending` | Session needs more info; resolve and re-dispatch |
 | (none) | `timed_out` | `pending` | Headless budget exceeded. **Check impl branch first** — often impl shipped, only Stage 3/4 transition lost. Otherwise redispatch. |
 | (none) | `completed` + `claude_session_id: null` | `pending` | **Reconcile-race regression.** Session actually ran fine; cw lost track. Scan worktree transcript dir for the latest sentinel (see "Salvaging crashed-but-actually-ran"). |
+| (none — always `disposition: null`) | any | `cancelled` | Operator-initiated task cancel, not a sentinel outcome. Report "cancelled, nothing to report"; don't wait on a sentinel. |
 
 If you see a combination not in this table, surface the full sentinel + the
 queue routing to the user — that's likely a bug worth filing.
