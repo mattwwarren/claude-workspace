@@ -91,12 +91,28 @@ cw dev-queue status --client <client> --json   # per-ticket routing decision
 `cw session show` exits 1 if the ref doesn't resolve; `resolve_sid` returning
 non-zero means no spawn was ever recorded for that ticket/client.
 
-### Mode B — Wait until done (Bash `run_in_background`)
+### Mode B — Wait until done
 
 Use when you've **just** dispatched and want a single notification when the
-session terminates. Resolve the id once (it's still active), then block on
-`cw session wait` — it polls cw state internally every few seconds, so no
-manual `until` loop and no `Monitor` + `tail -F | awk` pipe.
+session terminates.
+
+**Primary: subscribe to the operator channel.** Instead of blocking on a poll,
+subscribe to `cw-operator` (see the
+[operator channel](../../../docs/operator-channel.md) doc for wiring) and
+react to the terminal `task.transition` push for this ticket — read
+`disposition` off its payload for the outcome (`shipped` / `blocked` /
+`no_op` / etc., see the Common Patterns table below), then confirm with `cw
+session show "$SID" --json` as usual. **Handle `cancelled` as its own case:**
+a `cancelled` `task.transition` forwards through the channel but always
+carries `disposition: null` — that means the session was cancelled with
+nothing to report, not an error and not a value to silently coerce into some
+other outcome.
+
+### Fallback: Poll Ladder
+
+Use when the channel server is down. Resolve the id once (it's still active),
+then block on `cw session wait` — it polls cw state internally every few
+seconds, so no manual `until` loop and no `Monitor` + `tail -F | awk` pipe.
 
 > **Why not a hand-rolled poll loop or `Monitor` + `awk`:** `awk`'s block
 > buffering + `exit` action means a matching event can sit unflushed while
@@ -188,6 +204,10 @@ result`):
   (so the user knows what unblocks it).
 - **If `status == "no_op"`**: explain why no work was needed (often "already
   done in upstream PR" or similar).
+- **If the queue transition is `cancelled`**: this is an operator-initiated
+  task cancel (`cw spawn close` / `cancel_ticket`), not a sentinel outcome —
+  `disposition` is always null. Report "cancelled, nothing to report" rather
+  than waiting on a sentinel or treating the null as an error.
 - **If the session `status` is `timed_out` and no sentinel was recorded**:
   the session never emitted a sentinel; elapsed time hit the headless budget.
   **Before recommending re-dispatch, check the impl branch for un-PR'd
@@ -221,6 +241,7 @@ result`):
 | `ambiguities_pending_resolution` | `completed` | `pending` | Session needs more info; resolve and re-dispatch |
 | (none) | `timed_out` | `pending` | Headless budget exceeded. **Check impl branch first** — often impl shipped, only Stage 3/4 transition lost. Otherwise redispatch. |
 | (none) | `completed` + `claude_session_id: null` | `pending` | **Reconcile-race regression.** Session actually ran fine; cw lost track. Scan worktree transcript dir for the latest sentinel (see "Salvaging crashed-but-actually-ran"). |
+| (none — always `disposition: null`) | any | `cancelled` | Operator-initiated task cancel, not a sentinel outcome. Report "cancelled, nothing to report"; don't wait on a sentinel. |
 
 If you see a combination not in this table, surface the full sentinel + the
 queue routing to the user — that's likely a bug worth filing.
