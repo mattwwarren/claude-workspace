@@ -573,6 +573,19 @@ not integer) used elsewhere in this file, derived from
 `_transcript_age_seconds` divided by 60.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
+
+### Operator-attention channel (RFC 0008 W3, #1002)
+
+A server-side filter (`cw.cw_operator_events`) forwards a declarative subset
+of this bus — `task.transition` (only for terminal/attention-worthy
+`new_status` values), `task.deleted`, `session.needs_attention`, all five
+`pr.*` types, and `session.liveness_changed` (only at `new_bucket >=
+stale_30m`) — onto a distinct `cw-operator` SSE topic on the existing
+`cw_queue_events_server`, consumed with cursor name
+`"operator-channel-bridge"`. See
+[`docs/operator-channel.md`](operator-channel.md) for the filter reference,
+subscription instructions, and degradation contract.
+
 ## CLI
 
 ### Record an event
