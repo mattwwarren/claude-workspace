@@ -200,6 +200,15 @@ def tmp_state_dir(tmp_config_dir: Path) -> Path:
 
 
 @pytest.fixture
+def tmp_events_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect cw.config.EVENTS_DIR to tmp_path."""
+    events_dir = tmp_path / ".local" / "share" / "cw" / "events"
+    events_dir.mkdir(parents=True)
+    monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
+    return events_dir
+
+
+@pytest.fixture
 def sample_client(tmp_path: Path) -> ClientConfig:
     """A ClientConfig pointing at tmp_path."""
     workspace = tmp_path / "workspace" / "test-project"

@@ -30,22 +30,11 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def tmp_events_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect cw.config.EVENTS_DIR to tmp_path."""
-    events_dir = tmp_path / ".local" / "share" / "cw" / "events"
-    events_dir.mkdir(parents=True)
-    monkeypatch.setattr("cw.config.EVENTS_DIR", events_dir)
-    return events_dir
-
-
-# ---------------------------------------------------------------------------
 # Model / enum tests
 # ---------------------------------------------------------------------------
+
+# `tmp_events_dir` lives in tests/conftest.py (promoted from here; see #1002)
+# so both this file and tests/test_cw_operator_events.py can use it.
 
 
 def test_all_orchestrator_event_types_round_trip() -> None:
