@@ -18,7 +18,9 @@ validation logic:
 - **dispatch** uses `cw dev-queue add` + `cw dev-queue run`.
 - **wave lifecycle** uses the bundled `scripts/wave_status.py` (is the batch done?).
 - **in-flight health** uses `cw queue peek` (WAIT/PEEK/STOP).
-- **attention** uses the `session.needs_attention` / `session.timed_out` event bus.
+- **attention** uses the operator channel (`task.transition` /
+  `session.needs_attention` pushes), falling back to the `session.needs_attention`
+  / `session.timed_out` event bus when the channel is unavailable.
 
 ## When to use
 
@@ -110,34 +112,16 @@ back to the operator.
 This is the handoff `/cw-queue-peek` was built to receive. Drive it from
 **checkpoints**, not a busy `sleep` poll — react to events and re-check state.
 
-**Monitor LIVENESS, not just queue state.** Queue rows, the roster, and
-`wave_status` output can all lag or lie (false parks on live sessions — #976;
-rows deleted mid-run with no event — #978; silent worker deaths produce NO
-queue transition, ever). The 2026-07-03/05 sprint's operator had to manually
-bump a queue-transition-only monitor twice. The wave monitor MUST watch three
-signals per ticket:
-
-1. **Queue transitions** — the `wave_status.py` diff (below).
-2. **Transcript-mtime LIVE/STALE flips** — newest `*.jsonl` under
-   `~/.claude/projects/<worktree-slug>-dev-<T>/`; STALE when untouched
-   > 15-20 min while the ticket is non-terminal (use ~20 min for review
-   stages — reviewer subagents are parent-silent for long stretches).
-3. **New worktree commits** — `git -C <wt> rev-parse --short HEAD` changes
-   (positive progress proof: silence + LIVE = genuinely working).
-
-**Announce initial state when arming the monitor** — a change-only monitor
-started against an already-stale world silently baselines the outage and
-never fires.
-
-**The liveness decision ladder (before ANY park/requeue action):**
-- Transcript **< 2 min old** → the session is ALIVE regardless of row status.
-  Do NOT requeue (double-spawn, the #919 class). Wait for its sentinel; the
-  #918 late-sentinel rescue recovers a falsely-parked row.
-- Transcript **flat ≥ 45 min** (or two consecutive 20-min stale checks with
-  no queue movement) → dead regardless of a `running` row. Adopt-check, then
-  `cw spawn close <sid> --confirmed-dead` and requeue/re-add.
-- In between → arm a bounded one-shot deadline check (resume-or-dead), don't
-  guess.
+**Primary: subscribe to the operator channel.** Wave-watching converts from
+hand-rolled bash liveness monitors to a `cw-operator` subscription (see the
+[operator channel](../../../docs/operator-channel.md) doc for wiring). React
+to terminal `task.transition` pushes (read `disposition` off the payload) and
+`session.needs_attention` pushes as they arrive on
+`<channel source="cw-operator">` — that is what drives Step 4b below. A
+`cancelled` transition also forwards but always carries `disposition: null`;
+handle it as its own case, not an error. `wave_status.py` (4a) is still the
+terminal-state confirmation for the whole batch; the channel is what tells you
+*when* to re-check it instead of polling on a timer.
 
 **a. Wave lifecycle — am I done?**
 
@@ -174,7 +158,11 @@ LOOP:
 
 **b. Attention signals — does anything need me now?**
 
-Tail the event bus with a durable consumer cursor (resumes where it left off):
+With the operator channel subscribed (the primary path above), attention
+signals arrive as `<channel source="cw-operator">` pushes and drive straight
+into the gate-closure logic below — no polling needed. If the channel server
+is down (see the Fallback below), tail the event bus with a durable consumer
+cursor instead (resumes where it left off):
 
 ```bash
 cw event tail --since fanout-mon \
@@ -276,6 +264,41 @@ Surface progress sparingly — one line when the wave shrinks or a ticket flips
 to needs-attention; otherwise stay quiet. The operator can `cw watch` for the
 live board.
 
+### Fallback: Poll Ladder
+
+Use this when the channel server (`cw queue-channel serve`) is down,
+`cw-operator` isn't wired into `.mcp.json`, or you need recovery forensics —
+it's also the `cw event tail` command referenced in 4b above.
+
+**Monitor LIVENESS, not just queue state.** Queue rows, the roster, and
+`wave_status` output can all lag or lie (false parks on live sessions — #976;
+rows deleted mid-run with no event — #978; silent worker deaths produce NO
+queue transition, ever). The 2026-07-03/05 sprint's operator had to manually
+bump a queue-transition-only monitor twice. The wave monitor MUST watch three
+signals per ticket:
+
+1. **Queue transitions** — the `wave_status.py` diff (4a above).
+2. **Transcript-mtime LIVE/STALE flips** — newest `*.jsonl` under
+   `~/.claude/projects/<worktree-slug>-dev-<T>/`; STALE when untouched
+   > 15-20 min while the ticket is non-terminal (use ~20 min for review
+   stages — reviewer subagents are parent-silent for long stretches).
+3. **New worktree commits** — `git -C <wt> rev-parse --short HEAD` changes
+   (positive progress proof: silence + LIVE = genuinely working).
+
+**Announce initial state when arming the monitor** — a change-only monitor
+started against an already-stale world silently baselines the outage and
+never fires.
+
+**The liveness decision ladder (before ANY park/requeue action):**
+- Transcript **< 2 min old** → the session is ALIVE regardless of row status.
+  Do NOT requeue (double-spawn, the #919 class). Wait for its sentinel; the
+  #918 late-sentinel rescue recovers a falsely-parked row.
+- Transcript **flat ≥ 45 min** (or two consecutive 20-min stale checks with
+  no queue movement) → dead regardless of a `running` row. Adopt-check, then
+  `cw spawn close <sid> --confirmed-dead` and requeue/re-add.
+- In between → arm a bounded one-shot deadline check (resume-or-dead), don't
+  guess.
+
 ### Step 5 — report + disposition
 
 When `wave_status.py` reports terminal, stop the background dispatch loop (if no
@@ -343,6 +366,9 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
 
 ## Related
 
+- [operator channel](../../../docs/operator-channel.md) — primary
+  attention-signal source for Step 4 monitoring; the `cw event tail` bus is
+  the fallback when its server is down.
 - `/cw-smoke-test` — single-ticket end-to-end dogfood (the N=1 form of this).
 - `/cw-queue-peek` — in-flight WAIT/PEEK/STOP ladder (Step 4c).
 - `/cw-validate-result` — forensic read on a finished ticket (Step 5).
