@@ -1689,3 +1689,90 @@ class TestRunPollerLoopBody:
 
         with pytest.raises(_StopLoop):
             _REAL_RUN_POLLER()
+
+    def test_config_load_failure_falls_back_but_still_calls_poller_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Binding decision #1: a config-reload failure must NEVER prevent
+        _poller_tick (and therefore queue.* broadcasting) from running.
+        First-ever tick has no last-known-good config yet, so it must fall
+        back to OrchestratorConfig() defaults.
+        """
+        import time
+
+        import cw.config as _config_mod
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        calls: list[OrchestratorConfig] = []
+
+        def _capture_tick(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _capture_tick)
+
+        def _raise_config_load() -> OrchestratorConfig:
+            msg = "config boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(_config_mod, "load_orchestrator_config", _raise_config_load)
+
+        sleep_calls2: list[float] = []
+
+        def _fake_sleep2(seconds: float) -> None:
+            sleep_calls2.append(seconds)
+            if len(sleep_calls2) >= 2:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep2)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()
+
+        assert calls == [OrchestratorConfig()]
+
+    def test_config_load_failure_falls_back_to_last_known_good_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once a config has loaded successfully at least once, a later
+        reload failure must fall back to THAT config, not fresh defaults."""
+        import time
+
+        import cw.config as _config_mod
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        calls: list[OrchestratorConfig] = []
+
+        def _capture_tick(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _capture_tick)
+
+        good_config = OrchestratorConfig(tick_interval_seconds=999)
+        load_attempts: list[int] = []
+
+        def _flaky_load() -> OrchestratorConfig:
+            load_attempts.append(1)
+            if len(load_attempts) == 1:
+                return good_config
+            msg = "config boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(_config_mod, "load_orchestrator_config", _flaky_load)
+
+        sleep_calls3: list[float] = []
+
+        def _fake_sleep3(seconds: float) -> None:
+            sleep_calls3.append(seconds)
+            if len(sleep_calls3) >= 3:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep3)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()
+
+        assert calls == [good_config, good_config]
