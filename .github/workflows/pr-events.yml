@@ -13,6 +13,16 @@ name: PR Events Push
 #
 # pr.mergeable is NOT triggered here (no `mergeStateStatus` webhook signal
 # exists on any of these events) — the poll producer covers it exclusively.
+#
+# Known limitation (fork PRs): pull_request/pull_request_review events from
+# fork-originated PRs run with no access to repo secrets, so
+# CW_PR_EVENTS_HMAC_SECRET resolves empty and this workflow silently falls
+# through to the unsigned curl branch below. This is intentionally NOT
+# worked around via pull_request_target (that would expose secrets to
+# untrusted fork checkout content) -- accepted per #930, since this
+# pipeline's PRs are same-repo/bot-originated, never forks. The poll
+# producer (cw.pr_hydrate) still covers fork PRs on its own schedule
+# regardless.
 
 on:
   pull_request:
@@ -27,6 +37,8 @@ jobs:
   push-pr-event:
     runs-on: ubuntu-latest
     if: vars.CW_PR_EVENTS_RELAY_URL != ''
+    permissions:
+      pull-requests: read
     steps:
       - name: Resolve event_type, pr_number, and payload for this trigger
         id: resolve
