@@ -47,7 +47,7 @@ The "Live work dashboard" milestone closed without consolidating these.
 
 `tui.py`'s session-grouping view and worktree-contention column migrate into `board.py` as a toggle panel (`cw board --detail`). The `dispatch.tick` flood (#854) is suppressed by default in the board's event feed (aggregate consecutive ticks as `dispatch.tick ×N over Xm`); `cw board --raw-events` restores full stream. `last_stage=unknown` (#854) resolves when stage events are wired in Phase 2.
 
-`cw orchestrate watch` is deprecated in Phase 4 after parity. `cw orchestrate status` retains its `--json` path (the machine-readable surface used by tests and the future tuner). Absorbed legibility tickets: #854, #813, #824.
+`cw orchestrate watch` is deprecated in Phase 4 after parity. **(Shipped — #995.)** `cw orchestrate status` retains its `--json` path (the machine-readable surface used by tests and the future tuner). Absorbed legibility tickets: #854, #813, #824.
 
 ### W2 — PR state + push events
 
@@ -84,7 +84,7 @@ Data-integrity floor: the board is only as trustworthy as the state workers writ
 | **1 — Data correctness** | #929 (pr_state hydration + pr.* emit), #952 (zero-comment fix), #953 (empty-ambiguity validator); #536-P1 (`cw result emit`) in parallel | Board renders accurate data; no silent freeze for open PRs |
 | **2 — Board consolidation** | Extend `board.py` with PR/CI column, AWAITING SIGNOFF cell, session age, attention badges; `tui.py` toggle panel; #854 dispatch.tick suppression | `cw board` replaces `cw dev-queue status` as primary read surface |
 | **3 — Signoff gates** | `TicketTask.signoff`, `apply_staged_decision` gate, `awaiting_operator_signoff` status, `cw dev-queue approve` clearance; compose with RFC 0005 C3/C2 (#621/#622) | `--signoff operator` reliably parks before ship, code-enforced |
-| **4 — Push + deprecation** | #930 (GitHub Actions → relay → `POST /pr-event`); freshness-gate `session.needs_attention`; `cw orchestrate watch` deprecation notice | Zero-latency PR signal; `tui.py` marked deprecated, removed in following release |
+| **4 — Push + deprecation** | #930 (GitHub Actions → relay → `POST /pr-event`); freshness-gate `session.needs_attention`; `cw orchestrate watch` deprecation notice | Zero-latency PR signal; `tui.py` marked deprecated, removed in following release (shipped, #995) |
 
 Phase 1 is the prerequisite for Phase 2 (board accuracy) and Phase 3 (correct gate state). Phases 2 and 3 are independent and can ship in either order.
 

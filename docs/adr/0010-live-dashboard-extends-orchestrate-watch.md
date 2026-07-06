@@ -3,6 +3,9 @@
 **Status:** Accepted
 **Driven by:** #537 (epic "Live work dashboard"); split into #308, #834, #833, #310, #842
 
+> **Note:** `cw orchestrate watch` is deprecated (RFC 0007 Phase 4) and will
+> be removed in the release after v1.14.0. Use `cw board` instead.
+
 ## Decision
 
 The operator-facing "live work dashboard" is the existing `cw orchestrate watch`

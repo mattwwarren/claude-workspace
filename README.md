@@ -144,7 +144,7 @@ You (coordinator)
 | Command | Description |
 |---------|-------------|
 | `cw orchestrate status` | Snapshot of orchestrator pipeline state |
-| `cw orchestrate watch` | Live orchestrator dashboard |
+| `cw orchestrate watch` | **Deprecated** — live orchestrator dashboard; use `cw board` |
 | `cw orchestrate workers` | List active worker sessions |
 | `cw orchestrate run --lane <name>` | Run the reap-authority loop for a lane |
 | `cw orchestrate start --lane <name>` | Bind lane reap authority |
