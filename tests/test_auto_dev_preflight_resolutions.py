@@ -13,6 +13,7 @@ SKILLS = ROOT / ".claude" / "skills"
 
 REFUSE = "multiple resolution comments detected — re-run /harden-ticket to consolidate"
 MARKER = "<!-- auto-dev-preflight-resolutions -->"
+BLOCKER_HEADER = "## Multi-Marker Gate Blocked"
 
 
 def _cmd(name: str) -> str:
@@ -63,6 +64,24 @@ def test_marker_consistent_between_producer_and_consumer() -> None:
     """
     assert MARKER in _skill("harden-ticket/SKILL.md")
     assert MARKER in _cmd("auto-dev-plan.md")
+
+
+def test_multi_marker_blocker_has_distinct_header() -> None:
+    """The >1-marker gate posts its blocker under a distinct, greppable header."""
+    assert BLOCKER_HEADER in _step1b_section()
+
+
+def test_multi_marker_blocker_forbids_literal_marker() -> None:
+    """The gate's blocker-comment template must never emit the literal marker (#967)."""
+    section = _step1b_section()
+    assert "MUST NOT contain the literal pre-flight resolutions marker" in section
+
+
+def test_gate_tally_excludes_self_authored_blocker() -> None:
+    """Defense in depth: the marker tally excludes the pipeline's own blocker header."""
+    section = _step1b_section()
+    assert "exclude any comment bearing the pipeline's own blocker header" in section
+    assert BLOCKER_HEADER in section
 
 
 def test_harden_directs_superseding_comment() -> None:
