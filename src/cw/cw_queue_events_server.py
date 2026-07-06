@@ -424,10 +424,21 @@ def _run_poller() -> None:
 
     from cw.config import load_orchestrator_config
 
+    last_good_config: OrchestratorConfig | None = None
     while True:
         time.sleep(POLL_INTERVAL_SECONDS)
         try:
-            config = load_orchestrator_config()
+            last_good_config = load_orchestrator_config()
+        except Exception:
+            # Why: a config reload failure must NEVER starve queue.* broadcasting
+            # (RFC 0008 W3, #1002, binding decision #1) -- fall back to the last
+            # config that loaded successfully (or safe defaults, pre-_start_poller)
+            # so _poller_tick below still runs this tick regardless.
+            logger.exception("orchestrator config reload failed, using last-known-good")
+        config = (
+            last_good_config if last_good_config is not None else OrchestratorConfig()
+        )
+        try:
             _poller_tick(config)
         except Exception:
             logger.exception("poller error")
@@ -473,21 +484,28 @@ _event_offset[0] = _load_offset_from_file()
 
 
 class _SSESlashMiddleware:
-    """Rewrite bare /sse → /sse/ at ASGI scope level.
+    """Rewrite bare mount paths -> their slash-suffixed forms at ASGI scope level.
 
-    Starlette's Mount("/sse") regex requires a trailing slash to produce a
-    FULL match.  Without this rewrite, a GET /sse request falls through to
-    the redirect_slashes handler and returns a 307.  We normalise the path
-    internally so neither the client nor the router needs to care which form
-    was used.
+    Starlette's Mount(...) regex requires a trailing slash to produce a FULL
+    match. Without this rewrite, a bare GET /sse/operator (no trailing slash)
+    doesn't match Mount("/sse/operator", ...)'s own regex either -- it falls
+    through to the NEXT route in the list, Mount("/sse", ...), whose regex
+    happily matches "/sse" + remaining "/operator". That's a silent
+    prefix-swallow into the WRONG channel, not a clean 404 (RFC 0008 W3,
+    #1002) -- exactly the risk binding decision #4 called "the highest-risk
+    detail." /messages/operator has the identical exposure against
+    Mount("/messages", ...). We normalise the path internally so neither the
+    client nor the router needs to care which form was used.
     """
+
+    _BARE_PATHS = ("/sse", "/sse/operator", "/messages/operator")
 
     def __init__(self, app: Any) -> None:
         self._app = app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        if scope.get("type") == "http" and scope.get("path") == "/sse":
-            scope = dict(scope, path="/sse/")
+        if scope.get("type") == "http" and scope.get("path") in self._BARE_PATHS:
+            scope = dict(scope, path=scope["path"] + "/")
         await self._app(scope, receive, send)
 
 

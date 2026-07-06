@@ -25,6 +25,7 @@ from cw.cw_operator_events_channel import (
     _extract_payload,
     _relay_upstream,
 )
+from cw.models import OrchestratorEventType
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -281,7 +282,7 @@ class TestRelayUpstream:
         import anyio
 
         msg = _make_operator_session_message(
-            "pr.registered",
+            OrchestratorEventType.PR_REGISTERED.value,
             {"pr": 42, "repo": "owner/repo", "branch": "feat/x", "session_id": "s1"},
         )
 

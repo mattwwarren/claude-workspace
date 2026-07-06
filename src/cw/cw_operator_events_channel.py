@@ -9,6 +9,8 @@ import socket
 import urllib.parse
 from typing import Any, cast
 
+from cw.models import OrchestratorEventType
+
 logger = logging.getLogger(__name__)
 
 # Same host/port as cw-queue-events -- the operator channel is a distinct SSE
@@ -17,6 +19,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BASE_URL = "http://127.0.0.1:8789"
 # Intentionally not imported from cw_operator_events to avoid triggering
 # module-level I/O (_cursors.update/_event_offset init) at import time.
+# cw.models has no such side effects, so OrchestratorEventType is imported
+# directly above rather than duplicated as a raw string.
 _NOTIFICATION_TYPE = "cw-operator-event"
 
 # MCP types — deferred-import inside functions per project convention
@@ -93,7 +97,7 @@ async def _relay_upstream(
         # even when this proxy is scoped to one client via --client-id: a
         # scoped operator silently missing PR registrations is worse than
         # rare cross-client noise on this one low-volume event type.
-        if payload.get("event") == "pr.registered":
+        if payload.get("event") == OrchestratorEventType.PR_REGISTERED.value:
             outbound = _build_outbound_notification(payload)
             await stdio_write.send(outbound)
             continue

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ starlette = pytest.importorskip(
     "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
 )
 
+from starlette.routing import Match
 from starlette.testclient import TestClient
 
 import cw.cw_operator_events as _operator_mod
@@ -1390,13 +1392,15 @@ class TestStartPollerConfigValidation:
     """A malformed operator_channel_forward must crash _start_poller (fail-loud)."""
 
     def test_malformed_operator_channel_forward_crashes_at_startup(self) -> None:
+        import pydantic
+
         from cw.config import orchestrator_config_file
 
         path = orchestrator_config_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
 
-        with pytest.raises(Exception, match=r".*"):
+        with pytest.raises(pydantic.ValidationError, match=re.escape("bogus.event")):
             _server_mod._start_poller()
         assert _server_mod._poller_started[0] is False
 
@@ -1408,6 +1412,8 @@ class TestStartPollerConfigValidation:
         assert _server_mod._poller_started[0] is True
 
     def test_revalidates_on_every_call_even_when_already_started(self) -> None:
+        import pydantic
+
         from cw.config import orchestrator_config_file
 
         _server_mod._start_poller()
@@ -1416,7 +1422,7 @@ class TestStartPollerConfigValidation:
         path = orchestrator_config_file()
         path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
 
-        with pytest.raises(Exception, match=r".*"):
+        with pytest.raises(pydantic.ValidationError, match=re.escape("bogus.event")):
             _server_mod._start_poller()
 
 
@@ -1449,6 +1455,116 @@ class TestOperatorRouteOrdering:
             "/messages",
             "/ack",
         ]
+
+    def test_operator_sse_mount_resolves_before_queue_sse_mount(self) -> None:
+        """Exercise the actual ASGI dispatch mechanism -- Starlette's Router
+        iterates ``self.routes`` calling ``route.matches(scope)`` in order and
+        dispatches to the first match -- against a real ``/sse/operator/``
+        request scope (the slash-suffixed form ``_SSESlashMiddleware``
+        normalises bare requests to; see the middleware tests below for the
+        normalisation itself). This proves a request to the operator SSE
+        endpoint actually resolves to the operator's Mount rather than being
+        prefix-swallowed by ``Mount("/sse", ...)``, not just that its path
+        string sorts earlier in the route list (binding decision #4: "request
+        to each channel asserts no prefix-swallowing").
+        """
+        app = make_app()
+        scope = {"type": "http", "method": "GET", "path": "/sse/operator/"}
+        matched = next(
+            (route for route in app.routes if route.matches(scope)[0] != Match.NONE),  # type: ignore[attr-defined]
+            None,
+        )
+        assert matched is not None
+        assert matched.path == "/sse/operator"  # type: ignore[attr-defined]
+
+    def test_operator_messages_mount_resolves_before_queue_messages_mount(
+        self,
+    ) -> None:
+        app = make_app()
+        scope = {"type": "http", "method": "POST", "path": "/messages/operator/"}
+        matched = next(
+            (route for route in app.routes if route.matches(scope)[0] != Match.NONE),  # type: ignore[attr-defined]
+            None,
+        )
+        assert matched is not None
+        assert matched.path == "/messages/operator"  # type: ignore[attr-defined]
+
+    def test_bare_operator_sse_path_without_middleware_is_prefix_swallowed(
+        self,
+    ) -> None:
+        """Ground truth for why ``_SSESlashMiddleware`` had to grow two new
+        entries: absent the rewrite, a bare (no trailing slash) request to
+        ``/sse/operator`` doesn't match ``Mount("/sse/operator", ...)``'s own
+        regex (Mounts require a trailing-slash remainder) and falls through to
+        ``Mount("/sse", ...)`` instead, which happily matches "/sse" + the
+        remaining "/operator" -- a silent misroute into the WRONG channel,
+        not a 404. This is exactly the prefix-swallow binding decision #4
+        called "the highest-risk detail."
+        """
+        app = make_app()
+        scope = {"type": "http", "method": "GET", "path": "/sse/operator"}
+        matched = next(
+            (route for route in app.routes if route.matches(scope)[0] != Match.NONE),  # type: ignore[attr-defined]
+            None,
+        )
+        assert matched is not None
+        assert matched.path == "/sse"  # type: ignore[attr-defined]
+
+    def test_sse_slash_middleware_rewrites_bare_operator_sse_path(self) -> None:
+        """The middleware fix: a bare ``/sse/operator`` request is rewritten to
+        ``/sse/operator/`` before the router ever sees it, so real ASGI
+        requests never hit the prefix-swallow demonstrated above."""
+        import anyio
+
+        from cw.cw_queue_events_server import _SSESlashMiddleware
+
+        seen_scopes: list[dict[str, Any]] = []
+
+        async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
+            seen_scopes.append(scope)
+
+        async def _run() -> None:
+            middleware = _SSESlashMiddleware(_inner_app)
+            await middleware({"type": "http", "path": "/sse/operator"}, None, None)
+
+        anyio.run(_run)
+        assert seen_scopes[0]["path"] == "/sse/operator/"
+
+    def test_sse_slash_middleware_rewrites_bare_operator_messages_path(
+        self,
+    ) -> None:
+        import anyio
+
+        from cw.cw_queue_events_server import _SSESlashMiddleware
+
+        seen_scopes: list[dict[str, Any]] = []
+
+        async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
+            seen_scopes.append(scope)
+
+        async def _run() -> None:
+            middleware = _SSESlashMiddleware(_inner_app)
+            await middleware({"type": "http", "path": "/messages/operator"}, None, None)
+
+        anyio.run(_run)
+        assert seen_scopes[0]["path"] == "/messages/operator/"
+
+    def test_sse_slash_middleware_leaves_other_paths_untouched(self) -> None:
+        import anyio
+
+        from cw.cw_queue_events_server import _SSESlashMiddleware
+
+        seen_scopes: list[dict[str, Any]] = []
+
+        async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
+            seen_scopes.append(scope)
+
+        async def _run() -> None:
+            middleware = _SSESlashMiddleware(_inner_app)
+            await middleware({"type": "http", "path": "/operator/ack"}, None, None)
+
+        anyio.run(_run)
+        assert seen_scopes[0]["path"] == "/operator/ack"
 
     def test_operator_ack_route_functions(self) -> None:
         client = TestClient(make_app())
