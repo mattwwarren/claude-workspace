@@ -294,8 +294,9 @@ without task revert).
 ### `session.needs_attention`
 
 **Emitter:** `flag_silently_idle_daemon_sessions`, `revert_timed_out_tasks`,
-`revert_completed_silent_tasks`, `_salvage_low_path` in `cw.reconcile`;
-`apply_staged_decision` in `cw.dispatch` (for plan-parked sessions)
+`revert_completed_silent_tasks`, `_salvage_low_path`,
+`_record_salvage_skip` in `cw.reconcile`; `apply_staged_decision`,
+`dispatch_tick` (via `_record_client_freshness_block`) in `cw.dispatch`
 **Payload:**
 ```json
 {
@@ -329,9 +330,30 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
   Operator should inspect the session result (`cw session result <id>`) and
   either resolve the ambiguities and re-dispatch, or close the ticket. See #923.
+- `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
+  latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
+  §W2) reached `freshness_block_attention_threshold`. Client-scoped, not
+  session-scoped: `session_id`/`session_name` are empty strings, `client` is
+  set, `ticket_id` is `null`. `breadcrumbs` carries the freshness_detail
+  reason (e.g. `"main_behind_origin"`). Surfaces via `board.py`'s
+  client-header badge only — invisible to the per-ticket row badge and to
+  `cw orchestrate status` (no `ticket_id` to key off of).
+- `"salvage_skip_escalated"` — A session's consecutive salvage-skip latch
+  (`Session.consecutive_salvage_skips`, closes #974) reached
+  `salvage_skip_attention_threshold`. Session-scoped: standard
+  `session_id`/`session_name`/`ticket_id` populated. `breadcrumbs` carries
+  the streak count plus the last salvage-skip reason. Surfaces via
+  `board.py`'s existing per-ticket row badge — `_index_badge_events` already
+  keys on `ticket_id`, so no new board.py path is needed for this one.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
-A push notification is fired for each emission (via `fire_push_notification`).
+A push notification is fired for most emissions (via `fire_push_notification`)
+— **except** `"freshness_gate_blocked"` and `"salvage_skip_escalated"`, which
+deliberately do not push. This mirrors the existing `gh_check_blocked`
+paused_status (verified: its `_emit_stalled_events` call site does not call
+`fire_push_notification` either) — note this sentence was already stale
+before this ticket for that pre-existing case; only the two new values'
+qualifier is in scope here.
 
 ### `session.salvage_skipped`
 

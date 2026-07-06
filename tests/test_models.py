@@ -872,3 +872,27 @@ class TestOperatorSignoffGates:
 
         with pytest.raises(pydantic.ValidationError):
             OrchestratorConfig(default_signoff="bogus")  # type: ignore[arg-type]
+
+
+class TestConsecutiveSkipLatches:
+    """RFC 0007 Phase 4 (W2) + #974: consecutive-skip attention latches."""
+
+    def test_orchestrator_config_freshness_block_threshold_default(self) -> None:
+        assert OrchestratorConfig().freshness_block_attention_threshold == 5
+
+    def test_orchestrator_config_salvage_skip_threshold_default(self) -> None:
+        assert OrchestratorConfig().salvage_skip_attention_threshold == 5
+
+    def test_client_concurrency_override_freshness_blocks_defaults_zero(self) -> None:
+        from cw.models import ClientConcurrencyOverride
+
+        assert ClientConcurrencyOverride().consecutive_freshness_blocks == 0
+
+    def test_session_consecutive_salvage_skips_defaults_zero(self) -> None:
+        session = Session(
+            name="acme/impl",
+            client="acme",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/tmp/acme"),
+        )
+        assert session.consecutive_salvage_skips == 0

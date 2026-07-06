@@ -946,6 +946,12 @@ def _check_loop_health() -> list[CheckResult]:
     whether the most recent _LOOP_STALL_CONSECUTIVE_TICKS ticks are all
     FRESHNESS_GATE with pending>0 and running==0. When a stall is detected for
     a client, emits a warn=True result suggesting ``cw dev-queue refresh-all``.
+
+    This is the on-demand forensic replay (threshold
+    _LOOP_STALL_CONSECUTIVE_TICKS=3, derived from tick events) and coexists
+    with the proactive, persisted runtime latch
+    ``ClientConcurrencyOverride.consecutive_freshness_blocks`` (threshold 5,
+    RFC 0007 §W2) — the two are deliberately not unified.
     """
     cutoff = datetime.now(UTC) - timedelta(hours=1)
     events = read_events(

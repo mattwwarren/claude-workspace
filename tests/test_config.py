@@ -883,6 +883,51 @@ class TestMigrateCwState:
         session = migrated["sessions"][0]
         assert session["stage"] == "impl"
 
+    def test_v11_to_v12_fills_consecutive_salvage_skips_default(self) -> None:
+        """migrate_cw_state fills consecutive_salvage_skips=0 on v11 sessions
+        that lack the key (#974)."""
+        raw = {
+            "schema_version": 11,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["consecutive_salvage_skips"] == 0
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v12_consecutive_salvage_skips_preserved_idempotently(self) -> None:
+        """Existing nonzero consecutive_salvage_skips survives a migration pass."""
+        raw = {
+            "schema_version": 12,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 3,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["consecutive_salvage_skips"] == 3
+
     # -----------------------------------------------------------------------
     # Phase F: cmux surface_ref migration tests (schema v5)
     # -----------------------------------------------------------------------

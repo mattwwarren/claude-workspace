@@ -123,6 +123,12 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 1800
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
 _SILENTLY_IDLE_REASON = "silently_idle"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
+# paused_status written to SESSION_NEEDS_ATTENTION when a client's
+# consecutive freshness-gate-block latch trips (RFC 0007 §W2).
+_FRESHNESS_BLOCK_ESCALATED_REASON = "freshness_gate_blocked"
+# paused_status written to SESSION_NEEDS_ATTENTION when a session's
+# consecutive salvage-skip latch trips (closes #974).
+_SALVAGE_SKIP_ESCALATED_REASON = "salvage_skip_escalated"
 # Reason tag written to SESSION_COMPLETED events when a TIMED_OUT session's PR
 # was found MERGED via issue-linkage (timed_out-merged auto-complete, #488).
 _TIMED_OUT_MERGED_REASON = "timed_out_merged"
@@ -225,6 +231,10 @@ class ProposedAction(StrEnum):
     # LOCAL fire-and-forget aider process exited (dead liveness handle); harvest
     # synthesizes the git-based completion and advances the task. See #888.
     HARVEST_LOCAL_COMPLETE = "harvest_local_complete"
+    # Zero a session's consecutive_salvage_skips latch on recovery (any
+    # non-SKIP_PARKED detect-phase disposition). Carries no event of its own —
+    # a pure state-mutation candidate. Closes #974.
+    RESET_SALVAGE_SKIP_COUNTER = "reset_salvage_skip_counter"
 
 
 @dataclass(frozen=True)

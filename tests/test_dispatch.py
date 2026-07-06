@@ -44,6 +44,7 @@ from cw.exceptions import StaleWorktreeError, VersionDriftError, WorktreeError
 from cw.models import (
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
+    ClientConcurrencyOverride,
     ClientConfig,
     ConcurrencyOverrides,
     CwState,
@@ -6441,8 +6442,7 @@ class TestLaneCircuitBreaker:
 
         saves: list[object] = []
         import cw.dispatch as dispatch_mod
-
-        real_save = dispatch_mod._save_concurrency_overrides
+        from cw.config import _save_concurrency_overrides as real_save
 
         def _counting_save(overrides: object) -> None:
             saves.append(overrides)
@@ -6669,6 +6669,13 @@ class TestLaneCircuitBreaker:
         Regression guard for the lazy-load fix in _dispatch_client_lanes: without
         it, _check_lane_circuit_paused would reload the override file once per
         paused lane per tick instead of once per call.
+
+        Expects exactly 2 loads per tick: one from the client-scoped freshness-
+        block latch (_reset_client_freshness_blocks, RFC 0007 §W2 — this client
+        passes the freshness gate every tick in this fixture), plus the single
+        lane-pause-check load shared across both paused lanes (the invariant
+        this test actually guards). A regression back to N-loads-per-paused-lane
+        would show up as 3, not 2.
         """
         lanes = [
             LaneConfig(name="impl", max_parallel=1),
@@ -6708,7 +6715,7 @@ class TestLaneCircuitBreaker:
         result = dispatch_tick(breaker_config, native_daemon=daemon)
 
         assert result.spawned == 0
-        assert len(loads) == 1
+        assert len(loads) == 2
 
 
 class TestResolveDispatchSkipReasonCircuitPaused:
@@ -6826,3 +6833,228 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestFreshnessBlockAttentionLatch — per-client freshness-gate-block latch
+# (RFC 0007 §W2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def freshness_breaker_config() -> OrchestratorConfig:
+    """OrchestratorConfig with a low freshness-block attention threshold."""
+    return OrchestratorConfig(
+        tick_interval_seconds=30,
+        per_client_max_parallel={"test-client": 1},
+        freshness_block_attention_threshold=2,
+    )
+
+
+def _seed_client_freshness_override(count: int) -> None:
+    """Persist a ClientConcurrencyOverride for test-client's freshness latch."""
+    _save_concurrency_overrides(
+        ConcurrencyOverrides(
+            clients={
+                "test-client": ClientConcurrencyOverride(
+                    consecutive_freshness_blocks=count
+                )
+            }
+        )
+    )
+
+
+def _client_freshness_override() -> ClientConcurrencyOverride:
+    """Read back the persisted test-client freshness-block override."""
+    return _load_concurrency_overrides().clients["test-client"]
+
+
+def _force_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force _resolve_freshness to report test-client as stale (main behind)."""
+    monkeypatch.setattr(
+        "cw.dispatch.is_main_behind_origin",
+        lambda _client, **_kw: (True, "aaa", "bbb", 3),
+    )
+
+
+class TestFreshnessBlockAttentionLatch:
+    """Per-client consecutive freshness-gate-block latch (RFC 0007 §W2).
+
+    Sibling of TestLaneCircuitBreaker: the client-keyed counter increments
+    once per tick the client is skipped with skip_reason=FRESHNESS_GATE,
+    fires session.needs_attention exactly once at the configured threshold
+    (latch: no re-fire while still at/above threshold), and resets to 0 on
+    the next non-stale tick.
+    """
+
+    def test_below_threshold_no_emit(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        freshness_breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One stale tick increments the counter but does not yet emit."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-W2A", client="test-client"))
+        _force_stale(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(freshness_breaker_config, native_daemon=daemon, auto_ff=False)
+
+        assert _client_freshness_override().consecutive_freshness_blocks == 1
+        events = read_events(
+            consumer="test-w2-below",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_counter_increments_once_per_tick_not_per_ticket(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        freshness_breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two pending tickets on a stale client → counter increments by 1."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-W2B1", client="test-client"))
+        add_ticket(TicketTask(ticket_id="GEN-W2B2", client="test-client"))
+        _force_stale(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(freshness_breaker_config, native_daemon=daemon, auto_ff=False)
+
+        assert _client_freshness_override().consecutive_freshness_blocks == 1
+
+    def test_exact_threshold_emits_full_payload(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        freshness_breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reaching the threshold emits session.needs_attention with all 8 fields."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_client_freshness_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-W2C", client="test-client"))
+        _force_stale(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(freshness_breaker_config, native_daemon=daemon, auto_ff=False)
+
+        assert _client_freshness_override().consecutive_freshness_blocks == 2
+        events = read_events(
+            consumer="test-w2-threshold",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        assert events[0].payload == {
+            "session_id": "",
+            "session_name": "",
+            "client": "test-client",
+            "ticket_id": None,
+            "claude_session_id": None,
+            "paused_status": "freshness_gate_blocked",
+            "breadcrumbs": "main_behind_origin",
+            "crashed": False,
+        }
+        assert events[0].correlation_id is None
+
+    def test_no_refire_while_latched(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        freshness_breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tick that keeps the client at/above threshold does not re-emit."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_client_freshness_override(2)
+        add_ticket(TicketTask(ticket_id="GEN-W2D", client="test-client"))
+        _force_stale(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(freshness_breaker_config, native_daemon=daemon, auto_ff=False)
+
+        assert _client_freshness_override().consecutive_freshness_blocks == 3
+        events = read_events(
+            consumer="test-w2-latched",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_reset_on_non_stale_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        freshness_breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A non-stale tick resets the client's freshness-block counter to 0."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_client_freshness_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-W2E", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(
+            freshness_breaker_config, native_daemon=daemon, auto_ff=False
+        )
+
+        assert result.spawned == 1
+        assert _client_freshness_override().consecutive_freshness_blocks == 0
+
+    def test_reset_short_circuits_when_already_zero(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        freshness_breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An already-zero counter is not re-persisted on a non-stale tick."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_client_freshness_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-W2F", client="test-client"))
+
+        saves: list[object] = []
+        import cw.dispatch as dispatch_mod
+        from cw.config import _save_concurrency_overrides as real_save
+
+        def _counting_save(overrides: object) -> None:
+            saves.append(overrides)
+            real_save(overrides)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(dispatch_mod, "_save_concurrency_overrides", _counting_save)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(
+            freshness_breaker_config, native_daemon=daemon, auto_ff=False
+        )
+
+        assert result.spawned == 1
+        # Counter was already 0 → reset helper must short-circuit before save.
+        assert saves == []
+
+    def test_no_push_notification_on_threshold_emit(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        freshness_breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The freshness-block escalation never calls fire_push_notification."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_client_freshness_override(1)
+        add_ticket(TicketTask(ticket_id="GEN-W2G", client="test-client"))
+        _force_stale(monkeypatch)
+
+        push_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification",
+            lambda *a, **kw: push_calls.append((a, kw)),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(freshness_breaker_config, native_daemon=daemon, auto_ff=False)
+
+        assert _client_freshness_override().consecutive_freshness_blocks == 2
+        assert push_calls == []

@@ -726,6 +726,97 @@ class TestBadges:
         output = _render(_state_with_task(events=[mismatched]))
         assert "ATTN" not in output
 
+    def test_client_scoped_freshness_block_shows_client_header_badge(self) -> None:
+        """A freshness-block SESSION_NEEDS_ATTENTION (client set, no ticket_id)
+        surfaces via the client-header badge, not the per-ticket row badge."""
+        freshness_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"client": "acme", "ticket_id": None},
+            created_at=NOW,
+        )
+        output = _render(_state_with_task(client="acme", events=[freshness_event]))
+        assert "[ATTN]" in output
+
+    def test_client_scoped_badge_does_not_bleed_to_unrelated_client(self) -> None:
+        """A freshness-block event scoped to one client must not badge another
+        client's panel (no false-positive badge bleed)."""
+        task_acme = TicketTask(
+            ticket_id="MW-200",
+            client="acme",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+            lane="default",
+            created_at=NOW,
+        )
+        task_other = TicketTask(
+            ticket_id="MW-201",
+            client="other-client",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+            lane="default",
+            created_at=NOW,
+        )
+        freshness_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"client": "acme", "ticket_id": None},
+            created_at=NOW,
+        )
+        state = BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(tasks=[task_acme, task_other]),
+            clients={},
+            config=OrchestratorConfig(),
+            now=NOW,
+            events=[freshness_event],
+        )
+        output = _render(state)
+
+        acme_idx = output.index("acme / default")
+        other_idx = output.index("other-client / default")
+        acme_title_end = output.index("\n", acme_idx)
+        other_title_end = output.index("\n", other_idx)
+        assert "[ATTN]" in output[acme_idx:acme_title_end]
+        assert "[ATTN]" not in output[other_idx:other_title_end]
+
+    def test_ticket_scoped_needs_attention_does_not_show_client_header_badge(
+        self,
+    ) -> None:
+        """A routine ticket-scoped SESSION_NEEDS_ATTENTION (e.g. silently_idle)
+        carries `client` alongside a real ticket_id, per every pre-existing
+        emit site (idle.py, stalled.py, phantom.py, etc). It must surface only
+        via the per-ticket row badge, not bleed into the client-header badge —
+        regression lock for the false-positive _index_client_badge_events bug
+        caught in review (#996)."""
+        ticket_scoped_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"client": "acme", "ticket_id": "MW-100"},
+            created_at=NOW,
+        )
+        output = _render(_state_with_task(client="acme", events=[ticket_scoped_event]))
+
+        acme_idx = output.index("acme / default")
+        acme_title_end = output.index("\n", acme_idx)
+        assert "[ATTN]" not in output[acme_idx:acme_title_end]
+        assert "ATTN" in output  # still shows via the per-ticket row badge
+
+    def test_ticket_scoped_reap_proposed_does_not_show_client_header_badge(
+        self,
+    ) -> None:
+        """SESSION_REAP_PROPOSED is always ticket/session-scoped (never carries
+        ticket_id=None) — it must never populate the client-header badge."""
+        reap_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_REAP_PROPOSED,
+            payload={"client": "acme", "ticket_id": "MW-100"},
+            created_at=NOW,
+        )
+        output = _render(_state_with_task(client="acme", events=[reap_event]))
+
+        acme_idx = output.index("acme / default")
+        acme_title_end = output.index("\n", acme_idx)
+        assert "[ATTN]" not in output[acme_idx:acme_title_end]
+        assert "[REAP]" not in output[acme_idx:acme_title_end]
+        assert "REAP" in output  # still shows via the per-ticket row badge
+
 
 class TestAggregateFeed:
     def test_consecutive_ticks_collapse(self) -> None:

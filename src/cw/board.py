@@ -247,6 +247,47 @@ def _index_badge_events(
     return result
 
 
+def _index_client_badge_events(
+    events: list[OrchestratorEvent],
+    now: datetime,
+    client_names: set[str],
+) -> dict[str, str]:
+    """Bounded (window + live-client join) index of client -> badge label.
+
+    Sibling of :func:`_index_badge_events`, keyed on ``client`` instead of
+    ``ticket_id``. Surfaces client-scoped SESSION_NEEDS_ATTENTION events
+    (e.g. ``paused_status="freshness_gate_blocked"``) which carry
+    ``ticket_id=None`` / ``session_id=""`` and are otherwise invisible to
+    every ticket-keyed consumption path.
+
+    Why: every ticket-scoped SESSION_NEEDS_ATTENTION/SESSION_REAP_PROPOSED
+    emit site ALSO sets ``client`` in its payload (alongside a real
+    ``ticket_id``) — those already surface via the per-ticket row badge
+    (:func:`_index_badge_events`) and must not additionally paint the
+    client header, or routine per-ticket events would falsely badge the
+    whole client. Restricting to SESSION_NEEDS_ATTENTION with
+    ``ticket_id is None`` is what actually makes this client-scoped rather
+    than a second, redundant path for ticket-scoped signals. No precedence
+    rule is needed today — only one contributing signal type exists at
+    client level (freshness_gate_blocked) — so this always writes
+    ``_BADGE_ATTENTION``.
+    """
+    cutoff = now - _EVENT_FEED_WINDOW
+    result: dict[str, str] = {}
+    for event in events:
+        if event.type != OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+            continue
+        if event.created_at < cutoff:
+            continue
+        if event.payload.get("ticket_id") is not None:
+            continue
+        client = event.payload.get("client")
+        if client is None or client not in client_names:
+            continue
+        result[client] = _BADGE_ATTENTION
+    return result
+
+
 def _row_badge(
     ticket_id: str,
     pr_state: PrState | None,
@@ -362,8 +403,16 @@ def _build_lane_panel(
     now: datetime,
     started_map: dict[str, datetime],
     badge_index: dict[str, str],
+    client_badge: str | None = None,
 ) -> Panel:
-    """Build one Rich Panel for a single client/lane combination."""
+    """Build one Rich Panel for a single client/lane combination.
+
+    ``client_badge`` (when set) is the client-level badge from
+    :func:`_index_client_badge_events` — surfaces client-scoped signals
+    (e.g. freshness_gate_blocked) that carry no ticket_id, so they are
+    invisible to the per-row ``BADGE`` column. Rendered in the panel title,
+    bracketed to visually distinguish it from the per-ticket row badge.
+    """
     # Why: D1 (#624) specified one Panel per client containing a Table per lane.
     # We use one Panel per client x lane instead: flat layout is identical for
     # single-lane clients (today's norm) and simpler to render. Multi-lane
@@ -375,6 +424,8 @@ def _build_lane_panel(
 
     pause_tag = " [PAUSED]" if paused else ""
     title = f"{client_name} / {lane_name}{pause_tag}  [{running}/{max_parallel}]"
+    if client_badge:
+        title += f"  [{client_badge}]"
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
     table.add_column("TICKET", no_wrap=True)
@@ -494,6 +545,9 @@ def render_board(
     badge_index = _index_badge_events(
         events=scoped_events, now=board_state.now, known_ticket_ids=known_ticket_ids
     )
+    client_badge_index = _index_client_badge_events(
+        events=scoped_events, now=board_state.now, client_names=set(all_clients)
+    )
 
     for client_name in all_clients:
         client_cfg = board_state.clients.get(client_name)
@@ -529,6 +583,7 @@ def render_board(
                 now=board_state.now,
                 started_map=started_map,
                 badge_index=badge_index,
+                client_badge=client_badge_index.get(client_name),
             )
             panels.append(panel)
 

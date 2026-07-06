@@ -40,6 +40,7 @@ from cw.reconcile._shared import (
     _LIVE_STATUSES,
     _NEEDS_SALVAGE_REASON,
     _PHANTOM_REAP_MERGED_REASON,
+    _SALVAGE_SKIP_ESCALATED_REASON,
     _SALVAGE_SKIP_REASON,
     _SILENTLY_IDLE_REASON,
     _STALLED_CAP_PARKED_REASON,
@@ -117,6 +118,31 @@ def _resolve_finalize_blocked_condition(
     return True, branch
 
 
+def _maybe_append_salvage_skip_reset(
+    candidates: list[ReapCandidate],
+    session: Session,
+    ticket_id: str | None,
+) -> None:
+    """Append a RESET_SALVAGE_SKIP_COUNTER candidate when the latch is nonzero.
+
+    Shared by all 5 non-SKIP_PARKED detect-phase exits in
+    _detect_stalled_candidates (#974). Gated at detect time on
+    session.consecutive_salvage_skips != 0 so a session whose counter is
+    already 0 never grows the per-tick candidate list. A session can thus
+    yield TWO ReapCandidates in one pass — its own disposition candidate plus
+    this reset — which is novel for this ticket.
+    """
+    if session.consecutive_salvage_skips != 0:
+        candidates.append(
+            ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+                ticket_id=ticket_id,
+                client=session.client,
+            )
+        )
+
+
 def _detect_stalled_candidates(
     state: CwState,
     *,
@@ -168,11 +194,23 @@ def _detect_stalled_candidates(
         budget = resolve_headless_budget(task, session, config)
         elapsed = (now - session.started_at).total_seconds()
         if elapsed < budget:
+            # Why: a session that recovers (elapsed back under budget after a
+            # prior SKIP_PARKED streak isn't possible via this branch alone,
+            # but a session can carry a nonzero latch from an earlier tick and
+            # then clear the park-marker condition above; this is one of the
+            # 5 non-SKIP_PARKED detect-phase exits that must reset the latch.
+            # A session can therefore yield a RESET_SALVAGE_SKIP_COUNTER
+            # candidate here with no disposition candidate alongside it (#974).
+            _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
             continue
         # Try terminal-sentinel salvage before declaring timeout.
         salvage = _shared.salvage_terminal_result(session)
         if salvage is not None:
             result, claude_session_id = salvage
+            # Why: recovery via salvage — this session yields TWO candidates
+            # this pass (its own SALVAGE_COMPLETION disposition plus a
+            # RESET_SALVAGE_SKIP_COUNTER reset), novel for this ticket (#974).
+            _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
             candidates.append(
                 ReapCandidate(
                     session_id=session.id,
@@ -207,6 +245,11 @@ def _detect_stalled_candidates(
                     finalize_pr_by_branch=finalize_pr_by_branch,
                 )
                 if fb_blocked and fb_branch is not None:
+                    # Why: recovery via finalize-park — a session can yield
+                    # both its PARK_FINALIZE_BLOCKED disposition and a
+                    # RESET_SALVAGE_SKIP_COUNTER candidate in the same pass
+                    # (#974).
+                    _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
                     candidates.append(
                         ReapCandidate(
                             session_id=session.id,
@@ -226,6 +269,10 @@ def _detect_stalled_candidates(
         # Why: task.attempts is the shared counter for both this per-tier stalled cap
         # and the future global attempt ceiling (#786). Do not add a parallel counter.
         if task is not None and task.attempts >= cap:
+            # Why: recovery via retry-cap park — a session can yield both its
+            # PARK_BLOCKED_ON_USER disposition and a RESET_SALVAGE_SKIP_COUNTER
+            # candidate in the same pass (#974).
+            _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
             candidates.append(
                 ReapCandidate(
                     session_id=session.id,
@@ -240,6 +287,11 @@ def _detect_stalled_candidates(
                 )
             )
             continue
+        # Why: recovery via ordinary wall-clock revert — a session can yield
+        # both its REVERT_TASK disposition and a RESET_SALVAGE_SKIP_COUNTER
+        # candidate in the same pass (#974). This is the 5th and final
+        # non-SKIP_PARKED detect-phase exit (loop falls through, no continue).
+        _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
         candidates.append(
             ReapCandidate(
                 session_id=session.id,
@@ -307,6 +359,7 @@ def _apply_stalled_state_mutations(
     revert_candidates: list[ReapCandidate],
     park_candidates: list[ReapCandidate],
     finalize_blocked_candidates: list[ReapCandidate],
+    reset_salvage_skip_candidates: list[ReapCandidate],
 ) -> None:
     """Apply in-place session-state mutations for stalled dispositions.
 
@@ -359,6 +412,11 @@ def _apply_stalled_state_mutations(
             "paused_status": _FINALIZE_BLOCKED_REASON,
             "branch": candidate.branch,
         }
+    # Recovery: zero the salvage-skip latch (#974). Reset-eligibility was
+    # already gated at detect time (session.consecutive_salvage_skips != 0),
+    # so every candidate here is a real transition back to 0.
+    for candidate in reset_salvage_skip_candidates:
+        session_by_id[candidate.session_id].consecutive_salvage_skips = 0
 
 
 def _apply_stalled_queue_mutations(
@@ -633,6 +691,53 @@ def _emit_stalled_events(
     _emit_finalize_blocked_events(session_by_id, finalize_blocked_candidates)
 
 
+def _record_salvage_skip(
+    session_by_id: dict[str, Session],
+    candidate: ReapCandidate,
+    *,
+    config: OrchestratorConfig,
+) -> None:
+    """Increment a session's salvage-skip latch and emit its events (#974).
+
+    Always emits SESSION_SALVAGE_SKIPPED (unchanged payload). Additionally
+    emits session.needs_attention exactly once, when the incremented count
+    hits config.salvage_skip_attention_threshold (latch: no re-fire while
+    still at the threshold on subsequent ticks, since detect only re-appends
+    a SKIP_PARKED candidate — the count keeps climbing past the threshold on
+    later ticks, but the emit below only fires on exact equality).
+    """
+    session = session_by_id[candidate.session_id]
+    session.consecutive_salvage_skips += 1
+    record_event(
+        OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
+        {
+            "session_id": candidate.session_id,
+            "ticket_id": candidate.ticket_id,
+            "reason": _SALVAGE_SKIP_REASON,
+            "paused_status": candidate.paused_status,
+        },
+        correlation_id=candidate.ticket_id,
+    )
+    if session.consecutive_salvage_skips == config.salvage_skip_attention_threshold:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _SALVAGE_SKIP_ESCALATED_REASON,
+                "breadcrumbs": (
+                    f"{session.consecutive_salvage_skips} consecutive "
+                    f"salvage-skips; last reason: {_SALVAGE_SKIP_REASON}"
+                ),
+                "crashed": False,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+
+
 def _act_on_stalled_candidates(
     state: CwState,
     candidates: list[ReapCandidate],
@@ -722,6 +827,11 @@ def _act_on_stalled_candidates(
         for c in candidates
         if c.proposed_action == ProposedAction.PARK_FINALIZE_BLOCKED
     ]
+    reset_salvage_skip_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.RESET_SALVAGE_SKIP_COUNTER
+    ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
     # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
@@ -743,28 +853,25 @@ def _act_on_stalled_candidates(
         if c not in merged_revert_candidates and c not in gh_blocked_revert_candidates
     ]
 
-    # SKIP_PARKED: emit event only, no state/queue change.
-    for candidate in skip_candidates:
-        record_event(
-            OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
-            {
-                "session_id": candidate.session_id,
-                "ticket_id": candidate.ticket_id,
-                "reason": _SALVAGE_SKIP_REASON,
-                "paused_status": candidate.paused_status,
-            },
-            correlation_id=candidate.ticket_id,
-        )
-
-    if (
-        not salvage_candidates
-        and not all_revert_candidates
-        and not park_candidates
-        and not finalize_blocked_candidates
-    ):
-        return [], []
-
+    # Why: no per-action-list emptiness guard here (there was one, historically
+    # — see #974 plan review bug fix, which found it silently dropped counter
+    # mutations on a skip/reset-only tick because it predated those two
+    # candidate lists). The `if not candidates: return [], []` above already
+    # guarantees non-emptiness, and skip/salvage/revert/park/finalize_blocked/
+    # reset_salvage_skip exhaustively partition every ProposedAction that
+    # _detect_stalled_candidates emits — so a second enumerated guard here can
+    # never fire and only risks silently reintroducing the same bug class the
+    # next time a new ProposedAction is added and this list isn't updated to
+    # match. session_by_id must be built unconditionally: SKIP_PARKED/
+    # RESET_SALVAGE_SKIP_COUNTER candidates need live Session objects even
+    # when they are the tick's only candidates.
     session_by_id = {s.id: s for s in state.sessions}
+
+    effective_config = config if config is not None else OrchestratorConfig()
+
+    # SKIP_PARKED: increment the salvage-skip latch and emit its event(s).
+    for candidate in skip_candidates:
+        _record_salvage_skip(session_by_id, candidate, config=effective_config)
 
     _apply_stalled_state_mutations(
         session_by_id,
@@ -775,6 +882,7 @@ def _act_on_stalled_candidates(
         revert_candidates=revert_candidates,
         park_candidates=park_candidates,
         finalize_blocked_candidates=finalize_blocked_candidates,
+        reset_salvage_skip_candidates=reset_salvage_skip_candidates,
     )
 
     save_state(state)

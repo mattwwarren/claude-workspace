@@ -122,7 +122,8 @@ class Stage(StrEnum):
 # v9: added Session.lane (GitHub #594).
 # v10: added Session.stage (GitHub #612).
 # v11: added Session.local_liveness (GitHub #888).
-CW_STATE_SCHEMA_VERSION = 11
+# v12: added Session.consecutive_salvage_skips (#974).
+CW_STATE_SCHEMA_VERSION = 12
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
@@ -200,6 +201,10 @@ class ClientConcurrencyOverride(BaseModel):
     """Per-client ceiling override from the concurrency override store."""
 
     ceiling: int | None = None
+    # Consecutive freshness-gate-block count for the per-client attention latch
+    # (RFC 0007 §W2). Incremented once per tick the client is skipped with
+    # skip_reason=FRESHNESS_GATE, reset to 0 on the next non-stale tick.
+    consecutive_freshness_blocks: int = 0
 
 
 class ConcurrencyOverrides(BaseModel):
@@ -552,6 +557,16 @@ class OrchestratorConfig(BaseModel):
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.
     idle_confirm_observations: int = 2
+    # Consecutive per-client freshness-gate-block count at which a
+    # session.needs_attention (paused_status="freshness_gate_blocked") is
+    # emitted exactly once (latch: no re-fire while still at/above threshold,
+    # resets on the next non-stale tick). RFC 0007 §W2.
+    freshness_block_attention_threshold: int = 5
+    # Consecutive per-session salvage-skip count at which a
+    # session.needs_attention (paused_status="salvage_skip_escalated") is
+    # emitted exactly once (same latch semantics as
+    # freshness_block_attention_threshold above). Closes #974.
+    salvage_skip_attention_threshold: int = 5
     # Gating policy for destructive reap actions (stop daemon, revert task to
     # PENDING, remove worktree). Default ``signal_only`` routes stalled/phantom
     # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
@@ -707,6 +722,12 @@ class Session(BaseModel):
     # git-salvaged) only when it reaches OrchestratorConfig.idle_confirm_observations.
     # See GitHub #545.
     idle_observation_count: int = 0
+    # Consecutive salvage-skip count for the per-session attention latch
+    # (closes #974). Incremented each time this session is skipped via
+    # ProposedAction.SKIP_PARKED (SESSION_SALVAGE_SKIPPED); reset to 0 on
+    # recovery (any non-SKIP_PARKED detect-phase disposition). Same
+    # reset-on-recovery latch shape as idle_observation_count above.
+    consecutive_salvage_skips: int = 0
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None
