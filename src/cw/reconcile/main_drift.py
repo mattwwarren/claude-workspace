@@ -7,10 +7,11 @@ diverged). Emits an advisory ``SESSION_NEEDS_ATTENTION`` so the operator inspect
 before the stray state freezes dispatch via the freshness gate.
 
 This is a *per-session state check* that re-fires every tick while the drift
-holds — it is NOT the #929 per-tick consecutive-freshness-gate-block counter
-(that carries no persisted edge-trigger state here). The ``"detached"`` outcome
-of ``check_main_ff_safety`` is the known adjacent mislabel bug (#940 R7) and is
-deliberately ignored.
+holds — it is NOT the per-tick consecutive-freshness-gate-block counter (see
+``ClientConcurrencyOverride.consecutive_freshness_blocks``, RFC 0007 §W2) —
+that counter persists an edge-triggered latch; this check re-fires every tick
+by design. The ``"detached"`` outcome of ``check_main_ff_safety`` is the known
+adjacent mislabel bug (#940 R7) and is deliberately ignored.
 """
 
 from __future__ import annotations
