@@ -53,6 +53,45 @@ def _seed_daemon_session(
     return sess
 
 
+def _write_idle_transcript(
+    home: Path,
+    worktree: Path,
+    filename: str = "fake-short-id-sess.jsonl",
+) -> Path:
+    """Write a minimal transcript .jsonl under the project dir for *worktree*.
+
+    Default filename starts with ``fake-short-id`` so that
+    ``_locate_session_transcript``'s surface_ref-prefix glob finds it when the
+    session has ``surface_ref="fake-short-id"`` (the default in
+    ``_mk_headless_daemon_session``).
+    """
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True, exist_ok=True)
+    path = project_dir / filename
+    record = '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
+    path.write_text(record)
+    return path
+
+
+def _make_daemon_session(
+    *, claude_session_id: str | None = None, surface_ref: str = "live-ref"
+) -> Session:
+    return Session(
+        id="sess-1",
+        name="client-a/auto-dev/T-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=Path("/tmp/wt"),
+        surface_ref=surface_ref,
+        claude_session_id=claude_session_id,
+        started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+
+
 @pytest.fixture(autouse=True)
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect every cw state/config path to ``tmp_path``.
