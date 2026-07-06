@@ -23,6 +23,7 @@ from cw import __version__
 from cw.config import get_client, load_clients, load_state
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
+    FRESHNESS_MAIN_DETACHED,
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
@@ -176,6 +177,18 @@ def _emit_freshness_subline(
         click.echo(
             f"  ⚠ {client_name}: main checkout dirty — commit or stash changes,"
             " then auto-ff will retry"
+        )
+    elif tick_freshness_detail == FRESHNESS_MAIN_DETACHED:
+        try:
+            cc = get_client(client_name)
+            default_br = cc.default_branch
+            ws_path = str(cc.workspace_path)
+        except CwError:
+            default_br = "main"
+            ws_path = client_name
+        click.echo(
+            f"  ⚠ {client_name}: main checkout has a detached HEAD —"
+            f" run: git -C {ws_path} checkout {default_br}"
         )
     elif tick_freshness_detail == FRESHNESS_MAIN_DIVERGED:
         click.echo(
