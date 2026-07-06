@@ -309,6 +309,32 @@ pr_hydration_interval_seconds: 150
 # silently falling back — a config typo must never silently disable the
 # gate an operator is relying on. See Operator Signoff Gates below.
 default_signoff: none
+
+# Operator-attention forward-set for the cw-operator SSE channel (RFC 0008
+# W3, GitHub #1002) -- a declarative filter over the orchestrator event bus.
+# Shown here with its defaults; omit this block entirely to use them.
+# Like default_signoff (not reap_policy), an invalid value here -- an
+# unknown event type, QueueItemStatus, or LivenessBucket -- raises loudly
+# and crashes `cw queue-channel serve` at startup rather than silently
+# under-forwarding. See docs/operator-channel.md for the full reference.
+operator_channel_forward:
+  event_types:
+    - task.transition
+    - task.deleted
+    - session.needs_attention
+    - pr.registered
+    - pr.ci_failed
+    - pr.review_received
+    - pr.mergeable
+    - pr.merged
+    - session.liveness_changed
+  task_transition_statuses:
+    - blocked_on_user
+    - awaiting_operator_signoff
+    - completed
+    - failed
+    - cancelled
+  liveness_min_bucket: stale_30m
 ```
 
 Override a single ticket's budget at enqueue time:
@@ -433,6 +459,11 @@ are `null` when not applicable.
 `<workspace>/.mcp.json`. The files `config/cw-queue-events.mcp.json.example` and
 `config/cw-pr-events.mcp.json.example` are for manual wiring only and are not
 required when using `cw init`.
+
+`cw-operator` (see [`docs/operator-channel.md`](../docs/operator-channel.md))
+is **manual wiring only** — `cw init` does not auto-wire it into `.mcp.json`.
+Copy `config/cw-operator-events.mcp.json.example` in by hand. It shares the
+same host/port as `cw-queue-events` (no separate `serve` process).
 
 ## Managing Configuration
 

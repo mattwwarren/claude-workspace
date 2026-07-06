@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -17,8 +18,10 @@ starlette = pytest.importorskip(
     "starlette", reason="requires mcp extras: pip install 'cw[mcp]'"
 )
 
+from starlette.routing import Match
 from starlette.testclient import TestClient
 
+import cw.cw_operator_events as _operator_mod
 import cw.cw_queue_events_server as _server_mod
 from cw.cw_queue_events_server import (
     _NOTIFICATION_TYPE,
@@ -40,6 +43,7 @@ from cw.cw_queue_events_server import (
 from cw.models import (
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     QueueItemStatus,
     ReapReason,
     Session,
@@ -48,6 +52,12 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+
+# Captured at module-load time, BEFORE the _no_real_poller_thread autouse
+# fixture (below) monkeypatches _server_mod._run_poller to a no-op for every
+# test in this file. TestRunPollerLoopBody calls this reference directly to
+# exercise the real loop body without ever spawning a real daemon thread.
+_REAL_RUN_POLLER = _server_mod._run_poller
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +82,52 @@ def _reset_channel_state() -> Generator[None]:
         _server_mod._cursors.clear()
         _server_mod._event_offset[0] = 0
     _server_mod._poller_started[0] = False
+
+
+@pytest.fixture(autouse=True)
+def _no_real_poller_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neuter _run_poller for every test in this file.
+
+    ``_start_poller()`` -- called internally by ``make_app()`` (exercised by
+    ``TestHandlePostAckQueueChannel``, ``TestMakeAppQueueEvents``, and this
+    ticket's ``TestOperatorRouteOrdering``), and directly by
+    ``TestStartPollerConfigValidation`` -- spawns a REAL daemon thread whose
+    target loops forever on ``POLL_INTERVAL_SECONDS``. No test in this file
+    needs that thread to actually run: ``TestPollerTickIsolation`` and
+    ``TestStartPollerConfigValidation`` exercise ``_poller_tick``/
+    ``_start_poller`` directly and synchronously; every other test only cares
+    about the ASGI app's routes or the ``_poller_started`` guard boolean.
+
+    Left real, a leaked thread outlives its own test (daemon threads are
+    never joined) and keeps calling ``_poller_tick`` -- now including the
+    #1002 operator bridge's full orchestrator-inbox re-scan on every tick --
+    against whatever tmp path the CURRENTLY running test has monkeypatched.
+    Confirmed: with this fixture absent, a full `pytest tests/ -x -q` run
+    hung with runaway CPU/memory many tests later, in test_config.py.
+    """
+    monkeypatch.setattr(_server_mod, "_run_poller", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_operator_channel_state() -> Generator[None]:
+    """Reset the operator channel's own subscriber/cursor/offset state.
+
+    ``make_app()`` now wires ``cw_operator_events.build_operator_routes()``
+    alongside the queue channel's own routes (#1002), so tests in this file
+    that call ``make_app()``/exercise ``/operator/ack`` must not bleed state
+    across tests any more than the queue channel's own globals above.
+    """
+    with _operator_mod._lock:
+        _operator_mod._subscribers.clear()
+    with _operator_mod._file_lock:
+        _operator_mod._cursors.clear()
+        _operator_mod._event_offset[0] = 0
+    yield
+    with _operator_mod._lock:
+        _operator_mod._subscribers.clear()
+    with _operator_mod._file_lock:
+        _operator_mod._cursors.clear()
+        _operator_mod._event_offset[0] = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1257,3 +1313,466 @@ class TestSessionReapedDeltaDetection:
             reaped = [e for e in events if e.get("event") == "queue.session_reaped"]
             assert len(reaped) == 1, f"Expected 1 event for reason={reason}"
             assert reaped[0]["reason"] == str(reason)
+
+
+# ---------------------------------------------------------------------------
+# TestPollerTickIsolation (#1002, RFC 0008 W3 binding decision #1)
+# ---------------------------------------------------------------------------
+
+
+class TestPollerTickIsolation:
+    """The operator-bridge call must never block/break queue.* broadcasting."""
+
+    def test_bridge_exception_does_not_block_queue_broadcast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        save_dev_queue(
+            DevQueueStore(tasks=[_make_task("T-iso", "acme", QueueItemStatus.PENDING)])
+        )
+        save_state(CwState())
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            msg = "bridge boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "cw.cw_operator_events.poll_and_forward_operator_channel", _raise
+        )
+
+        q = subscribe()
+        try:
+            _server_mod._poller_tick(OrchestratorConfig())
+            item = q.get_nowait()
+            assert item["message"]
+        finally:
+            unsubscribe(q)
+
+    def test_bridge_exception_logged_as_operator_bridge_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            msg = "bridge boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "cw.cw_operator_events.poll_and_forward_operator_channel", _raise
+        )
+        caplog.set_level(logging.ERROR, logger="cw.cw_queue_events_server")
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert any("operator-bridge error" in r.message for r in caplog.records)
+        assert not any("poller error" in r.message for r in caplog.records)
+
+    def test_bridge_called_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[OrchestratorConfig] = []
+
+        def _capture(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(
+            "cw.cw_operator_events.poll_and_forward_operator_channel", _capture
+        )
+        config = OrchestratorConfig()
+        _server_mod._poller_tick(config)
+        assert calls == [config]
+
+
+# ---------------------------------------------------------------------------
+# TestStartPollerConfigValidation (#1002, RFC 0008 W3 binding decision #2)
+# ---------------------------------------------------------------------------
+
+
+class TestStartPollerConfigValidation:
+    """A malformed operator_channel_forward must crash _start_poller (fail-loud)."""
+
+    def test_malformed_operator_channel_forward_crashes_at_startup(self) -> None:
+        import pydantic
+
+        from cw.config import orchestrator_config_file
+
+        path = orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
+
+        with pytest.raises(pydantic.ValidationError, match=re.escape("bogus.event")):
+            _server_mod._start_poller()
+        assert _server_mod._poller_started[0] is False
+
+    def test_valid_config_starts_poller(self) -> None:
+        # _run_poller is neutered file-wide by the _no_real_poller_thread
+        # autouse fixture, so .start() below spawns a thread that exits
+        # immediately rather than looping for real.
+        _server_mod._start_poller()
+        assert _server_mod._poller_started[0] is True
+
+    def test_revalidates_on_every_call_even_when_already_started(self) -> None:
+        import pydantic
+
+        from cw.config import orchestrator_config_file
+
+        _server_mod._start_poller()
+        assert _server_mod._poller_started[0] is True
+
+        path = orchestrator_config_file()
+        path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
+
+        with pytest.raises(pydantic.ValidationError, match=re.escape("bogus.event")):
+            _server_mod._start_poller()
+
+
+# ---------------------------------------------------------------------------
+# TestOperatorRouteOrdering (#1002, RFC 0008 W3 binding decision #4)
+# ---------------------------------------------------------------------------
+
+
+class TestOperatorRouteOrdering:
+    """Operator routes must be prepended -- Starlette resolves first-match-wins,
+
+    so Mount("/sse", ...) would otherwise prefix-swallow /sse/operator.
+    """
+
+    def test_operator_routes_prepended_before_existing(self) -> None:
+        app = make_app()
+        paths = [r.path for r in app.routes]  # type: ignore[attr-defined]
+        assert paths.index("/sse/operator") < paths.index("/sse")
+        assert paths.index("/messages/operator") < paths.index("/messages")
+        assert paths.index("/operator/ack") < paths.index("/ack")
+
+    def test_all_six_routes_present_in_order(self) -> None:
+        app = make_app()
+        paths = [r.path for r in app.routes]  # type: ignore[attr-defined]
+        assert paths == [
+            "/sse/operator",
+            "/messages/operator",
+            "/operator/ack",
+            "/sse",
+            "/messages",
+            "/ack",
+        ]
+
+    def test_operator_sse_mount_resolves_before_queue_sse_mount(self) -> None:
+        """Exercise the actual ASGI dispatch mechanism -- Starlette's Router
+        iterates ``self.routes`` calling ``route.matches(scope)`` in order and
+        dispatches to the first match -- against a real ``/sse/operator/``
+        request scope (the slash-suffixed form ``_SSESlashMiddleware``
+        normalises bare requests to; see the middleware tests below for the
+        normalisation itself). This proves a request to the operator SSE
+        endpoint actually resolves to the operator's Mount rather than being
+        prefix-swallowed by ``Mount("/sse", ...)``, not just that its path
+        string sorts earlier in the route list (binding decision #4: "request
+        to each channel asserts no prefix-swallowing").
+        """
+        app = make_app()
+        scope = {"type": "http", "method": "GET", "path": "/sse/operator/"}
+        matched = next(
+            (route for route in app.routes if route.matches(scope)[0] != Match.NONE),  # type: ignore[attr-defined]
+            None,
+        )
+        assert matched is not None
+        assert matched.path == "/sse/operator"  # type: ignore[attr-defined]
+
+    def test_operator_messages_mount_resolves_before_queue_messages_mount(
+        self,
+    ) -> None:
+        app = make_app()
+        scope = {"type": "http", "method": "POST", "path": "/messages/operator/"}
+        matched = next(
+            (route for route in app.routes if route.matches(scope)[0] != Match.NONE),  # type: ignore[attr-defined]
+            None,
+        )
+        assert matched is not None
+        assert matched.path == "/messages/operator"  # type: ignore[attr-defined]
+
+    def test_bare_operator_sse_path_without_middleware_is_prefix_swallowed(
+        self,
+    ) -> None:
+        """Ground truth for why ``_SSESlashMiddleware`` had to grow two new
+        entries: absent the rewrite, a bare (no trailing slash) request to
+        ``/sse/operator`` doesn't match ``Mount("/sse/operator", ...)``'s own
+        regex (Mounts require a trailing-slash remainder) and falls through to
+        ``Mount("/sse", ...)`` instead, which happily matches "/sse" + the
+        remaining "/operator" -- a silent misroute into the WRONG channel,
+        not a 404. This is exactly the prefix-swallow binding decision #4
+        called "the highest-risk detail."
+        """
+        app = make_app()
+        scope = {"type": "http", "method": "GET", "path": "/sse/operator"}
+        matched = next(
+            (route for route in app.routes if route.matches(scope)[0] != Match.NONE),  # type: ignore[attr-defined]
+            None,
+        )
+        assert matched is not None
+        assert matched.path == "/sse"  # type: ignore[attr-defined]
+
+    def test_sse_slash_middleware_rewrites_bare_operator_sse_path(self) -> None:
+        """The middleware fix: a bare ``/sse/operator`` request is rewritten to
+        ``/sse/operator/`` before the router ever sees it, so real ASGI
+        requests never hit the prefix-swallow demonstrated above."""
+        import anyio
+
+        from cw.cw_queue_events_server import _SSESlashMiddleware
+
+        seen_scopes: list[dict[str, Any]] = []
+
+        async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
+            seen_scopes.append(scope)
+
+        async def _run() -> None:
+            middleware = _SSESlashMiddleware(_inner_app)
+            await middleware({"type": "http", "path": "/sse/operator"}, None, None)
+
+        anyio.run(_run)
+        assert seen_scopes[0]["path"] == "/sse/operator/"
+
+    def test_sse_slash_middleware_rewrites_bare_operator_messages_path(
+        self,
+    ) -> None:
+        import anyio
+
+        from cw.cw_queue_events_server import _SSESlashMiddleware
+
+        seen_scopes: list[dict[str, Any]] = []
+
+        async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
+            seen_scopes.append(scope)
+
+        async def _run() -> None:
+            middleware = _SSESlashMiddleware(_inner_app)
+            await middleware({"type": "http", "path": "/messages/operator"}, None, None)
+
+        anyio.run(_run)
+        assert seen_scopes[0]["path"] == "/messages/operator/"
+
+    def test_sse_slash_middleware_leaves_other_paths_untouched(self) -> None:
+        import anyio
+
+        from cw.cw_queue_events_server import _SSESlashMiddleware
+
+        seen_scopes: list[dict[str, Any]] = []
+
+        async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
+            seen_scopes.append(scope)
+
+        async def _run() -> None:
+            middleware = _SSESlashMiddleware(_inner_app)
+            await middleware({"type": "http", "path": "/operator/ack"}, None, None)
+
+        anyio.run(_run)
+        assert seen_scopes[0]["path"] == "/operator/ack"
+
+    def test_operator_ack_route_functions(self) -> None:
+        client = TestClient(make_app())
+        resp = client.post("/operator/ack", json={"client_id": "op1", "offset": 5})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    def test_operator_ack_invalid_body_returns_400(self) -> None:
+        client = TestClient(make_app())
+        resp = client.post("/operator/ack", json={"client_id": "op1"})  # missing offset
+        assert resp.status_code == 400
+
+    def test_operator_ack_uses_distinct_cursor_store_from_queue_ack(self) -> None:
+        client = TestClient(make_app())
+        client.post("/operator/ack", json={"client_id": "shared-id", "offset": 10})
+        client.post("/ack", json={"client_id": "shared-id", "offset": 20})
+        assert _operator_mod._cursors["shared-id"] == 10
+        assert _server_mod._cursors["shared-id"] == 20
+
+
+# ---------------------------------------------------------------------------
+# TestCLIOperatorChannel (#1002)
+# ---------------------------------------------------------------------------
+
+
+class TestCLIOperatorChannel:
+    def test_operator_channel_proxy_help(self) -> None:
+        from cw.cli import main
+
+        result = CliRunner().invoke(main, ["operator-channel", "proxy", "--help"])
+        assert result.exit_code == 0
+        assert "--client-id" in result.output
+
+    def test_operator_channel_has_no_serve_subcommand(self) -> None:
+        from cw.cli import main
+
+        result = CliRunner().invoke(main, ["operator-channel", "serve", "--help"])
+        assert result.exit_code != 0
+
+    def test_operator_channel_proxy_command_invokes_run_proxy(self) -> None:
+        from cw.cli import main
+
+        mock_run_proxy = MagicMock()
+        runner = CliRunner()
+        with patch("cw.cw_operator_events_channel.run_proxy", mock_run_proxy):
+            result = runner.invoke(
+                main, ["operator-channel", "proxy", "--client-id", "acme"]
+            )
+        assert result.exit_code == 0
+        mock_run_proxy.assert_called_once_with(client_id="acme")
+
+
+# ---------------------------------------------------------------------------
+# TestRunPollerLoopBody (#1002)
+# ---------------------------------------------------------------------------
+
+
+class TestRunPollerLoopBody:
+    """Direct coverage of _run_poller's own loop body.
+
+    _run_poller is never allowed to actually run as a real background thread
+    in this test file (see _no_real_poller_thread above) -- so its own loop
+    body (config load + _poller_tick call, wrapped in the outer try/except)
+    needs its own direct, single-iteration test.
+    """
+
+    def test_loads_config_and_calls_poller_tick_each_iteration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        calls: list[OrchestratorConfig] = []
+
+        def _capture_tick(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _capture_tick)
+
+        sleep_calls: list[float] = []
+
+        def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 2:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()
+
+        assert sleep_calls == [
+            _server_mod.POLL_INTERVAL_SECONDS,
+            _server_mod.POLL_INTERVAL_SECONDS,
+        ]
+        assert len(calls) == 1
+
+    def test_poller_tick_exception_is_caught_and_loop_continues(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        def _raise_tick(_config: OrchestratorConfig) -> None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _raise_tick)
+
+        sleep_calls: list[float] = []
+
+        def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 2:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()
+
+    def test_config_load_failure_falls_back_but_still_calls_poller_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Binding decision #1: a config-reload failure must NEVER prevent
+        _poller_tick (and therefore queue.* broadcasting) from running.
+        First-ever tick has no last-known-good config yet, so it must fall
+        back to OrchestratorConfig() defaults.
+        """
+        import time
+
+        import cw.config as _config_mod
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        calls: list[OrchestratorConfig] = []
+
+        def _capture_tick(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _capture_tick)
+
+        def _raise_config_load() -> OrchestratorConfig:
+            msg = "config boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(_config_mod, "load_orchestrator_config", _raise_config_load)
+
+        sleep_calls2: list[float] = []
+
+        def _fake_sleep2(seconds: float) -> None:
+            sleep_calls2.append(seconds)
+            if len(sleep_calls2) >= 2:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep2)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()
+
+        assert calls == [OrchestratorConfig()]
+
+    def test_config_load_failure_falls_back_to_last_known_good_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once a config has loaded successfully at least once, a later
+        reload failure must fall back to THAT config, not fresh defaults."""
+        import time
+
+        import cw.config as _config_mod
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        calls: list[OrchestratorConfig] = []
+
+        def _capture_tick(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _capture_tick)
+
+        good_config = OrchestratorConfig(tick_interval_seconds=999)
+        load_attempts: list[int] = []
+
+        def _flaky_load() -> OrchestratorConfig:
+            load_attempts.append(1)
+            if len(load_attempts) == 1:
+                return good_config
+            msg = "config boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(_config_mod, "load_orchestrator_config", _flaky_load)
+
+        sleep_calls3: list[float] = []
+
+        def _fake_sleep3(seconds: float) -> None:
+            sleep_calls3.append(seconds)
+            if len(sleep_calls3) >= 3:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep3)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()
+
+        assert calls == [good_config, good_config]

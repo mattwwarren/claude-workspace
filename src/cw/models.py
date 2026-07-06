@@ -520,6 +520,54 @@ class LaneConfig(BaseModel):
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
 
+# RFC 0008 W3 (#1002) default operator-attention forward-set. task.transition
+# is admitted only for the terminal/attention-worthy statuses below (narrowed
+# further in OperatorChannelForward._admits by cw.cw_operator_events); the
+# other four types are unconditional once present in event_types.
+_DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
+    {
+        OrchestratorEventType.TASK_TRANSITION,
+        OrchestratorEventType.TASK_DELETED,
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        OrchestratorEventType.PR_REGISTERED,
+        OrchestratorEventType.PR_CI_FAILED,
+        OrchestratorEventType.PR_REVIEW_RECEIVED,
+        OrchestratorEventType.PR_MERGEABLE,
+        OrchestratorEventType.PR_MERGED,
+        OrchestratorEventType.SESSION_LIVENESS_CHANGED,
+    }
+)
+_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    {
+        QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        QueueItemStatus.COMPLETED,
+        QueueItemStatus.FAILED,
+        QueueItemStatus.CANCELLED,
+    }
+)
+
+
+class OperatorChannelForward(BaseModel):
+    """Declarative forward-set for the cw-operator SSE channel (RFC 0008 W3).
+
+    Consumed by ``cw.cw_operator_events``'s filter engine, which additionally
+    applies the two sub-condition rules referenced above (task.transition's
+    ``new_status`` and session.liveness_changed's ``new_bucket`` are compared
+    against ``task_transition_statuses``/``liveness_min_bucket`` respectively;
+    every other admitted type in ``event_types`` forwards unconditionally).
+    No coercion validator by design -- see the field docstring on
+    ``OrchestratorConfig.operator_channel_forward``. See GitHub #1002.
+    """
+
+    event_types: frozenset[OrchestratorEventType] = Field(
+        default_factory=lambda: frozenset(_DEFAULT_OPERATOR_EVENT_TYPES)
+    )
+    task_transition_statuses: frozenset[QueueItemStatus] = Field(
+        default_factory=lambda: frozenset(_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES)
+    )
+    liveness_min_bucket: LivenessBucket = LivenessBucket.STALE_30M
+
 
 class OrchestratorConfig(BaseModel):
     """Parsed contents of orchestrator.yaml.
@@ -650,6 +698,15 @@ class OrchestratorConfig(BaseModel):
     # normal impl-stage idling. See GitHub #1001.
     liveness_first_bucket_by_stage: dict[Stage, int] = Field(
         default_factory=lambda: {Stage.IMPL: 35}
+    )
+    # RFC 0008 W3 (#1002) — declarative operator-attention forward-set for the
+    # cw-operator SSE channel bridge (cw.cw_operator_events). No coercion
+    # validator (fail-loud, mirrors default_signoff's asymmetry with
+    # _coerce_reap_policy below): under-forwarding is a silent operator-facing
+    # regression, so a malformed forward-set must crash `cw queue-channel
+    # serve` at startup rather than silently degrade.
+    operator_channel_forward: OperatorChannelForward = Field(
+        default_factory=OperatorChannelForward
     )
 
     @model_validator(mode="before")

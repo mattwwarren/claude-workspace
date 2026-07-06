@@ -63,3 +63,17 @@ def queue_channel_serve(port: int, host: str) -> None:
     from cw.cw_queue_events_server import serve as _serve  # noqa: PLC0415
 
     _serve(host=host, port=port)
+
+
+@main.group(name="operator-channel")
+def operator_channel() -> None:
+    """Operator channel: push MCP notifications filtered for operator attention."""
+
+
+@operator_channel.command(name="proxy")
+@click.option("--client-id", default=None, help="Unique client ID for cursor tracking.")
+def operator_channel_proxy(client_id: str | None) -> None:
+    """Start the MCP stdio proxy for cw-operator (add to .mcp.json)."""
+    from cw.cw_operator_events_channel import run_proxy  # noqa: PLC0415
+
+    run_proxy(client_id=client_id)

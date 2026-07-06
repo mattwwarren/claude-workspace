@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cw-operator": {
+      "command": "cw",
+      "args": ["operator-channel", "proxy", "--client-id", "<client-name>"],
+      "env": {
+        "CW_OPERATOR_EVENTS_BASE_URL": "http://127.0.0.1:8789"
+      }
+    }
+  }
+}
