@@ -636,8 +636,13 @@ class OrchestratorConfig(BaseModel):
     # threshold unreachable for sessions at that stage (labels keep their
     # global-threshold identity; only the entry point moves) — e.g. an IMPL
     # session with floor=35 never emits stale_30m (global threshold 30 < 35).
-    # See GitHub #1001.
-    liveness_first_bucket_by_stage: dict[Stage, int] = Field(default_factory=dict)
+    # Defaults to IMPL: 35 per the RFC 0008 W2 empirical baselines (impl p99
+    # gap 31m vs review p95 9m) — without this default every client config
+    # would need a manual override just to avoid spurious stale_15m noise on
+    # normal impl-stage idling. See GitHub #1001.
+    liveness_first_bucket_by_stage: dict[Stage, int] = Field(
+        default_factory=lambda: {Stage.IMPL: 35}
+    )
 
     @model_validator(mode="before")
     @classmethod

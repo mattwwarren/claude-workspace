@@ -466,6 +466,12 @@ since 30 < 35 is unreachable once the floor has already been crossed.
 `stale_45m` needs no such guard: it is always the top rung, so crossing it
 is correct regardless of where the floor sits.
 
+The IMPL 35-minute floor (and the 15/30/45-minute global ladder) are derived
+from empirical stage-timing baselines (wiki `cw-stage-timing-baselines-2026-07-05`,
+n=739 legs): p95 intra-session gap ≤1m in every stage; IMPL p99 gap 31m vs
+REVIEW p95 9m; real session deaths cluster ≥60m. The IMPL floor sits above its
+p99 gap so normal idling doesn't cross into `stale_15m`.
+
 `stale_minutes` mirrors the existing `elapsed_seconds` convention (float,
 not integer) used elsewhere in this file, derived from
 `_transcript_age_seconds` divided by 60.
