@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -15,6 +16,12 @@ from pydantic import BaseModel, Field, field_validator
 
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
+from cw.pr_events_auth import (
+    CW_PR_EVENTS_HMAC_SECRET_ENV,
+    SIGNATURE_HEADER,
+    verify_signature,
+    warn_if_unsigned_mode,
+)
 
 if TYPE_CHECKING:
     from starlette.applications import Starlette
@@ -217,17 +224,50 @@ def _build_notification(event: PREventRequest) -> dict[str, Any]:
 
 
 async def handle_post_pr_event(request: Request) -> Response:
-    """Handle POST /pr-event: validate JSON body and broadcast MCP notification."""
+    """Handle POST /pr-event (#930): authenticate, validate, broadcast, observe.
+
+    When ``CW_PR_EVENTS_HMAC_SECRET`` is set, requires a valid
+    ``X-Cw-Signature`` header (401 otherwise) -- the endpoint is otherwise
+    unauthenticated open internet-facing input via a relay tunnel. Validates
+    the JSON body (unchanged 400 contract), broadcasts the MCP notification
+    (unchanged, additive), then routes the event through
+    ``cw.pr_hydrate.observe_pushed_event`` -- offloaded onto a worker thread
+    via ``anyio.to_thread.run_sync`` since ``dev_queue_lock`` is a blocking
+    ``fcntl.flock``, not asyncio-aware.
+    """
     from starlette.responses import JSONResponse
 
+    raw_body = await request.body()
+    secret = os.environ.get(CW_PR_EVENTS_HMAC_SECRET_ENV)
+    if secret and not verify_signature(
+        raw_body, request.headers.get(SIGNATURE_HEADER), secret
+    ):
+        logger.warning("pr-event rejected: invalid or missing signature")
+        return JSONResponse({"error": "invalid signature"}, status_code=401)
+
     try:
-        body = await request.json()
+        body = json.loads(raw_body)
         event = PREventRequest.model_validate(body)
     except (ValueError, TypeError) as exc:
         logger.warning("pr-event rejected: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=400)
+
     notification = _build_notification(event)
     broadcast(notification)
+
+    import anyio
+
+    from cw.pr_hydrate import observe_pushed_event
+
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            observe_pushed_event,
+            repo=event.repo,
+            pr_number=event.pr_number,
+            wire_event_type=event.event_type,
+            payload=event.payload,
+        )
+    )
     return JSONResponse({"status": "ok"})
 
 
@@ -345,9 +385,15 @@ def make_app() -> Starlette:
 
 
 def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-    """Start the server. Blocks until interrupted."""
+    """Start the server. Blocks until interrupted.
+
+    Why: warn_if_unsigned_mode() is called here, not from make_app(), so that
+    tests and callers constructing the app directly (TestClient(make_app()))
+    don't spam the unsigned-mode warning on every app construction (#930).
+    """
     import uvicorn
 
+    warn_if_unsigned_mode()
     uvicorn.run(make_app(), host=host, port=port)
 
 
