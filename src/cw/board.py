@@ -258,16 +258,28 @@ def _index_client_badge_events(
     ``ticket_id``. Surfaces client-scoped SESSION_NEEDS_ATTENTION events
     (e.g. ``paused_status="freshness_gate_blocked"``) which carry
     ``ticket_id=None`` / ``session_id=""`` and are otherwise invisible to
-    every ticket-keyed consumption path. No precedence rule is needed today
-    — only one contributing signal type exists at client level
-    (freshness_gate_blocked) — so this always writes ``_BADGE_ATTENTION``.
+    every ticket-keyed consumption path.
+
+    Why: every ticket-scoped SESSION_NEEDS_ATTENTION/SESSION_REAP_PROPOSED
+    emit site ALSO sets ``client`` in its payload (alongside a real
+    ``ticket_id``) — those already surface via the per-ticket row badge
+    (:func:`_index_badge_events`) and must not additionally paint the
+    client header, or routine per-ticket events would falsely badge the
+    whole client. Restricting to SESSION_NEEDS_ATTENTION with
+    ``ticket_id is None`` is what actually makes this client-scoped rather
+    than a second, redundant path for ticket-scoped signals. No precedence
+    rule is needed today — only one contributing signal type exists at
+    client level (freshness_gate_blocked) — so this always writes
+    ``_BADGE_ATTENTION``.
     """
     cutoff = now - _EVENT_FEED_WINDOW
     result: dict[str, str] = {}
     for event in events:
-        if event.type not in _BADGE_EVENT_TYPES:
+        if event.type != OrchestratorEventType.SESSION_NEEDS_ATTENTION:
             continue
         if event.created_at < cutoff:
+            continue
+        if event.payload.get("ticket_id") is not None:
             continue
         client = event.payload.get("client")
         if client is None or client not in client_names:

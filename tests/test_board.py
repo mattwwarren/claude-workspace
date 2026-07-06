@@ -778,6 +778,44 @@ class TestBadges:
         assert "[ATTN]" in output[acme_idx:acme_title_end]
         assert "[ATTN]" not in output[other_idx:other_title_end]
 
+    def test_ticket_scoped_needs_attention_does_not_show_client_header_badge(
+        self,
+    ) -> None:
+        """A routine ticket-scoped SESSION_NEEDS_ATTENTION (e.g. silently_idle)
+        carries `client` alongside a real ticket_id, per every pre-existing
+        emit site (idle.py, stalled.py, phantom.py, etc). It must surface only
+        via the per-ticket row badge, not bleed into the client-header badge —
+        regression lock for the false-positive _index_client_badge_events bug
+        caught in review (#996)."""
+        ticket_scoped_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"client": "acme", "ticket_id": "MW-100"},
+            created_at=NOW,
+        )
+        output = _render(_state_with_task(client="acme", events=[ticket_scoped_event]))
+
+        acme_idx = output.index("acme / default")
+        acme_title_end = output.index("\n", acme_idx)
+        assert "[ATTN]" not in output[acme_idx:acme_title_end]
+        assert "ATTN" in output  # still shows via the per-ticket row badge
+
+    def test_ticket_scoped_reap_proposed_does_not_show_client_header_badge(
+        self,
+    ) -> None:
+        """SESSION_REAP_PROPOSED is always ticket/session-scoped (never carries
+        ticket_id=None) — it must never populate the client-header badge."""
+        reap_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_REAP_PROPOSED,
+            payload={"client": "acme", "ticket_id": "MW-100"},
+            created_at=NOW,
+        )
+        output = _render(_state_with_task(client="acme", events=[reap_event]))
+
+        acme_idx = output.index("acme / default")
+        acme_title_end = output.index("\n", acme_idx)
+        assert "[ATTN]" not in output[acme_idx:acme_title_end]
+        assert "[REAP]" not in output[acme_idx:acme_title_end]
+
 
 class TestAggregateFeed:
     def test_consecutive_ticks_collapse(self) -> None:

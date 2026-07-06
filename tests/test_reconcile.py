@@ -12615,7 +12615,7 @@ class TestSalvageSkipAttentionLatch:
     non-SKIP_PARKED detect-phase exits.
     """
 
-    # --- act phase: _process_salvage_skip_candidate via _act_on_stalled_candidates ---
+    # --- act phase: _record_salvage_skip via _act_on_stalled_candidates ---
 
     def test_skip_below_threshold_no_attention_emit(
         self,

@@ -691,7 +691,7 @@ def _emit_stalled_events(
     _emit_finalize_blocked_events(session_by_id, finalize_blocked_candidates)
 
 
-def _process_salvage_skip_candidate(
+def _record_salvage_skip(
     session_by_id: dict[str, Session],
     candidate: ReapCandidate,
     *,
@@ -853,31 +853,25 @@ def _act_on_stalled_candidates(
         if c not in merged_revert_candidates and c not in gh_blocked_revert_candidates
     ]
 
-    # Why: the guard below and session_by_id construction must both run BEFORE
-    # branching on candidate emptiness — SKIP_PARKED/RESET_SALVAGE_SKIP_COUNTER
-    # candidates need live Session objects even when they are the tick's ONLY
-    # candidates (bug fix for #974 plan review: this predates the two new
-    # candidate lists and previously silently dropped counter mutations on a
-    # skip/reset-only tick).
-    if (
-        not salvage_candidates
-        and not all_revert_candidates
-        and not park_candidates
-        and not finalize_blocked_candidates
-        and not skip_candidates
-        and not reset_salvage_skip_candidates
-    ):
-        return [], []
-
+    # Why: no per-action-list emptiness guard here (there was one, historically
+    # — see #974 plan review bug fix, which found it silently dropped counter
+    # mutations on a skip/reset-only tick because it predated those two
+    # candidate lists). The `if not candidates: return [], []` above already
+    # guarantees non-emptiness, and skip/salvage/revert/park/finalize_blocked/
+    # reset_salvage_skip exhaustively partition every ProposedAction that
+    # _detect_stalled_candidates emits — so a second enumerated guard here can
+    # never fire and only risks silently reintroducing the same bug class the
+    # next time a new ProposedAction is added and this list isn't updated to
+    # match. session_by_id must be built unconditionally: SKIP_PARKED/
+    # RESET_SALVAGE_SKIP_COUNTER candidates need live Session objects even
+    # when they are the tick's only candidates.
     session_by_id = {s.id: s for s in state.sessions}
 
     effective_config = config if config is not None else OrchestratorConfig()
 
     # SKIP_PARKED: increment the salvage-skip latch and emit its event(s).
     for candidate in skip_candidates:
-        _process_salvage_skip_candidate(
-            session_by_id, candidate, config=effective_config
-        )
+        _record_salvage_skip(session_by_id, candidate, config=effective_config)
 
     _apply_stalled_state_mutations(
         session_by_id,

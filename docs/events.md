@@ -295,7 +295,7 @@ without task revert).
 
 **Emitter:** `flag_silently_idle_daemon_sessions`, `revert_timed_out_tasks`,
 `revert_completed_silent_tasks`, `_salvage_low_path`,
-`_process_salvage_skip_candidate` in `cw.reconcile`; `apply_staged_decision`,
+`_record_salvage_skip` in `cw.reconcile`; `apply_staged_decision`,
 `dispatch_tick` (via `_record_client_freshness_block`) in `cw.dispatch`
 **Payload:**
 ```json
