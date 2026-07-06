@@ -48,13 +48,17 @@ from cw.models import (
     DispatchPlan,
     DispatchSkipReason,
     OrchestratorConfig,
+    OrchestratorEventType,
     QueueItemStatus,
     Stage,
     TicketTask,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from tests.conftest import CapturedEvent
 
 
 # ---------------------------------------------------------------------------
@@ -1274,6 +1278,54 @@ class TestRemoveTicket:
         assert len(store.tasks) == 1
         assert store.tasks[0].ticket_id == "TKT-6"
 
+    def test_emits_task_deleted_operator_remove(
+        self,
+        tmp_dev_queue: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """remove_ticket emits task.deleted reason=operator_remove with payload."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
+        )
+        task = TicketTask(
+            ticket_id="TKT-DEL1",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.REVIEW,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        remove_ticket("TKT-DEL1", "genhealth")
+        assert len(events) == 1
+        etype, payload, corr = events[0]
+        assert etype == OrchestratorEventType.TASK_DELETED
+        assert corr == "TKT-DEL1"
+        assert payload["ticket_id"] == "TKT-DEL1"
+        assert payload["client"] == "genhealth"
+        assert payload["stage"] == Stage.REVIEW
+        assert payload["status_at_deletion"] == QueueItemStatus.BLOCKED_ON_USER
+        assert payload["reason"] == "operator_remove"
+
+    def test_remove_all_emits_one_event_per_task(
+        self,
+        tmp_dev_queue: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """remove_all removing N tasks emits N task.deleted events (Decision 2)."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
+        )
+        tasks = [
+            TicketTask(ticket_id="TKT-DUP", client="genhealth"),
+            TicketTask(ticket_id="TKT-DUP", client="genhealth"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        remove_ticket("TKT-DUP", "genhealth", remove_all=True)
+        assert len(events) == 2
+        assert all(
+            p["reason"] == "operator_remove" and p["ticket_id"] == "TKT-DUP"
+            for _, p, _ in events
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestClearTickets
@@ -1326,6 +1378,58 @@ class TestClearTickets:
         save_dev_queue(DevQueueStore(tasks=tasks))
         count = clear_tickets("genhealth")
         assert count == 2
+
+    def test_emits_task_deleted_operator_clear_per_task(
+        self,
+        tmp_dev_queue: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """clear_tickets emits one task.deleted (reason=operator_clear) per removed."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
+        )
+        tasks = [
+            TicketTask(ticket_id="TKT-CL1", client="genhealth"),
+            TicketTask(ticket_id="TKT-CL2", client="genhealth"),
+            TicketTask(ticket_id="TKT-CL3", client="other"),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        clear_tickets("genhealth")
+        assert len(events) == 2
+        removed_ids = {p["ticket_id"] for _, p, _ in events}
+        assert removed_ids == {"TKT-CL1", "TKT-CL2"}
+        assert all(p["reason"] == "operator_clear" for _, p, _ in events)
+        corrs = {corr for _, _, corr in events}
+        assert corrs == {"TKT-CL1", "TKT-CL2"}
+
+    def test_clear_by_status_emits_per_removed(
+        self,
+        tmp_dev_queue: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Status-filtered clear emits task.deleted only for removed tasks."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_DELETED
+        )
+        tasks = [
+            TicketTask(
+                ticket_id="TKT-SP",
+                client="genhealth",
+                status=QueueItemStatus.PENDING,
+            ),
+            TicketTask(
+                ticket_id="TKT-SR",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+            ),
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        clear_tickets("genhealth", status=QueueItemStatus.PENDING)
+        assert len(events) == 1
+        _, payload, _ = events[0]
+        assert payload["ticket_id"] == "TKT-SP"
+        assert payload["status_at_deletion"] == QueueItemStatus.PENDING
+        assert payload["reason"] == "operator_clear"
 
 
 # ---------------------------------------------------------------------------
@@ -3080,6 +3184,42 @@ class TestApproveTicket:
         with pytest.raises(ApproveGateError, match="not in pipeline"):
             approve_ticket("GEN-500", "genhealth")
 
+    def test_approve_advance_emits_single_stage_changed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Approve→advance emits exactly one task.stage_changed (no double-emit).
+
+        One real stage move (plan→impl via _advance_task_pointer) must produce
+        exactly one task.stage_changed with direction=advance (RFC 0008 W1).
+        """
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-adv1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-adv1",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        approve_ticket("GEN-500", "genhealth")
+
+        assert len(events) == 1
+        _, payload, corr = events[0]
+        assert corr == "GEN-500"
+        assert payload["old_stage"] == Stage.PLAN
+        assert payload["new_stage"] == Stage.IMPL
+        assert payload["direction"] == "advance"
+
 
 # ---------------------------------------------------------------------------
 # TestRequeueTicket — requeue_ticket() mutation function
@@ -3127,6 +3267,60 @@ class TestRequeueTicket:
         t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
         assert t.stage == Stage.IMPL
         assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_forward_override_emits_stage_changed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Forward stage_override (plan→impl) emits task.stage_changed advance."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-fwd1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        assert len(events) == 1
+        _, payload, corr = events[0]
+        assert corr == "GEN-500"
+        assert payload["old_stage"] == Stage.PLAN
+        assert payload["new_stage"] == Stage.IMPL
+        assert payload["direction"] == "advance"
+
+    def test_requeue_same_stage_override_emits_no_stage_changed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A same-stage requeue stays silent on task.stage_changed (Decision 1).
+
+        stage_override equal to the current stage exercises _apply_requeue_stage's
+        forward/same-stage tail; the shared helper's old==new guard must suppress
+        the emit. The status move (BLOCKED_ON_USER→PENDING) still emits
+        task.transition, so we assert that fired to prove the guard is
+        stage-scoped, not a blanket no-op.
+        """
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        # One capture for all event types — a second capture_events on the same
+        # module would clobber the first's monkeypatch of record_event.
+        events = capture_events("cw.dev_queue")
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-same1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        requeue_ticket("GEN-500", "genhealth", stage_override="plan")
+
+        types = [etype for etype, _, _ in events]
+        assert OrchestratorEventType.TASK_STAGE_CHANGED not in types
+        assert types.count(OrchestratorEventType.TASK_TRANSITION) == 1
 
     def test_requeue_backward_stage_raises(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -3976,6 +4170,93 @@ class TestTransitionTaskStatus:
         assert cancelled.disposition is None
         assert cancelled.completed_at is None
 
+    # -- task.transition producer (RFC 0008 W1, #978) -----------------------
+
+    def test_emits_task_transition_on_terminal(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        """A RUNNING→COMPLETED move emits one task.transition with full payload."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
+        )
+        task = TicketTask(
+            ticket_id="T-TR1",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            lane="default",
+            stage=Stage.FINALIZE,
+            session_id="sess-tr1",
+        )
+        transition_task_status(
+            task,
+            QueueItemStatus.COMPLETED,
+            disposition="shipped",
+            pr_url="http://pr/1",
+        )
+        assert len(events) == 1
+        etype, payload, corr = events[0]
+        assert etype == OrchestratorEventType.TASK_TRANSITION
+        assert corr == "T-TR1"
+        assert payload["ticket_id"] == "T-TR1"
+        assert payload["client"] == "genhealth"
+        assert payload["lane"] == "default"
+        assert payload["stage"] == Stage.FINALIZE
+        assert payload["old_status"] == QueueItemStatus.RUNNING
+        assert payload["new_status"] == QueueItemStatus.COMPLETED
+        assert payload["disposition"] == "shipped"
+        assert payload["session_id"] == "sess-tr1"
+        assert payload["pr_url"] == "http://pr/1"
+
+    def test_no_transition_emit_on_same_status(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        """new_status == old_status emits nothing (Decision 6, no-op guard)."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
+        )
+        task = TicketTask(
+            ticket_id="T-TR2",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert events == []
+
+    def test_emits_task_transition_reset_class(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        """A terminal→PENDING (reset) move emits task.transition."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
+        )
+        task = TicketTask(
+            ticket_id="T-TR3",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert len(events) == 1
+        _, payload, _ = events[0]
+        assert payload["old_status"] == QueueItemStatus.BLOCKED_ON_USER
+        assert payload["new_status"] == QueueItemStatus.PENDING
+
+    def test_emits_task_transition_park_class(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        """A RUNNING→AWAITING_OPERATOR_SIGNOFF (park) move emits task.transition."""
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_TRANSITION
+        )
+        task = TicketTask(
+            ticket_id="T-TR4",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+        )
+        transition_task_status(task, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF)
+        assert len(events) == 1
+        _, payload, _ = events[0]
+        assert payload["new_status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+
 
 # ---------------------------------------------------------------------------
 # TestDeriveDisposition
@@ -4118,3 +4399,24 @@ class TestStageRegress:
         task = self._make_task(worktree_path=wt)
         _stage_regress(task, Stage.IMPL)
         assert task.worktree_path == wt
+
+    def test_emits_stage_changed_regress(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        """_stage_regress emits exactly one task.stage_changed direction=regress."""
+        from cw.dev_queue import _stage_regress
+
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+        task = self._make_task(stage=Stage.FINALIZE)
+        _stage_regress(task, Stage.IMPL)
+        assert len(events) == 1
+        etype, payload, corr = events[0]
+        assert etype == OrchestratorEventType.TASK_STAGE_CHANGED
+        assert corr == "REGRESS-1"
+        assert payload["ticket_id"] == "REGRESS-1"
+        assert payload["client"] == "test-client"
+        assert payload["old_stage"] == Stage.FINALIZE
+        assert payload["new_stage"] == Stage.IMPL
+        assert payload["direction"] == "regress"

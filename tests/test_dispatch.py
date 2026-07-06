@@ -69,6 +69,8 @@ from cw.native_daemon import FakeNativeDaemonClient
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from tests.conftest import CapturedEvent
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -5365,6 +5367,44 @@ class TestApplyStagedDecision:
         assert payload["to_stage"] == Stage.IMPL
         assert payload["reason"] == "finalize_regress"
         assert payload["blocker_reason"] == "agent_block"
+
+    def test_finalize_regress_emits_both_requeued_and_stage_changed(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Finalize-regress self-heal fires BOTH events across two modules.
+
+        The dispatch layer emits the pre-existing TICKET_REQUEUED (from
+        cw.dispatch), while the shared _stage_regress chokepoint emits the new
+        task.stage_changed (from cw.dev_queue). record_event is patched by the
+        *calling* module's binding, so each producer needs its own capture —
+        the cw.dispatch capture would never observe the cw.dev_queue emit.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        requeued = capture_events(
+            "cw.dispatch", OrchestratorEventType.TICKET_REQUEUED
+        )
+        stage_changed = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = self._make_running_task("DUAL-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert len(requeued) == 1
+        assert len(stage_changed) == 1
+        _, sc_payload, sc_corr = stage_changed[0]
+        assert sc_corr == "DUAL-1"
+        assert sc_payload["old_stage"] == Stage.FINALIZE
+        assert sc_payload["new_stage"] == Stage.IMPL
+        assert sc_payload["direction"] == "regress"
 
     def test_merge_pending_routes_to_blocked_on_user_with_pr_url(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
