@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import queue
 import threading
 from collections.abc import Generator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,6 +33,19 @@ from cw.cw_pr_events_server import (
     subscribe_with_cursor,
     unsubscribe,
 )
+from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.events import read_events
+from cw.models import DevQueueStore, OrchestratorEventType, PrState, TicketTask
+from cw.pr_events_auth import (
+    CW_PR_EVENTS_HMAC_SECRET_ENV,
+    SIGNATURE_HEADER,
+    SIGNATURE_PREFIX,
+)
+
+
+def _sign(secret: str, body: bytes) -> str:
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return SIGNATURE_PREFIX + digest
 
 
 @pytest.fixture(autouse=True)
@@ -792,3 +808,151 @@ class TestSubscribeWithCursorTOCTOU:
             )
 
         assert fsync_calls, "os.fsync was never called during _append_event"
+
+
+_PR_URL = "https://github.com/acme/widgets/pull/42"
+
+
+class TestPrEventHMAC:
+    """HMAC authentication on POST /pr-event (#930)."""
+
+    def test_accepts_valid_signature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(CW_PR_EVENTS_HMAC_SECRET_ENV, "s3cr3t")
+        client = TestClient(make_app())
+        body = json.dumps(
+            {"repo": "owner/repo", "pr_number": 1, "event_type": "merged"}
+        ).encode()
+        sig = _sign("s3cr3t", body)
+        resp = client.post(
+            "/pr-event",
+            content=body,
+            headers={SIGNATURE_HEADER: sig, "content-type": "application/json"},
+        )
+        assert resp.status_code == 200
+
+    def test_rejects_invalid_signature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(CW_PR_EVENTS_HMAC_SECRET_ENV, "s3cr3t")
+        client = TestClient(make_app())
+        body = json.dumps(
+            {"repo": "owner/repo", "pr_number": 1, "event_type": "merged"}
+        ).encode()
+        resp = client.post(
+            "/pr-event",
+            content=body,
+            headers={
+                SIGNATURE_HEADER: SIGNATURE_PREFIX + "deadbeef",
+                "content-type": "application/json",
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_rejects_missing_signature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(CW_PR_EVENTS_HMAC_SECRET_ENV, "s3cr3t")
+        client = TestClient(make_app())
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "owner/repo", "pr_number": 1, "event_type": "merged"},
+        )
+        assert resp.status_code == 401
+
+    def test_accepts_unsigned_when_secret_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(CW_PR_EVENTS_HMAC_SECRET_ENV, raising=False)
+        client = TestClient(make_app())
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "owner/repo", "pr_number": 1, "event_type": "merged"},
+        )
+        assert resp.status_code == 200
+
+
+class TestWireSuffixMapping:
+    """Each of the 4 wire event_type suffixes maps to the matching pr.*
+    OrchestratorEventType (#930)."""
+
+    @pytest.mark.parametrize(
+        ("suffix", "expected"),
+        [
+            ("ci_failed", OrchestratorEventType.PR_CI_FAILED),
+            ("review_received", OrchestratorEventType.PR_REVIEW_RECEIVED),
+            ("mergeable", OrchestratorEventType.PR_MERGEABLE),
+            ("merged", OrchestratorEventType.PR_MERGED),
+        ],
+    )
+    def test_suffix_maps_to_event_type(
+        self, suffix: str, expected: OrchestratorEventType
+    ) -> None:
+        assert suffix in _server_mod._VALID_EVENT_TYPES
+        assert OrchestratorEventType("pr." + suffix) is expected
+
+
+class TestPushFeedsSharedObservation:
+    """POST /pr-event feeds the SAME persist/diff/emit path as poll hydration
+    (#930): a pushed event lands in dev_queue.json (pr_state) and
+    inbox.jsonl (pr.* events), just like hydrate_pr_states.
+    """
+
+    def test_merged_push_persists_pr_state_and_emits_event(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-9",
+                        client="acme",
+                        pr_url=_PR_URL,
+                        pr_state=PrState(state="OPEN"),
+                    )
+                ]
+            )
+        )
+        client = TestClient(make_app())
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "acme/widgets", "pr_number": 42, "event_type": "merged"},
+        )
+        assert resp.status_code == 200
+
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.state == "MERGED"
+
+        events = read_events(event_types=[OrchestratorEventType.PR_MERGED])
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "GEN-9"
+        assert events[0].payload["client"] == "acme"
+
+    def test_unmatched_pr_is_silent_noop(self) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        client = TestClient(make_app())
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "ghost/repo", "pr_number": 1, "event_type": "merged"},
+        )
+        assert resp.status_code == 200
+        assert read_events(event_types=[OrchestratorEventType.PR_MERGED]) == []
+
+
+class TestAsyncOffloadSeam:
+    """observe_pushed_event's dev_queue_lock is a blocking fcntl.flock — it
+    must be offloaded via anyio.to_thread.run_sync, never called directly on
+    the event loop thread (#930).
+    """
+
+    def test_handler_offloads_via_run_sync(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[Any, ...]] = []
+
+        async def _fake_run_sync(func: Any, *args: Any) -> Any:
+            calls.append((func, args))
+            return None
+
+        monkeypatch.setattr("anyio.to_thread.run_sync", _fake_run_sync)
+        client = TestClient(make_app())
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "owner/repo", "pr_number": 1, "event_type": "merged"},
+        )
+        assert resp.status_code == 200
+        assert len(calls) == 1
