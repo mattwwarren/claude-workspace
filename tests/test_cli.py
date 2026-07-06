@@ -5838,9 +5838,9 @@ class TestWatchCommand:
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrate", "watch"])
         assert result.exit_code == 0
-        assert "deprecated" in result.output
-        assert "cw board" in result.output
-        assert "next release" in result.output
+        assert "deprecated" in result.stderr
+        assert "cw board" in result.stderr
+        assert "next release" in result.stderr
         assert called
 
 

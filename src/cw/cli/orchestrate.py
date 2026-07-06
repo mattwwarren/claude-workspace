@@ -175,8 +175,7 @@ def orchestrate_watch(
     Repointed to the `cw board` render surface (issue #986). Press Ctrl-C
     to exit.
 
-    Deprecated: repointed to the `cw board` render surface (issue #986) and
-    will be removed in the next release; use `cw board` directly.
+    Deprecated: will be removed in the next release; use `cw board` directly.
     """
     click.echo(_ORCHESTRATE_WATCH_DEPRECATION, err=True)
     run_board(interval=interval, client_filter=client_filter)
