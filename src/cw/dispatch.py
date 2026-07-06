@@ -64,6 +64,7 @@ from cw.exceptions import (
 from cw.executor import resolve_executor
 from cw.models import (
     OCCUPIED_LANE_STATUSES,
+    ClientConcurrencyOverride,
     ClientConfig,
     ConcurrencyOverrides,
     DispatchSkipReason,
@@ -77,6 +78,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
+    _FRESHNESS_BLOCK_ESCALATED_REASON,
     reconcile,
     resolve_headless_budget,
     ticket_id_for_session,
@@ -886,6 +888,68 @@ def _reset_lane_spawn_errors(lane_cfg: LaneConfig, client_name: str) -> None:
         _save_concurrency_overrides(overrides)
 
 
+def _record_client_freshness_block(
+    client_name: str,
+    freshness_detail: str | None,
+    *,
+    config: OrchestratorConfig,
+) -> None:
+    """Increment the client's freshness-gate-block latch (RFC 0007 §W2).
+
+    Under the override lock: load → increment → save. When the
+    post-increment count reaches ``freshness_block_attention_threshold``
+    (exact equality — latch semantics, no re-fire while still at/above the
+    threshold on subsequent stale ticks) a ``session.needs_attention`` event
+    is emitted AFTER releasing the lock, mirroring
+    :func:`_record_lane_spawn_error`. No push notification (deliberate — see
+    the gh_blocked/finalize_blocked precedent, neither of which pushes).
+    """
+    tripped = False
+    count = 0
+    with concurrency_override_lock():
+        overrides = _load_concurrency_overrides()
+        override = overrides.clients.get(client_name, ClientConcurrencyOverride())
+        count = override.consecutive_freshness_blocks + 1
+        overrides.clients[client_name] = override.model_copy(
+            update={"consecutive_freshness_blocks": count}
+        )
+        _save_concurrency_overrides(overrides)
+        if count == config.freshness_block_attention_threshold:
+            tripped = True
+    if tripped:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": "",
+                "session_name": "",
+                "client": client_name,
+                "ticket_id": None,
+                "claude_session_id": None,
+                "paused_status": _FRESHNESS_BLOCK_ESCALATED_REASON,
+                "breadcrumbs": freshness_detail or "",
+                "crashed": False,
+            },
+            correlation_id=None,
+        )
+
+
+def _reset_client_freshness_blocks(client_name: str) -> None:
+    """Reset the client's freshness-gate-block counter to zero (RFC 0007 §W2).
+
+    Short-circuits (no write) when the counter is already zero or the client
+    has no override, mirroring :func:`_reset_lane_spawn_errors`.
+    """
+    with concurrency_override_lock():
+        overrides = _load_concurrency_overrides()
+        override = overrides.clients.get(client_name)
+        if override is None or override.consecutive_freshness_blocks == 0:
+            return
+        overrides.clients[client_name] = override.model_copy(
+            update={"consecutive_freshness_blocks": 0}
+        )
+        _save_concurrency_overrides(overrides)
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -1337,7 +1401,14 @@ def dispatch_tick(
                 warned_stale=warned_stale,
                 freshness_detail=freshness_detail,
             )
+            _record_client_freshness_block(client.name, freshness_detail, config=config)
             continue
+
+        # Client passed the freshness gate this tick — reset its consecutive
+        # freshness-block latch (RFC 0007 §W2). Short-circuits internally
+        # when already 0, so a steady-state healthy client never rewrites
+        # the override file.
+        _reset_client_freshness_blocks(client.name)
 
         # Why: incremented only past the freshness gate — a stale/skipped
         # client does not consume Tier-1 quota, so max_parallel_clients=N
