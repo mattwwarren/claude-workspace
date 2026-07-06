@@ -19,6 +19,7 @@ starlette = pytest.importorskip(
 
 from starlette.testclient import TestClient
 
+import cw.cw_operator_events as _operator_mod
 import cw.cw_queue_events_server as _server_mod
 from cw.cw_queue_events_server import (
     _NOTIFICATION_TYPE,
@@ -40,6 +41,7 @@ from cw.cw_queue_events_server import (
 from cw.models import (
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     QueueItemStatus,
     ReapReason,
     Session,
@@ -72,6 +74,28 @@ def _reset_channel_state() -> Generator[None]:
         _server_mod._cursors.clear()
         _server_mod._event_offset[0] = 0
     _server_mod._poller_started[0] = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_operator_channel_state() -> Generator[None]:
+    """Reset the operator channel's own subscriber/cursor/offset state.
+
+    ``make_app()`` now wires ``cw_operator_events.build_operator_routes()``
+    alongside the queue channel's own routes (#1002), so tests in this file
+    that call ``make_app()``/exercise ``/operator/ack`` must not bleed state
+    across tests any more than the queue channel's own globals above.
+    """
+    with _operator_mod._lock:
+        _operator_mod._subscribers.clear()
+    with _operator_mod._file_lock:
+        _operator_mod._cursors.clear()
+        _operator_mod._event_offset[0] = 0
+    yield
+    with _operator_mod._lock:
+        _operator_mod._subscribers.clear()
+    with _operator_mod._file_lock:
+        _operator_mod._cursors.clear()
+        _operator_mod._event_offset[0] = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1257,3 +1281,171 @@ class TestSessionReapedDeltaDetection:
             reaped = [e for e in events if e.get("event") == "queue.session_reaped"]
             assert len(reaped) == 1, f"Expected 1 event for reason={reason}"
             assert reaped[0]["reason"] == str(reason)
+
+
+# ---------------------------------------------------------------------------
+# TestPollerTickIsolation (#1002, RFC 0008 W3 binding decision #1)
+# ---------------------------------------------------------------------------
+
+
+class TestPollerTickIsolation:
+    """The operator-bridge call must never block/break queue.* broadcasting."""
+
+    def test_bridge_exception_does_not_block_queue_broadcast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_make_task("T-iso", "acme", QueueItemStatus.PENDING)]
+            )
+        )
+        save_state(CwState())
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("bridge boom")
+
+        monkeypatch.setattr(
+            "cw.cw_operator_events.poll_and_forward_operator_channel", _raise
+        )
+
+        q = subscribe()
+        try:
+            _server_mod._poller_tick(OrchestratorConfig())
+            item = q.get_nowait()
+            assert item["message"]
+        finally:
+            unsubscribe(q)
+
+    def test_bridge_exception_logged_as_operator_bridge_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("bridge boom")
+
+        monkeypatch.setattr(
+            "cw.cw_operator_events.poll_and_forward_operator_channel", _raise
+        )
+        caplog.set_level(logging.ERROR, logger="cw.cw_queue_events_server")
+        _server_mod._poller_tick(OrchestratorConfig())
+        assert any("operator-bridge error" in r.message for r in caplog.records)
+        assert not any("poller error" in r.message for r in caplog.records)
+
+    def test_bridge_called_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[OrchestratorConfig] = []
+
+        def _capture(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(
+            "cw.cw_operator_events.poll_and_forward_operator_channel", _capture
+        )
+        config = OrchestratorConfig()
+        _server_mod._poller_tick(config)
+        assert calls == [config]
+
+
+# ---------------------------------------------------------------------------
+# TestStartPollerConfigValidation (#1002, RFC 0008 W3 binding decision #2)
+# ---------------------------------------------------------------------------
+
+
+class TestStartPollerConfigValidation:
+    """A malformed operator_channel_forward must crash _start_poller (fail-loud)."""
+
+    def test_malformed_operator_channel_forward_crashes_at_startup(self) -> None:
+        from cw.config import orchestrator_config_file
+
+        path = orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
+
+        with pytest.raises(Exception, match=r".*"):
+            _server_mod._start_poller()
+        assert _server_mod._poller_started[0] is False
+
+    def test_valid_config_starts_poller(self) -> None:
+        _server_mod._start_poller()
+        assert _server_mod._poller_started[0] is True
+
+    def test_revalidates_on_every_call_even_when_already_started(self) -> None:
+        from cw.config import orchestrator_config_file
+
+        _server_mod._start_poller()
+        assert _server_mod._poller_started[0] is True
+
+        path = orchestrator_config_file()
+        path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
+
+        with pytest.raises(Exception, match=r".*"):
+            _server_mod._start_poller()
+
+
+# ---------------------------------------------------------------------------
+# TestOperatorRouteOrdering (#1002, RFC 0008 W3 binding decision #4)
+# ---------------------------------------------------------------------------
+
+
+class TestOperatorRouteOrdering:
+    """Operator routes must be prepended -- Starlette resolves first-match-wins,
+
+    so Mount("/sse", ...) would otherwise prefix-swallow /sse/operator.
+    """
+
+    def test_operator_routes_prepended_before_existing(self) -> None:
+        app = make_app()
+        paths = [r.path for r in app.routes]  # type: ignore[attr-defined]
+        assert paths.index("/sse/operator") < paths.index("/sse")
+        assert paths.index("/messages/operator") < paths.index("/messages")
+        assert paths.index("/operator/ack") < paths.index("/ack")
+
+    def test_all_six_routes_present_in_order(self) -> None:
+        app = make_app()
+        paths = [r.path for r in app.routes]  # type: ignore[attr-defined]
+        assert paths == [
+            "/sse/operator",
+            "/messages/operator",
+            "/operator/ack",
+            "/sse",
+            "/messages",
+            "/ack",
+        ]
+
+    def test_operator_ack_route_functions(self) -> None:
+        client = TestClient(make_app())
+        resp = client.post("/operator/ack", json={"client_id": "op1", "offset": 5})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    def test_operator_ack_uses_distinct_cursor_store_from_queue_ack(self) -> None:
+        client = TestClient(make_app())
+        client.post("/operator/ack", json={"client_id": "shared-id", "offset": 10})
+        client.post("/ack", json={"client_id": "shared-id", "offset": 20})
+        assert _operator_mod._cursors["shared-id"] == 10
+        assert _server_mod._cursors["shared-id"] == 20
+
+
+# ---------------------------------------------------------------------------
+# TestCLIOperatorChannel (#1002)
+# ---------------------------------------------------------------------------
+
+
+class TestCLIOperatorChannel:
+    def test_operator_channel_proxy_help(self) -> None:
+        from cw.cli import main
+
+        result = CliRunner().invoke(main, ["operator-channel", "proxy", "--help"])
+        assert result.exit_code == 0
+        assert "--client-id" in result.output
+
+    def test_operator_channel_has_no_serve_subcommand(self) -> None:
+        from cw.cli import main
+
+        result = CliRunner().invoke(main, ["operator-channel", "serve", "--help"])
+        assert result.exit_code != 0
