@@ -6,7 +6,7 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +15,7 @@ from cw.config import save_state
 from cw.models import (
     ClientConfig,
     CwState,
+    OrchestratorEventType,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -24,6 +25,9 @@ from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# A captured record_event invocation: (event_type, payload, correlation_id).
+CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
 
 
 def _seed_daemon_session(
@@ -263,6 +267,47 @@ def sample_state(sample_client: ClientConfig) -> CwState:
 def mock_native_daemon() -> FakeNativeDaemonClient:
     """A FakeNativeDaemonClient for testing daemon-origin spawn and reconcile."""
     return FakeNativeDaemonClient()
+
+
+@pytest.fixture
+def capture_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., list[CapturedEvent]]:
+    """Patch ``record_event`` on an arbitrary module and capture its calls.
+
+    ``monkeypatch.setattr`` patches a name by the *calling* module's binding,
+    so a test that needs to observe events emitted from ``cw.dev_queue`` must
+    patch ``cw.dev_queue.record_event`` — the ``capture_event`` closures in
+    ``test_dispatch.py`` that patch ``cw.dispatch.record_event`` will NOT see
+    events emitted from ``cw.dev_queue``. This factory patches
+    ``<module_path>.record_event`` and returns a list that accumulates
+    ``(event_type, payload, correlation_id)`` tuples for each emit, optionally
+    filtered to a single ``event_type``.
+
+    Call it once per module you want to observe; a test that spans two producer
+    modules (e.g. the dispatch finalize-regress path, which emits from both
+    ``cw.dispatch`` and ``cw.dev_queue``) calls it twice with distinct lists.
+    """
+
+    def _factory(
+        module_path: str,
+        event_type: OrchestratorEventType | None = None,
+    ) -> list[CapturedEvent]:
+        captured: list[CapturedEvent] = []
+
+        def _capture(
+            etype: OrchestratorEventType,
+            payload: dict[str, Any] | None = None,
+            *,
+            correlation_id: str | None = None,
+        ) -> None:
+            if event_type is None or etype == event_type:
+                captured.append((etype, payload or {}, correlation_id))
+
+        monkeypatch.setattr(f"{module_path}.record_event", _capture)
+        return captured
+
+    return _factory
 
 
 @pytest.fixture

@@ -415,6 +415,102 @@ associated with a task (phantom sessions without a matching queue entry).
 channel-server queue-events channel; the queue-events channel only carries
 actionable queue mutations.
 
+### `task.transition`
+
+A `TicketTask` changed status. This is the push-channel signal the orchestrator
+previously hand-polled `dev_queue.json` for (RFC 0008 W1, closes #978).
+
+**Emitter:** `transition_task_status` in `cw.dev_queue` — the single
+status-authority function. Because every status write routes through it, this
+event fires for **all** mutation paths (dispatch claim/complete, approve,
+requeue, cancel, reconcile revert/park, etc.), not just operator commands.
+**Semantics:** Emitted on every *real* status change — the emit is suppressed
+when `new_status == old_status` (a re-assert of the same status stays silent).
+`old_status`/`new_status` are `QueueItemStatus` values. `disposition`/`pr_url`
+reflect the task state *after* the transition (stamped on terminal moves,
+cleared on PENDING/CANCELLED). `session_id` is the value on the task at emit
+time (some callers clear it immediately *after* the transition, so it is
+typically still populated here). `correlation_id` is the `ticket_id`.
+
+```json
+{
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "lane": "default",
+  "stage": "finalize",
+  "old_status": "running",
+  "new_status": "completed",
+  "disposition": "shipped",
+  "session_id": "ab12cd34",
+  "pr_url": "https://github.com/owner/repo/pull/42"
+}
+```
+
+### `task.stage_changed`
+
+A `TicketTask` moved to a different pipeline stage (RFC 0008 W1, closes #978).
+
+**Emitter:** `_emit_stage_change` in `cw.dev_queue` — a single shared
+chokepoint called from `_advance_task_pointer` (`direction="advance"`),
+`_stage_regress` (`direction="regress"`), and `_apply_requeue_stage`'s
+forward/same-stage tail (`direction="advance"`). All three stage-pointer
+mutation sites route through this one helper, so exactly one event fires per
+real stage move.
+**Semantics:** Guarded on `old_stage != new_stage` — a same-stage requeue
+(e.g. `requeue --stage <current>`) stays silent. `direction` is a **closed**
+enum: `"advance"` or `"regress"`, matching the producing function names.
+`correlation_id` is the `ticket_id`.
+
+**Ordering (UNSPECIFIED):** A stage advance/regress also transitions the task's
+status to PENDING, so a single mutation emits **both** a `task.stage_changed`
+and a `task.transition`. Their relative emission order within that mutation is
+**unspecified** — consumers should rely on event *presence* plus
+`correlation_id` (the shared `ticket_id`) to correlate them, never on ordering.
+No order is pinned for future W3 consumers.
+
+```json
+{
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "old_stage": "plan",
+  "new_stage": "impl",
+  "direction": "advance"
+}
+```
+
+### `task.deleted`
+
+A `TicketTask` row was removed from the dev queue by an operator (RFC 0008 W1,
+closes #978 — a row deleted mid-run previously produced no event).
+
+**Emitter:** `remove_ticket` (`reason="operator_remove"`) and `clear_tickets`
+(`reason="operator_clear"`) in `cw.dev_queue`.
+**Semantics:** One event per removed **row**, not per API call — a
+`remove --all` or a `clear` that removes N tasks emits N events, each carrying
+that row's own `ticket_id`/`stage`/`status_at_deletion`. `status_at_deletion`
+is the `QueueItemStatus` the task held when removed. `reason` is an **open**
+enum — consumers MUST tolerate unknown values (the two values above are the
+only ones emitted today). `correlation_id` is the `ticket_id`.
+
+```json
+{
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "stage": "review",
+  "status_at_deletion": "blocked_on_user",
+  "reason": "operator_remove"
+}
+```
+
+**Known legacy gap — the `ticket.*` CLI family:** The operator-command events
+`ticket.enqueued`, `ticket.moved`, `ticket.approved`, `ticket.requeued`, and
+`ticket.unblocked` are emitted from the CLI layer with `correlation_id=None`
+(the `ticket_id` lives only in their payloads). The three `task.*` producers
+above deliberately set `correlation_id=ticket_id`; the older `ticket.*` family
+was **not** retrofitted in this change to avoid touching unrelated emit sites.
+Consumers that need to correlate a `ticket.*` event to a ticket must read
+`payload["ticket_id"]`, not `correlation_id`.
+
 ### `session.liveness_changed`
 
 **Emitter:** `record_session_liveness_changes` (`cw.reconcile.liveness`)
@@ -477,7 +573,6 @@ not integer) used elsewhere in this file, derived from
 `_transcript_age_seconds` divided by 60.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
-
 ## CLI
 
 ### Record an event

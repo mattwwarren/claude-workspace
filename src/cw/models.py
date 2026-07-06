@@ -272,6 +272,14 @@ class OrchestratorEventType(StrEnum):
     TICKET_UNBLOCKED = "ticket.unblocked"
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
     WAVE_COLLISION = "wave.collision"
+    # RFC 0008 W1 orchestrator push-channel producers (closes #978). Emitted
+    # from cw.dev_queue at the status-authority / stage-mutation / row-removal
+    # chokepoints; correlation_id is the ticket_id. See docs/events.md.
+    TASK_TRANSITION = "task.transition"
+    TASK_STAGE_CHANGED = "task.stage_changed"
+    TASK_DELETED = "task.deleted"
+    # RFC 0008 W2 liveness producer (#1001): latched transcript-staleness
+    # bucket crossings from the reconcile idle-watchdog pass.
     SESSION_LIVENESS_CHANGED = "session.liveness_changed"
 
 

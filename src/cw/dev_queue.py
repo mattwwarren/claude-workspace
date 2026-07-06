@@ -7,7 +7,7 @@ import fcntl
 import json
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import (
@@ -24,6 +24,7 @@ from cw.config import (
 from cw.config import (
     dev_queue_lock as _dev_queue_lock_file,
 )
+from cw.events import record_event
 from cw.exceptions import (
     ApproveGateError,
     CwError,
@@ -40,6 +41,7 @@ from cw.models import (
     DevQueueStore,
     DispatchPlan,
     OrchestratorConfig,
+    OrchestratorEventType,
     QueueItemStatus,
     Stage,
     TicketTask,
@@ -105,7 +107,12 @@ def transition_task_status(
     (COMPLETED/BLOCKED_ON_USER/FAILED/AWAITING_OPERATOR_SIGNOFF); clears them
     on PENDING/CANCELLED (requeue/cancel).  Companion field resets (session_id,
     stage_base_ref) stay at call sites.  GitHub #310, #990.
+
+    Emits a ``task.transition`` orchestrator event on a real status change (RFC
+    0008 W1, closes #978); the emit is suppressed when new_status == old_status
+    so a re-assert of the same status stays silent.
     """
+    old_status = task.status
     task.status = new_status
     if new_status in _TERMINAL_DISPOSITION_STATUSES:
         task.disposition = disposition
@@ -115,6 +122,26 @@ def transition_task_status(
         task.disposition = None
         task.pr_url = None
         task.completed_at = None
+    if old_status != new_status:
+        # Why: emit inline while callers still hold dev_queue_lock. record_event
+        # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
+        # reverse nesting never occurs (no path takes _inbox_lock then
+        # dev_queue_lock), so this ordering is deadlock-safe. RFC 0008 W1.
+        record_event(
+            OrchestratorEventType.TASK_TRANSITION,
+            {
+                "ticket_id": task.ticket_id,
+                "client": task.client,
+                "lane": task.lane,
+                "stage": task.stage,
+                "old_status": old_status,
+                "new_status": new_status,
+                "disposition": task.disposition,
+                "session_id": task.session_id,
+                "pr_url": task.pr_url,
+            },
+            correlation_id=task.ticket_id,
+        )
 
 
 _VERBATIM_DISPOSITION_STATUSES: frozenset[str] = (
@@ -362,6 +389,31 @@ def add_ticket(task: TicketTask) -> bool:
     return True
 
 
+def _emit_task_deleted(
+    removed: TicketTask, reason: Literal["operator_remove", "operator_clear"]
+) -> None:
+    """Emit a ``task.deleted`` event for a single removed row.
+
+    Shared chokepoint for both row-removal sites (RFC 0008 W1, closes #978):
+    called from ``remove_ticket`` (``operator_remove``) and ``clear_tickets``
+    (``operator_clear``), once per removed row.
+    """
+    # Why: emit inline under dev_queue_lock — one task.deleted per removed
+    # row (not per API call). record_event nests _inbox_lock INSIDE
+    # dev_queue_lock; the reverse never happens, so this is deadlock-safe.
+    record_event(
+        OrchestratorEventType.TASK_DELETED,
+        {
+            "ticket_id": removed.ticket_id,
+            "client": removed.client,
+            "stage": removed.stage,
+            "status_at_deletion": removed.status,
+            "reason": reason,
+        },
+        correlation_id=removed.ticket_id,
+    )
+
+
 def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> None:
     """Remove one (or all) matching TicketTask(s) from the dev queue.
 
@@ -389,6 +441,8 @@ def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> N
         match_set = {id(m) for m in matches}
         store.tasks = [t for t in store.tasks if id(t) not in match_set]
         save_dev_queue(store)
+        for removed in matches:
+            _emit_task_deleted(removed, "operator_remove")
 
 
 def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
@@ -516,17 +570,17 @@ def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
     with _lock():
         store = load_dev_queue()
         if status is None:
-            kept = [t for t in store.tasks if t.client != client]
+            removed_tasks = [t for t in store.tasks if t.client == client]
         else:
-            kept = [
-                t
-                for t in store.tasks
-                if not (t.client == client and t.status == status)
+            removed_tasks = [
+                t for t in store.tasks if t.client == client and t.status == status
             ]
-        removed = len(store.tasks) - len(kept)
-        store.tasks = kept
+        removed_ids = {id(t) for t in removed_tasks}
+        store.tasks = [t for t in store.tasks if id(t) not in removed_ids]
         save_dev_queue(store)
-    return removed
+        for task in removed_tasks:
+            _emit_task_deleted(task, "operator_clear")
+    return len(removed_tasks)
 
 
 def resolve_client(
@@ -660,6 +714,40 @@ def wait_for_terminal(
         time.sleep(poll_interval)
 
 
+def _emit_stage_change(
+    task: TicketTask,
+    old_stage: Stage,
+    new_stage: Stage,
+    direction: Literal["advance", "regress"],
+) -> None:
+    """Emit a ``task.stage_changed`` event for a single real stage move.
+
+    Single shared chokepoint for every stage-pointer mutation (RFC 0008 W1,
+    closes #978): called from ``_advance_task_pointer`` (advance),
+    ``_stage_regress`` (regress), and ``_apply_requeue_stage``'s forward/
+    same-stage tail (advance). Guarded on ``old_stage != new_stage`` so a
+    same-stage requeue stays silent. ``direction`` is the closed enum
+    ``"advance" | "regress"``.
+    """
+    if old_stage == new_stage:
+        return
+    # Why: emit inline while callers still hold dev_queue_lock. record_event
+    # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
+    # reverse nesting never occurs (no path takes _inbox_lock then
+    # dev_queue_lock), so this ordering is deadlock-safe. RFC 0008 W1.
+    record_event(
+        OrchestratorEventType.TASK_STAGE_CHANGED,
+        {
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "old_stage": old_stage,
+            "new_stage": new_stage,
+            "direction": direction,
+        },
+        correlation_id=task.ticket_id,
+    )
+
+
 def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     """Advance task to the next pipeline stage (no status precondition check).
 
@@ -667,11 +755,13 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     Does NOT check current status — approve path calls this directly;
     _stage_advance retains its RUNNING assert and calls this after.
     """
+    old_stage = task.stage
     idx = stages.index(task.stage)
     task.stage = stages[idx + 1]
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None  # R6: clear session_id on advance
     task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
+    _emit_stage_change(task, old_stage, task.stage, "advance")
 
 
 def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
@@ -683,11 +773,13 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     Caller is responsible for stage selection and regress-cap enforcement.
     See GitHub #770.
     """
+    old_stage = task.stage
     task.stage = target_stage
     task.regress_attempts += 1
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None
     task.stage_base_ref = None
+    _emit_stage_change(task, old_stage, target_stage, "regress")
 
 
 def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
@@ -890,7 +982,11 @@ def _apply_requeue_stage(
         return True
 
     # Forward or same-stage: caller enforces the BLOCKED_ON_USER precondition.
+    old_stage = task.stage
     task.stage = target_stage
+    # Forward stage move → direction="advance"; the same-stage case is naturally
+    # guarded silent by _emit_stage_change's old==new check. RFC 0008 W1.
+    _emit_stage_change(task, old_stage, target_stage, "advance")
     return False
 
 
