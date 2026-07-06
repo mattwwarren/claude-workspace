@@ -7,6 +7,7 @@
 | `nightly-native.yml` | Manual (`workflow_dispatch`) | ubuntu | Full test suite (excl. cmux) + native daemon smoke tests |
 | `release.yml` | Tag push | ubuntu | Build and publish to PyPI |
 | `dispatch-guard.yml` | Push to `main` (dispatch/reconcile/spawn) | ubuntu | Opens a `dispatch-drift` issue when critical files are unreleased; closes on next release |
+| `pr-events.yml` | PR closed / review submitted / CI workflow_run completed | ubuntu | Pushes PR lifecycle events to `cw_pr_events_server` `/pr-event` via an operator-provisioned relay (GitHub #930); no-ops if `CW_PR_EVENTS_RELAY_URL` repo variable is unset |
 
 ## Triggering workflows manually
 
