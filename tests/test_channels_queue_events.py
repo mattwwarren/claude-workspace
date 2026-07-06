@@ -51,6 +51,12 @@ from cw.models import (
     TicketTask,
 )
 
+# Captured at module-load time, BEFORE the _no_real_poller_thread autouse
+# fixture (below) monkeypatches _server_mod._run_poller to a no-op for every
+# test in this file. TestRunPollerLoopBody calls this reference directly to
+# exercise the real loop body without ever spawning a real daemon thread.
+_REAL_RUN_POLLER = _server_mod._run_poller
+
 
 @pytest.fixture(autouse=True)
 def _reset_subscribers() -> Generator[None]:
@@ -1450,6 +1456,11 @@ class TestOperatorRouteOrdering:
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
+    def test_operator_ack_invalid_body_returns_400(self) -> None:
+        client = TestClient(make_app())
+        resp = client.post("/operator/ack", json={"client_id": "op1"})  # missing offset
+        assert resp.status_code == 400
+
     def test_operator_ack_uses_distinct_cursor_store_from_queue_ack(self) -> None:
         client = TestClient(make_app())
         client.post("/operator/ack", json={"client_id": "shared-id", "offset": 10})
@@ -1476,3 +1487,89 @@ class TestCLIOperatorChannel:
 
         result = CliRunner().invoke(main, ["operator-channel", "serve", "--help"])
         assert result.exit_code != 0
+
+    def test_operator_channel_proxy_command_invokes_run_proxy(self) -> None:
+        from cw.cli import main
+
+        mock_run_proxy = MagicMock()
+        runner = CliRunner()
+        with patch("cw.cw_operator_events_channel.run_proxy", mock_run_proxy):
+            result = runner.invoke(
+                main, ["operator-channel", "proxy", "--client-id", "acme"]
+            )
+        assert result.exit_code == 0
+        mock_run_proxy.assert_called_once_with(client_id="acme")
+
+
+# ---------------------------------------------------------------------------
+# TestRunPollerLoopBody (#1002)
+# ---------------------------------------------------------------------------
+
+
+class TestRunPollerLoopBody:
+    """Direct coverage of _run_poller's own loop body.
+
+    _run_poller is never allowed to actually run as a real background thread
+    in this test file (see _no_real_poller_thread above) -- so its own loop
+    body (config load + _poller_tick call, wrapped in the outer try/except)
+    needs its own direct, single-iteration test.
+    """
+
+    def test_loads_config_and_calls_poller_tick_each_iteration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        calls: list[OrchestratorConfig] = []
+
+        def _capture_tick(config: OrchestratorConfig) -> None:
+            calls.append(config)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _capture_tick)
+
+        sleep_calls: list[float] = []
+
+        def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 2:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()
+
+        assert sleep_calls == [
+            _server_mod.POLL_INTERVAL_SECONDS,
+            _server_mod.POLL_INTERVAL_SECONDS,
+        ]
+        assert len(calls) == 1
+
+    def test_poller_tick_exception_is_caught_and_loop_continues(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        class _StopLoop(Exception):  # noqa: N818
+            pass
+
+        def _raise_tick(_config: OrchestratorConfig) -> None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(_server_mod, "_poller_tick", _raise_tick)
+
+        sleep_calls: list[float] = []
+
+        def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 2:
+                raise _StopLoop
+
+        monkeypatch.setattr(time, "sleep", _fake_sleep)
+
+        with pytest.raises(_StopLoop):
+            _REAL_RUN_POLLER()

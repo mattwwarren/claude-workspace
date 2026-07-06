@@ -193,6 +193,14 @@ class TestAdmitsFilterEngine:
         )
         assert _admits(event, self._default_forward()) is False
 
+    def test_liveness_changed_missing_bucket_dropped(self) -> None:
+        """payload.get("new_bucket") returning None (non-str) is dropped."""
+        event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_LIVENESS_CHANGED,
+            payload={},
+        )
+        assert _admits(event, self._default_forward()) is False
+
 
 # ---------------------------------------------------------------------------
 # TestBuildOperatorNotification
@@ -446,3 +454,117 @@ class TestAppendEventOperatorChannel:
         records = [json.loads(line) for line in lines]
         offsets = {r["offset"] for r in records}
         assert len(offsets) == 10
+
+
+# ---------------------------------------------------------------------------
+# TestReadEventsFromOffsetOperatorChannel
+# ---------------------------------------------------------------------------
+
+
+class TestReadEventsFromOffsetOperatorChannel:
+    def test_returns_empty_for_missing_file(self, tmp_events_dir: Path) -> None:
+        from cw.cw_operator_events import _read_events_from_offset
+
+        assert _read_events_from_offset(0) == []
+
+    def test_skips_blank_and_malformed_lines(self, tmp_events_dir: Path) -> None:
+        from cw.config import state_dir
+        from cw.cw_operator_events import (
+            _OPERATOR_EVENTS_FILE,
+            _read_events_from_offset,
+        )
+
+        path = state_dir() / _OPERATOR_EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"notification_type": _NOTIFICATION_TYPE, "offset": 0})
+            + "\n"
+            + "\n"
+            + "{ partial torn line\n"
+        )
+        result = _read_events_from_offset(0)
+        assert len(result) == 1
+
+    def test_respects_offset_filter(self, tmp_events_dir: Path) -> None:
+        from cw.cw_operator_events import _append_event, _read_events_from_offset
+
+        _append_event({"notification_type": _NOTIFICATION_TYPE, "message": "a"})
+        _append_event({"notification_type": _NOTIFICATION_TYPE, "message": "b"})
+        _append_event({"notification_type": _NOTIFICATION_TYPE, "message": "c"})
+        result = _read_events_from_offset(1)
+        assert len(result) == 2
+        assert result[0]["offset"] == 1
+        assert result[1]["offset"] == 2
+
+
+# ---------------------------------------------------------------------------
+# TestLoadCursorsOperatorChannel
+# ---------------------------------------------------------------------------
+
+
+class TestLoadCursorsOperatorChannel:
+    def test_returns_empty_for_missing_file(self, tmp_events_dir: Path) -> None:
+        from cw.cw_operator_events import _load_cursors
+
+        assert _load_cursors() == {}
+
+    def test_returns_empty_on_corrupt_json(self, tmp_events_dir: Path) -> None:
+        from cw.config import state_dir
+        from cw.cw_operator_events import _OPERATOR_CURSORS_FILE, _load_cursors
+
+        path = state_dir() / _OPERATOR_CURSORS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not-json")
+        assert _load_cursors() == {}
+
+    def test_returns_empty_on_unexpected_shape(self, tmp_events_dir: Path) -> None:
+        from cw.config import state_dir
+        from cw.cw_operator_events import _OPERATOR_CURSORS_FILE, _load_cursors
+
+        path = state_dir() / _OPERATOR_CURSORS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps([1, 2, 3]))
+        assert _load_cursors() == {}
+
+
+# ---------------------------------------------------------------------------
+# TestLoadOffsetFromFileOperatorChannel
+# ---------------------------------------------------------------------------
+
+
+class TestLoadOffsetFromFileOperatorChannel:
+    def test_returns_zero_when_file_missing(self, tmp_events_dir: Path) -> None:
+        from cw.cw_operator_events import _load_offset_from_file
+
+        assert _load_offset_from_file() == 0
+
+    def test_returns_max_offset_plus_one_skipping_blank_and_malformed(
+        self, tmp_events_dir: Path
+    ) -> None:
+        from cw.config import state_dir
+        from cw.cw_operator_events import _OPERATOR_EVENTS_FILE, _load_offset_from_file
+
+        path = state_dir() / _OPERATOR_EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            json.dumps({"offset": 2, "message": "a"}),
+            "",
+            json.dumps({"offset": 5, "message": "b"}),
+            "not-json",
+            json.dumps({"offset": 3, "message": "c"}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        assert _load_offset_from_file() == 6
+
+    def test_ignores_non_int_offset(self, tmp_events_dir: Path) -> None:
+        from cw.config import state_dir
+        from cw.cw_operator_events import _OPERATOR_EVENTS_FILE, _load_offset_from_file
+
+        path = state_dir() / _OPERATOR_EVENTS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            json.dumps({"offset": "bad", "message": "a"}),
+            json.dumps({"offset": 4, "message": "b"}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        assert _load_offset_from_file() == 5
