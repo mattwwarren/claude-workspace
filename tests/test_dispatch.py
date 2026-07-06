@@ -28,6 +28,7 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
+    FRESHNESS_MAIN_DETACHED,
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
@@ -4040,6 +4041,53 @@ class TestFreshnessGateAutoFF:
         assert "log origin/" in warn
         assert "do NOT auto-rebase" in warn
         assert "pull --rebase" not in warn
+
+    def test_auto_ff_detached_emits_detached_detail(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """safety='detached' → freshness_detail='main_detached_head' (#964).
+
+        When the client's main checkout HEAD is detached, dispatch should
+        emit a distinct freshness_detail so the operator WARN gives accurate
+        checkout advice instead of falling through to the generic
+        "main behind origin" message.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(ticket_id="CW-964", client="test-client")
+        add_ticket(task)
+
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 1),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.get_head_branch",
+            lambda _client: None,  # detached HEAD
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.check_main_ff_safety",
+            lambda _client, **_kw: "detached",
+        )
+
+        emitted: list[str] = []
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
+
+        assert result.spawned == 0
+        tick_events = read_events(
+            consumer="test-auto-ff-detached-detail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DETACHED
+        detached_warns = [ln for ln in emitted if "detached" in ln]
+        assert detached_warns, f"no detached WARN emitted: {emitted}"
+        warn = detached_warns[0]
+        assert "checkout" in warn
 
 
 # ---------------------------------------------------------------------------
