@@ -6,13 +6,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-07-06
+
+**Observability sprint Phase 4 (RFC 0007 W2 push + deprecation) — sprint
+close.** Zero-latency PR signal via GitHub-webhook push, latch-style
+escalation for the silent repeated-skip classes, release tagging automated,
+`cw orchestrate watch` formally deprecated. RFC 0008 (orchestrator push
+channel) accepted as the follow-on design.
+
+### Added
+
+- **GitHub webhook push producer** (#930, #1005): `.github/workflows/pr-events.yml`
+  POSTs `merged` / `ci_failed` / `review_received` wire events to
+  `POST /pr-event` through an operator-run relay tunnel; the server verifies
+  an HMAC signature (`CW_PR_EVENTS_HMAC_SECRET` env, `X-Cw-Signature:
+  sha256=…`, fail-open with a startup warning when unset) and routes pushed
+  observations through the same persist/diff/emit path as the poll layer
+  (shared `apply_pr_state_observation` extracted from `pr_hydrate`) — push and
+  poll dedupe against the same persisted `pr_state`, with a TOCTOU re-read
+  fix from review. `COMMENTED` reviews emit without mutating
+  `review_decision`; `mergeable` stays poll-only; unmatched PRs no-op.
+  Runbook §10 documents the tunnel as operator infrastructure and the
+  poll-covers-push-down degradation contract.
+- **Consecutive-skip escalation counters** (#996, #1006, closes #974):
+  per-client `consecutive_freshness_blocks` (override store) and per-session
+  `consecutive_salvage_skips` (state schema v12) — latch semantics (one
+  `session.needs_attention` per streak at threshold 5, reset on recovery),
+  new `paused_status` values `freshness_gate_blocked` /
+  `salvage_skip_escalated`, and a client-header attention badge on `cw board`
+  so client-scoped signals are actually visible (the #940 silent freeze now
+  pages the board within 5 ticks).
+- **Tag-on-release-merge workflow** (#997, #1004): `chore(release): vX.Y.Z`
+  commits landing on main are tagged and get a GitHub Release with the
+  matching CHANGELOG section automatically — idempotent, version
+  cross-checked against pyproject.toml, never force-moves a tag. This release
+  is the first to use it.
+
 ### Deprecated
 
-- **`cw orchestrate watch`** (RFC 0007 Phase 4): prints a deprecation
-  notice to stderr on every invocation before launching the board as
-  today. `cw orchestrate watch` has been board-backed since #986
-  (v1.12.0); removal targeted for the release after v1.14.0. Use
-  `cw board` instead. `cw watch` (the flat table) is unaffected.
+- **`cw orchestrate watch`** (#995, #998): prints a deprecation notice to
+  stderr on every invocation before launching the board. Board-backed since
+  #986 (v1.12.0); removal targeted for the release after v1.14.0. Use
+  `cw board`. `cw watch` (the flat table) is unaffected.
+
+### Documentation
+
+- **RFC 0008 — orchestrator push channel** (#999): transition/liveness
+  producers + server-side operator attention filter; implementation tickets
+  #1000-#1003.
 
 ## [1.13.0] — 2026-07-05
 
