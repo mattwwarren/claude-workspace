@@ -77,6 +77,30 @@ def _reset_channel_state() -> Generator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _no_real_poller_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neuter _run_poller for every test in this file.
+
+    ``_start_poller()`` -- called internally by ``make_app()`` (exercised by
+    ``TestHandlePostAckQueueChannel``, ``TestMakeAppQueueEvents``, and this
+    ticket's ``TestOperatorRouteOrdering``), and directly by
+    ``TestStartPollerConfigValidation`` -- spawns a REAL daemon thread whose
+    target loops forever on ``POLL_INTERVAL_SECONDS``. No test in this file
+    needs that thread to actually run: ``TestPollerTickIsolation`` and
+    ``TestStartPollerConfigValidation`` exercise ``_poller_tick``/
+    ``_start_poller`` directly and synchronously; every other test only cares
+    about the ASGI app's routes or the ``_poller_started`` guard boolean.
+
+    Left real, a leaked thread outlives its own test (daemon threads are
+    never joined) and keeps calling ``_poller_tick`` -- now including the
+    #1002 operator bridge's full orchestrator-inbox re-scan on every tick --
+    against whatever tmp path the CURRENTLY running test has monkeypatched.
+    Confirmed: with this fixture absent, a full `pytest tests/ -x -q` run
+    hung with runaway CPU/memory many tests later, in test_config.py.
+    """
+    monkeypatch.setattr(_server_mod, "_run_poller", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_operator_channel_state() -> Generator[None]:
     """Reset the operator channel's own subscriber/cursor/offset state.
 
@@ -1370,24 +1394,16 @@ class TestStartPollerConfigValidation:
             _server_mod._start_poller()
         assert _server_mod._poller_started[0] is False
 
-    def test_valid_config_starts_poller(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Why: _start_poller spawns a REAL daemon thread whose target loops
-        # every POLL_INTERVAL_SECONDS. Left running for real, it outlives this
-        # test and can race broadcast()/subscribe() calls in later tests
-        # (confirmed: an earlier draft of this test leaked a live poller
-        # thread that corrupted TestSubscriberRegistry in a full-suite run).
-        # Neuter the thread's target so .start() spawns a thread that exits
-        # immediately, without touching the global threading.Thread class.
-        monkeypatch.setattr(_server_mod, "_run_poller", lambda: None)
+    def test_valid_config_starts_poller(self) -> None:
+        # _run_poller is neutered file-wide by the _no_real_poller_thread
+        # autouse fixture, so .start() below spawns a thread that exits
+        # immediately rather than looping for real.
         _server_mod._start_poller()
         assert _server_mod._poller_started[0] is True
 
-    def test_revalidates_on_every_call_even_when_already_started(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_revalidates_on_every_call_even_when_already_started(self) -> None:
         from cw.config import orchestrator_config_file
 
-        monkeypatch.setattr(_server_mod, "_run_poller", lambda: None)
         _server_mod._start_poller()
         assert _server_mod._poller_started[0] is True
 
