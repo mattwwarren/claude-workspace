@@ -896,3 +896,108 @@ class TestConsecutiveSkipLatches:
             workspace_path=Path("/tmp/acme"),
         )
         assert session.consecutive_salvage_skips == 0
+
+
+class TestOperatorChannelForward:
+    """RFC 0008 W3 (#1002): operator-attention forward-set config surface."""
+
+    def test_default_event_types_match_rfc_defaults(self) -> None:
+        from cw.models import OperatorChannelForward
+
+        forward = OperatorChannelForward()
+        assert forward.event_types == frozenset(
+            {
+                OrchestratorEventType.TASK_TRANSITION,
+                OrchestratorEventType.TASK_DELETED,
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                OrchestratorEventType.PR_REGISTERED,
+                OrchestratorEventType.PR_CI_FAILED,
+                OrchestratorEventType.PR_REVIEW_RECEIVED,
+                OrchestratorEventType.PR_MERGEABLE,
+                OrchestratorEventType.PR_MERGED,
+                OrchestratorEventType.SESSION_LIVENESS_CHANGED,
+            }
+        )
+
+    def test_default_task_transition_statuses(self) -> None:
+        from cw.models import OperatorChannelForward
+
+        forward = OperatorChannelForward()
+        assert forward.task_transition_statuses == frozenset(
+            {
+                QueueItemStatus.BLOCKED_ON_USER,
+                QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+                QueueItemStatus.COMPLETED,
+                QueueItemStatus.FAILED,
+                QueueItemStatus.CANCELLED,
+            }
+        )
+
+    def test_default_liveness_min_bucket_is_stale_30m(self) -> None:
+        from cw.models import LivenessBucket, OperatorChannelForward
+
+        assert OperatorChannelForward().liveness_min_bucket == LivenessBucket.STALE_30M
+
+    def test_rejects_invalid_event_type(self) -> None:
+        import pydantic
+
+        from cw.models import OperatorChannelForward
+
+        with pytest.raises(pydantic.ValidationError):
+            OperatorChannelForward(event_types=frozenset({"bogus.event"}))  # type: ignore[arg-type]
+
+    def test_rejects_invalid_task_transition_status(self) -> None:
+        import pydantic
+
+        from cw.models import OperatorChannelForward
+
+        with pytest.raises(pydantic.ValidationError):
+            OperatorChannelForward(
+                task_transition_statuses=frozenset({"bogus_status"})  # type: ignore[arg-type]
+            )
+
+    def test_rejects_invalid_liveness_min_bucket(self) -> None:
+        import pydantic
+
+        from cw.models import OperatorChannelForward
+
+        with pytest.raises(pydantic.ValidationError):
+            OperatorChannelForward(liveness_min_bucket="bogus_bucket")  # type: ignore[arg-type]
+
+    def test_override_narrows_event_types(self) -> None:
+        from cw.models import OperatorChannelForward
+
+        forward = OperatorChannelForward(
+            event_types=frozenset({OrchestratorEventType.TASK_DELETED})
+        )
+        assert forward.event_types == frozenset({OrchestratorEventType.TASK_DELETED})
+
+    def test_override_widens_task_transition_statuses(self) -> None:
+        from cw.models import OperatorChannelForward
+
+        forward = OperatorChannelForward(
+            task_transition_statuses=frozenset(
+                {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
+            )
+        )
+        assert QueueItemStatus.PENDING in forward.task_transition_statuses
+        assert QueueItemStatus.RUNNING in forward.task_transition_statuses
+
+    def test_orchestrator_config_operator_channel_forward_default(self) -> None:
+        from cw.models import OperatorChannelForward
+
+        assert OrchestratorConfig().operator_channel_forward == OperatorChannelForward()
+
+    def test_orchestrator_config_accepts_operator_channel_forward_override(
+        self,
+    ) -> None:
+        from cw.models import OperatorChannelForward
+
+        cfg = OrchestratorConfig(
+            operator_channel_forward=OperatorChannelForward(
+                event_types=frozenset({OrchestratorEventType.TASK_DELETED})
+            )
+        )
+        assert cfg.operator_channel_forward.event_types == frozenset(
+            {OrchestratorEventType.TASK_DELETED}
+        )
