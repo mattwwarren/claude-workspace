@@ -146,9 +146,7 @@ class TestAdmitsFilterEngine:
             OrchestratorEventType.PR_MERGED,
         ],
     )
-    def test_pr_star_always_admitted(
-        self, event_type: OrchestratorEventType
-    ) -> None:
+    def test_pr_star_always_admitted(self, event_type: OrchestratorEventType) -> None:
         event = OrchestratorEvent(type=event_type, payload={})
         assert _admits(event, self._default_forward()) is True
 
@@ -257,7 +255,9 @@ class TestSubscriberRegistry:
     def test_unsubscribe_removes_from_registry(self, tmp_events_dir: Path) -> None:
         q = subscribe()
         unsubscribe(q)
-        broadcast({"notification_type": _NOTIFICATION_TYPE, "message": "m", "title": "t"})
+        broadcast(
+            {"notification_type": _NOTIFICATION_TYPE, "message": "m", "title": "t"}
+        )
         assert q.empty()
 
     def test_broadcast_sends_to_all_queues(self, tmp_events_dir: Path) -> None:
@@ -345,7 +345,11 @@ class TestPollAndForwardOperatorChannel:
     def test_dropped_event_is_not_broadcast(self, tmp_events_dir: Path) -> None:
         record_event(
             OrchestratorEventType.TASK_TRANSITION,
-            payload={"ticket_id": "T-2", "old_status": "pending", "new_status": "running"},
+            payload={
+                "ticket_id": "T-2",
+                "old_status": "pending",
+                "new_status": "running",
+            },
             correlation_id="T-2",
         )
         q = subscribe()
@@ -360,7 +364,11 @@ class TestPollAndForwardOperatorChannel:
         """Cursor must advance past ALL read events, not just admitted ones."""
         record_event(
             OrchestratorEventType.TASK_TRANSITION,
-            payload={"ticket_id": "T-3", "old_status": "pending", "new_status": "running"},
+            payload={
+                "ticket_id": "T-3",
+                "old_status": "pending",
+                "new_status": "running",
+            },
         )
         config = OrchestratorConfig()
         poll_and_forward_operator_channel(config)

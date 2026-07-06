@@ -1298,14 +1298,13 @@ class TestPollerTickIsolation:
         from cw.dev_queue import save_dev_queue
 
         save_dev_queue(
-            DevQueueStore(
-                tasks=[_make_task("T-iso", "acme", QueueItemStatus.PENDING)]
-            )
+            DevQueueStore(tasks=[_make_task("T-iso", "acme", QueueItemStatus.PENDING)])
         )
         save_state(CwState())
 
         def _raise(*_a: object, **_kw: object) -> None:
-            raise RuntimeError("bridge boom")
+            msg = "bridge boom"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr(
             "cw.cw_operator_events.poll_and_forward_operator_channel", _raise
@@ -1327,7 +1326,8 @@ class TestPollerTickIsolation:
         import logging
 
         def _raise(*_a: object, **_kw: object) -> None:
-            raise RuntimeError("bridge boom")
+            msg = "bridge boom"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr(
             "cw.cw_operator_events.poll_and_forward_operator_channel", _raise
