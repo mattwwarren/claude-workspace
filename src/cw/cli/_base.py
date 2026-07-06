@@ -149,6 +149,15 @@ def _resolve_client(client_name: str | None) -> ClientConfig:
     return next(iter(clients.values()))
 
 
+def _resolve_default_branch_and_workspace(client_name: str) -> tuple[str, str]:
+    """Look up a client's default branch and workspace path, with a bare fallback."""
+    try:
+        cc = get_client(client_name)
+        return cc.default_branch, str(cc.workspace_path)
+    except CwError:
+        return "main", client_name
+
+
 def _emit_freshness_subline(
     client_name: str,
     tick_freshness_detail: str | None,
@@ -157,13 +166,7 @@ def _emit_freshness_subline(
 ) -> None:
     """Print a freshness-block subline under a stale tick entry."""
     if tick_freshness_detail == FRESHNESS_NON_MAIN_HEAD:
-        try:
-            cc = get_client(client_name)
-            default_br: str = cc.default_branch
-            ws_path: str = str(cc.workspace_path)
-        except CwError:
-            default_br = "main"
-            ws_path = client_name
+        default_br, ws_path = _resolve_default_branch_and_workspace(client_name)
         branch_str = tick_blocked_branch or "(detached)"
         click.echo(
             f"  ⚠ base checkout HEAD on '{branch_str}'"
@@ -179,13 +182,7 @@ def _emit_freshness_subline(
             " then auto-ff will retry"
         )
     elif tick_freshness_detail == FRESHNESS_MAIN_DETACHED:
-        try:
-            cc = get_client(client_name)
-            default_br = cc.default_branch
-            ws_path = str(cc.workspace_path)
-        except CwError:
-            default_br = "main"
-            ws_path = client_name
+        default_br, ws_path = _resolve_default_branch_and_workspace(client_name)
         click.echo(
             f"  ⚠ {client_name}: main checkout has a detached HEAD —"
             f" run: git -C {ws_path} checkout {default_br}"
