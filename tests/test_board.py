@@ -726,6 +726,58 @@ class TestBadges:
         output = _render(_state_with_task(events=[mismatched]))
         assert "ATTN" not in output
 
+    def test_client_scoped_freshness_block_shows_client_header_badge(self) -> None:
+        """A freshness-block SESSION_NEEDS_ATTENTION (client set, no ticket_id)
+        surfaces via the client-header badge, not the per-ticket row badge."""
+        freshness_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"client": "acme", "ticket_id": None},
+            created_at=NOW,
+        )
+        output = _render(_state_with_task(client="acme", events=[freshness_event]))
+        assert "[ATTN]" in output
+
+    def test_client_scoped_badge_does_not_bleed_to_unrelated_client(self) -> None:
+        """A freshness-block event scoped to one client must not badge another
+        client's panel (no false-positive badge bleed)."""
+        task_acme = TicketTask(
+            ticket_id="MW-200",
+            client="acme",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+            lane="default",
+            created_at=NOW,
+        )
+        task_other = TicketTask(
+            ticket_id="MW-201",
+            client="other-client",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.PLAN,
+            lane="default",
+            created_at=NOW,
+        )
+        freshness_event = OrchestratorEvent(
+            type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            payload={"client": "acme", "ticket_id": None},
+            created_at=NOW,
+        )
+        state = BoardState(
+            cw_state=CwState(),
+            dev_queue=DevQueueStore(tasks=[task_acme, task_other]),
+            clients={},
+            config=OrchestratorConfig(),
+            now=NOW,
+            events=[freshness_event],
+        )
+        output = _render(state)
+
+        acme_idx = output.index("acme / default")
+        other_idx = output.index("other-client / default")
+        acme_title_end = output.index("\n", acme_idx)
+        other_title_end = output.index("\n", other_idx)
+        assert "[ATTN]" in output[acme_idx:acme_title_end]
+        assert "[ATTN]" not in output[other_idx:other_title_end]
+
 
 class TestAggregateFeed:
     def test_consecutive_ticks_collapse(self) -> None:
