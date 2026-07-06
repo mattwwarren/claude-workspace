@@ -156,6 +156,12 @@ ignore = [
 "src/cw/cmux.py" = [
     "S108",   # Unix socket paths in /tmp are part of the cmux protocol spec
 ]
+"src/cw/pr_events_auth.py" = [
+    # CW_PR_EVENTS_HMAC_SECRET_ENV holds an ENV VAR NAME string, not a secret
+    # value -- bandit's heuristic flags any "*_ENV"/"*SECRET*" name assigned a
+    # string literal regardless of what the literal actually is.
+    "S105",
+]
 # Channel/server modules defer mcp/starlette/uvicorn/anyio imports by design so
 # the core CLI does not hard-require the optional [mcp] extra. Inline imports
 # (PLC0415) are the sanctioned mechanism here, not a workaround.

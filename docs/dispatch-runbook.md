@@ -617,3 +617,99 @@ subsequent reconcile tick. It is NOT automatically cleared — the above manual
 steps are the operator self-service reset. Do not re-dispatch the ticket.
 
 Related issues: #812 (finalize-blocked detection), #816 (tombstone hardening).
+
+---
+
+## 10. Push producer: webhook relay (GitHub #930)
+
+`cw_pr_events_server`'s `POST /pr-event` endpoint accepts pushed PR lifecycle
+events from GitHub Actions, feeding the exact same
+`apply_pr_state_observation` persist/diff/emit path as the poll producer
+(`cw.pr_hydrate.hydrate_pr_states`, #929). This is a **latency** optimization
+on top of the poll producer, not a replacement for it — see the degradation
+contract in §10.4.
+
+### 10.1 Relay tunnel setup (operator infrastructure, not code)
+
+`cw_pr_events_server` binds to `127.0.0.1` by default and is not meant to be
+exposed directly to the internet. GitHub Actions runners cannot reach a
+`127.0.0.1` endpoint on your machine, so a relay tunnel is required between
+the Actions workflow and wherever `cw pr-channel serve` is actually running.
+Two options, either works — this repo does not prescribe or automate either:
+
+- **[smee.io](https://smee.io)**: create a channel at smee.io, run
+  `smee --url <channel-url> --target http://127.0.0.1:8788/pr-event` on the
+  machine running `cw pr-channel serve`, and set the smee channel URL as the
+  `CW_PR_EVENTS_RELAY_URL` repo variable.
+- **[cloudflared](https://github.com/cloudflare/cloudflared)**: run
+  `cloudflared tunnel --url http://127.0.0.1:8788` (quick tunnel, no account
+  needed for testing) or a named tunnel for a stable URL, and set the
+  resulting `https://*.trycloudflare.com` (or your custom domain) URL as
+  `CW_PR_EVENTS_RELAY_URL`.
+
+Either way, the relay's job is just to forward POST bodies unmodified from
+the public internet to the local `/pr-event` endpoint — it does not need to
+understand the payload shape.
+
+### 10.2 Secret wiring
+
+**Set `CW_PR_EVENTS_HMAC_SECRET` on the server BEFORE provisioning the relay
+tunnel from §10.1.** Standing up the tunnel first, even briefly, opens an
+unauthenticated internet-facing window (see the blast-radius note below).
+
+Two repo-level settings gate the workflow (`.github/workflows/pr-events.yml`):
+
+- **`CW_PR_EVENTS_RELAY_URL`** (repo **variable**, not secret — it's a URL,
+  not sensitive): the relay's public ingress URL from §10.1. The workflow's
+  post-event job is entirely skipped (`if: vars.CW_PR_EVENTS_RELAY_URL !=
+  ''`) when this is unset — repos that haven't provisioned a relay simply
+  keep relying on the poll producer.
+- **`CW_PR_EVENTS_HMAC_SECRET`** (repo **secret**): shared secret for
+  request signing. Set it identically as:
+  - a GitHub Actions repo secret (`gh secret set CW_PR_EVENTS_HMAC_SECRET`),
+    consumed by the workflow to compute the `X-Cw-Signature` header, and
+  - an environment variable on the machine running `cw pr-channel serve`
+    (`export CW_PR_EVENTS_HMAC_SECRET=...` before `serve()` starts), consumed
+    by `cw.pr_events_auth.verify_signature` to validate incoming requests.
+
+  If `CW_PR_EVENTS_HMAC_SECRET` is unset server-side, `/pr-event` accepts
+  **unsigned** requests (pre-#930 behavior) and `serve()` logs a startup
+  warning ("accepts unsigned requests") so the unauthenticated posture is
+  visible in the server logs, not silent. **Blast radius of running
+  unsigned behind a public tunnel**: any POST reaching the relay can mutate
+  `pr_state` for *any* `(repo, pr_number)` currently tracked across *all*
+  clients in `dev_queue.json`, with no rate limiting or origin check beyond
+  JSON shape. Relaying this endpoint over the open internet without the
+  secret set is not recommended.
+- **Fork PRs cannot authenticate.** `pull_request`/`pull_request_review`
+  events triggered by a fork-originated PR run with no access to repo
+  secrets, so `secrets.CW_PR_EVENTS_HMAC_SECRET` resolves empty and the
+  workflow falls through to the unsigned `curl` branch (a `::warning::`
+  annotation on the run, nothing louder). This is a known, accepted
+  limitation (#930) — not worked around via `pull_request_target`, since
+  that would expose secrets to untrusted fork checkout content — because
+  this pipeline's tracked PRs are same-repo/bot-originated, never forks.
+  The poll producer still covers fork PRs on its own schedule regardless.
+
+### 10.3 Config
+
+No `cw` config file changes are needed — `OrchestratorConfig` does not gain a
+relay-URL field (nothing host-side reads it; the relay URL lives only in the
+GitHub Actions repo variable above). The only host-side state is the
+`CW_PR_EVENTS_HMAC_SECRET` environment variable read at request-handling
+time.
+
+### 10.4 Degradation contract
+
+If the relay tunnel goes down, GitHub Actions runs fail to reach
+`/pr-event`, or `CW_PR_EVENTS_RELAY_URL` is simply unset: **no events are
+silently lost.** The poll producer (`hydrate_pr_states`, gated by
+`pr_hydration_interval_seconds`, default 150s) independently re-derives the
+same PR state on its own schedule and emits the same `pr.*` events through
+the same `apply_pr_state_observation` chokepoint — push is a latency
+optimization on top of an already-complete poll producer, not a dependency
+of it. The one caveat: a `COMMENTED` review's `pr.review_received` event
+(#930's carve-out — it never mutates `pr_state`, so the poll producer's diff
+has nothing to compare against) is push-only; if the relay is down when a
+`COMMENTED` review lands, that specific notification is missed, though the
+review itself remains visible via `gh pr view`.

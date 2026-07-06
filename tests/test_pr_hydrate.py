@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+import pytest
 from freezegun import freeze_time
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -19,13 +20,14 @@ from cw.models import (
 from cw.pr_hydrate import (
     _compute_attention_state,
     _diff_transitions,
+    _overlay_push_observation,
     _parse_pr_url,
+    _resolve_task_by_pr_ref,
     _summarize_status_checks,
+    apply_pr_state_observation,
     hydrate_pr_states,
+    observe_pushed_event,
 )
-
-if TYPE_CHECKING:
-    import pytest
 
 _URL = "https://github.com/acme/widgets/pull/42"
 
@@ -732,3 +734,433 @@ class TestMultiTaskRouting:
         assert state_acme.merge_state_status == "CLEAN"
         assert state_widgets.merge_state_status == "DIRTY"
         assert state_widgets.review_decision == ""
+
+
+class TestApplyPrStateObservation:
+    """apply_pr_state_observation (#930): the shared persist/diff/emit chokepoint
+    extracted from _persist_and_emit's per-task body. Both the poll producer
+    (_persist_and_emit) and the push producer (observe_pushed_event) route
+    through this so they share transition-dedup semantics.
+    """
+
+    def test_persists_state_and_emits_transition(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=_pr_state(state="OPEN"),
+                    )
+                ]
+            )
+        )
+        apply_pr_state_observation(
+            client="acme", ticket_id="GEN-1", new_state=_pr_state(state="MERGED")
+        )
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.state == "MERGED"
+        events = read_events(event_types=[OrchestratorEventType.PR_MERGED])
+        assert len(events) == 1
+        assert events[0].correlation_id == "GEN-1"
+        assert events[0].payload == {
+            "repo": "acme/widgets",
+            "pr_number": 42,
+            "ticket_id": "GEN-1",
+            "client": "acme",
+        }
+
+    def test_no_matching_task_is_noop(self) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        apply_pr_state_observation(
+            client="acme", ticket_id="GEN-404", new_state=_pr_state(state="MERGED")
+        )
+        assert read_events(event_types=[OrchestratorEventType.PR_MERGED]) == []
+
+    def test_dedup_against_persisted_baseline(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=_pr_state(review_decision="APPROVED"),
+                    )
+                ]
+            )
+        )
+        apply_pr_state_observation(
+            client="acme",
+            ticket_id="GEN-1",
+            new_state=_pr_state(review_decision="APPROVED"),
+        )
+        assert read_events(event_types=[OrchestratorEventType.PR_REVIEW_RECEIVED]) == []
+
+    def test_unparseable_pr_url_still_persists_but_emits_nothing(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url="not-a-github-url",
+                        pr_state=_pr_state(state="OPEN"),
+                    )
+                ]
+            )
+        )
+        apply_pr_state_observation(
+            client="acme", ticket_id="GEN-1", new_state=_pr_state(state="MERGED")
+        )
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.state == "MERGED"
+        assert read_events(event_types=[OrchestratorEventType.PR_MERGED]) == []
+
+
+class TestResolveTaskByPrRef:
+    def test_finds_matching_task(self) -> None:
+        store = DevQueueStore(
+            tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
+        )
+        task = _resolve_task_by_pr_ref(store, repo="acme/widgets", pr_number=42)
+        assert task is not None
+        assert task.ticket_id == "GEN-1"
+
+    def test_returns_none_when_no_task_matches(self) -> None:
+        store = DevQueueStore(
+            tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
+        )
+        assert (
+            _resolve_task_by_pr_ref(store, repo="acme/widgets", pr_number=999) is None
+        )
+
+    def test_returns_none_for_empty_store(self) -> None:
+        empty_store = DevQueueStore(tasks=[])
+        assert (
+            _resolve_task_by_pr_ref(empty_store, repo="acme/widgets", pr_number=42)
+            is None
+        )
+
+    def test_returns_first_match_when_multiple_tasks_share_pr(self) -> None:
+        store = DevQueueStore(
+            tasks=[
+                TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL),
+                TicketTask(ticket_id="GEN-2", client="acme", pr_url=_URL),
+            ]
+        )
+        task = _resolve_task_by_pr_ref(store, repo="acme/widgets", pr_number=42)
+        assert task is not None
+        assert task.ticket_id == "GEN-1"
+
+
+class TestOverlayPushObservation:
+    """_overlay_push_observation (#930): pure overlay builder for one pushed
+    wire event onto a prior (or absent) PrState baseline.
+    """
+
+    def test_merged_sets_state(self) -> None:
+        old = _pr_state(state="OPEN")
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGED, payload={}
+        )
+        assert new.state == "MERGED"
+
+    def test_ci_failed_sets_ci_ok_false_and_failing_checks(self) -> None:
+        old = _pr_state(ci_ok=True, failing_checks=[])
+        new = _overlay_push_observation(
+            old,
+            event_type=OrchestratorEventType.PR_CI_FAILED,
+            payload={"failing_checks": ["lint"]},
+        )
+        assert new.ci_ok is False
+        assert new.failing_checks == ["lint"]
+
+    def test_ci_failed_missing_failing_checks_key_leaves_field_untouched(self) -> None:
+        old = _pr_state(ci_ok=True, failing_checks=["stale"])
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_CI_FAILED, payload={}
+        )
+        assert new.ci_ok is False
+        assert new.failing_checks == ["stale"]
+
+    def test_review_received_sets_review_decision(self) -> None:
+        old = _pr_state(review_decision="REVIEW_REQUIRED")
+        new = _overlay_push_observation(
+            old,
+            event_type=OrchestratorEventType.PR_REVIEW_RECEIVED,
+            payload={"review_decision": "APPROVED"},
+        )
+        assert new.review_decision == "APPROVED"
+
+    def test_review_received_missing_key_leaves_field_untouched(self) -> None:
+        old = _pr_state(review_decision="REVIEW_REQUIRED")
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_REVIEW_RECEIVED, payload={}
+        )
+        assert new.review_decision == "REVIEW_REQUIRED"
+
+    def test_mergeable_sets_merge_state_status(self) -> None:
+        old = _pr_state(merge_state_status="BLOCKED")
+        new = _overlay_push_observation(
+            old,
+            event_type=OrchestratorEventType.PR_MERGEABLE,
+            payload={"merge_state_status": "CLEAN"},
+        )
+        assert new.merge_state_status == "CLEAN"
+
+    def test_mergeable_missing_key_leaves_field_untouched(self) -> None:
+        old = _pr_state(merge_state_status="BLOCKED")
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGEABLE, payload={}
+        )
+        assert new.merge_state_status == "BLOCKED"
+
+    def test_no_prior_baseline_starts_fresh(self) -> None:
+        new = _overlay_push_observation(
+            None, event_type=OrchestratorEventType.PR_MERGED, payload={}
+        )
+        assert new.state == "MERGED"
+        assert new.ci_ok is True  # PrState() default, untouched
+
+    def test_carries_forward_untouched_fields(self) -> None:
+        old = _pr_state(
+            state="OPEN",
+            ci_ok=False,
+            failing_checks=["x"],
+            review_decision="APPROVED",
+        )
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGED, payload={}
+        )
+        assert new.state == "MERGED"
+        assert new.ci_ok is False
+        assert new.failing_checks == ["x"]
+        assert new.review_decision == "APPROVED"
+
+    def test_hydrated_at_refreshed(self) -> None:
+        old = _pr_state(hydrated_at=datetime(2000, 1, 1, tzinfo=UTC))
+        with freeze_time("2026-07-06 12:00:00"):
+            new = _overlay_push_observation(
+                old, event_type=OrchestratorEventType.PR_MERGED, payload={}
+            )
+        assert new.hydrated_at == datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
+
+
+class TestObservePushedEvent:
+    """observe_pushed_event (#930): the public webhook-push entrypoint —
+    resolves (repo, pr_number) to a task, builds the overlay, and routes it
+    through apply_pr_state_observation (the same chokepoint the poll producer
+    uses).
+    """
+
+    def test_matching_transition_emits_and_persists(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=_pr_state(state="OPEN"),
+                    )
+                ]
+            )
+        )
+        observe_pushed_event(
+            repo="acme/widgets", pr_number=42, wire_event_type="merged", payload={}
+        )
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.state == "MERGED"
+        events = read_events(event_types=[OrchestratorEventType.PR_MERGED])
+        assert len(events) == 1
+
+    def test_no_state_change_is_deduped(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=_pr_state(merge_state_status="CLEAN"),
+                    )
+                ]
+            )
+        )
+        observe_pushed_event(
+            repo="acme/widgets",
+            pr_number=42,
+            wire_event_type="mergeable",
+            payload={"merge_state_status": "CLEAN"},
+        )
+        assert read_events(event_types=[OrchestratorEventType.PR_MERGEABLE]) == []
+
+    def test_unmatched_repo_pr_is_silent_noop(self) -> None:
+        save_dev_queue(DevQueueStore(tasks=[]))
+        observe_pushed_event(
+            repo="ghost/repo", pr_number=1, wire_event_type="merged", payload={}
+        )
+        assert read_events(event_types=[OrchestratorEventType.PR_MERGED]) == []
+
+    def test_commented_review_emits_without_mutating_pr_state(self) -> None:
+        """Operator correction #2 (#930): COMMENTED reviews are not a
+        merge-gate signal, so they mutate NOTHING on PrState — but still emit
+        pr.review_received unconditionally.
+        """
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=_pr_state(review_decision="APPROVED"),
+                    )
+                ]
+            )
+        )
+        observe_pushed_event(
+            repo="acme/widgets",
+            pr_number=42,
+            wire_event_type="review_received",
+            payload={"review_decision": "COMMENTED"},
+        )
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.review_decision == "APPROVED"  # untouched
+
+        events = read_events(event_types=[OrchestratorEventType.PR_REVIEW_RECEIVED])
+        assert len(events) == 1
+        assert events[0].payload["review_decision"] == "COMMENTED"
+        assert events[0].correlation_id == "GEN-1"
+
+    def test_commented_review_redelivery_double_emits(self) -> None:
+        """Unlike the other 3 wire event types (which dedup via persisted
+        PrState), a redelivered/duplicate COMMENTED webhook double-emits —
+        there is no PrState field change to compare, so diff-based dedup
+        cannot apply (#930 operator correction #2).
+        """
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
+            )
+        )
+        for _ in range(2):
+            observe_pushed_event(
+                repo="acme/widgets",
+                pr_number=42,
+                wire_event_type="review_received",
+                payload={"review_decision": "COMMENTED"},
+            )
+        events = read_events(event_types=[OrchestratorEventType.PR_REVIEW_RECEIVED])
+        assert len(events) == 2
+
+    def test_unknown_wire_event_type_is_noop(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
+            )
+        )
+        observe_pushed_event(
+            repo="acme/widgets", pr_number=42, wire_event_type="bogus", payload={}
+        )
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is None
+
+    def test_uses_overlay_not_prebuilt_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """observe_pushed_event must call apply_pr_state_observation with
+        overlay=, never a pre-built new_state= — passing new_state would mean
+        the overlay was computed from a pre-lock snapshot, reintroducing the
+        #930 TOCTOU lost-update bug (a concurrent writer between this
+        function's initial task lookup and apply_pr_state_observation's lock
+        acquisition would be silently clobbered).
+        """
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)]
+            )
+        )
+        captured: dict[str, Any] = {}
+
+        def _fake_apply(**kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        monkeypatch.setattr("cw.pr_hydrate.apply_pr_state_observation", _fake_apply)
+        observe_pushed_event(
+            repo="acme/widgets", pr_number=42, wire_event_type="merged", payload={}
+        )
+        assert captured["client"] == "acme"
+        assert captured["ticket_id"] == "GEN-1"
+        assert callable(captured["overlay"])
+        assert "new_state" not in captured
+
+
+class TestApplyPrStateObservationOverlayFreshness:
+    """apply_pr_state_observation's *overlay* callable must be invoked with
+    the task state re-read INSIDE dev_queue_lock(), never a snapshot the
+    caller captured earlier (#930 fix for observe_pushed_event's original
+    TOCTOU lost-update bug: the push path used to build its full replacement
+    PrState from an unlocked pre-lock read, then persist it unconditionally,
+    silently discarding any write that landed in the meantime).
+    """
+
+    def test_overlay_sees_freshest_persisted_state(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=_pr_state(ci_ok=True, review_decision=""),
+                    )
+                ]
+            )
+        )
+
+        # Simulate a concurrent writer (e.g. a poll tick, or another webhook
+        # delivery) landing a durable change to a DIFFERENT field.
+        apply_pr_state_observation(
+            client="acme",
+            ticket_id="GEN-1",
+            new_state=_pr_state(ci_ok=True, review_decision="APPROVED"),
+        )
+
+        def _overlay(old: PrState | None) -> PrState:
+            assert old is not None
+            # If apply_pr_state_observation regressed to invoking overlay()
+            # against a pre-lock snapshot instead of the freshly-locked
+            # state, this would observe the pre-concurrent-write value
+            # ("") instead of "APPROVED".
+            assert old.review_decision == "APPROVED", (
+                "overlay received a stale baseline, not the freshly-locked "
+                "state — the #930 TOCTOU fix has regressed"
+            )
+            return old.model_copy(update={"ci_ok": False})
+
+        apply_pr_state_observation(client="acme", ticket_id="GEN-1", overlay=_overlay)
+
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.ci_ok is False
+        assert task.pr_state.review_decision == "APPROVED"
+
+    def test_new_state_and_overlay_both_given_raises(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            apply_pr_state_observation(
+                client="acme",
+                ticket_id="GEN-1",
+                new_state=_pr_state(),
+                overlay=lambda _old: _pr_state(),
+            )
+
+    def test_neither_new_state_nor_overlay_given_raises(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            apply_pr_state_observation(client="acme", ticket_id="GEN-1")

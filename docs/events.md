@@ -93,53 +93,108 @@ A pull request has been registered with the orchestrator for monitoring.
 
 ### `pr.ci_failed`
 
-CI checks on a monitored PR failed.
+CI checks on a tracked PR transitioned from passing to failing.
+
+**Emitter:** `apply_pr_state_observation` in `cw.pr_hydrate` (shared by both
+the poll producer, `hydrate_pr_states`/`_persist_and_emit`, and the webhook
+push producer, `observe_pushed_event` — GitHub #929/#930).
+**Semantics:** Dedup'd against the task's persisted `pr_state.ci_ok` — fires
+once per true->false transition, not on every still-failing observation.
+`correlation_id` is the `ticket_id`.
 
 ```json
 {
-  "pr": 42,
   "repo": "owner/repo",
-  "run_id": "<str>",
-  "failed_checks": ["check-name"]
+  "pr_number": 42,
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "failing_checks": ["check-name"]
 }
 ```
 
 ### `pr.review_received`
 
-A review was submitted on a monitored PR.
+A review was submitted on a tracked PR.
+
+**Emitter:** `apply_pr_state_observation` in `cw.pr_hydrate` (poll + push,
+same chokepoint as `pr.ci_failed` above).
+**Semantics:** For `APPROVED`/`CHANGES_REQUESTED`, dedup'd against the
+task's persisted `pr_state.review_decision` — fires once per value change.
+`COMMENTED` reviews are a carve-out (#930): they are not a merge-gate signal,
+so they never mutate `pr_state` and are NOT deduped — every `COMMENTED`
+webhook delivery (including redelivered/duplicate ones) emits its own event.
+`correlation_id` is the `ticket_id`.
 
 ```json
 {
-  "pr": 42,
   "repo": "owner/repo",
-  "review_id": "<int>",
-  "state": "APPROVED|CHANGES_REQUESTED|COMMENTED",
-  "reviewer": "github-login"
+  "pr_number": 42,
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "review_decision": "APPROVED|CHANGES_REQUESTED|COMMENTED"
 }
 ```
 
 ### `pr.mergeable`
 
-A monitored PR is now mergeable (CI green, approvals met).
+A tracked PR entered a genuinely-mergeable `mergeStateStatus` (CI green,
+approvals met) from outside that set.
+
+**Emitter:** `apply_pr_state_observation` in `cw.pr_hydrate` (poll producer
+only today — see "Push producer" below).
+**Semantics:** Fires on ENTERING one of GitHub's mergeable statuses (`CLEAN`,
+`UNSTABLE`, `HAS_HOOKS`) from outside the set, not on merely leaving a
+blocking status into `UNKNOWN`/`DRAFT` (#929). `mergeStateStatus` is a
+deliberate camelCase passthrough of the raw `gh` field name, unlike every
+sibling payload key. `correlation_id` is the `ticket_id`.
 
 ```json
 {
-  "pr": 42,
-  "repo": "owner/repo"
+  "repo": "owner/repo",
+  "pr_number": 42,
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "mergeStateStatus": "CLEAN"
 }
 ```
 
 ### `pr.merged`
 
-A monitored PR was merged.
+A tracked PR was merged.
+
+**Emitter:** `apply_pr_state_observation` in `cw.pr_hydrate` (poll + push).
+**Semantics:** Fires on the first observation of a `MERGED` state (even if no
+prior baseline exists, so a re-discovered merge still retires the ticket).
+`correlation_id` is the `ticket_id`.
 
 ```json
 {
-  "pr": 42,
   "repo": "owner/repo",
-  "merge_sha": "<str>"
+  "pr_number": 42,
+  "ticket_id": "CW-42",
+  "client": "my-client"
 }
 ```
+
+### Push producer: GitHub webhook -> `/pr-event` (#930)
+
+The four `pr.*` events above are also fed by a **push** producer, not just
+the serve-tick poll pass: a per-repo GitHub Actions workflow
+(`.github/workflows/pr-events.yml`) posts mapped payloads to
+`cw_pr_events_server`'s `POST /pr-event` endpoint via an operator-provisioned
+relay tunnel (smee.io / cloudflared — see
+[`dispatch-runbook.md` §10](dispatch-runbook.md#10-push-producer-webhook-relay-github-930)).
+`cw.cw_pr_events_server.handle_post_pr_event` authenticates the request (HMAC
+via `X-Cw-Signature` when `CW_PR_EVENTS_HMAC_SECRET` is set), then calls
+`cw.pr_hydrate.observe_pushed_event`, which resolves the `(repo, pr_number)`
+to a dev-queue task and routes it through the exact same
+`apply_pr_state_observation` chokepoint the poll producer uses — so push and
+poll share transition-dedup and both land in `dev_queue.json` (`pr_state`)
+and `inbox.jsonl` (this same `pr.*` event stream). `pr.mergeable` has no
+webhook trigger wired (no GitHub event carries `mergeStateStatus` directly)
+— the poll producer covers it exclusively. Push is a latency optimization,
+not a replacement: if the relay is down, the poll producer still covers all
+four event types within `pr_hydration_interval_seconds`.
 
 ### `stage.entered`
 
