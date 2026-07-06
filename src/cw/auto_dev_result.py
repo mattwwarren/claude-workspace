@@ -22,9 +22,12 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -408,11 +411,28 @@ _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION = (
     "investigate; see #953)"
 )
 
+# Synthetic placeholder claim injected when a premises array survives the
+# empty-claim/premise filter with nothing left (issue #962, sibling of #953).
+# Parks the ticket visibly as a producer glitch rather than silently with no
+# usable claim to verify.
+_PREMISE_GLITCH_PLACEHOLDER_CLAIM = (
+    "(producer emitted no usable premise — operator: requeue or investigate; see #962)"
+)
+
 
 def _has_usable_question(item: dict[str, Any]) -> bool:
     """Return True iff *item* carries a non-empty, non-whitespace question string."""
     q = item.get("question")
     return isinstance(q, str) and bool(q.strip())
+
+
+def _has_usable_premise_text(item: dict[str, Any]) -> bool:
+    """Return True iff *item* carries non-empty text under 'claim' or 'premise'."""
+    for key in ("claim", "premise"):
+        v = item.get(key)
+        if isinstance(v, str) and v.strip():
+            return True
+    return False
 
 
 class AutoDevResult(BaseModel):
@@ -440,9 +460,13 @@ class AutoDevResult(BaseModel):
     next_actions: list[str] = Field(default_factory=list)
     # v4: populated when status is ambiguities_pending_resolution or
     # premises_pending_verification. Entry shapes are best-effort per §4.4 —
-    # keys tolerate producer-side name drift, EXCEPT `question`, which must be a
-    # non-empty, non-whitespace string when an item is present (issue #953,
-    # enforced by _reject_empty_question_ambiguities).
+    # keys tolerate producer-side name drift, EXCEPT `question` (for
+    # ambiguities), which must be a non-empty, non-whitespace string when an
+    # item is present (issue #953, enforced by
+    # _reject_empty_question_ambiguities), and the `claim`/`premise` union (for
+    # premises), at least one of which must be a non-empty, non-whitespace
+    # string when an item is present (issue #962, enforced by
+    # _reject_empty_claim_premises).
     ambiguities: list[dict[str, Any]] = Field(default_factory=list)
     premises: list[dict[str, Any]] = Field(default_factory=list)
     # Total USD cost for this auto-dev run. Optional — producers that don't
@@ -477,6 +501,31 @@ class AutoDevResult(BaseModel):
                     "carry a non-empty, non-whitespace question string. Drop the "
                     "empty item, or exit stage_complete if there is nothing to "
                     "ask (see #953)."
+                )
+                raise ValueError(msg)
+        return v
+
+    # Why: intentionally status-agnostic (fires on every model_validate, not
+    # only premises_pending_verification) per #953 pre-flight resolution #1
+    # (same rationale applied here, sibling of #953). A stray populated
+    # `premises` array with an empty-claim item on an unrelated status would
+    # now hard-fail as validation_failed instead of being silently ignored —
+    # accepted trade-off, mirroring the ambiguities validator above.
+    @field_validator("premises")
+    @classmethod
+    def _reject_empty_claim_premises(
+        cls, v: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        for idx, item in enumerate(v):
+            if not _has_usable_premise_text(item):
+                msg = (
+                    f"premises[{idx}] has no usable 'claim'/'premise' text "
+                    f"(got claim={item.get('claim')!r}, "
+                    f"premise={item.get('premise')!r}); "
+                    "every premise item must carry a non-empty, non-whitespace "
+                    "string under 'claim' or 'premise'. Drop the empty item, "
+                    "or exit stage_complete if there is nothing to verify "
+                    "(see #962)."
                 )
                 raise ValueError(msg)
         return v
@@ -1038,9 +1087,10 @@ def _coerce_empty_pending_array(
     """Inject a minimal placeholder for an empty ambiguities/premises array.
 
     Issue #430 case 1 — accept empty arrays at the parse boundary so the §4.4
-    A5 invariant does not turn producer drift into validation_failed. Callers
-    may pass a labeled *placeholder* (issue #953); premises passes nothing and
-    keeps the minimal ``[{}]`` default.
+    A5 invariant does not turn producer drift into validation_failed. Both
+    callers now pass a labeled *placeholder* (ambiguities: #953, premises:
+    #962) so an empty/missing array parks the ticket with a synthetic,
+    clearly-labeled item rather than a silent ``[{}]`` default.
     """
     if not payload.get(key):  # None or [] both need coercing
         _log.warning(
@@ -1054,28 +1104,56 @@ def _coerce_empty_pending_array(
         payload[key] = placeholder if placeholder is not None else [{}]
 
 
-def _filter_empty_question_ambiguities(payload: dict[str, Any]) -> None:
-    """Drop ambiguity items with an empty/missing question (issue #953).
+def _filter_empty_pending_items(
+    payload: dict[str, Any],
+    key: str,
+    predicate: Callable[[dict[str, Any]], bool],
+    empty_desc: str,
+    issue_ref: str,
+) -> None:
+    """Drop *key* items failing *predicate*, generalized across #953/#962.
 
     Non-dict items are left in place (isinstance guard) so they fail loudly
     at strict model_validate rather than being silently dropped.
     """
-    raw = payload.get("ambiguities")
+    raw = payload.get(key)
     if not isinstance(raw, list):
         return
-    filtered = [
-        item for item in raw if not isinstance(item, dict) or _has_usable_question(item)
-    ]
+    filtered = [item for item in raw if not isinstance(item, dict) or predicate(item)]
     if len(filtered) != len(raw):
         _log.warning(
-            "auto-dev: dropped %d ambiguity item(s) with empty/missing "
-            "'question' at parse boundary (ticket=%s, schema_version=%s); "
-            "see #953",
+            "auto-dev: dropped %d %s item(s) with %s at parse boundary "
+            "(ticket=%s, schema_version=%s); see %s",
             len(raw) - len(filtered),
+            key,
+            empty_desc,
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            issue_ref,
         )
-    payload["ambiguities"] = filtered
+    payload[key] = filtered
+
+
+def _filter_empty_question_ambiguities(payload: dict[str, Any]) -> None:
+    """Drop ambiguity items with an empty/missing question (issue #953)."""
+    _filter_empty_pending_items(
+        payload,
+        "ambiguities",
+        _has_usable_question,
+        "empty/missing 'question'",
+        "#953",
+    )
+
+
+def _filter_empty_claim_premises(payload: dict[str, Any]) -> None:
+    """Drop premise items with no usable claim/premise text (issue #962)."""
+    _filter_empty_pending_items(
+        payload,
+        "premises",
+        _has_usable_premise_text,
+        "no usable 'claim'/'premise' text",
+        "#962",
+    )
 
 
 def _coerce_blocked_next_actions(payload: dict[str, Any]) -> None:
@@ -1190,7 +1268,13 @@ def _normalize_payload(payload: dict[str, Any], raw_status: str) -> None:
             placeholder=[{"question": _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION}],
         )
     if raw_status == "premises_pending_verification":
-        _coerce_empty_pending_array(payload, "premises", raw_status)
+        _filter_empty_claim_premises(payload)
+        _coerce_empty_pending_array(
+            payload,
+            "premises",
+            raw_status,
+            placeholder=[{"claim": _PREMISE_GLITCH_PLACEHOLDER_CLAIM}],
+        )
     if raw_status == "blocked":
         _coerce_blocked_with_pr(payload)  # may change status to merge_pending
         if payload.get("status") == "blocked":

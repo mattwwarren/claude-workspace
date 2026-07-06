@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from cw.auto_dev_result import (
     _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION,
+    _PREMISE_GLITCH_PLACEHOLDER_CLAIM,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
     BLOCKER_REASON_VALIDATION_FAILED,
     PAUSED_FOR_USER_INPUT_STATUSES,
@@ -2401,6 +2402,129 @@ class TestCase953EmptyQuestionAmbiguitiesRejected:
         ]
         with pytest.raises(ValidationError, match=r"ambiguities\[0\]"):
             AutoDevResult.model_validate(p)
+
+
+# ---------------------------------------------------------------------------
+# Issue #962 — empty-claim/premise premise items ({claim: null, ...}, or a
+# `{}` item), sibling of #953 for `premises`. Alternate key shapes (`claim` vs
+# `premise`) are both accepted; an item must carry non-empty, non-whitespace
+# text under one of them. Dropped at the parse boundary, and if none survive,
+# coerced to a labeled synthetic placeholder that parks the ticket visibly as
+# a producer glitch. Strict model_validate rejects any residual empty item.
+# ---------------------------------------------------------------------------
+
+
+class TestCase962EmptyClaimPremisesRejected:
+    """Empty-claim/premise premise items are filtered / rejected (issue #962).
+
+    Sibling of #953: a producer can emit a premises array containing a single
+    fully-empty item (e.g. {}), and the sentinel would validate with nothing
+    for the operator to verify. The parse boundary now drops such items; if
+    none remain, a labeled placeholder is injected so the park is visibly a
+    producer glitch. Strict model_validate rejects the raw shape.
+    """
+
+    def test_exact_regression_payload_parks_with_labeled_placeholder(self) -> None:
+        """The exact regression payload ({}) parses to a labeled placeholder."""
+        p = _premises_pending_payload()
+        p["premises"] = [{}]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+        assert result.premises[0]["claim"] == _PREMISE_GLITCH_PLACEHOLDER_CLAIM
+
+    def test_exact_regression_payload_strict_rejects(self) -> None:
+        """Strict model_validate rejects the same raw empty-item shape."""
+        p = _premises_pending_payload()
+        p["premises"] = [{}]
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    def test_mixed_valid_and_empty_filters_to_valid_only(self) -> None:
+        """A mix of valid + empty items filters down to the valid ones."""
+        p = _premises_pending_payload()
+        p["premises"] = [
+            {"claim": "real one", "how_to_verify": "read the doc"},
+            {},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.premises) == 1
+        assert result.premises[0]["claim"] == "real one"
+
+    def test_whitespace_only_claim_strict_rejects(self) -> None:
+        """A whitespace-only claim is rejected by strict model_validate."""
+        p = _premises_pending_payload()
+        p["premises"] = [{"claim": "   "}]
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    def test_whitespace_only_claim_filtered_at_parse_boundary(self) -> None:
+        """A whitespace-only claim is filtered → labeled placeholder park."""
+        p = _premises_pending_payload()
+        p["premises"] = [{"claim": "   "}]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+        assert result.premises[0]["claim"] == _PREMISE_GLITCH_PLACEHOLDER_CLAIM
+
+    def test_whitespace_only_premise_strict_rejects(self) -> None:
+        """Alternate-key coverage: a whitespace-only `premise` is rejected too."""
+        p = _premises_pending_payload()
+        p["premises"] = [{"premise": "   "}]
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    def test_only_unrelated_keys_rejected(self) -> None:
+        """An item with neither `claim` nor `premise` at all is rejected."""
+        p = _premises_pending_payload()
+        p["premises"] = [{"verify_by": "read the doc"}]
+        with pytest.raises(ValidationError, match="premises"):
+            AutoDevResult.model_validate(p)
+
+    def test_placeholder_passes_strict_validation(self) -> None:
+        """The injected placeholder claim passes strict model_validate."""
+        p = _premises_pending_payload()
+        p["premises"] = [{"claim": _PREMISE_GLITCH_PLACEHOLDER_CLAIM}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_non_dict_item_survives_filter_and_fails_loudly(self) -> None:
+        """A non-dict item is left in place and fails strict validation."""
+        p = _premises_pending_payload()
+        p["premises"] = ["not-a-dict", {"claim": "real?"}]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED
+
+    def test_all_valid_list_untouched(self) -> None:
+        """No-op branch: an all-valid premises list is left unchanged."""
+        result = parse_stdout(_wrap_sentinel(_premises_pending_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.premises) == 1
+
+    def test_validator_message_names_offending_index(self) -> None:
+        """Field validator names the offending index in its error message."""
+        p = _premises_pending_payload()
+        p["premises"] = [{}]
+        with pytest.raises(ValidationError, match=r"premises\[0\]"):
+            AutoDevResult.model_validate(p)
+
+    def test_claim_populated_accepted(self) -> None:
+        """Positive coverage: a populated `claim` key is accepted."""
+        p = _premises_pending_payload()
+        p["premises"] = [{"claim": "the claim text"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
+
+    def test_premise_populated_accepted(self) -> None:
+        """Positive coverage: a populated `premise` key is accepted."""
+        p = _premises_pending_payload()
+        p["premises"] = [{"premise": "the premise text"}]
+        result = AutoDevResult.model_validate(p)
+        assert len(result.premises) == 1
 
 
 # ---------------------------------------------------------------------------

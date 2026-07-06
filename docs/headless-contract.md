@@ -284,6 +284,7 @@ Both `ambiguities_pending_resolution` and `premises_pending_verification` (§4.1
 - Both statuses prohibit `branch` (pre-branch, A4) and require `scope.lines_actual=null` (pre-impl, A4).
 - Both statuses require `schema_version >= 4` (A1).
 - Each ambiguity item's question must be a non-empty, non-whitespace string; empty-question items are filtered at the parse boundary, and an all-empty/missing array coerces to a labeled synthetic placeholder that parks the ticket visibly as a producer glitch (**A6**, #953).
+- Each premise item's claim (key `claim` or `premise`) must be a non-empty, non-whitespace string; empty-claim items are filtered at the parse boundary, and an all-empty/missing array coerces to a labeled synthetic placeholder that parks the ticket visibly as a producer glitch (**A7**, #962).
 
 **Consumer guidance:** Key off `result.status` directly — these are now canonical statuses. Route `user_resolve_ambiguities` / `user_verify_premises` via `next_actions`. The `ambiguities` and `premises` arrays hold the structured entries for human presentation.
 
@@ -434,6 +435,8 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 | 4 | Promoted `ambiguities_pending_resolution` and `premises_pending_verification` from §4.4 interim states (not in closed enum) to canonical `Status` values (§4.1). Added `ambiguities` and `premises` top-level fields with cross-field invariants (non-empty when corresponding status is set, §4.4). Added `user_resolve_ambiguities` and `user_verify_premises` to §4.3 vocabulary. v3-tagged payloads with either new status are rejected as `validation_failed`. Tracked in #191. |
 
 **Note (A6, #953):** Rejecting empty-question ambiguity items and coercing an empty/missing ambiguities array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (consistent with the #430 `_coerce_empty_pending_array` precedent).
+
+**Note (A7, #962):** Rejecting empty-claim/premise premise items and coercing an empty/missing premises array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (same precedent as A6/#953 and #430).
 
 **Bump required when:**
 - Any field is removed or renamed.
