@@ -839,7 +839,8 @@ class TestResolveTaskByPrRef:
         assert _resolve_task_by_pr_ref(store, "acme/widgets", 999) is None
 
     def test_returns_none_for_empty_store(self) -> None:
-        assert _resolve_task_by_pr_ref(DevQueueStore(tasks=[]), "acme/widgets", 42) is None
+        empty_store = DevQueueStore(tasks=[])
+        assert _resolve_task_by_pr_ref(empty_store, "acme/widgets", 42) is None
 
     def test_returns_first_match_when_multiple_tasks_share_pr(self) -> None:
         store = DevQueueStore(
@@ -888,7 +889,9 @@ class TestOverlayPushObservation:
 
     def test_review_received_missing_key_leaves_field_untouched(self) -> None:
         old = _pr_state(review_decision="REVIEW_REQUIRED")
-        new = _overlay_push_observation(old, OrchestratorEventType.PR_REVIEW_RECEIVED, {})
+        new = _overlay_push_observation(
+            old, OrchestratorEventType.PR_REVIEW_RECEIVED, {}
+        )
         assert new.review_decision == "REVIEW_REQUIRED"
 
     def test_mergeable_sets_merge_state_status(self) -> None:
