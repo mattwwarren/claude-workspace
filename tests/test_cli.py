@@ -5825,6 +5825,24 @@ class TestWatchCommand:
         assert called[0]["interval"] == 3
         assert called[0]["client_filter"] == "acme"
 
+    def test_orchestrate_watch_emits_deprecation_notice(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from cw.cli import main
+        from cw.cli import orchestrate as cli
+
+        called: list[dict[str, object]] = []
+        monkeypatch.setattr(cli, "run_board", lambda **kwargs: called.append(kwargs))
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "watch"])
+        assert result.exit_code == 0
+        assert "deprecated" in result.stderr
+        assert "cw board" in result.stderr
+        assert "next release" in result.stderr
+        assert called
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueRunQuiet
