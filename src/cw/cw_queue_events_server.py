@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
-from cw.models import QueueItemStatus, SessionStatus
+from cw.models import OrchestratorConfig, QueueItemStatus, SessionStatus
 
 if TYPE_CHECKING:
     from starlette.applications import Starlette
@@ -386,26 +386,49 @@ def _poll_once(old: QueueSnapshot) -> tuple[QueueSnapshot, list[dict[str, Any]]]
     return new_snap, events
 
 
+def _poller_tick(config: OrchestratorConfig) -> None:
+    """Run one poll tick: broadcast queue.* deltas, then bridge to the operator channel.
+
+    The operator-bridge call sits in its OWN try/except, OUTSIDE ``_file_lock``
+    and after the queue.* broadcast loop above, so a bug in the bridge can
+    never block or suppress the queue.* broadcasts that already fired
+    (RFC 0008 W3, #1002). Logs ``"operator-bridge error"`` -- distinct from
+    this function's own caller's ``"poller error"`` message -- so the two
+    failure modes are distinguishable in logs.
+    """
+    with _file_lock:
+        # Guard load→compute→save with _file_lock: prevents concurrent poll
+        # cycles from reading the same stale snapshot and emitting duplicate
+        # queue.* events (#433 fix 4).
+        current_snap = _load_snapshot()
+        new_snap, events = _poll_once(current_snap)
+        if events or (
+            new_snap.task_statuses != current_snap.task_statuses
+            or new_snap.session_statuses != current_snap.session_statuses
+        ):
+            _save_snapshot(new_snap)
+    for event in events:
+        broadcast(_build_queue_notification(event))
+
+    try:
+        from cw.cw_operator_events import poll_and_forward_operator_channel
+
+        poll_and_forward_operator_channel(config)
+    except Exception:
+        logger.exception("operator-bridge error")
+
+
 def _run_poller() -> None:
     """Background polling thread. Runs as daemon."""
     import time
 
+    from cw.config import load_orchestrator_config
+
     while True:
         time.sleep(POLL_INTERVAL_SECONDS)
         try:
-            # Guard load→compute→save with _file_lock: prevents concurrent poll
-            # cycles from reading the same stale snapshot and emitting duplicate
-            # queue.* events (#433 fix 4).
-            with _file_lock:
-                current_snap = _load_snapshot()
-                new_snap, events = _poll_once(current_snap)
-                if events or (
-                    new_snap.task_statuses != current_snap.task_statuses
-                    or new_snap.session_statuses != current_snap.session_statuses
-                ):
-                    _save_snapshot(new_snap)
-            for event in events:
-                broadcast(_build_queue_notification(event))
+            config = load_orchestrator_config()
+            _poller_tick(config)
         except Exception:
             logger.exception("poller error")
 
@@ -414,6 +437,14 @@ _poller_started: list[bool] = [False]
 
 
 def _start_poller() -> None:
+    from cw.config import load_orchestrator_config
+
+    # Fail-loud config validation (RFC 0008 W3, #1002): re-validated on EVERY
+    # call, including calls after the poller thread is already running -- the
+    # guard below only prevents re-spawning the thread, not re-validation. A
+    # malformed operator_channel_forward must crash `cw queue-channel serve`
+    # at startup rather than silently under-forward.
+    load_orchestrator_config()
     with _lock:
         if _poller_started[0]:
             return
@@ -474,8 +505,12 @@ def make_app() -> Starlette:
     from mcp.shared.message import SessionMessage
     from mcp.types import JSONRPCMessage, JSONRPCNotification
 
+    from cw.cw_operator_events import build_operator_routes
+
     mcp_server: Server[None, Any] = Server("cw-queue-events")
     sse = SseServerTransport("/messages")
+
+    operator_routes = build_operator_routes()
 
     _start_poller()
 
@@ -526,6 +561,10 @@ def make_app() -> Starlette:
 
     app = Starlette(
         routes=[
+            # Operator routes MUST be prepended: Starlette resolves routes by
+            # first match, and Mount("/sse", ...) below would otherwise
+            # prefix-swallow /sse/operator (RFC 0008 W3, #1002).
+            *operator_routes,
             Mount("/sse", app=_sse_asgi),
             Mount("/messages", app=sse.handle_post_message),
             Route("/ack", handle_post_ack, methods=["POST"]),
