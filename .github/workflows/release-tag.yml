@@ -1,0 +1,166 @@
+name: Release Tag
+
+# Tags a `chore(release): vX.Y.Z` commit on `main` and cuts the matching
+# GitHub Release, so the version-bump merge IS the release — no manual
+# post-merge tagging step.
+#
+# NOTE ON RELEASE-NOTES ASYMMETRY (operator-confirmed, not a bug):
+# A tag created by THIS workflow gets CHANGELOG-derived release notes (see
+# the "Extract CHANGELOG section" step below). `release.yml` already reacts
+# to any `push: tags: ['v*']` event and auto-creates a release with a fixed
+# install-instructions template; if a human ever pushes a matching tag by
+# hand instead of letting this workflow do it, that release still gets
+# `release.yml`'s fixed template, not CHANGELOG notes. These two notes
+# shapes are allowed to diverge — this is intentional, don't try to unify
+# them without discussing the tradeoff first. `release.yml` itself is left
+# completely unmodified by this workflow.
+#
+# Anti-recursion note: a tag pushed by this workflow's own GITHUB_TOKEN does
+# NOT retrigger `release.yml` a second time for the same event chain (GitHub's
+# documented behavior: workflow runs triggered by the default GITHUB_TOKEN do
+# not themselves trigger other workflow runs). `release.yml` still fires
+# normally off the tag push itself (tag pushes are not "workflow runs" and are
+# not subject to that suppression) — the "Check existing release" step below
+# exists only to guard the narrow race where a human manually pushes the same
+# tag around the same time.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: validate the full decision chain without creating a tag or release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Check commit subject for release version
+        id: guard
+        run: |
+          SUBJECT=$(git log -1 --pretty=%s)
+          echo "Commit subject: $SUBJECT"
+          if [[ "$SUBJECT" =~ ^chore\(release\):\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+            echo "Release commit detected for v${BASH_REMATCH[1]}"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+            echo "Not a release commit — skipping remaining steps."
+          fi
+
+      - name: Verify version matches pyproject.toml
+        if: steps.guard.outputs.match == 'true'
+        run: |
+          VERSION="${{ steps.guard.outputs.version }}"
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "$VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Commit subject version v$VERSION does not match pyproject.toml version $PYPROJECT_VERSION"
+            exit 1
+          fi
+          echo "Version verified: v$VERSION matches pyproject.toml"
+
+      - name: Check if tag already exists
+        id: tag
+        if: steps.guard.outputs.match == 'true'
+        run: |
+          VERSION="${{ steps.guard.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag v$VERSION already exists — skipping tag creation (idempotent re-run)."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: >
+          steps.guard.outputs.match == 'true' &&
+          steps.tag.outputs.exists == 'false' &&
+          inputs.dry_run != true
+        run: |
+          VERSION="${{ steps.guard.outputs.version }}"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Check if release already exists
+        id: release
+        if: steps.guard.outputs.match == 'true'
+        run: |
+          VERSION="${{ steps.guard.outputs.version }}"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release v$VERSION already exists — skipping release creation."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract CHANGELOG section
+        id: changelog
+        if: steps.guard.outputs.match == 'true'
+        run: |
+          VERSION="${{ steps.guard.outputs.version }}"
+          awk -v ver="$VERSION" '
+            BEGIN { found = 0; printing = 0 }
+            {
+              if ($0 ~ "^## \\[" ver "\\]") { printing = 1; found = 1; next }
+              else if (printing && $0 ~ /^## \[/) { printing = 0 }
+              if (printing) print
+            }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > "$RUNNER_TEMP/changelog-notes.txt"
+          EXTRACT_STATUS=$?
+          if [ "$EXTRACT_STATUS" -ne 0 ] || [ ! -s "$RUNNER_TEMP/changelog-notes.txt" ]; then
+            echo "::warning::No CHANGELOG section found for v$VERSION (expected heading '## [$VERSION] — <date>') — falling back to autogenerated release notes."
+            echo "notes_found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "notes_found=true" >> "$GITHUB_OUTPUT"
+            echo "CHANGELOG section extracted ($(wc -l < "$RUNNER_TEMP/changelog-notes.txt") lines)."
+          fi
+
+      - name: Create GitHub Release
+        if: >
+          steps.guard.outputs.match == 'true' &&
+          steps.release.outputs.exists == 'false' &&
+          inputs.dry_run != true
+        run: |
+          VERSION="${{ steps.guard.outputs.version }}"
+          if [ "${{ steps.changelog.outputs.notes_found }}" == "true" ]; then
+            gh release create "v$VERSION" --title "v$VERSION" --notes-file "$RUNNER_TEMP/changelog-notes.txt"
+          else
+            gh release create "v$VERSION" --title "v$VERSION" --generate-notes
+          fi
+
+      - name: Dry-run summary
+        if: inputs.dry_run == true
+        run: |
+          echo "=== Dry-run summary ==="
+          if [ "${{ steps.guard.outputs.match }}" == "true" ]; then
+            VERSION="${{ steps.guard.outputs.version }}"
+            echo "Commit subject matched release pattern for v$VERSION"
+            if [ "${{ steps.tag.outputs.exists }}" == "true" ]; then
+              echo "Tag v$VERSION already exists — would NOT create/push a tag"
+            else
+              echo "Tag v$VERSION does not exist — WOULD create and push tag v$VERSION"
+            fi
+            if [ "${{ steps.release.outputs.exists }}" == "true" ]; then
+              echo "Release v$VERSION already exists — would NOT create a release"
+            elif [ "${{ steps.changelog.outputs.notes_found }}" == "true" ]; then
+              echo "WOULD create release v$VERSION with CHANGELOG-derived notes"
+            else
+              echo "WOULD create release v$VERSION with autogenerated notes (no CHANGELOG section found)"
+            fi
+          else
+            echo "Commit subject did NOT match release pattern — no action would be taken"
+          fi
