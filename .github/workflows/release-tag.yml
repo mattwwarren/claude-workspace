@@ -56,7 +56,9 @@ jobs:
         run: |
           SUBJECT=$(git log -1 --pretty=%s)
           echo "Commit subject: $SUBJECT"
-          if [[ "$SUBJECT" =~ ^chore\(release\):\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          # Squash-merge appends the PR number to the subject ("chore(release): v1.14.0 (#1008)")
+          # — v1.14.0's run matched nothing and skipped every step. Tolerate the suffix.
+          if [[ "$SUBJECT" =~ ^chore\(release\):\ v([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
             echo "match=true" >> "$GITHUB_OUTPUT"
             echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
             echo "Release commit detected for v${BASH_REMATCH[1]}"
