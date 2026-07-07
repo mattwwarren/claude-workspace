@@ -19,6 +19,7 @@ from cw.cli import (
     maintenance,
     queues,
     session_inspect,
+    watchdog,
     worktree,
 )
 from cw.cli._base import (
@@ -92,5 +93,6 @@ __all__ = [
     "queues",
     "session_group",
     "session_inspect",
+    "watchdog",
     "worktree",
 ]
