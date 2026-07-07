@@ -22,13 +22,19 @@ from cw.reconcile.escalation import ESCALATION_PARK_MINUTES, run_escalation_swee
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
-# The 6 escalation-eligible (status, disposition) combos per the binding
+# The 7 escalation-eligible (status, disposition) combos per the binding
 # two-branch formula.
 _ELIGIBLE_COMBOS: list[tuple[QueueItemStatus, str | None]] = [
     (QueueItemStatus.BLOCKED_ON_USER, "ambiguities_pending_resolution"),
     (QueueItemStatus.BLOCKED_ON_USER, "plan_pending_approval"),
     (QueueItemStatus.BLOCKED_ON_USER, "review_pending_approval"),
     (QueueItemStatus.BLOCKED_ON_USER, "stalled_retry_cap_parked"),
+    # None: recipe 1 (false_park_requeue)'s null-disposition target (the
+    # idle-watchdog's silently-idle park) is ceiling-refusable exactly like
+    # stalled_retry_cap_parked — a ceiling-refused row here must also
+    # escalate, or it's a silent stuck row. Review follow-up, see
+    # cw.reconcile.escalation._ELIGIBLE_DISPOSITIONS.
+    (QueueItemStatus.BLOCKED_ON_USER, None),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, None),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, "signoff_gate"),
     (QueueItemStatus.FAILED, None),

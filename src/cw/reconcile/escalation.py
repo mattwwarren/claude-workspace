@@ -33,9 +33,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.reconcile._shared import _STALLED_CAP_PARKED_REASON
 
 # P1 (round-4 binding decision): a flat threshold, NOT per-stage. This is
 # distinct from park-marker-poison's OWN transcript-staleness check inside
@@ -45,19 +47,24 @@ from cw.models import OrchestratorEventType, QueueItemStatus
 ESCALATION_PARK_MINUTES = 45
 
 # Disposition branch: BLOCKED_ON_USER rows whose disposition is one of these
-# 4 gates. "premises_pending_verification" is DELIBERATELY EXCLUDED — it is
-# one of the ticket's named gates for approval purposes elsewhere, but was
+# gates. Built from the same source constants dev_queue.py/concierge.py
+# already use rather than re-typed literals, so the two can never silently
+# drift apart. "premises_pending_verification" is DELIBERATELY EXCLUDED — it
+# is one of the ticket's named gates for approval purposes elsewhere, but was
 # not included in the escalation-eligible formula per the binding round-4
 # correction; do not add it back without re-opening that decision.
-_ELIGIBLE_DISPOSITIONS: frozenset[str] = frozenset(
-    {
-        "ambiguities_pending_resolution",
-        "plan_pending_approval",
-        "review_pending_approval",
-        # Added per round-2 A1: a ceiling-refused concierge recovery is
-        # exactly the case that should surface to the operator.
-        "stalled_retry_cap_parked",
-    }
+#
+# `None` is included per review follow-up: recipe 1 (false_park_requeue in
+# cw.reconcile.concierge) treats a null-disposition BLOCKED_ON_USER row (the
+# idle-watchdog's silently-idle park) as ceiling-refusable exactly like
+# stalled_retry_cap_parked. Without it, a ceiling-refused null-disposition row
+# is invisible to both concierge and escalation — a silent stuck row, the
+# exact failure mode round-2's A1 added stalled_retry_cap_parked to kill. A1's
+# own reasoning ("a concierge-declined recovery... is the highest-value case
+# for surfacing to the operator") applies identically here.
+_ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
+    (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
+    | {_STALLED_CAP_PARKED_REASON, None}
 )
 
 # Status branch: disposition is irrelevant for these two statuses.
