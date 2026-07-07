@@ -303,16 +303,17 @@ def _resolve_cw_executable_path() -> str:
     """Absolute path of the running ``cw`` executable, for the unit's ExecStart.
 
     systemd user services / launchd agents do not inherit the login-shell PATH,
-    so a bare ``cw`` fails 203/EXEC (#1027). Resolution order (R1):
-    (1) ``Path(sys.argv[0]).resolve()`` when it is an existing file named ``cw``;
-    (2) else ``shutil.which(_CW_COMMAND_NAME)``. ``sys.executable`` is NOT used —
-    under a uv tool install it is the venv interpreter, not the ``cw`` shim.
-    R1's literal fallback triggers ("not absolute after resolution" / "invoked
-    via python -m") are implemented via a stricter proxy: argv[0] must resolve
-    to an existing file named ``cw``. An ``Environment=PATH=...`` line in the
-    unit file was considered and rejected — it has no equivalent on launchd's
-    ``ProgramArguments`` (no PATH-injection mechanism there), so absolute-path
-    resolution is simpler and gives Linux/macOS parity.
+    so a bare ``cw`` fails 203/EXEC (#1027). Resolution order: (1) prefer
+    ``Path(sys.argv[0]).resolve()`` when it points at an existing file named
+    ``cw``; (2) otherwise fall back to ``shutil.which(_CW_COMMAND_NAME)``. This
+    covers both cases where argv[0] isn't usable as-is — a relative or
+    non-``cw``-named argv[0] (e.g. a ``python -m`` invocation) falls straight
+    through to the ``which()`` lookup. ``sys.executable`` is NOT used — under a
+    uv tool install it is the venv interpreter, not the ``cw`` shim. An
+    ``Environment=PATH=...`` line in the unit file was considered and
+    rejected — it has no equivalent on launchd's ``ProgramArguments`` (no
+    PATH-injection mechanism there), so absolute-path resolution is simpler and
+    gives Linux/macOS parity.
     """
     argv0 = Path(sys.argv[0]).resolve()
     if argv0.is_file() and argv0.name == _CW_COMMAND_NAME:

@@ -454,5 +454,6 @@ class TestResolveCwExecutablePath:
         with pytest.raises(CwError) as exc_info:
             _resolve_cw_executable_path()
 
-        assert "cw" in str(exc_info.value)
+        assert "'cw' executable" in str(exc_info.value)
+        assert "/usr/bin/python3" in str(exc_info.value)
         assert "PATH" in str(exc_info.value)
