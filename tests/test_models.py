@@ -791,7 +791,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_9(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 9
+        assert DEV_QUEUE_SCHEMA_VERSION == 10
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -916,6 +916,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.PR_MERGEABLE,
                 OrchestratorEventType.PR_MERGED,
                 OrchestratorEventType.SESSION_LIVENESS_CHANGED,
+                OrchestratorEventType.OPERATOR_ESCALATION,
             }
         )
 
@@ -1001,3 +1002,60 @@ class TestOperatorChannelForward:
         assert cfg.operator_channel_forward.event_types == frozenset(
             {OrchestratorEventType.TASK_DELETED}
         )
+
+
+class TestConciergeAndEscalationModelSurface:
+    """RFC 0008 capstone (#1015): concierge + durable-escalation model surface."""
+
+    def test_ticket_task_escalation_fields_default_none(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.escalation_parked_at is None
+        assert task.escalation_fired_at is None
+
+    def test_ticket_task_carries_escalation_fields(self) -> None:
+        parked_at = datetime.now(UTC)
+        fired_at = datetime.now(UTC)
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            escalation_parked_at=parked_at,
+            escalation_fired_at=fired_at,
+        )
+        assert task.escalation_parked_at == parked_at
+        assert task.escalation_fired_at == fired_at
+
+    def test_orchestrator_event_type_includes_concierge_recovered(self) -> None:
+        assert OrchestratorEventType.CONCIERGE_RECOVERED == "concierge.recovered"
+
+    def test_orchestrator_event_type_includes_operator_escalation(self) -> None:
+        assert OrchestratorEventType.OPERATOR_ESCALATION == "operator.escalation"
+
+    def test_operator_escalation_in_default_forward_set(self) -> None:
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.OPERATOR_ESCALATION in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
+    def test_concierge_recovered_not_in_default_forward_set(self) -> None:
+        """CONCIERGE_RECOVERED is audit-trail only — deliberately NOT forwarded
+        to the operator channel by default (Q3)."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.CONCIERGE_RECOVERED
+            not in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
+    def test_orchestrator_config_concierge_enabled_defaults_false(self) -> None:
+        assert OrchestratorConfig().concierge_enabled is False
+
+    def test_orchestrator_config_concierge_enabled_accepts_true(self) -> None:
+        assert OrchestratorConfig(concierge_enabled=True).concierge_enabled is True
+
+    def test_orchestrator_config_concierge_recoveries_defaults_empty(self) -> None:
+        assert OrchestratorConfig().concierge_recoveries == {}
+
+    def test_orchestrator_config_concierge_recoveries_accepts_overrides(self) -> None:
+        cfg = OrchestratorConfig(concierge_recoveries={"false_park_requeue": False})
+        assert cfg.concierge_recoveries == {"false_park_requeue": False}
