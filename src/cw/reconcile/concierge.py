@@ -255,7 +255,12 @@ def _detect_false_park_candidates(
 
 
 def _act_on_false_park_candidates(candidates: list[ConciergeCandidate]) -> list[str]:
-    """Act phase for recipe 1: emit-then-requeue under dev_queue_lock."""
+    """Act phase for recipe 1: emit-then-requeue under dev_queue_lock.
+
+    ADR-0006: non-destructive. The only mutation is PENDING requeue of a row
+    the detect phase already proved is behind a dead session (roster-absent,
+    transcript flat) — no daemon is stopped, no worktree touched/removed.
+    """
     if not candidates:
         return []
     by_ticket = {c.ticket_id: c for c in candidates}
@@ -383,7 +388,17 @@ def _close_confirmed_dead_session(session_id: str, now: datetime) -> bool:
 def _act_on_park_marker_poison_candidates(
     candidates: list[ConciergeCandidate], *, now: datetime
 ) -> list[str]:
-    """Act phase for recipe 2: emit, close the dead session, then requeue."""
+    """Act phase for recipe 2: emit, close the dead session, then requeue.
+
+    ADR-0006: this is the recipe Q1 singled out as ADR-0006-adjacent ("poison-
+    loop recovery runs spawn close = daemon stop"), so the reasoning is spelled
+    out here rather than left to the module docstring alone. It stays
+    non-destructive because ``_close_confirmed_dead_session`` only flips the
+    status of a session the detect phase already proved dead (roster-absent +
+    consecutive_salvage_skips >= 1 + transcript stale 45m+) to COMPLETED/
+    CRASHED — it is bookkeeping on an already-gone session, not a live
+    ``spawn close`` that stops a running daemon. No worktree is touched.
+    """
     if not candidates:
         return []
     by_ticket = {c.ticket_id: c for c in candidates}
@@ -434,6 +449,19 @@ def _detect_cancelled_row_candidates(
     No attempt-ceiling gate (per the ticket's one-time reasoned omission —
     this recovers committed work, it is not a retry) and no ``attempts``
     increment on restore (A3): the next real claim increments as usual.
+
+    Why this also restores operator-initiated cancels, not just mechanical
+    ones: the ticket's own deliverable text names the target population as
+    "operator/spawn-close-produced `cancelled` rows with a live worktree +
+    committed work" — both sources are explicitly in scope by design. There is
+    deliberately no field distinguishing "operator meant to cancel this for
+    good" from "a mechanical process cancelled it in error": the ticket's
+    stated intent is that committed work should never be silently lost to
+    *any* cancel, of either origin. An operator who wants a ticket to stay
+    cancelled despite committed work should set
+    ``concierge_recoveries.cancelled_row_restore: false`` (Q7) or clear the
+    worktree; this was reviewed and confirmed against the ticket text as
+    intentional, not a defect.
     """
     candidates: list[ConciergeCandidate] = []
     for task in tasks:
@@ -462,7 +490,12 @@ def _detect_cancelled_row_candidates(
 
 
 def _act_on_cancelled_row_candidates(candidates: list[ConciergeCandidate]) -> list[str]:
-    """Act phase for recipe 3: emit-then-restore CANCELLED rows to PENDING."""
+    """Act phase for recipe 3: emit-then-restore CANCELLED rows to PENDING.
+
+    ADR-0006: non-destructive. Restoring to PENDING never touches the
+    worktree or stops any process — the detect phase already confirmed the
+    worktree exists and has committed work ahead of its base branch.
+    """
     if not candidates:
         return []
     by_ticket = {c.ticket_id: c for c in candidates}
