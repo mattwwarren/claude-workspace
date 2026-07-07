@@ -185,10 +185,12 @@ def _transcript_is_flat(
 # ---------------------------------------------------------------------------
 
 # Dispositions recipe 1 targets: the stalled watchdog's retry-cap park, or a
-# BLOCKED_ON_USER row with no disposition at all (e.g. idle-watchdog's
-# silently-idle park, which never stamps a task-level disposition — see
-# reconcile/idle.py's park_disposition_by_tid, sourced from an unset
-# ReapCandidate.paused_status).
+# BLOCKED_ON_USER row with no disposition at all. As of #976, every reconcile
+# park path (idle-watchdog's silently-idle park included) stamps a non-null
+# task-level disposition via reconcile/idle.py's park_disposition_by_tid,
+# sourced from ReapCandidate.paused_status — so `None` here now covers only
+# legacy pre-#976 rows and any park path this module doesn't itself produce,
+# not a documented "silently_idle parks as None" case.
 _FALSE_PARK_ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     {_STALLED_CAP_PARKED_REASON, None}
 )

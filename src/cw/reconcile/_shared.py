@@ -1027,6 +1027,7 @@ def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> boo
 def _apply_queue_mutations(
     mutations: dict[str, QueueItemStatus],
     clear_session_id: set[str],
+    disposition: str | None = None,
 ) -> list[str]:
     """Apply ticket-status mutations to the dev queue under dev_queue_lock.
 
@@ -1034,6 +1035,11 @@ def _apply_queue_mutations(
     *clear_session_id* is the subset of ticket_ids whose session_id should be
     set to None (only PENDING-routed tasks; BLOCKED_ON_USER tasks keep their
     session_id for operator traceability).
+    *disposition* is stamped on every mutated task via
+    ``transition_task_status`` — each call site passes a single reason string
+    appropriate to its own sweep (safe because each call's *mutations* dict is
+    built from that sweep's own homogeneous candidate population in one tick).
+    See GitHub #976.
 
     Returns the list of ticket_ids that were mutated.  Skips tasks that are
     not RUNNING (natural idempotency — a second call is a no-op).
@@ -1049,7 +1055,9 @@ def _apply_queue_mutations(
                 continue
             if task.ticket_id not in mutations:
                 continue
-            transition_task_status(task, mutations[task.ticket_id])
+            transition_task_status(
+                task, mutations[task.ticket_id], disposition=disposition
+            )
             if task.ticket_id in clear_session_id:
                 task.session_id = None
             mutated.append(task.ticket_id)

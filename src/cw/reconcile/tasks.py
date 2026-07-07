@@ -521,7 +521,11 @@ def park_terminal_sibling_tasks() -> list[str]:
                 # cleared regardless; reason is captured in SESSION_REAP_PROPOSED event.
                 transition_task_status(task, QueueItemStatus.CANCELLED)
             else:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=ReapReason.TERMINAL_SIBLING.value,
+                )
             task.session_id = None
             parked_ids.append(task.ticket_id)
             pending_events.append(

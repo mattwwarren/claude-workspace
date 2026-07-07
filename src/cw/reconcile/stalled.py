@@ -284,6 +284,7 @@ def _detect_stalled_candidates(
                     client=session.client,
                     stage=task.stage if task else DEFAULT_STAGE,
                     attempts=task.attempts if task else 0,
+                    paused_status=_STALLED_CAP_PARKED_REASON,
                 )
             )
             continue
@@ -345,7 +346,11 @@ def _route_stalled_by_policy(
         else:
             auto_candidates.append(c)
     if signal_mutations:
-        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+        _apply_queue_mutations(
+            signal_mutations,
+            clear_session_id=set(),
+            disposition=ReapReason.WALL_CLOCK_BUDGET.value,
+        )
     return auto_candidates
 
 
@@ -469,7 +474,11 @@ def _apply_stalled_queue_mutations(
                 merged_completed.append(task.ticket_id)
                 changed = True
             elif task.ticket_id in gh_blocked_tids:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=_GH_CHECK_BLOCKED_REASON,
+                )
                 task.session_id = None
                 changed = True
             elif task.ticket_id in park_disposition_by_tid:

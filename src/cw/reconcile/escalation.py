@@ -36,8 +36,8 @@ from datetime import UTC, datetime
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.models import OrchestratorEventType, QueueItemStatus
-from cw.reconcile._shared import _STALLED_CAP_PARKED_REASON
+from cw.models import OrchestratorEventType, QueueItemStatus, ReapReason
+from cw.reconcile._shared import _SILENTLY_IDLE_REASON, _STALLED_CAP_PARKED_REASON
 
 # P1 (round-4 binding decision): a flat threshold, NOT per-stage. This is
 # distinct from park-marker-poison's OWN transcript-staleness check inside
@@ -62,9 +62,24 @@ ESCALATION_PARK_MINUTES = 45
 # exact failure mode round-2's A1 added stalled_retry_cap_parked to kill. A1's
 # own reasoning ("a concierge-declined recovery... is the highest-value case
 # for surfacing to the operator") applies identically here.
+# #976: fixing the null-disposition park bug means idle.py's silently-idle
+# park now stamps `_SILENTLY_IDLE_REASON` instead of `None`, and the
+# stalled/idle/phantom SIGNAL_ONLY reroute + park paths now stamp
+# ReapReason.IDLE_STALL / WALL_CLOCK_BUDGET / PHANTOM_SURFACE instead of
+# leaving disposition null. Escalation eligibility must follow those
+# dispositions or escalation coverage regresses for those park classes —
+# a ceiling-refused row with one of these reasons is exactly the "silent
+# stuck row" case `None` was already included here to catch.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
-    | {_STALLED_CAP_PARKED_REASON, None}
+    | {
+        _STALLED_CAP_PARKED_REASON,
+        _SILENTLY_IDLE_REASON,
+        ReapReason.IDLE_STALL.value,
+        ReapReason.WALL_CLOCK_BUDGET.value,
+        ReapReason.PHANTOM_SURFACE.value,
+        None,
+    }
 )
 
 # Status branch: disposition is irrelevant for these two statuses.
