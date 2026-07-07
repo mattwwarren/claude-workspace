@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw._transcript import locate_transcript
 from cw._util import _iter_sentinel_text_blocks, claude_project_dir
@@ -685,11 +685,28 @@ def _parse_any_sentinel_from_transcript(
     return None
 
 
+class SentinelRouteOutcome(NamedTuple):
+    """Result of routing a sentinel through ``_apply_sentinel_to_task`` (#1019).
+
+    ``rescued`` is True iff a parked (non-RUNNING) task was rescued via the
+    #918 AutoDevResult arm. ``routed`` is False iff the shared staged-advance
+    guard (``_route_staged_decision``) refused the sentinel due to a
+    stage_reached/task.stage mismatch (#1019, the #986 incident) -- callers
+    (notably the phantom sweep's ``_apply_phantom_routed_mutations``) must not
+    complete/tear down the session when ``routed`` is False. A target-not-found
+    lookup miss has nothing to refuse, so it reports ``routed=True`` (the
+    caller's existing completion behavior for that case is unaffected).
+    """
+
+    rescued: bool
+    routed: bool
+
+
 def _apply_sentinel_to_task(
     ticket_id: str,
     cw_session_id: str,
     sentinel: AutoDevResult | BlockedResult,
-) -> bool:
+) -> SentinelRouteOutcome:
     """Update the matching dev-queue task based on the sentinel result.
 
     Shared by signal_stop (cli.py) and the ROUTE_EMITTED_SENTINEL reconcile
@@ -701,8 +718,8 @@ def _apply_sentinel_to_task(
     AWAITING_OPERATOR_SIGNOFF task that still carries this session_id (an
     idle-parked or signoff-parked session whose late Stop-hook sentinel
     finally arrived, #918, #990). A parked task retains its session_id (the
-    idle watchdog does not clear it), so the rescue can re-find it. Returns
-    ``True`` iff a parked task was rescued via the AutoDevResult arm.
+    idle watchdog does not clear it), so the rescue can re-find it. Returns a
+    ``SentinelRouteOutcome`` -- see its docstring for ``rescued``/``routed``.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -718,9 +735,10 @@ def _apply_sentinel_to_task(
                 target_status = task.status
                 break
         if target is None:
-            return False
+            return SentinelRouteOutcome(rescued=False, routed=True)
 
         rescued = False
+        routed = True
         mutated = True
         if isinstance(sentinel, AutoDevResult):
             # Delegate to the shared B2 staged advance decision so both the
@@ -734,13 +752,20 @@ def _apply_sentinel_to_task(
             clients = _deps.load_effective_clients()
             last_result = sentinel.model_dump(mode="json")
             if target_status == QueueItemStatus.RUNNING:
-                apply_staged_decision(target, sentinel.status, last_result, clients)
+                routed = apply_staged_decision(
+                    target, sentinel.status, last_result, clients
+                )
             else:
                 # #918: rescue an idle-parked (BLOCKED_ON_USER) task through the
                 # same assert-free routing core so it lands in exactly the state
                 # its RUNNING counterpart would.
-                _route_staged_decision(target, sentinel.status, last_result, clients)
-                rescued = True
+                routed = _route_staged_decision(
+                    target, sentinel.status, last_result, clients
+                )
+                rescued = routed
+            # #1019: a stage-mismatch refusal is a true no-op -- the routing
+            # core already left `target` untouched, but skip the write too.
+            mutated = routed
         elif target_status == QueueItemStatus.RUNNING:
             # BlockedResult on a live RUNNING task. A parked task falls through
             # to an implicit no-op — a BlockedResult carries no success signal,
@@ -754,7 +779,7 @@ def _apply_sentinel_to_task(
 
         if mutated:
             save_dev_queue(store)
-        return rescued
+        return SentinelRouteOutcome(rescued=rescued, routed=routed)
 
 
 def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -> None:

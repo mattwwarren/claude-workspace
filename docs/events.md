@@ -650,6 +650,43 @@ Added to the operator-channel's default forward set (unlike
 
 `correlation_id` is the `ticket_id`.
 
+### `sentinel.stage_mismatch`
+
+**Emitter:** `_route_staged_decision` (`cw.dispatch`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "session_id": "<str | null>",
+  "expected_stage": "harden | plan | impl | review | finalize",
+  "sentinel_stage_reached": "<str>"
+}
+```
+**Semantics:** GitHub #1019 (the #986 incident: a late/replayed sentinel from a
+previous leg was routed against whatever stage the row currently held).
+`_route_staged_decision` is the single advance authority shared by the
+consume path (`apply_staged_decision`) and reconcile's emitted-sentinel
+router (`_apply_sentinel_to_task`, including the #918 late-sentinel rescue
+arm) — the guard runs once there rather than being duplicated in either
+caller. `expected_stage` is `task.stage` at the moment of the check;
+`sentinel_stage_reached` is the sentinel's raw `stage_reached` value, mapped
+against `expected_stage` via `_STAGE_REACHED_TO_STAGE`. A `Stage.HARDEN` task
+always mismatches by construction — HARDEN has no legitimate
+`stage_reached` counterpart (RFC 0005 A1, dormant stage).
+
+A missing or `None` `stage_reached` (e.g. a `BlockedResult`-derived payload,
+which has no such field) bypasses the guard entirely and never fires this
+event — Rule 1-6 routing proceeds unchanged.
+
+On mismatch this is a true no-op: no status transition, and callers that
+gate on `_route_staged_decision`'s `False` return skip `save_dev_queue`
+entirely. The row stays in whatever status it holds (`RUNNING`,
+`BLOCKED_ON_USER`, or `AWAITING_OPERATOR_SIGNOFF`) and remains routable by
+the next legitimate sentinel or operator action.
+
+`correlation_id` is the `ticket_id`.
+
 ### `session.park_vetoed`
 
 **Emitter:** `_act_on_stalled_candidates` in `cw.reconcile.stalled`

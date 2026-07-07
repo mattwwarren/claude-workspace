@@ -686,7 +686,7 @@ def signal_stop() -> None:
         ):
             rescued = _apply_sentinel_to_task(
                 ticket_id_value, session.id, parsed_sentinel
-            )
+            ).rescued
 
         session.status = SessionStatus.COMPLETED
         session.completed_at = now

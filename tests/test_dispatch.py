@@ -2649,6 +2649,42 @@ class TestAccumulateTaskCost:
         store = load_dev_queue()
         assert store.tasks[0].total_cost_usd == pytest.approx(5.0)
 
+    def test_stage_mismatch_skips_cost_accumulation_and_completed_count(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """A refused stage-mismatch sentinel must not accumulate cost or count
+        toward ``completed`` (#1019, Pre-flight Resolution #4's true-no-op
+        contract) -- ``_apply_events_to_store`` is the consume-path caller of
+        ``apply_staged_decision`` and must honor its bool return like the
+        reconcile path already does.
+        """
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="s_mismatch1",
+            stage=Stage.REVIEW,
+            total_cost_usd=1.0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        self._make_session(
+            "s_mismatch1",
+            cost_usd=5.0,
+            last_result={"status": "stage_complete", "stage_reached": "stage2_impl"},
+        )
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-1", "session_id": "s_mismatch1"},
+        )
+        completed = consume_completed_sessions()
+
+        assert completed == 0
+        store = load_dev_queue()
+        t = store.tasks[0]
+        assert t.total_cost_usd == pytest.approx(1.0)
+        assert t.status == QueueItemStatus.RUNNING
+        assert t.stage == Stage.REVIEW
+
     def test_empty_string_session_id_is_not_treated_as_missing(
         self, tmp_dispatch_dirs: Path
     ) -> None:
@@ -5982,6 +6018,184 @@ class TestApplyStagedDecision:
             "last_result",
             "clients",
         ]
+
+    def test_matching_stage_reached_routes_normally(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """stage_reached matching task.stage → routes normally (positive
+        control, #1019)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("MATCH-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage3_review",
+        }
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+
+    def test_stage_mismatch_refuses_routing_no_transition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Stale IMPL sentinel against a REVIEW-stage task → refused,
+        untouched (#986/#1019).
+
+        Reproduces the #986 incident shape: a late/replayed sentinel from a
+        previous leg (stage_reached=stage2_impl) arrives against a task whose
+        row has already advanced to REVIEW. The guard must refuse to route it.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("MISMATCH-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage2_impl",
+        }
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.REVIEW
+
+    def test_stage_mismatch_emits_sentinel_stage_mismatch_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Stage mismatch emits SENTINEL_STAGE_MISMATCH with full payload (#1019)."""
+        from cw.dispatch import apply_staged_decision
+
+        captured = capture_events(
+            "cw.dispatch", OrchestratorEventType.SENTINEL_STAGE_MISMATCH
+        )
+
+        task = self._make_running_task("MISMATCH-EVT-1", stage=Stage.REVIEW)
+        task.session_id = "sess-mismatch-evt-1"
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage2_impl",
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert len(captured) == 1
+        _, payload, correlation_id = captured[0]
+        assert payload["ticket_id"] == "MISMATCH-EVT-1"
+        assert payload["client"] == "test-client"
+        assert payload["session_id"] == "sess-mismatch-evt-1"
+        assert payload["expected_stage"] == Stage.REVIEW
+        assert payload["sentinel_stage_reached"] == "stage2_impl"
+        assert correlation_id == "MISMATCH-EVT-1"
+
+    def test_missing_stage_reached_bypasses_guard(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """No stage_reached key in last_result → guard bypassed, routes
+        normally (#1019)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NOKEY-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {"status": "stage_complete"}
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+
+    def test_non_string_stage_reached_treated_as_mismatch(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Non-str, non-None stage_reached (malformed payload) → refused,
+        not a KeyError/TypeError (#1019 defensive branch)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("BADTYPE-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": 3,
+        }
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.REVIEW
+
+    def test_none_status_none_last_result_bypasses_guard(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """(None, None) → Rule 6 fallback unaffected by the stage-mismatch
+        guard (#1019)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("NONERESULT-1")
+        routed = apply_staged_decision(task, None, None, self._clients(tmp_path))
+
+        assert routed is True
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "abandoned"
+
+    def test_harden_stage_sentinel_always_mismatches(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """HARDEN-stage task + any populated stage_reached → refused by construction.
+
+        Stage.HARDEN has no legitimate stage_reached counterpart (RFC 0005 A1,
+        dormant stage) -- deliberately absent from _STAGE_REACHED_TO_STAGE, so
+        every one of the 7 canonical stage_reached values maps to PLAN/IMPL/
+        REVIEW/FINALIZE and never HARDEN (#1019).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HARDEN-1", stage=Stage.HARDEN)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage1_pre_flight",
+        }
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.HARDEN
+
+    def test_finalize_regress_returns_true_after_guard_refactor(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 5a's finalize-regress early return still reports routed=True (#1019).
+
+        Regression guard on the guard-refactor: the bare `return` inside Rule
+        5a became `return True` when _route_staged_decision was widened to
+        `-> bool`.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("REGRESS-TRUE-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4a_merge_gate",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
 
 
 # ---------------------------------------------------------------------------

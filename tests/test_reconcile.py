@@ -53,6 +53,7 @@ from cw.reconcile import (
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+    SentinelRouteOutcome,
     _act_on_local_harvest_candidates,
     _apply_sentinel_to_task,
     _claude_agents_json,
@@ -3150,6 +3151,81 @@ def test_reconcile_phantom_non_advance_sentinel_not_routed(
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-blocked")
     assert task.stage == Stage.IMPL
     assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_reconcile_phantom_stage_mismatch_does_not_orphan_task_or_complete_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale phantom-routed sentinel must not orphan the task or complete the
+    session (GitHub #1019, the #986 incident reproduced via the phantom path).
+
+    Same shape as ``test_reconcile_phantom_routes_stage_complete_advance_sentinel``
+    (a phantom worker's transcript carries a stage_complete/stage2_impl advance
+    sentinel), except the task's row has already advanced to REVIEW by the time
+    the late/replayed sentinel is discovered. Pre-#1019 this would silently
+    complete the session and leave the task's stage untouched but the session
+    torn down -- a task with no owning live session and no route recorded. The
+    guard must refuse: task stays exactly as it was, session is NOT completed,
+    and SENTINEL_STAGE_MISMATCH is emitted.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-mismatch"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        "salv-mismatch", worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
+    payload["ticket_id"] = "salv-mismatch"
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-mismatch", payload, surface_ref="gone-ref"
+    )
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-mismatch",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-mismatch",
+                    # Row already advanced past IMPL by the time this stale
+                    # IMPL-leg sentinel is discovered -- the #986 shape.
+                    stage=Stage.REVIEW,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        reconcile()
+
+    # Task untouched: still RUNNING at REVIEW, no disposition stamped.
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-mismatch")
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.RUNNING
+    assert task.disposition is None
+
+    # Session NOT completed/torn down -- the refusal must not orphan it.
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-mismatch")
+    assert reloaded.status != SessionStatus.COMPLETED
+
+    mismatch_events = read_events(
+        consumer="test-salv-mismatch-sentinel-stage-mismatch",
+        event_types=[OrchestratorEventType.SENTINEL_STAGE_MISMATCH],
+    )
+    assert any(e.payload.get("ticket_id") == "salv-mismatch" for e in mismatch_events)
 
 
 def test_idle_routes_stage_complete_advance_sentinel(
@@ -15313,6 +15389,12 @@ class TestRouteEmittedSentinel:
                         client="client-a",
                         status=QueueItemStatus.RUNNING,
                         session_id=ticket_id,
+                        # stage_reached=stage3_review in the payload above must
+                        # match the seeded task's stage -- otherwise #1019's
+                        # stage-mismatch guard refuses to route it (a task at
+                        # the default Stage.PLAN could never realistically
+                        # emit a review-stage sentinel).
+                        stage=Stage.REVIEW,
                     )
                 ]
             )
@@ -16238,7 +16320,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16258,7 +16340,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_shipped_salvage_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16277,7 +16359,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_no_op_salvage_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16301,7 +16383,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_blocked_autodev_payload(ticket_id))
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16332,7 +16414,7 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "status_unknown"
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16360,7 +16442,7 @@ class TestApplySentinelToTaskLateRescue:
         save_dev_queue(DevQueueStore(tasks=[task]))
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16414,7 +16496,7 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "validation_failed"
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16442,7 +16524,7 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "no_result_emitted"
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16469,7 +16551,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -16502,15 +16584,98 @@ class TestApplySentinelToTaskLateRescue:
         store = load_dev_queue()
         store.tasks[0].signoff = "operator"
         save_dev_queue(store)
-        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+        # stage_reached must match the seeded Stage.REVIEW task -- the shared
+        # _stage_complete_payload() fixture carries stage_reached=stage2_impl
+        # (IMPL), which would now be a stage-mismatch refusal under #1019's
+        # guard rather than exercising the #918 rescue arm's signoff re-park.
+        payload = _stage_complete_payload()
+        payload["stage_reached"] = "stage3_review"
+        sentinel = AutoDevResult.model_validate(payload)
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
         assert t.stage == Stage.REVIEW
         assert t.disposition == "signoff_gate"
+
+    def test_late_sentinel_stage_mismatch_refuses_rescue_reports_not_rescued(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A stale sentinel against a parked task refuses the #918 rescue (#1019).
+
+        Parked at REVIEW; the late sentinel carries stage_reached=stage2_impl
+        (a previous IMPL leg). The shared stage-mismatch guard refuses to route
+        it -- the task must stay untouched at REVIEW, and rescued must report
+        False (no rescue actually happened), not True.
+        """
+        ticket_id, session_id = "GH-1019-mismatch-parked", "sess-1019-mismatch-parked"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.REVIEW,
+        )
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.rescued is False
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.REVIEW
+        assert t.disposition is None
+
+    def test_running_task_stage_mismatch_returns_not_routed(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + mismatched sentinel → SentinelRouteOutcome(False, False) (#1019).
+
+        The task stays RUNNING (no status transition, no disposition stamp) --
+        a true no-op on the mismatch path, mirroring the parked-task refusal.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1019-mismatch-running", "sess-1019-mismatch-running"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.REVIEW,
+            scope_hint="small",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.rescued is False
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.RUNNING
+        assert t.stage == Stage.REVIEW
+        assert t.disposition is None
+
+    def test_apply_sentinel_to_task_target_none_returns_routed_true(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """No matching task found → SentinelRouteOutcome(rescued=False, routed=True).
+
+        Regression guard: a lookup miss has nothing to refuse, so `routed` must
+        stay True -- callers that gate session completion on `routed` (the
+        phantom sweep, #1019) must still complete the session in this case,
+        matching pre-#1019 behavior for an unmatched ticket_id/session_id pair.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(
+            "GH-1019-no-target", "sess-no-target", sentinel
+        )
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
 
 
 class TestVerifySupervisorSessionId:

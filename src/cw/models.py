@@ -289,6 +289,11 @@ class OrchestratorEventType(StrEnum):
     # one-shot fire when a gate has sat parked past ESCALATION_PARK_MINUTES.
     CONCIERGE_RECOVERED = "concierge.recovered"
     OPERATOR_ESCALATION = "operator.escalation"
+    # GitHub #1019 — sentinel/task stage-mismatch guard. Emitted by
+    # _route_staged_decision when a late/replayed sentinel's stage_reached
+    # does not match task.stage; the routing table refuses to advance the
+    # row in that case (true no-op — see cw.dispatch._STAGE_REACHED_TO_STAGE).
+    SENTINEL_STAGE_MISMATCH = "sentinel.stage_mismatch"
     # #976 — wall-clock-budget liveness veto. Emitted by the stalled sweep
     # instead of proceeding with a REVERT_TASK/park when the session's
     # freshly-classified liveness bucket is still LIVE despite the wall-clock
