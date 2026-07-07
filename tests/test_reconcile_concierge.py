@@ -17,6 +17,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
+    ReapReason,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -197,6 +198,31 @@ class TestRecipeFalseParkRequeue:
     def test_requeues_null_disposition_row(self, tmp_config_dir: Path) -> None:
         """A null-disposition BLOCKED_ON_USER row is also eligible."""
         task = _make_task(disposition=None, attempts=1)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+
+    @pytest.mark.parametrize(
+        "disposition",
+        [
+            ReapReason.WALL_CLOCK_BUDGET.value,
+            ReapReason.IDLE_STALL.value,
+            ReapReason.PHANTOM_SURFACE.value,
+        ],
+    )
+    def test_requeues_signal_only_reroute_disposition_row(
+        self, tmp_config_dir: Path, disposition: str
+    ) -> None:
+        """#976: SIGNAL_ONLY reroute dispositions (wall_clock_budget/idle_stall/
+        phantom_surface) used to land as disposition=None and were recoverable
+        via the None branch — recipe 1 must keep recovering this population now
+        that they carry a real disposition, or auto-recovery silently regresses."""
+        task = _make_task(disposition=disposition, attempts=1)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
 

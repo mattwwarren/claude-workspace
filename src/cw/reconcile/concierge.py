@@ -60,6 +60,7 @@ from cw.models import (
     LivenessBucket,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapReason,
     SessionStatus,
 )
 from cw.reconcile._shared import (
@@ -191,8 +192,24 @@ def _transcript_is_flat(
 # sourced from ReapCandidate.paused_status — so `None` here now covers only
 # legacy pre-#976 rows and any park path this module doesn't itself produce,
 # not a documented "silently_idle parks as None" case.
+#
+# #976: the SIGNAL_ONLY reroute-to-BLOCKED_ON_USER path (shared by the
+# stalled/idle/phantom sweeps via _apply_queue_mutations) used to leave
+# disposition=None on these rows — which is exactly the "no disposition at
+# all" case recipe 1's own docstring describes as in-scope. Now that the
+# reroute stamps a real disposition (ReapReason.WALL_CLOCK_BUDGET/IDLE_STALL/
+# PHANTOM_SURFACE), recipe 1 must keep tracking that population or these rows
+# silently stop being auto-recoverable — the exact regression escalation.py's
+# _ELIGIBLE_DISPOSITIONS extension (same ticket) was written to avoid for the
+# escalation consumer.
 _FALSE_PARK_ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
-    {_STALLED_CAP_PARKED_REASON, None}
+    {
+        _STALLED_CAP_PARKED_REASON,
+        ReapReason.IDLE_STALL.value,
+        ReapReason.WALL_CLOCK_BUDGET.value,
+        ReapReason.PHANTOM_SURFACE.value,
+        None,
+    }
 )
 
 # Session-level park markers (recipe 2's own domain — see _has_park_marker

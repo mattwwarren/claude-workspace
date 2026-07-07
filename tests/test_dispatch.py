@@ -5242,6 +5242,8 @@ class TestApplyStagedDecision:
 
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 1
+        assert task.session_id is None
 
     def test_stage_advance_unchecked_unknown_client_stamps_disposition(
         self, tmp_dispatch_dirs: Path
