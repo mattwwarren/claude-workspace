@@ -12,6 +12,7 @@ import pytest
 from cw.config import save_state, state_dir
 from cw.dev_queue import save_dev_queue
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import (
     CwState,
     DevQueueStore,
@@ -26,6 +27,7 @@ from cw.models import (
 )
 from cw.watchdog import (
     WatchdogStatus,
+    _resolve_cw_executable_path,
     generate_launchd_plist_text,
     generate_systemd_service_text,
     generate_systemd_timer_text,
@@ -263,13 +265,20 @@ class TestInstallUninstallStatusLinux:
         monkeypatch.setattr("cw.watchdog.platform.system", lambda: "Linux")
         xdg = tmp_config_dir / "xdg-config"
         monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+        monkeypatch.setattr("cw.watchdog.sys.argv", ["pytest"])
+        monkeypatch.setattr(
+            "cw.watchdog.shutil.which", lambda _name: "/usr/local/bin/cw"
+        )
 
         paths = install()
 
         assert paths == [systemd_service_path(), systemd_timer_path()]
         for path in paths:
             assert path.exists()
-        assert "ExecStart=cw watchdog tick" in systemd_service_path().read_text()
+        assert (
+            "ExecStart=/usr/local/bin/cw watchdog tick"
+            in systemd_service_path().read_text()
+        )
         assert "OnUnitActiveSec=15min" in systemd_timer_path().read_text()
 
     def test_respects_xdg_config_home(
@@ -339,6 +348,10 @@ class TestInstallUninstallStatusMacos:
     ) -> None:
         monkeypatch.setattr("cw.watchdog.platform.system", lambda: "Darwin")
         monkeypatch.setattr("cw.watchdog.Path.home", lambda: tmp_config_dir)
+        monkeypatch.setattr("cw.watchdog.sys.argv", ["pytest"])
+        monkeypatch.setattr(
+            "cw.watchdog.shutil.which", lambda _name: "/usr/local/bin/cw"
+        )
 
         paths = install()
 
@@ -347,6 +360,7 @@ class TestInstallUninstallStatusMacos:
         text = launchd_plist_path().read_text()
         assert "com.cw.watchdog" in text
         assert "<integer>900</integer>" in text
+        assert "<string>/usr/local/bin/cw</string>" in text
 
     def test_plist_path_under_library_launchagents(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -373,10 +387,10 @@ class TestInstallUninstallStatusMacos:
 
 class TestUnitFileTextGeneration:
     def test_systemd_service_text_contains_expected_fields(self) -> None:
-        text = generate_systemd_service_text()
+        text = generate_systemd_service_text("/usr/local/bin/cw")
         assert "[Service]" in text
         assert "Type=oneshot" in text
-        assert "ExecStart=cw watchdog tick" in text
+        assert "ExecStart=/usr/local/bin/cw watchdog tick" in text
 
     def test_systemd_timer_text_contains_expected_fields(self) -> None:
         text = generate_systemd_timer_text()
@@ -386,8 +400,59 @@ class TestUnitFileTextGeneration:
         assert "WantedBy=timers.target" in text
 
     def test_launchd_plist_text_is_valid_xml_shape(self) -> None:
-        text = generate_launchd_plist_text()
+        text = generate_launchd_plist_text("/usr/local/bin/cw")
         assert text.startswith('<?xml version="1.0"')
         assert "<key>Label</key>" in text
         assert "<string>com.cw.watchdog</string>" in text
         assert "<key>StartInterval</key>" in text
+        assert "        <string>/usr/local/bin/cw</string>" in text
+
+
+class TestResolveCwExecutablePath:
+    def test_prefers_argv0_when_it_names_cw(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cw_file = tmp_path / "cw"
+        cw_file.write_text("#!/bin/sh\n")
+        monkeypatch.setattr("cw.watchdog.sys.argv", [str(cw_file)])
+        monkeypatch.setattr(
+            "cw.watchdog.shutil.which", lambda _name: "/should/not/be/used"
+        )
+
+        result = _resolve_cw_executable_path()
+
+        assert result == str(cw_file.resolve())
+
+    def test_falls_back_to_which_when_argv0_not_cw(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.watchdog.sys.argv", ["/usr/bin/python3"])
+        monkeypatch.setattr("cw.watchdog.shutil.which", lambda _name: "/opt/bin/cw")
+
+        result = _resolve_cw_executable_path()
+
+        assert result == "/opt/bin/cw"
+
+    def test_falls_back_to_which_on_python_m_invocation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.watchdog.sys.argv", ["/home/u/.venv/lib/cw/cli/__main__.py"]
+        )
+        monkeypatch.setattr("cw.watchdog.shutil.which", lambda _name: "/opt/bin/cw")
+
+        result = _resolve_cw_executable_path()
+
+        assert result == "/opt/bin/cw"
+
+    def test_raises_when_neither_resolves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.watchdog.sys.argv", ["/usr/bin/python3"])
+        monkeypatch.setattr("cw.watchdog.shutil.which", lambda _name: None)
+
+        with pytest.raises(CwError) as exc_info:
+            _resolve_cw_executable_path()
+
+        assert "cw" in str(exc_info.value)
+        assert "PATH" in str(exc_info.value)
