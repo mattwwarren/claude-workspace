@@ -19053,3 +19053,53 @@ def test_detect_main_drift_swallows_git_error(
         "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
     }
     assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
+
+
+class TestConciergeAndEscalationWiring:
+    """RFC 0008 capstone (#1015): wiring-only — both new sweeps run exactly
+    once per reconcile() tick, in both the no-phantoms and phantom branches
+    of _reconcile_locked."""
+
+    def test_no_phantoms_branch_calls_both_sweeps_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        concierge_mock = MagicMock(return_value=[])
+        escalation_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_concierge_recoveries", concierge_mock
+        )
+        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", escalation_mock)
+
+        reconcile()
+
+        concierge_mock.assert_called_once()
+        escalation_mock.assert_called_once()
+
+    def test_phantom_branch_calls_both_sweeps_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A phantom (missing-surface) DAEMON session routes through the
+        phantom-handling tail of _reconcile_locked — the sweeps must still
+        fire exactly once there too."""
+        state = CwState(sessions=[_mk_session("phantom-1", "missing-ref")])
+        save_state(state)
+        # A non-empty (but unrelated) roster keeps `native_live` non-empty so
+        # _looks_like_daemon_outage's "roster looks totally dead" guard
+        # doesn't short-circuit the tick before reaching either sweep.
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "unrelated1"}],
+        )
+        concierge_mock = MagicMock(return_value=[])
+        escalation_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_concierge_recoveries", concierge_mock
+        )
+        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", escalation_mock)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == ["phantom-1"]
+        concierge_mock.assert_called_once()
+        escalation_mock.assert_called_once()

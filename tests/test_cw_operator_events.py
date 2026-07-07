@@ -150,6 +150,21 @@ class TestAdmitsFilterEngine:
         event = OrchestratorEvent(type=event_type, payload={})
         assert _admits(event, self._default_forward()) is True
 
+    def test_operator_escalation_admitted_by_default(self) -> None:
+        """OPERATOR_ESCALATION forwards unconditionally (#1015, Q3)."""
+        event = OrchestratorEvent(
+            type=OrchestratorEventType.OPERATOR_ESCALATION, payload={}
+        )
+        assert _admits(event, self._default_forward()) is True
+
+    def test_concierge_recovered_not_admitted_by_default(self) -> None:
+        """CONCIERGE_RECOVERED is audit-trail only — NOT in the default
+        forward set (#1015, Q3)."""
+        event = OrchestratorEvent(
+            type=OrchestratorEventType.CONCIERGE_RECOVERED, payload={}
+        )
+        assert _admits(event, self._default_forward()) is False
+
     def test_liveness_changed_admitted_at_stale_30m(self) -> None:
         event = OrchestratorEvent(
             type=OrchestratorEventType.SESSION_LIVENESS_CHANGED,
