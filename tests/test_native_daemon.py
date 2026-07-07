@@ -59,14 +59,18 @@ class TestRealNativeDaemonClientSpawnGitEnv:
 
         env = captured.get("env")
         assert isinstance(env, dict), "spawn_bg must pass env= to subprocess.run"
-        git_keys = [k for k in env if k.startswith("GIT_") and k != "GIT_TERMINAL_PROMPT"]
-        assert not git_keys, f"unexpected GIT_* vars must be stripped; found: {git_keys}"
+        git_keys = [
+            k for k in env if k.startswith("GIT_") and k != "GIT_TERMINAL_PROMPT"
+        ]
+        assert not git_keys, (
+            f"unexpected GIT_* vars must be stripped; found: {git_keys}"
+        )
         assert "PATH" in env, "non-GIT env vars must be preserved (PATH missing)"
 
     def test_gh_and_git_prompt_env_vars_injected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """spawn_bg must unconditionally set the four interactive-prompt-suppression vars.
+        """spawn_bg must unconditionally set the four prompt-suppression vars.
 
         Without these, a dispatched worker's `gh`/`git` Bash calls can block on an
         interactive prompt (auth refresh, pager, update notifier) with no human to
@@ -123,7 +127,7 @@ class TestRealNativeDaemonClientSpawnGitEnv:
     def test_ci_env_var_not_injected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CI must NOT be set by spawn_bg — it can silently reshape other tools' behavior."""
+        """CI must NOT be set by spawn_bg — it can reshape other tools' behavior."""
         captured: dict[str, object] = {}
 
         def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
