@@ -264,6 +264,7 @@ the sweep re-evaluates it again next tick.
 
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) — full end-to-end dispatch procedure.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` event.
+- [`docs/events.md`](events.md) — `session.park_vetoed` and the full orchestrator event-bus reference.
 - `src/cw/cli.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
 - `src/cw/reconcile.py:_locate_session_transcript` — transcript path resolver.
 - `src/cw/reconcile.py:_csid_from_transcript` — claude_session_id derivation.

@@ -289,6 +289,11 @@ class OrchestratorEventType(StrEnum):
     # one-shot fire when a gate has sat parked past ESCALATION_PARK_MINUTES.
     CONCIERGE_RECOVERED = "concierge.recovered"
     OPERATOR_ESCALATION = "operator.escalation"
+    # #976 — wall-clock-budget liveness veto. Emitted by the stalled sweep
+    # instead of proceeding with a REVERT_TASK/park when the session's
+    # freshly-classified liveness bucket is still LIVE despite the wall-clock
+    # budget having expired. Side-effect-only: no queue or session mutation.
+    SESSION_PARK_VETOED = "session.park_vetoed"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).

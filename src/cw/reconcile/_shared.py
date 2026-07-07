@@ -235,6 +235,11 @@ class ProposedAction(StrEnum):
     # non-SKIP_PARKED detect-phase disposition). Carries no event of its own —
     # a pure state-mutation candidate. Closes #974.
     RESET_SALVAGE_SKIP_COUNTER = "reset_salvage_skip_counter"
+    # Side-effect-only candidate — emits `session.park_vetoed`, mutates
+    # nothing. The stalled sweep's wall-clock-budget park is suppressed while
+    # the session's freshly-classified liveness bucket is still LIVE. Closes
+    # #976.
+    PARK_VETOED = "park_vetoed"
 
 
 @dataclass(frozen=True)
@@ -273,6 +278,10 @@ class ReapCandidate:
     # SESSION_STAGE_TIMED_OUT_RETRIED payload. See GitHub #724.
     stage: Stage = DEFAULT_STAGE
     attempts: int = 0
+    # PARK_VETOED only: the freshly-computed transcript-staleness minutes that
+    # produced the LIVE classification, carried into the session.park_vetoed
+    # event payload so the act phase does not need to recompute it. See #976.
+    stale_minutes: float | None = None
 
 
 @dataclass(frozen=True)
