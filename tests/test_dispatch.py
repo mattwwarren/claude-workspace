@@ -2649,6 +2649,42 @@ class TestAccumulateTaskCost:
         store = load_dev_queue()
         assert store.tasks[0].total_cost_usd == pytest.approx(5.0)
 
+    def test_stage_mismatch_skips_cost_accumulation_and_completed_count(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """A refused stage-mismatch sentinel must not accumulate cost or count
+        toward ``completed`` (#1019, Pre-flight Resolution #4's true-no-op
+        contract) -- ``_apply_events_to_store`` is the consume-path caller of
+        ``apply_staged_decision`` and must honor its bool return like the
+        reconcile path already does.
+        """
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="s_mismatch1",
+            stage=Stage.REVIEW,
+            total_cost_usd=1.0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        self._make_session(
+            "s_mismatch1",
+            cost_usd=5.0,
+            last_result={"status": "stage_complete", "stage_reached": "stage2_impl"},
+        )
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-1", "session_id": "s_mismatch1"},
+        )
+        completed = consume_completed_sessions()
+
+        assert completed == 0
+        store = load_dev_queue()
+        t = store.tasks[0]
+        assert t.total_cost_usd == pytest.approx(1.0)
+        assert t.status == QueueItemStatus.RUNNING
+        assert t.stage == Stage.REVIEW
+
     def test_empty_string_session_id_is_not_treated_as_missing(
         self, tmp_dispatch_dirs: Path
     ) -> None:
@@ -6160,40 +6196,6 @@ class TestApplyStagedDecision:
         assert routed is True
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.IMPL
-
-    def test_apply_staged_decision_returns_routed_bool(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
-        """apply_staged_decision threads _route_staged_decision's bool return
-        unchanged (#1019)."""
-        from cw.dispatch import apply_staged_decision
-
-        matched_task = self._make_running_task("WRAPPER-MATCH", stage=Stage.IMPL)
-        matched_result: dict[str, object] = {
-            "status": "stage_complete",
-            "stage_reached": "stage2_impl",
-        }
-        assert (
-            apply_staged_decision(
-                matched_task, "stage_complete", matched_result, self._clients(tmp_path)
-            )
-            is True
-        )
-
-        mismatched_task = self._make_running_task("WRAPPER-MISMATCH", stage=Stage.IMPL)
-        mismatched_result: dict[str, object] = {
-            "status": "stage_complete",
-            "stage_reached": "stage3_review",
-        }
-        assert (
-            apply_staged_decision(
-                mismatched_task,
-                "stage_complete",
-                mismatched_result,
-                self._clients(tmp_path),
-            )
-            is False
-        )
 
 
 # ---------------------------------------------------------------------------

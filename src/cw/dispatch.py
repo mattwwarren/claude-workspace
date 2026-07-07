@@ -16,6 +16,7 @@ import pydantic
 import yaml
 
 from cw.auto_dev_result import (
+    _STAGE_REACHED_CANONICAL,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FINALIZE_REGRESS_CAP,
     PAUSED_FOR_USER_INPUT_STATUSES,
@@ -1659,6 +1660,16 @@ _STAGE_REACHED_TO_STAGE: dict[str, Stage] = {
     "stage4b_pr_create": Stage.FINALIZE,
     "stage5_post_create": Stage.FINALIZE,
 }
+# Fail fast at import time if this mapping's keys ever drift from the
+# canonical StageReached value set (e.g. a new stage added to the Literal in
+# auto_dev_result.py without a matching entry here) -- a silent gap here
+# degrades to a permanent stage-mismatch refusal with no test signal.
+if set(_STAGE_REACHED_TO_STAGE) != _STAGE_REACHED_CANONICAL:
+    _drift_msg = (
+        "_STAGE_REACHED_TO_STAGE keys drifted from cw.auto_dev_result."
+        "_STAGE_REACHED_CANONICAL -- update both together"
+    )
+    raise AssertionError(_drift_msg)
 
 
 def _sentinel_stage_matches(
@@ -1975,10 +1986,14 @@ def _apply_events_to_store(
             )
             status = last_result.get("status") if last_result is not None else None
 
-            apply_staged_decision(task, status, last_result, clients)
-            sid = event_session_id if isinstance(event_session_id, str) else None
-            _accumulate_task_cost(task, sid)
-            completed += 1
+            # #1019: a stage-mismatch refusal is a true no-op (Pre-flight
+            # Resolution #4) -- skip cost accumulation and the completed
+            # count so a refused/stale sentinel doesn't mutate task state
+            # or trigger save_dev_queue below.
+            if apply_staged_decision(task, status, last_result, clients):
+                sid = event_session_id if isinstance(event_session_id, str) else None
+                _accumulate_task_cost(task, sid)
+                completed += 1
             break
     if completed:
         save_dev_queue(store)
