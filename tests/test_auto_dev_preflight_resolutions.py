@@ -41,6 +41,11 @@ def _nearby(content: str, anchor: str, span: int = 400) -> str:
     return content[max(0, idx - span) : idx + len(anchor)]
 
 
+def _after(content: str, anchor: str, span: int = 400) -> str:
+    idx = content.index(anchor)
+    return content[idx : idx + span]
+
+
 def test_plan_refuses_multiple_marker_comments() -> None:
     """>1 marker comment refuses with the exact operator message."""
     assert REFUSE in _cmd("auto-dev-plan.md")
@@ -276,19 +281,26 @@ def test_step1b_body_list_not_double_injected() -> None:
     )
 
 
+def test_step1b_updated_at_named_as_coarse_trigger() -> None:
+    """updatedAt is documented as at most a coarse re-read trigger."""
+    section = _step1b_section()
+    assert "as at most a coarse re-read trigger" in section
+    assert "the failure asymmetry favors over-reading" in section
+
+
 def test_step1c_ambiguities_exit_uses_pending_header() -> None:
     """The AMBIGUITIES headless exit posts under the pinned pending-verify header."""
     content = _cmd("auto-dev-plan.md")
-    idx = content.index("`AMBIGUITIES` → EXIT `ambiguities_pending_resolution`")
-    window = content[idx : idx + 400]
+    window = _after(content, "`AMBIGUITIES` → EXIT `ambiguities_pending_resolution`")
     assert PENDING_HEADER in window
 
 
 def test_step1c_premises_exit_uses_pending_header() -> None:
     """The PREMISES TO VERIFY headless exit posts under the pinned header too."""
     content = _cmd("auto-dev-plan.md")
-    idx = content.index("`PREMISES TO VERIFY` → EXIT `premises_pending_verification`")
-    window = content[idx : idx + 400]
+    window = _after(
+        content, "`PREMISES TO VERIFY` → EXIT `premises_pending_verification`"
+    )
     assert PENDING_HEADER in window
 
 
