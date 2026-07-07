@@ -476,7 +476,7 @@ def _apply_phantom_routed_mutations(
     *,
     now: datetime,
     phantom_names: list[str],
-) -> None:
+) -> list[ReapCandidate]:
     """Apply ROUTE_EMITTED_SENTINEL mutations for exited stage-advance workers (#716).
 
     Routes the emitted advance sentinel through the shared staged-advance
@@ -486,14 +486,26 @@ def _apply_phantom_routed_mutations(
     acquires its own ``dev_queue_lock``; session state is flushed by the caller's
     ``save_state``. Appends each routed session to ``phantom_names`` so the caller
     stops the surface and emits its completion event.
+
+    GitHub #1019: when ``_apply_sentinel_to_task`` reports ``routed=False`` (a
+    stage-mismatch refusal, the #986 incident), the session must NOT be
+    completed or torn down — the task row was left untouched, so orphaning the
+    session here would strand a live/reapable surface with no owning task.
+    Returns only the candidates that were actually routed, so the caller's
+    ``_emit_phantom_routed_events`` (SESSION_COMPLETED) fires solely for those.
     """
+    accepted: list[ReapCandidate] = []
     for candidate in routed_candidates:
         if candidate.routed_sentinel is None or candidate.salvage_csid is None:
             continue  # Invariant: ROUTE_EMITTED_SENTINEL has routed_sentinel + csid
+        routed = True
         if candidate.ticket_id:
-            _apply_sentinel_to_task(
+            outcome = _apply_sentinel_to_task(
                 candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
             )
+            routed = outcome.routed
+        if not routed:
+            continue
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
@@ -502,6 +514,8 @@ def _apply_phantom_routed_mutations(
         session.last_result = candidate.routed_sentinel.model_dump(mode="json")
         session.claude_session_id = candidate.salvage_csid
         phantom_names.append(session.name)
+        accepted.append(candidate)
+    return accepted
 
 
 def _emit_phantom_routed_events(
@@ -611,7 +625,7 @@ def _act_on_phantom_candidates(
     # through the staged-advance authority instead of reverting them (#716). The
     # queue mutation happens inside _apply_sentinel_to_task (its own lock), so the
     # routed tickets are intentionally excluded from _apply_phantom_queue_mutations.
-    _apply_phantom_routed_mutations(
+    routed_candidates = _apply_phantom_routed_mutations(
         session_by_id,
         routed_candidates,
         now=now,
