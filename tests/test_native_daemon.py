@@ -59,9 +59,90 @@ class TestRealNativeDaemonClientSpawnGitEnv:
 
         env = captured.get("env")
         assert isinstance(env, dict), "spawn_bg must pass env= to subprocess.run"
-        git_keys = [k for k in env if k.startswith("GIT_")]
-        assert not git_keys, f"GIT_* vars must be stripped; found: {git_keys}"
+        git_keys = [
+            k for k in env if k.startswith("GIT_") and k != "GIT_TERMINAL_PROMPT"
+        ]
+        assert not git_keys, (
+            f"unexpected GIT_* vars must be stripped; found: {git_keys}"
+        )
         assert "PATH" in env, "non-GIT env vars must be preserved (PATH missing)"
+
+    def test_gh_and_git_prompt_env_vars_injected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn_bg must unconditionally set the four prompt-suppression vars.
+
+        Without these, a dispatched worker's `gh`/`git` Bash calls can block on an
+        interactive prompt (auth refresh, pager, update notifier) with no human to
+        answer it — the worker hangs indefinitely inside the tool call (#979).
+        """
+        captured: dict[str, object] = {}
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            captured.update(kwargs)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        client = RealNativeDaemonClient()
+        client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        env = captured.get("env")
+        assert isinstance(env, dict)
+        assert env["GH_PROMPT_DISABLED"] == "1"
+        assert env["GH_PAGER"] == "cat"
+        assert env["GH_NO_UPDATE_NOTIFIER"] == "1"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_gh_prompt_env_vars_override_inherited_values(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The four vars must be unconditional overrides, not setdefault.
+
+        A headless daemon worker must never inherit a value that could
+        re-enable an interactive prompt.
+        """
+        captured: dict[str, object] = {}
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            captured.update(kwargs)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setenv("GH_PROMPT_DISABLED", "0")
+        monkeypatch.setenv("GH_PAGER", "less")
+        monkeypatch.setenv("GH_NO_UPDATE_NOTIFIER", "0")
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        client = RealNativeDaemonClient()
+        client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        env = captured.get("env")
+        assert isinstance(env, dict)
+        assert env["GH_PROMPT_DISABLED"] == "1"
+        assert env["GH_PAGER"] == "cat"
+        assert env["GH_NO_UPDATE_NOTIFIER"] == "1"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_ci_env_var_not_injected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CI must NOT be set by spawn_bg — it can reshape other tools' behavior."""
+        captured: dict[str, object] = {}
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            captured.update(kwargs)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        client = RealNativeDaemonClient()
+        client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        env = captured.get("env")
+        assert isinstance(env, dict)
+        assert "CI" not in env, "CI must not be injected by spawn_bg"
 
     def test_pwd_overridden_with_worktree_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
