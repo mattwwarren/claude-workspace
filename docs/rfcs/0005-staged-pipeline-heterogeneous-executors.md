@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Partially Implemented — Phases 1–4 shipped in v1.2.0 (stage engine, per-stage commands, advance loop, `cw board`, schema seam, `ClaudeNativeExecutor`); Phase 5 (foreign executor backends) deferred to v1.2.x+** |
+| Status | **Partially Implemented — Phases 1–4 shipped in v1.2.0 (stage engine, per-stage commands, advance loop, `cw board`, schema seam, `ClaudeNativeExecutor`); Phase 5 (foreign executor backends) deferred to v1.2.x+. Per-stage *behaviour* legs C1/C2/C3 are NOT yet implemented — the durable per-stage stage-tracker trace (#620), REVIEW-opens-draft-PR (#621), and FINALIZE scrub/fold/draft-split (#622) remain open.** |
 | Owner | @mattwwarren |
 | Date | 2026-06-13 |
 | Supersedes | none (extends the dispatch model on a new axis) |

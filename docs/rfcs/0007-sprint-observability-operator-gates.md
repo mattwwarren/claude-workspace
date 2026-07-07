@@ -8,6 +8,13 @@
 | Supersedes | none |
 | Related | RFC 0004 (work lanes), RFC 0005 (staged pipeline), RFC 0002 (Agent SDK / MCP push channel), RFC 0006 (review system), ADR 0006 (reaping authority), `docs/events.md` |
 
+> **⚠ Overlap with RFC 0008 (needs reconciliation before ratification).** RFC 0008
+> (*Orchestrator Push Channel*, 2026-07-05) covers much of the same observability /
+> operator-attention territory as this draft and has a shipped slice (the operator-attention
+> filter, #1002 / `docs/operator-channel.md`). Both are Draft. Decide which RFC owns the
+> operator-gates + attention surface and fold or scope the other accordingly. — flagged by
+> the 2026-07-07 ticket audit.
+
 ## Summary
 
 The 2026-07-01/03 reliability bug sprint exposed two gaps:

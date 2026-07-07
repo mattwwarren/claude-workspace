@@ -109,12 +109,16 @@ Default action (when prior PRs have since merged): rebase + force-push + open PR
 WORKTREE=$(jq -r '.session.worktree_path' <<<"$RESULT")
 BRANCH=$(jq -r '.raw_payload.branch' <<<"$RESULT")
 FORK_POINT=$(jq -r '.raw_payload.fork_point_sha' <<<"$RESULT")
+TICKET=$(jq -r '.ticket_id // .session.ticket_id // empty' <<<"$RESULT")
 
 git -C "$WORKTREE" fetch origin
 git -C "$WORKTREE" checkout -B "$BRANCH" "origin/$BRANCH"
 git -C "$WORKTREE" rebase --onto origin/main "$FORK_POINT" "$BRANCH"
 git -C "$WORKTREE" push --force-with-lease origin "$BRANCH"
-gh pr create --base main --head "$BRANCH"  # body derived from the review summary
+# Include a `Closes #<ticket>` line so GitHub auto-closes the ticket on merge —
+# a bare `(#N)` in the commit subject does NOT auto-close (ticket-audit 2026-07-07).
+gh pr create --base main --head "$BRANCH" \
+  --body "$(printf '%s\n\nCloses #%s' "<review summary>" "$TICKET")"
 ```
 
 #### `ambiguities_pending_resolution` / `premises_pending_verification`

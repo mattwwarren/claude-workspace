@@ -34,7 +34,7 @@ from cw.schema import REGISTRY, format_json, format_tldr
 @click.option(
     "--reap",
     is_flag=True,
-    help="Also reconcile state with the live multiplexer and reap phantoms.",
+    help="Also reconcile state against the live daemon roster and reap phantoms.",
 )
 @click.option(
     "--json",
