@@ -232,6 +232,25 @@ class TestRecipeFalseParkRequeue:
 
         assert recovered == ["GEN-1"]
 
+    def test_requeues_silently_idle_disposition_row_with_no_session_record(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#976: idle.py's silently-idle park now stamps disposition=
+        "silently_idle" instead of None. _has_park_marker's exclusion (recipe
+        2's domain) only fires when a session record still exists — a row
+        whose session has since been pruned entirely has no marker to check,
+        so pre-#976 (disposition=None) it was still recipe-1-eligible. Must
+        remain eligible now that it carries a real disposition."""
+        task = _make_task(disposition="silently_idle", attempts=1)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+
     def test_non_matching_disposition_untouched(self, tmp_config_dir: Path) -> None:
         """A BLOCKED_ON_USER row with an unrelated disposition is left alone."""
         task = _make_task(disposition="dirty_worktree", attempts=1)
