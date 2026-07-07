@@ -383,6 +383,37 @@ class TestRecipeParkMarkerPoisonClear:
         assert closed is not None
         assert closed.status == SessionStatus.COMPLETED
 
+    def test_clears_park_marker_when_dead_and_stale_silently_idle_disposition(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#976: recipe 1's newly-added `_SILENTLY_IDLE_REASON` eligibility
+        must not steal a marker-bearing session from recipe 2 — _has_park_marker
+        reads only session.last_result, never task.disposition, so a row whose
+        session still carries the marker stays recipe 2's domain regardless of
+        which disposition string is now in recipe 1's frozenset."""
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition="silently_idle", attempts=1, session_id="sess-1")
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        state = CwState.model_validate_json(
+            (tmp_config_dir / ".local" / "share" / "cw" / "sessions.json").read_text()
+        )
+        closed = state.find_by_name_or_id("sess-1")
+        assert closed is not None
+        # recipe 2's act (session closed), not recipe 1's:
+        assert closed.status == SessionStatus.COMPLETED
+
     def test_cycling_threshold_zero_skips_count(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
