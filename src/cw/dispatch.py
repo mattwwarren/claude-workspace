@@ -119,6 +119,17 @@ _CW_PACKAGE_NAME: str = "claude-workspace"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
+# Disposition stamped by _stage_advance_unchecked when the task's client is
+# absent from the effective clients dict — a config error, not a
+# transient/recoverable state. Deliberately excluded from both
+# concierge._FALSE_PARK_ELIGIBLE_DISPOSITIONS and
+# escalation._ELIGIBLE_DISPOSITIONS. See GitHub #976.
+_UNKNOWN_CLIENT_REASON = "unknown_client"
+# Disposition stamped by _stage_advance_unchecked when task.stage is not in
+# the client's configured pipeline stages — a config error, not a
+# transient/recoverable state. Same exclusion as _UNKNOWN_CLIENT_REASON. See
+# GitHub #976.
+_INVALID_STAGE_REASON = "invalid_stage_config"
 # ``source`` field on a LANE_PAUSED event emitted by the per-lane circuit breaker
 # (as opposed to an operator-initiated ``cw lane pause``). See GitHub issue #875.
 _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = "circuit_breaker"
@@ -1604,7 +1615,9 @@ def _stage_advance_unchecked(
             task.client,
             task.ticket_id,
         )
-        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition=_UNKNOWN_CLIENT_REASON
+        )
         return
     pipeline = client_cfg.pipeline
     stages = pipeline.stages
@@ -1614,7 +1627,9 @@ def _stage_advance_unchecked(
             task.stage,
             task.ticket_id,
         )
-        transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+        transition_task_status(
+            task, QueueItemStatus.BLOCKED_ON_USER, disposition=_INVALID_STAGE_REASON
+        )
         return
     if task.stage == stages[-1]:
         transition_task_status(

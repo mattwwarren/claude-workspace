@@ -650,6 +650,37 @@ Added to the operator-channel's default forward set (unlike
 
 `correlation_id` is the `ticket_id`.
 
+### `session.park_vetoed`
+
+**Emitter:** `_act_on_stalled_candidates` in `cw.reconcile.stalled`
+**Payload:**
+```json
+{
+  "ticket_id": "<str | null>",
+  "client": "<str | null>",
+  "session_id": "<str>",
+  "stage": "harden | plan | impl | review | finalize",
+  "reason": "wall_clock_budget",
+  "stale_minutes": "<float>"
+}
+```
+**Semantics:** GitHub #976. Emitted instead of the normal wall-clock-budget
+REVERT_TASK/park when the session's freshly-classified transcript-staleness
+liveness bucket (`_classify_liveness_bucket`, same per-stage-floor ladder as
+`session.liveness_changed`) is still `live` at the moment the wall-clock
+budget expired — the session is demonstrably still making progress, so the
+park is suppressed. The veto is indefinite while the session stays live:
+there is no suppress-counter and no escalation latch, it simply re-evaluates
+every tick. **Zero queue or session-state mutation** accompanies this event —
+the task stays `RUNNING` and the session stays `ACTIVE`/`IDLE`.
+
+The veto does **not** apply to the cap-exceeded retry-cap park
+(`stalled_retry_cap_parked`) — that park fires unconditionally once
+`task.attempts >= cap`, regardless of liveness; the veto is only reachable
+from the ordinary wall-clock-budget fallthrough.
+
+`correlation_id` is the `ticket_id`.
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset

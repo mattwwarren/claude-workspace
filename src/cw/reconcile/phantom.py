@@ -297,7 +297,11 @@ def _route_phantom_by_policy(
         else:
             auto_candidates.append(c)
     if signal_mutations:
-        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+        _apply_queue_mutations(
+            signal_mutations,
+            clear_session_id=set(),
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+        )
     return auto_candidates
 
 
@@ -445,7 +449,11 @@ def _apply_phantom_queue_mutations(
                 merged_completed_ids.append(task.ticket_id)
                 changed = True
             elif task.ticket_id in gh_blocked_crash_tids:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=_GH_CHECK_BLOCKED_REASON,
+                )
                 task.session_id = None
                 changed = True
             elif task.ticket_id in salvaged_set:

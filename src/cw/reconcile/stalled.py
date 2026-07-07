@@ -24,6 +24,7 @@ from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
     CompletionReason,
+    LivenessBucket,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -52,12 +53,14 @@ from cw.reconcile._shared import (
     _emit_reap_proposed,
     _is_headless,
     _queue_status_for_salvaged,
+    _transcript_age_seconds,
     feature_branch_key,
     resolve_headless_budget,
     resolve_reap_policy,
     resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
+from cw.reconcile.liveness import _classify_liveness_bucket
 from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
@@ -284,6 +287,7 @@ def _detect_stalled_candidates(
                     client=session.client,
                     stage=task.stage if task else DEFAULT_STAGE,
                     attempts=task.attempts if task else 0,
+                    paused_status=_STALLED_CAP_PARKED_REASON,
                 )
             )
             continue
@@ -291,21 +295,68 @@ def _detect_stalled_candidates(
         # both its REVERT_TASK disposition and a RESET_SALVAGE_SKIP_COUNTER
         # candidate in the same pass (#974). This is the 5th and final
         # non-SKIP_PARKED detect-phase exit (loop falls through, no continue).
+        # This branch is reached only after the cap-exceeded check above has
+        # already returned/appended its own candidate — the liveness veto
+        # (#976) therefore never applies to a cap-exceeded park; correctness
+        # comes from this call-site placement, not a guard inside the helper.
         _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
         candidates.append(
-            ReapCandidate(
-                session_id=session.id,
-                proposed_action=ProposedAction.REVERT_TASK,
-                ticket_id=ticket_id,
-                elapsed_seconds=elapsed,
-                reap_reason=ReapReason.WALL_CLOCK_BUDGET,
-                lane=task.lane if task else DEFAULT_LANE,
-                client=session.client,
-                stage=task.stage if task else DEFAULT_STAGE,
-                attempts=task.attempts if task else 0,
+            _resolve_wall_clock_candidate(
+                session, task, ticket_id, elapsed, now=now, config=config
             )
         )
     return candidates
+
+
+def _resolve_wall_clock_candidate(
+    session: Session,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    elapsed: float,
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+) -> ReapCandidate:
+    """Return PARK_VETOED when the session is still LIVE, else REVERT_TASK.
+
+    Computes fresh transcript-mtime staleness via :func:`_transcript_age_seconds`
+    and classifies it through the same per-stage-floor liveness ladder the
+    observability sweep (``cw.reconcile.liveness``) uses. When the freshly-
+    classified bucket is :attr:`LivenessBucket.LIVE`, the wall-clock-budget
+    park is vetoed entirely — no disposition, no queue mutation — because the
+    session is demonstrably still making progress despite the wall-clock
+    budget having expired. Fail-toward-park: a session whose transcript
+    cannot be located (``_transcript_age_seconds`` returns ``None``) falls
+    through to the normal REVERT_TASK candidate. See GitHub #976.
+    """
+    stage = task.stage if task is not None else DEFAULT_STAGE
+    stale_seconds = _transcript_age_seconds(session, now)
+    if stale_seconds is not None:
+        stale_minutes = stale_seconds / 60.0
+        bucket = _classify_liveness_bucket(stale_minutes, stage=stage, config=config)
+        if bucket is LivenessBucket.LIVE:
+            return ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.PARK_VETOED,
+                ticket_id=ticket_id,
+                elapsed_seconds=elapsed,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
+                stage=stage,
+                attempts=task.attempts if task else 0,
+                stale_minutes=stale_minutes,
+            )
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id=ticket_id,
+        elapsed_seconds=elapsed,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        lane=task.lane if task else DEFAULT_LANE,
+        client=session.client,
+        stage=stage,
+        attempts=task.attempts if task else 0,
+    )
 
 
 def _route_stalled_by_policy(
@@ -345,7 +396,11 @@ def _route_stalled_by_policy(
         else:
             auto_candidates.append(c)
     if signal_mutations:
-        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+        _apply_queue_mutations(
+            signal_mutations,
+            clear_session_id=set(),
+            disposition=ReapReason.WALL_CLOCK_BUDGET.value,
+        )
     return auto_candidates
 
 
@@ -469,7 +524,11 @@ def _apply_stalled_queue_mutations(
                 merged_completed.append(task.ticket_id)
                 changed = True
             elif task.ticket_id in gh_blocked_tids:
-                transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                transition_task_status(
+                    task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=_GH_CHECK_BLOCKED_REASON,
+                )
                 task.session_id = None
                 changed = True
             elif task.ticket_id in park_disposition_by_tid:
@@ -832,6 +891,9 @@ def _act_on_stalled_candidates(
         for c in candidates
         if c.proposed_action == ProposedAction.RESET_SALVAGE_SKIP_COUNTER
     ]
+    park_vetoed_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.PARK_VETOED
+    ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
     # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
@@ -858,11 +920,11 @@ def _act_on_stalled_candidates(
     # mutations on a skip/reset-only tick because it predated those two
     # candidate lists). The `if not candidates: return [], []` above already
     # guarantees non-emptiness, and skip/salvage/revert/park/finalize_blocked/
-    # reset_salvage_skip exhaustively partition every ProposedAction that
-    # _detect_stalled_candidates emits — so a second enumerated guard here can
-    # never fire and only risks silently reintroducing the same bug class the
-    # next time a new ProposedAction is added and this list isn't updated to
-    # match. session_by_id must be built unconditionally: SKIP_PARKED/
+    # reset_salvage_skip/park_vetoed exhaustively partition every ProposedAction
+    # that _detect_stalled_candidates emits — so a second enumerated guard here
+    # can never fire and only risks silently reintroducing the same bug class
+    # the next time a new ProposedAction is added and this list isn't updated
+    # to match. session_by_id must be built unconditionally: SKIP_PARKED/
     # RESET_SALVAGE_SKIP_COUNTER candidates need live Session objects even
     # when they are the tick's only candidates.
     session_by_id = {s.id: s for s in state.sessions}
@@ -872,6 +934,22 @@ def _act_on_stalled_candidates(
     # SKIP_PARKED: increment the salvage-skip latch and emit its event(s).
     for candidate in skip_candidates:
         _record_salvage_skip(session_by_id, candidate, config=effective_config)
+
+    # PARK_VETOED: side-effect-only — emit session.park_vetoed, mutate nothing
+    # (#976). No state/queue mutation is added for this action anywhere below.
+    for candidate in park_vetoed_candidates:
+        record_event(
+            OrchestratorEventType.SESSION_PARK_VETOED,
+            {
+                "ticket_id": candidate.ticket_id,
+                "client": candidate.client,
+                "session_id": candidate.session_id,
+                "stage": candidate.stage,
+                "reason": ReapReason.WALL_CLOCK_BUDGET.value,
+                "stale_minutes": candidate.stale_minutes,
+            },
+            correlation_id=candidate.ticket_id,
+        )
 
     _apply_stalled_state_mutations(
         session_by_id,

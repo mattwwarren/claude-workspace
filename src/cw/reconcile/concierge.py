@@ -60,6 +60,7 @@ from cw.models import (
     LivenessBucket,
     OrchestratorEventType,
     QueueItemStatus,
+    ReapReason,
     SessionStatus,
 )
 from cw.reconcile._shared import (
@@ -185,12 +186,43 @@ def _transcript_is_flat(
 # ---------------------------------------------------------------------------
 
 # Dispositions recipe 1 targets: the stalled watchdog's retry-cap park, or a
-# BLOCKED_ON_USER row with no disposition at all (e.g. idle-watchdog's
-# silently-idle park, which never stamps a task-level disposition — see
-# reconcile/idle.py's park_disposition_by_tid, sourced from an unset
-# ReapCandidate.paused_status).
+# BLOCKED_ON_USER row with no disposition at all. As of #976, every reconcile
+# park path (idle-watchdog's silently-idle park included) stamps a non-null
+# task-level disposition via reconcile/idle.py's park_disposition_by_tid,
+# sourced from ReapCandidate.paused_status — so `None` here now covers only
+# legacy pre-#976 rows and any park path this module doesn't itself produce,
+# not a documented "silently_idle parks as None" case.
+#
+# #976: the SIGNAL_ONLY reroute-to-BLOCKED_ON_USER path (shared by the
+# stalled/idle/phantom sweeps via _apply_queue_mutations) used to leave
+# disposition=None on these rows — which is exactly the "no disposition at
+# all" case recipe 1's own docstring describes as in-scope. Now that the
+# reroute stamps a real disposition (ReapReason.WALL_CLOCK_BUDGET/IDLE_STALL/
+# PHANTOM_SURFACE), recipe 1 must keep tracking that population or these rows
+# silently stop being auto-recoverable — the exact regression escalation.py's
+# _ELIGIBLE_DISPOSITIONS extension (same ticket) was written to avoid for the
+# escalation consumer.
+#
+# #976: _SILENTLY_IDLE_REASON is included too, even though the module's
+# _has_park_marker check (below) already routes a *live* silently-idle
+# session-with-marker to recipe 2's stricter gate. That marker check only
+# fires when `session is not None` — a row whose session record has since
+# been pruned entirely (not merely marker-bearing) has no marker to check,
+# so pre-#976 (disposition=None) it was still recipe-1-eligible via the
+# `None` branch. Omitting _SILENTLY_IDLE_REASON here would silently regress
+# that no-session-record population the same way the wall-clock/idle-stall/
+# phantom-surface values above would have. The `_has_park_marker` guard below
+# still excludes any row whose session record *does* exist and carries the
+# marker, so recipe 2's domain is unaffected.
 _FALSE_PARK_ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
-    {_STALLED_CAP_PARKED_REASON, None}
+    {
+        _STALLED_CAP_PARKED_REASON,
+        _SILENTLY_IDLE_REASON,
+        ReapReason.IDLE_STALL.value,
+        ReapReason.WALL_CLOCK_BUDGET.value,
+        ReapReason.PHANTOM_SURFACE.value,
+        None,
+    }
 )
 
 # Session-level park markers (recipe 2's own domain — see _has_park_marker

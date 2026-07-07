@@ -124,6 +124,7 @@ def _classify_idle_threshold(
         new_observation_count=new_count,
         lane=lane,
         client=session.client,
+        paused_status=_SILENTLY_IDLE_REASON,
     )
 
 
@@ -281,7 +282,11 @@ def _route_idle_by_policy(
         else:
             auto_candidates.append(c)
     if signal_mutations:
-        _apply_queue_mutations(signal_mutations, clear_session_id=set())
+        _apply_queue_mutations(
+            signal_mutations,
+            clear_session_id=set(),
+            disposition=ReapReason.IDLE_STALL.value,
+        )
     return auto_candidates
 
 
