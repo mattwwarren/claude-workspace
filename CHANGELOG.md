@@ -6,8 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-07-07
+
+Post-RFC-0008 reliability wave: false-park elimination, a wrong-stage
+sentinel guard, and headless hang mitigations — the operational gaps the
+2026-07-03/05 sprint incidents exposed.
+
+### Added
+
+- **Stage-mismatch sentinel guard** (#1019): `_route_staged_decision` now
+  validates the sentinel's `stage_reached` against `task.stage` via a new
+  `_STAGE_REACHED_TO_STAGE` mapping table before routing; a late or
+  replayed sentinel from a previous leg (the #986 incident class) is
+  refused with a new `sentinel.stage_mismatch` event and a true no-op on
+  the row. Missing `stage_reached` (legacy/`BlockedResult` payloads)
+  bypasses the guard. A new `SentinelRouteOutcome` return contract is
+  threaded through `_apply_sentinel_to_task` so `reconcile/phantom.py` no
+  longer unconditionally completes the session on a refused route
+  (orphaned-row hazard); the same gating for `idle.py`/`cli/sessions.py`/
+  `local.py` is tracked in #1031.
+- **Wall-clock liveness veto** (#976): the stalled sweep re-classifies
+  transcript staleness fresh (via `_classify_liveness_bucket`, per-stage
+  floors included) before proposing a wall-clock-budget park; a
+  demonstrably-alive session is never parked or killed — a new
+  side-effect-only `ProposedAction.PARK_VETOED` candidate emits
+  `session.park_vetoed` instead. Applies to both AUTO and SIGNAL_ONLY
+  lanes; the cap-exceeded park branch is unaffected.
+
 ### Fixed
 
+- **Null-disposition BLOCKED_ON_USER parks** (#976): every operator-facing
+  park now carries a disposition — `ReapCandidate.paused_status` is stamped
+  in the idle/stalled `PARK_BLOCKED_ON_USER` branches, `_apply_queue_mutations`
+  threads a disposition at all three call sites, and six bare park sites
+  (gh-blocked, salvage, config-error fallbacks, terminal-sibling) are
+  normalized. The concierge and escalation eligibility frozensets are
+  extended to the new disposition strings so live auto-recovery and the
+  45-minute operator-escalation latch keep their coverage.
+- **Watchdog systemd unit fails 203/EXEC** (#1027): `cw watchdog install`
+  now resolves the absolute path of the running `cw` executable
+  (argv[0]-derived with a `shutil.which` fallback; hard error if neither
+  resolves) into `ExecStart`/`ProgramArguments` instead of writing bare
+  `cw`, which systemd user managers cannot resolve.
+- **Body-folded pre-flight resolutions invisible to the plan scanner**
+  (#980): `auto-dev-plan` now live-fetches the ticket body on every
+  invocation (the #952 rule extended beyond comments) and treats a
+  marker-bearing body resolutions section as an authoritative operator
+  response channel; body markers are excluded from the multi-marker gate
+  tally, and the Step 1c scan-exit comment gets a pinned
+  `## Pending Verification Scan` header.
 - **Dispatched workers can hang on interactive gh/git prompts** (#979):
   `native_daemon.py:_spawn_clean_env` now unconditionally sets
   `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, `GH_NO_UPDATE_NOTIFIER=1`, and
