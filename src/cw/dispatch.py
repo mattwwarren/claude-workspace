@@ -1676,6 +1676,8 @@ def _sentinel_stage_matches(
     stage_reached = last_result.get("stage_reached")
     if stage_reached is None:
         return True
+    if not isinstance(stage_reached, str):
+        return False
     return _STAGE_REACHED_TO_STAGE.get(stage_reached) == task.stage
 
 

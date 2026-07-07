@@ -5986,7 +5986,8 @@ class TestApplyStagedDecision:
     def test_matching_stage_reached_routes_normally(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
-        """stage_reached matching task.stage → routes normally (positive control, #1019)."""
+        """stage_reached matching task.stage → routes normally (positive
+        control, #1019)."""
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("MATCH-1", stage=Stage.REVIEW)
@@ -6005,7 +6006,8 @@ class TestApplyStagedDecision:
     def test_stage_mismatch_refuses_routing_no_transition(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
-        """Stale IMPL sentinel against a REVIEW-stage task → refused, untouched (#986/#1019).
+        """Stale IMPL sentinel against a REVIEW-stage task → refused,
+        untouched (#986/#1019).
 
         Reproduces the #986 incident shape: a late/replayed sentinel from a
         previous leg (stage_reached=stage2_impl) arrives against a task whose
@@ -6061,7 +6063,8 @@ class TestApplyStagedDecision:
     def test_missing_stage_reached_bypasses_guard(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
-        """No stage_reached key in last_result → guard bypassed, routes normally (#1019)."""
+        """No stage_reached key in last_result → guard bypassed, routes
+        normally (#1019)."""
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("NOKEY-1", stage=Stage.REVIEW)
@@ -6074,10 +6077,31 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.FINALIZE
 
+    def test_non_string_stage_reached_treated_as_mismatch(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Non-str, non-None stage_reached (malformed payload) → refused,
+        not a KeyError/TypeError (#1019 defensive branch)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("BADTYPE-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": 3,
+        }
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.REVIEW
+
     def test_none_status_none_last_result_bypasses_guard(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
-        """(None, None) → Rule 6 fallback unaffected by the stage-mismatch guard (#1019)."""
+        """(None, None) → Rule 6 fallback unaffected by the stage-mismatch
+        guard (#1019)."""
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("NONERESULT-1")
