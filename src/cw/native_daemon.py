@@ -92,9 +92,25 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     importing from ``spawn`` would create a circular import
     (``spawn`` already imports ``native_daemon``). A future shared util
     (e.g. ``cw._git``) can consolidate all three.
+
+    Also unconditionally overrides (not setdefault) ``GH_PROMPT_DISABLED``,
+    ``GH_PAGER``, ``GH_NO_UPDATE_NOTIFIER``, and ``GIT_TERMINAL_PROMPT`` so a
+    headless daemon worker can never inherit a value that re-enables an
+    interactive prompt — a `gh`/`git` call blocking on stdin with no human to
+    answer it hangs the worker indefinitely with no error and no sentinel
+    (#979). Note ``GH_PROMPT=disabled`` is not a real ``gh`` env var; the
+    documented knob is ``GH_PROMPT_DISABLED``. ``CI`` is deliberately excluded
+    — it silently reshapes the behavior of other tools (pytest plugins, etc.)
+    beyond just prompt suppression.
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["PWD"] = str(cwd)
+    # Unconditional overrides (not setdefault) — a worker's inherited
+    # environment must not be able to re-enable interactive prompts.
+    env["GH_PROMPT_DISABLED"] = "1"
+    env["GH_PAGER"] = "cat"
+    env["GH_NO_UPDATE_NOTIFIER"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 
