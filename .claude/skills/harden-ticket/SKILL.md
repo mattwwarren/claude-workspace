@@ -178,7 +178,7 @@ hardened, resolutions posted, ready to enqueue."
   silently dropped them); if a ticket keeps bouncing on questions you already
   answered, suspect the worker never saw the answer — verify it's in the
   materialized context, don't just append again. When in doubt, fold the
-  resolutions into the body and re-dispatch fresh.
+  resolutions into the body and re-dispatch fresh. When folding resolutions into the body, the pre-flight resolutions HTML-comment marker `<!-- auto-dev-preflight-resolutions -->` moves with them — place it at the end of the body's resolutions section, exactly as it would end a marker-bearing comment. This keeps detection symmetric (marker-based) across both channels: the pipeline's Step 1b extraction (`auto-dev-plan.md`, #980) greps the body's resolutions section for the identical marker it greps comments for, and treats a marker-bearing body as the authoritative source when both channels carry it.
 - **For migration-style tickets, give a deriving grep, not a hand-list.** When
   the change is "route all N call sites through helper X" / "rename every Y" /
   "add a field at every Z", do NOT enumerate the sites by hand in the
