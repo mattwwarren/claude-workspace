@@ -330,6 +330,11 @@ the newest `*.jsonl` under `~/.claude/projects/<slug>-dev-<T>/`:
 
 ### Attempt-cap reset (environmental burn)
 
+**Now partially mechanized** — see §11.1's `false_park_requeue` recipe,
+which auto-requeues the common `stalled_retry_cap_parked` case when
+`concierge_enabled: true`. The manual recipe below is still needed when
+concierge is off, or when the row is refused at the attempt ceiling.
+
 A quota window or hang loop (#979) grinds a ticket to
 `attempt_cap_blocked` (`attempts` bumps on every claim AND stage transition).
 Reset recipe — the file-edit steps are only safe with ZERO loops alive:
@@ -357,7 +362,9 @@ read-modify-write (observed twice, 2026-07-04).
 - A session wedged in `needs_salvage` with a park marker poisons every
   respawn of its ticket (claim → revert → attempts+1, plus per-tick
   `session.salvage_skipped` noise): `cw spawn close <sid> --confirmed-dead`
-  clears it.
+  clears it. **Now partially mechanized** — see §11.1's
+  `park_marker_poison_clear` recipe (requires `concierge_enabled: true` and
+  `consecutive_salvage_skips >= 1` on a confirmed-dead session).
 
 ### Quota walls: probe before pausing
 
@@ -733,3 +740,88 @@ of it. The one caveat: a `COMMENTED` review's `pr.review_received` event
 has nothing to compare against) is push-only; if the relay is down when a
 `COMMENTED` review lands, that specific notification is missed, though the
 review itself remains visible via `gh pr view`.
+
+---
+
+## 11. Concierge & Watchdog (RFC 0008 capstone, #1015)
+
+Two independent daemon-side additions that mechanize/backstop patterns
+previously handled by hand (see §7's "Attempt-cap reset" and "park marker
+poisons every respawn" notes above — the concierge partially mechanizes
+both).
+
+### 11.1 Mechanical recovery reactor (`cw.reconcile.concierge`)
+
+Runs inside every reconcile tick (both branches of `_reconcile_locked`), but
+is **opt-in**: nothing fires unless `concierge_enabled: true` is set in
+`orchestrator.yaml` (default `false`), mirroring `reap_policy`'s own
+fail-safe default. See `config/CONFIG_REFERENCE.md` for the config surface.
+
+Three recipes, each individually toggleable via `concierge_recoveries`:
+
+1. **`false_park_requeue`** — a row parked `stalled_retry_cap_parked` (or
+   with no disposition at all) whose owning session is confirmed dead
+   (absent from the daemon roster, transcript flat) is requeued to PENDING
+   at its current stage. This is the automated version of §7's "Attempt-cap
+   reset" recipe for the common case; the manual recipe (editing
+   `dev_queue.json` directly) is still needed for a ceiling-refused row (see
+   below) or when `concierge_enabled` is off.
+2. **`park_marker_poison_clear`** — a row behind a session whose park marker
+   (`silently_idle`/`needs_salvage`) has persisted for
+   `consecutive_salvage_skips >= 1` and whose transcript is confirmed dead
+   (per-stage-floor 45-minute staleness) is closed and requeued. This is the
+   automated version of §7's "a session wedged in `needs_salvage`... poisons
+   every respawn" note — `cw spawn close <sid> --confirmed-dead` is no
+   longer required by hand for this case.
+3. **`cancelled_row_restore`** — a CANCELLED row whose worktree still has
+   committed work ahead of its base branch is restored to PENDING, so work
+   is never silently lost to a stray cancel.
+
+Both recipe 1 and recipe 2 gate on `attempts < global_attempt_ceiling`; at
+the ceiling, the row is refused and left parked rather than requeued — that
+refusal is itself an escalation-eligible state (see 11.2) for
+`stalled_retry_cap_parked` rows, so an operator still gets paged rather than
+the ticket silently spinning forever. Every recovery emits a
+`concierge.recovered` event (audit-trail only, not forwarded to the operator
+channel by default) **before** mutating the row — see `docs/events.md`.
+
+### 11.2 Durable escalation latch (`cw.reconcile.escalation`)
+
+Runs **unconditionally** every reconcile tick (not gated by
+`concierge_enabled`) — a `TicketTask` sitting in the escalation-eligible set
+(disposition ∈ `ambiguities_pending_resolution` / `plan_pending_approval` /
+`review_pending_approval` / `stalled_retry_cap_parked` while
+`BLOCKED_ON_USER`, or any `AWAITING_OPERATOR_SIGNOFF`/`FAILED` row) for more
+than 45 minutes fires one `operator.escalation` event — a single page per
+parked episode, not a repeat-every-tick alarm. See `docs/events.md` for the
+full formula and `docs/operator-channel.md` for its default-forwarded status.
+
+### 11.3 Mainstream watchdog (`cw watchdog`)
+
+A standalone, one-shot `cw watchdog tick` command meant to run from a
+per-user systemd timer (Linux) or launchd agent (macOS) — **independently**
+of the `cw dev-queue run` dispatch loop, so an operator still gets paged even
+when that loop itself is down. Three checks per tick: (1) the same durable
+escalation sweep as 11.2 (fires a desktop notification for anything newly
+escalated), (2) a dead-man's-switch on `dispatch.tick` event recency, and
+(3) park-marker cycling (a `BLOCKED_ON_USER` row whose session's
+`consecutive_salvage_skips` has crossed `salvage_skip_attention_threshold`).
+Detections append to `~/.local/share/cw/watchdog.log` (log-on-detection
+only) and fire a desktop notification (`notify-send` on Linux, `osascript`
+on macOS).
+
+Install/manage the timer/agent:
+
+```bash
+cw watchdog install     # writes the unit file(s); prints the activation command
+cw watchdog status      # shows whether the unit file(s) are installed
+cw watchdog uninstall   # removes the unit file(s)
+cw watchdog tick        # run one tick manually (also what the timer/agent invokes)
+```
+
+`install` only writes the systemd `.service`/`.timer` files under
+`$XDG_CONFIG_HOME/systemd/user/` (falling back to `~/.config`) or the
+launchd `.plist` under `~/Library/LaunchAgents/` — it does not itself run
+`systemctl`/`launchctl`; run the printed activation command
+(`systemctl --user daemon-reload && systemctl --user enable --now
+cw-watchdog.timer`, or `launchctl load <plist>`) yourself.
