@@ -6,8 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-07-07
+
+RFC 0008 (orchestrator push channel) lands in full: queue-event producers,
+the operator attention channel, subscribe-first monitoring docs, and the
+gate-concierge capstone.
+
 ### Added
 
+- **Gate concierge + durable escalation + `cw watchdog`** (#1015, RFC 0008
+  capstone): `cw.reconcile.concierge` — a mechanical recovery reactor with
+  three recipes (wall-clock false-park requeue, park-marker-poison clear,
+  cancelled-row restore), gated behind a new global opt-in
+  `OrchestratorConfig.concierge_enabled` (**default `false`**, per
+  ADR-0006) with per-recipe `concierge_recoveries` flags
+  (merge-with-defaults semantics — omitting a key does not disable it).
+  `cw.reconcile.escalation` — a durable escalation latch
+  (`escalation_parked_at`/`escalation_fired_at`, flat 45-minute threshold)
+  over six judgment gates, emitting a latched `operator.escalation` event
+  on the operator channel; `concierge.recovered` is audit-trail only. New
+  `cw watchdog` CLI group (`tick`/`install`/`uninstall`/`status`) installs
+  a session-independent systemd user timer (Linux) / launchd plist (macOS)
+  dead-man's switch. Dev-queue schema v9 → v10.
+- **Operator attention channel** (#1002, RFC 0008 W3): operator-relevant
+  event filtering over the queue-events SSE channel, configured via
+  `OrchestratorConfig.operator_channel_forward` and
+  `_DEFAULT_OPERATOR_EVENT_TYPES`.
+- **`task.transition` / `task.stage_changed` / `task.deleted` producers**
+  (#1000, RFC 0008 W1): queue-row lifecycle events with disposition
+  payloads, emitted from `transition_task_status` and friends.
 - **`session.liveness_changed` producer** (#1001, RFC 0008 W2): a new
   `cw.reconcile.liveness` sweep classifies each live DAEMON session's
   transcript-mtime staleness into a latched `Session.liveness_bucket`
@@ -18,6 +45,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reassigning the global bucket labels — see `docs/events.md` for the
   floor-suppression semantics. Pure observation: no disposition, no queue
   mutation. `CW_STATE_SCHEMA_VERSION` bumped 12 → 13.
+
+### Fixed
+
+- **Detached-HEAD main checkout misclassified** (#964): dispatch's freshness
+  gate now surfaces `freshness_detail=main_detached_head` (with accurate
+  checkout advice in the WARN and `dev-queue status` subline) instead of
+  falling through to the generic `main_behind_origin` label.
+- **Release-tag workflow skipped on squash merges** (#1009): the
+  `chore(release):` commit-subject guard now tolerates the PR-number suffix
+  GitHub appends on squash merge; v1.14.0 had to be tagged by hand because
+  of this.
+
+### Documentation
+
+- **Subscribe-first monitoring** (#1003, RFC 0008 W4): the dispatch runbook's
+  monitoring section now leads with operator-channel subscription
+  (`task.transition` disposition payloads); the poll ladder is demoted to an
+  explicitly labeled fallback. `cw-session-watch` Mode B and `cw-fanout`
+  gate-closure consume the pushed events.
 
 ## [1.14.0] — 2026-07-06
 
