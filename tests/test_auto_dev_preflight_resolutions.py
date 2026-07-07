@@ -14,6 +14,7 @@ SKILLS = ROOT / ".claude" / "skills"
 REFUSE = "multiple resolution comments detected — re-run /harden-ticket to consolidate"
 MARKER = "<!-- auto-dev-preflight-resolutions -->"
 BLOCKER_HEADER = "## Multi-Marker Gate Blocked"
+PENDING_HEADER = "## Pending Verification Scan"
 
 
 def _cmd(name: str) -> str:
@@ -176,9 +177,10 @@ def test_intake_table_row_includes_comments() -> None:
 
 
 def test_plan_live_fetch_every_invocation() -> None:
-    """Plan Stage 1 mandates a comments live-fetch on every invocation."""
-    assert "live-fetch the ticket comments on every invocation" in _cmd(
-        "auto-dev-plan.md"
+    """Plan Stage 1 mandates a comments+body live-fetch on every invocation."""
+    assert (
+        "live-fetch the ticket comments AND the ticket body on every invocation"
+        in _cmd("auto-dev-plan.md")
     )
 
 
@@ -211,3 +213,92 @@ def test_intake_linear_list_comments_before_0d() -> None:
     content = _cmd("auto-dev-intake.md")
     assert "list_comments(<id>)" in content
     assert "mandatory op that MUST run before Step 0d" in content
+
+
+# ---------------------------------------------------------------------------
+# Body-fold resolutions invisible to the response check (#980)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_body_field_precedes_snapshot_anchor() -> None:
+    """The cached-body callout sits right before the Stage-0 snapshot anchor."""
+    assert "and the cached `body` field" in _nearby(
+        _cmd("auto-dev-plan.md"), "Stage-0 provenance snapshot only"
+    )
+
+
+def test_plan_live_fetch_rule_covers_body() -> None:
+    """The Orientation live-fetch rule is retitled to cover comments AND body."""
+    assert "Comments and body are live, not cached" in _cmd("auto-dev-plan.md")
+
+
+def test_plan_body_fetch_op_named() -> None:
+    """The github-issues fetch op is named with the body field included."""
+    assert "`gh issue view <n> --json body,comments`" in _cmd("auto-dev-plan.md")
+
+
+def test_step1b_greps_body_resolutions_section() -> None:
+    """Step 1b setup also greps the live-fetched issue BODY's resolutions section."""
+    assert (
+        "grep the live-fetched issue BODY's resolutions section for the same marker"
+        in _step1b_section()
+    )
+
+
+def test_step1b_body_markers_excluded_from_tally() -> None:
+    """Body markers are excluded from the >1-marker comment tally."""
+    assert "body markers are EXCLUDED from that tally" in _step1b_section()
+
+
+def test_step1b_dual_channel_echo_does_not_trip_gate() -> None:
+    """The sanctioned dual-channel (comment + body) echo must not trip the gate."""
+    assert "must NOT trip the gate" in _step1b_section()
+
+
+def test_step1b_marker_source_excludes_cached_body_too() -> None:
+    """The marker source pin excludes the cached body field too, not just comments."""
+    assert (
+        "NEVER the `.cw/context.json` `comments` array or cached `body` field"
+        in _cmd("auto-dev-plan.md")
+    )
+
+
+def test_step1b_body_copy_is_authoritative() -> None:
+    """When the body carries the marker, the body's copy is authoritative."""
+    assert "the body's copy is authoritative" in _step1b_section()
+
+
+def test_step1b_body_list_not_double_injected() -> None:
+    """The body's list is used without separately injecting the comment's copy."""
+    assert (
+        "use the body's list and do not separately inject the comment's copy"
+        in _step1b_section()
+    )
+
+
+def test_step1c_ambiguities_exit_uses_pending_header() -> None:
+    """The AMBIGUITIES headless exit posts under the pinned pending-verify header."""
+    content = _cmd("auto-dev-plan.md")
+    idx = content.index("`AMBIGUITIES` → EXIT `ambiguities_pending_resolution`")
+    window = content[idx : idx + 400]
+    assert PENDING_HEADER in window
+
+
+def test_step1c_premises_exit_uses_pending_header() -> None:
+    """The PREMISES TO VERIFY headless exit posts under the pinned header too."""
+    content = _cmd("auto-dev-plan.md")
+    idx = content.index("`PREMISES TO VERIFY` → EXIT `premises_pending_verification`")
+    window = content[idx : idx + 400]
+    assert PENDING_HEADER in window
+
+
+def test_step1c_pending_header_mirrors_gate_blocked_idiom() -> None:
+    """The pinned header is documented as mirroring the Multi-Marker Gate idiom."""
+    assert "mirroring the `## Multi-Marker Gate Blocked`" in _cmd("auto-dev-plan.md")
+
+
+def test_harden_documents_marker_moves_with_body_fold() -> None:
+    """harden-ticket documents the marker moves with resolutions folded into body."""
+    content = _skill("harden-ticket/SKILL.md")
+    assert "pre-flight resolutions HTML-comment marker" in content
+    assert "moves with them" in content
