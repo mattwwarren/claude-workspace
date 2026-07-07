@@ -12495,6 +12495,231 @@ def _auto_config(**kwargs: object) -> OrchestratorConfig:
     return OrchestratorConfig(reap_policy=ReapPolicy.AUTO, **kwargs)  # type: ignore[arg-type]
 
 
+# ---------------------------------------------------------------------------
+# Wall-clock-budget liveness veto (#976)
+# ---------------------------------------------------------------------------
+
+
+def test_stalled_veto_suppresses_park_when_transcript_fresh(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget expired but transcript fresh -> PARK_VETOED, not REVERT_TASK;
+    no queue/session mutation through the act phase (#976)."""
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_stalled_candidates,
+        _detect_stalled_candidates,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-fresh"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("veto-fresh-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-fresh-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-fresh-1",
+        stage=Stage.PLAN,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    # 5 minutes stale — well under the 15-min PLAN-stage floor -> LIVE.
+    fresh_ts = (now - timedelta(minutes=5)).timestamp()
+    os.utime(str(transcript), (fresh_ts, fresh_ts))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"veto-fresh-1": task},
+    )
+
+    veto = next(
+        c for c in candidates if c.proposed_action == ProposedAction.PARK_VETOED
+    )
+    assert veto.stale_minutes is not None
+    assert veto.stale_minutes < 15
+    assert not any(c.proposed_action == ProposedAction.REVERT_TASK for c in candidates)
+
+    _act_on_stalled_candidates(state, candidates, now=now, config=_auto_config())
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "veto-fresh-1")
+    assert t.status == QueueItemStatus.RUNNING
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "veto-fresh-1")
+    assert s.status == SessionStatus.ACTIVE
+
+
+def test_stalled_veto_park_proceeds_once_quiet(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget expired and transcript stale beyond the per-stage floor ->
+    normal REVERT_TASK still fires (#976)."""
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-quiet"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("veto-quiet-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-quiet-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-quiet-1",
+        stage=Stage.PLAN,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    # 40 minutes stale — past the 15-min PLAN-stage floor -> not LIVE.
+    stale_ts = (now - timedelta(minutes=40)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"veto-quiet-1": task},
+    )
+
+    assert any(c.proposed_action == ProposedAction.REVERT_TASK for c in candidates)
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
+
+
+def test_stalled_veto_does_not_apply_to_cap_exceeded_park(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """attempts >= cap park fires unconditionally even with a fresh transcript
+    — the veto is structurally unreachable for the cap-exceeded branch (#976)."""
+    from cw.reconcile import (
+        DEFAULT_STALLED_RETRY_CAP,
+        ProposedAction,
+        _detect_stalled_candidates,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-cap"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("veto-cap-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-cap-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-cap-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    fresh_ts = (now - timedelta(minutes=1)).timestamp()
+    os.utime(str(transcript), (fresh_ts, fresh_ts))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"veto-cap-1": task},
+    )
+
+    assert any(
+        c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER for c in candidates
+    )
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
+
+
+def test_act_on_stalled_park_vetoed_emits_event_no_mutation(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """PARK_VETOED candidate -> session.park_vetoed emitted; zero mutation (#976)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    worktree = tmp_path / "wt-veto-act"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("act-veto-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="act-veto-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="act-veto-1",
+        stage=Stage.IMPL,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="act-veto-1",
+        proposed_action=ProposedAction.PARK_VETOED,
+        ticket_id="act-veto-1",
+        elapsed_seconds=3700.0,
+        client="client-a",
+        stage=Stage.IMPL,
+        stale_minutes=4.2,
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now)
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "act-veto-1")
+    assert t.status == QueueItemStatus.RUNNING
+    assert t.disposition is None
+
+    s = next(s for s in state.sessions if s.id == "act-veto-1")
+    assert s.status == SessionStatus.ACTIVE
+
+    events = read_events(
+        consumer="test-act-veto-1",
+        event_types=[OrchestratorEventType.SESSION_PARK_VETOED],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] == "act-veto-1"
+    assert payload["client"] == "client-a"
+    assert payload["session_id"] == "act-veto-1"
+    assert payload["reason"] == "wall_clock_budget"
+    assert payload["stale_minutes"] == 4.2
+    assert events[0].correlation_id == "act-veto-1"
+
+
 class TestActOnStalledCandidatesSignalOnly:
     """Under signal_only policy, REVERT_TASK stalled candidates → BLOCKED_ON_USER."""
 
@@ -13107,6 +13332,56 @@ class TestSalvageSkipAttentionLatch:
         actions = {c.proposed_action for c in candidates}
         assert actions == {
             ProposedAction.REVERT_TASK,
+            ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+        }
+
+    def test_stalled_veto_resets_salvage_skip_latch(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Veto path still appends RESET_SALVAGE_SKIP_COUNTER alongside
+        PARK_VETOED (#976)."""
+        from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        worktree = tmp_path / "wt-veto-reset"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("veto-reset-1", worktree, started_at)
+        sess.consecutive_salvage_skips = 1
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        task = TicketTask(
+            ticket_id="veto-reset-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="veto-reset-1",
+            stage=Stage.PLAN,
+        )
+
+        transcript = _write_idle_transcript(home, worktree)
+        fresh_ts = (now - timedelta(minutes=2)).timestamp()
+        os.utime(str(transcript), (fresh_ts, fresh_ts))
+
+        candidates = _detect_stalled_candidates(
+            state,
+            now=now,
+            config=_auto_config(),
+            task_by_ticket={"veto-reset-1": task},
+        )
+
+        assert len(candidates) == 2
+        actions = {c.proposed_action for c in candidates}
+        assert actions == {
+            ProposedAction.PARK_VETOED,
             ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
         }
 
