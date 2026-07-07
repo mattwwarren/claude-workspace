@@ -574,6 +574,82 @@ not integer) used elsewhere in this file, derived from
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 
+### `concierge.recovered`
+
+**Emitter:** `run_concierge_recoveries` (`cw.reconcile.concierge`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "recipe": "false_park_requeue | park_marker_poison_clear | cancelled_row_restore",
+  "evidence": "<dict>"
+}
+```
+**Semantics:** RFC 0008 capstone (#1015). Emitted **before** the corresponding
+mutation for every recovery the mechanical recovery reactor performs — the
+event is durably recorded even if the subsequent task/session write fails,
+so the decision trace survives a partial write. Audit-trail only: **not**
+forwarded to the operator-attention channel by default (see
+`operator.escalation` below, and Q3 in the design notes) — an operator does
+not need paging for a mechanical, non-destructive recovery.
+
+Gated entirely behind `OrchestratorConfig.concierge_enabled` (default
+`false`) and, per-recipe, `OrchestratorConfig.concierge_recoveries`. See
+[`config/CONFIG_REFERENCE.md`](../config/CONFIG_REFERENCE.md) and
+[`docs/dispatch-runbook.md`](dispatch-runbook.md)'s "Concierge & Watchdog"
+section for the 3 recipes' preconditions.
+
+`evidence` is recipe-specific (e.g. `disposition`/`attempts`/`session_id` for
+`false_park_requeue`; `paused_status`/`consecutive_salvage_skips`/
+`session_id` for `park_marker_poison_clear`; `worktree_path`/`default_branch`
+for `cancelled_row_restore`).
+
+`correlation_id` is the `ticket_id`.
+
+### `operator.escalation`
+
+**Emitter:** `run_escalation_sweep` (`cw.reconcile.escalation`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "status": "blocked_on_user | awaiting_operator_signoff | failed",
+  "disposition": "<str | null>",
+  "lane": "<str>",
+  "stage": "harden | plan | impl | review | finalize",
+  "parked_at": "<ISO 8601 timestamp>",
+  "elapsed_minutes": "<float>"
+}
+```
+**Semantics:** RFC 0008 capstone (#1015). Fires exactly once per parked
+episode: a task entering the escalation-eligible set gets
+`TicketTask.escalation_parked_at` stamped (no event yet); once
+`now - escalation_parked_at >= 45` minutes (`ESCALATION_PARK_MINUTES`, a flat
+threshold — NOT per-stage, unlike the liveness sweep above), this event
+fires and `escalation_fired_at` is stamped so it never re-fires for the same
+episode. Both fields clear together via the `transition_task_status` seam
+(`cw.dev_queue`) when the row leaves the eligible set, so a fresh parked
+episode always starts the clock over.
+
+The escalation-eligible set is a two-branch formula, not a single
+disposition list: a `BLOCKED_ON_USER` row is eligible only for disposition
+∈ {`ambiguities_pending_resolution`, `plan_pending_approval`,
+`review_pending_approval`, `stalled_retry_cap_parked`}, while
+`AWAITING_OPERATOR_SIGNOFF`/`FAILED` rows are eligible regardless of
+disposition. `premises_pending_verification` is deliberately excluded.
+
+Runs **unconditionally** every reconcile tick (not gated by
+`concierge_enabled`) and is also directly callable from `cw watchdog tick`
+(see `docs/dispatch-runbook.md`) — it needs no `sessions_lock`, so it fires
+even when the dispatch loop itself is down.
+
+Added to the operator-channel's default forward set (unlike
+`concierge.recovered` above) — this IS the operator-facing signal.
+
+`correlation_id` is the `ticket_id`.
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset

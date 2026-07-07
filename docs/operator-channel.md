@@ -34,6 +34,7 @@ operator_channel_forward:
     - pr.mergeable
     - pr.merged
     - session.liveness_changed
+    - operator.escalation
   task_transition_statuses:
     - blocked_on_user
     - awaiting_operator_signoff
@@ -61,8 +62,16 @@ in `orchestrator.yaml` unless you want to override it.
   signal (`stale_15m`) and only surfaces once a session has been quiet for a
   more concerning window.
 - Every other admitted type (`task.deleted`, `session.needs_attention`, all
-  five `pr.*` types) forwards unconditionally once present in `event_types` —
-  there is no sub-condition for them.
+  five `pr.*` types, `operator.escalation`) forwards unconditionally once
+  present in `event_types` — there is no sub-condition for them.
+
+`operator.escalation` (RFC 0008 capstone, #1015) was added to the default
+forward set: it is the durable-escalation-latch's operator-facing signal,
+firing once per parked episode past a 45-minute threshold (see
+`docs/events.md`). Its sibling event, `concierge.recovered` (the mechanical
+recovery reactor's audit trail), is deliberately **excluded** from the
+default set — it records a non-destructive, already-resolved recovery the
+operator does not need paging for.
 
 **Fail-loud validation:** unlike `reap_policy` (which silently coerces an
 invalid value to its safe default per ADR-0006), an invalid

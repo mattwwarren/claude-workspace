@@ -37,6 +37,8 @@ from cw.reconcile._shared import (
     feature_branch_key,
     ticket_id_for_session,
 )
+from cw.reconcile.concierge import run_concierge_recoveries
+from cw.reconcile.escalation import run_escalation_sweep
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.liveness import record_session_liveness_changes
 from cw.reconcile.local import (
@@ -67,9 +69,39 @@ from cw.reconcile.tasks import (
 )
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, CwState
+    from cw.models import ClientConfig, CwState, OrchestratorConfig
 
 _log = logging.getLogger(__name__)
+
+
+def _run_terminal_backstops_and_sweeps(
+    *,
+    now: datetime,
+    native_live: set[str],
+    config: OrchestratorConfig,
+) -> tuple[list[str], list[str]]:
+    """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
+
+    Both branches of ``_reconcile_locked`` (the no-phantoms early return and
+    the normal phantom-handling tail) call this in the same spot: after their
+    own detect/act sweep, recover any RUNNING task whose session already
+    went TIMED_OUT/COMPLETED without reverting it, park stale PENDING rows
+    with a terminal sibling (#876), then run the mechanical recovery reactor
+    (opt-in) and durable escalation sweep (unconditional) from GitHub #1015.
+    All of these load their own fresh dev-queue/state snapshots rather than
+    reusing the (possibly now-stale) locals in ``_reconcile_locked``.
+    Extracted to one call site (instead of duplicating 4 lines in each
+    branch) to keep ``_reconcile_locked``'s statement count under the
+    PLR0915 limit.
+
+    Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
+    """
+    timed_out_ticket_ids = revert_timed_out_tasks()
+    completed_silent_ticket_ids = revert_completed_silent_tasks()
+    park_terminal_sibling_tasks()
+    run_concierge_recoveries(now=now, native_live=native_live, config=config)
+    run_escalation_sweep(now=now)
+    return timed_out_ticket_ids, completed_silent_ticket_ids
 
 
 def _verify_supervisor_session_id(state: CwState) -> int:
@@ -416,9 +448,11 @@ def _reconcile_locked(
         # COMPLETED-silent, and terminal-sibling sweeps so any tasks whose
         # sessions completed or timed out without reverting their queue task
         # are recovered, and stale PENDING rows with terminal siblings are parked.
-        timed_out_ticket_ids = revert_timed_out_tasks()
-        completed_silent_ticket_ids = revert_completed_silent_tasks()
-        park_terminal_sibling_tasks()
+        timed_out_ticket_ids, completed_silent_ticket_ids = (
+            _run_terminal_backstops_and_sweeps(
+                now=now, native_live=native_live, config=orchestrator_config
+            )
+        )
         all_reverted = list(
             dict.fromkeys(
                 stalled_reverted
@@ -464,10 +498,11 @@ def _reconcile_locked(
     # reap_reason stamp inside revert_timed_out_tasks /
     # revert_completed_silent_tasks (in-place + save_state, serialized by
     # the sessions_lock this function runs under).
-    timed_out_ticket_ids = revert_timed_out_tasks()
-    completed_silent_ticket_ids = revert_completed_silent_tasks()
-    # Park stale PENDING rows whose ticket already has a terminal sibling (#876).
-    park_terminal_sibling_tasks()
+    timed_out_ticket_ids, completed_silent_ticket_ids = (
+        _run_terminal_backstops_and_sweeps(
+            now=now, native_live=native_live, config=orchestrator_config
+        )
+    )
     all_reverted = list(
         dict.fromkeys(
             stalled_reverted

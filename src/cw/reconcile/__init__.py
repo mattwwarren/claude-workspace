@@ -114,10 +114,23 @@ from cw.reconcile._shared import (
     resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
+from cw.reconcile.concierge import (
+    DEFAULT_CONCIERGE_RECOVERIES,
+    RECIPE_CANCELLED_ROW_RESTORE,
+    RECIPE_FALSE_PARK_REQUEUE,
+    RECIPE_PARK_MARKER_POISON_CLEAR,
+    ConciergeCandidate,
+    resolve_concierge_recipe_enabled,
+    run_concierge_recoveries,
+)
 from cw.reconcile.core import (
     _reconcile_locked,
     _verify_supervisor_session_id,
     reconcile,
+)
+from cw.reconcile.escalation import (
+    ESCALATION_PARK_MINUTES,
+    run_escalation_sweep,
 )
 from cw.reconcile.idle import (
     _act_on_idle_candidates,
@@ -161,10 +174,15 @@ from cw.reconcile.tasks import (
 
 __all__ = [
     "AUTO_DEV_LABEL_PREFIX",
+    "DEFAULT_CONCIERGE_RECOVERIES",
     "DEFAULT_IDLE_RETRY_CAP",
     "DEFAULT_STALLED_RETRY_CAP",
+    "ESCALATION_PARK_MINUTES",
     "HEADLESS_TIMEOUT_SECONDS",
     "IDLE_WATCHDOG_SECONDS",
+    "RECIPE_CANCELLED_ROW_RESTORE",
+    "RECIPE_FALSE_PARK_REQUEUE",
+    "RECIPE_PARK_MARKER_POISON_CLEAR",
     "SPAWN_GRACE_SECONDS",
     "SUBAGENT_LIVENESS_WINDOW_SECONDS",
     "TRANSCRIPT_LIVENESS_WINDOW_SECONDS",
@@ -183,6 +201,7 @@ __all__ = [
     "_STAGE_REVIEW_COMPLETE",
     "_STALLED_CAP_PARKED_REASON",
     "_VALIDATION_FAILED_MAX_ATTEMPTS",
+    "ConciergeCandidate",
     "LivenessCandidate",
     "ProposedAction",
     "ReapCandidate",
@@ -231,6 +250,7 @@ __all__ = [
     "reconcile",
     "record_session_liveness_changes",
     "rescue_finalize_blocked_sessions",
+    "resolve_concierge_recipe_enabled",
     "resolve_headless_budget",
     "resolve_idle_retry_cap",
     "resolve_idle_watchdog_budget",
@@ -239,6 +259,8 @@ __all__ = [
     "revert_completed_silent_tasks",
     "revert_stalled_headless_sessions",
     "revert_timed_out_tasks",
+    "run_concierge_recoveries",
+    "run_escalation_sweep",
     "salvage_committed_no_pr_sessions",
     "ticket_id_for_session",
 ]

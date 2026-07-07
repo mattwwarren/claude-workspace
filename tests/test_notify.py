@@ -15,6 +15,7 @@ from cw.notify import (
     _fire_push_notification_sync,
     _peon_sh_path,
     fire_push_notification,
+    send_desktop_notification,
 )
 
 
@@ -152,3 +153,78 @@ class TestFirePushNotification:
             "notify-send" in r.message and "acceptable" in r.message
             for r in caplog.records
         ), f"Expected notify-send debug log, got: {[r.message for r in caplog.records]}"
+
+
+class TestSendDesktopNotification:
+    """RFC 0008 capstone (#1015): synchronous watchdog desktop notification."""
+
+    def test_linux_dispatches_notify_send(self) -> None:
+        with (
+            patch("cw.notify.platform.system", return_value="Linux"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            send_desktop_notification("cw watchdog", "gate parked 46m")
+            mock_run.assert_called_once()
+            args = mock_run.call_args.args[0]
+            assert args == ["notify-send", "cw watchdog", "gate parked 46m"]
+
+    def test_macos_dispatches_osascript(self) -> None:
+        with (
+            patch("cw.notify.platform.system", return_value="Darwin"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            send_desktop_notification("cw watchdog", "gate parked 46m")
+            mock_run.assert_called_once()
+            args = mock_run.call_args.args[0]
+            assert args[0] == "osascript"
+            assert args[1] == "-e"
+            assert "display notification" in args[2]
+            assert "gate parked 46m" in args[2]
+            assert "cw watchdog" in args[2]
+
+    def test_macos_escapes_quotes_in_message(self) -> None:
+        with (
+            patch("cw.notify.platform.system", return_value="Darwin"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            send_desktop_notification("title", 'has "quotes" in it')
+            script = mock_run.call_args.args[0][2]
+            assert '\\"quotes\\"' in script
+
+    def test_unknown_platform_falls_back_to_notify_send(self) -> None:
+        with (
+            patch("cw.notify.platform.system", return_value="FreeBSD"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            send_desktop_notification("t", "m")
+            assert mock_run.call_args.args[0][0] == "notify-send"
+
+    def test_swallows_failure_linux(self) -> None:
+        with (
+            patch("cw.notify.platform.system", return_value="Linux"),
+            patch("subprocess.run", side_effect=OSError("no notify-send")),
+        ):
+            send_desktop_notification("t", "m")  # must not raise
+
+    def test_swallows_failure_macos(self) -> None:
+        with (
+            patch("cw.notify.platform.system", return_value="Darwin"),
+            patch("subprocess.run", side_effect=OSError("no osascript")),
+        ):
+            send_desktop_notification("t", "m")  # must not raise
+
+    def test_failure_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        with (
+            patch("cw.notify.platform.system", return_value="Linux"),
+            patch("subprocess.run", side_effect=OSError("boom")),
+            caplog.at_level(logging.DEBUG, logger="cw.notify"),
+        ):
+            send_desktop_notification("t", "m")
+        assert any(
+            "send_desktop_notification" in r.message and "acceptable" in r.message
+            for r in caplog.records
+        )

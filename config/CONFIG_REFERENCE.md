@@ -294,6 +294,42 @@ idle_watchdog_by_tier:
 #   reap_policy: auto
 reap_policy: signal_only
 
+# Daemon-side mechanical recovery reactor (RFC 0008 capstone, GitHub #1015).
+# Opt-in, default false: the 3 recipes below requeue/restore TicketTasks in
+# ways adjacent to reap_policy's own destructive-action gate above (ADR-0006
+# invariant 4) -- nothing fires without an explicit operator opt-in, same
+# fail-safe posture as reap_policy's signal_only default.
+#
+# When enabled, 3 recipes run every reconcile tick, each individually
+# toggleable via concierge_recoveries (merged onto the all-true defaults --
+# NOT a full-replace map; setting one key never silently disables the
+# others):
+#   false_park_requeue        -- requeue a stalled_retry_cap_parked (or
+#                                 null-disposition) BLOCKED_ON_USER row once
+#                                 its owning session is confirmed dead
+#                                 (absent from the daemon roster, transcript
+#                                 flat).
+#   park_marker_poison_clear   -- close + requeue a row behind a session
+#                                 whose park marker (silently_idle /
+#                                 needs_salvage) has persisted for
+#                                 consecutive_salvage_skips >= 1 and whose
+#                                 transcript is confirmed dead.
+#   cancelled_row_restore      -- restore a CANCELLED row to PENDING when its
+#                                 worktree still has committed work ahead of
+#                                 its base branch, so work is never silently
+#                                 lost to a stray cancel.
+#
+# The first two recipes gate on attempts < global_attempt_ceiling; at the
+# ceiling the row is refused and left parked rather than requeued. See
+# docs/dispatch-runbook.md's "Concierge & Watchdog" section (#11) for the
+# full recipe preconditions and docs/events.md for the concierge.recovered
+# event each recovery emits.
+concierge_enabled: false
+concierge_recoveries: {}
+#   false_park_requeue: true
+#   park_marker_poison_clear: true
+#   cancelled_row_restore: true
+
 # Minimum elapsed seconds between PR-state hydration passes in the serve tick
 # (GitHub #929). Gated off max(pr_state.hydrated_at) across dev-queue tasks —
 # no separate timer state. Each pass fetches `gh pr view` for every open PR
@@ -328,6 +364,7 @@ operator_channel_forward:
     - pr.mergeable
     - pr.merged
     - session.liveness_changed
+    - operator.escalation
   task_transition_statuses:
     - blocked_on_user
     - awaiting_operator_signoff

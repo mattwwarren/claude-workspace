@@ -122,6 +122,20 @@ def transition_task_status(
         task.disposition = None
         task.pr_url = None
         task.completed_at = None
+    # RFC 0008 capstone (#1015, Q5): unconditional clear-site for the
+    # durable-escalation-latch fields. transition_task_status is the single
+    # authority for every status/disposition mutation on a TicketTask (see
+    # docstring above), so clearing here — on every call, regardless of which
+    # branch above fired — covers approve_ticket, requeue_ticket,
+    # cancel_ticket, unblock_ticket, and _advance_task_pointer/_stage_regress
+    # all at once. This is deliberately NOT gated on old_status != new_status:
+    # a re-park to the same status (e.g. a fresh BLOCKED_ON_USER disposition
+    # overwriting a stale one) must also start the latch clean, and clearing
+    # an already-None pair is a no-op. cw.reconcile.escalation re-stamps
+    # escalation_parked_at on the next sweep tick if the row is still (or
+    # newly) in the escalation-eligible set.
+    task.escalation_parked_at = None
+    task.escalation_fired_at = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock. record_event
         # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
@@ -311,6 +325,15 @@ def _fill_signoff_default(task_raw: dict[str, Any]) -> None:
         task_raw["signoff"] = None
 
 
+def _fill_escalation_defaults(task_raw: dict[str, Any]) -> None:
+    """Fill escalation_parked_at/escalation_fired_at introduced in dev-queue
+    schema v10 (GitHub #1015, RFC 0008 capstone). Idempotent."""
+    if "escalation_parked_at" not in task_raw:
+        task_raw["escalation_parked_at"] = None
+    if "escalation_fired_at" not in task_raw:
+        task_raw["escalation_fired_at"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -328,6 +351,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_spawn_error_backoff_default(task_raw)
                 _fill_pr_state_default(task_raw)
                 _fill_signoff_default(task_raw)
+                _fill_escalation_defaults(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 

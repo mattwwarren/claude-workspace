@@ -1607,6 +1607,22 @@ class TestCancelTicket:
         cleared = cancel_ticket("TKT-PRET", "genhealth")
         assert cleared == [None]
 
+    def test_cancel_clears_escalation_fields(self, tmp_dev_queue: Path) -> None:
+        """cancel_ticket clears escalation_parked_at/fired_at (#1015, Q5)."""
+        task = TicketTask(
+            ticket_id="TKT-ESC",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            escalation_parked_at=datetime.now(UTC),
+            escalation_fired_at=datetime.now(UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cancel_ticket("TKT-ESC", "genhealth")
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TKT-ESC")
+        assert t.escalation_parked_at is None
+        assert t.escalation_fired_at is None
+
     def test_cancel_already_cancelled_returns_empty_list(
         self, tmp_dev_queue: Path
     ) -> None:
@@ -1989,7 +2005,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 9
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 10
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2030,10 +2046,10 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["signoff"] is None
 
     def test_migrate_dev_queue_bumps_to_v9(self) -> None:
-        """migrate_dev_queue bumps schema_version to 9 regardless of input."""
+        """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 9
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 10
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2051,6 +2067,45 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["signoff"] == "operator"
+
+    def test_migrate_dev_queue_fills_escalation_defaults(self) -> None:
+        """migrate_dev_queue fills escalation_parked_at/fired_at=None (v10)."""
+        raw: dict[str, object] = {
+            "schema_version": 9,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-60",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["escalation_parked_at"] is None
+        assert migrated["tasks"][0]["escalation_fired_at"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 10
+
+    def test_v10_escalation_fields_preserved_idempotently(self) -> None:
+        """Existing escalation timestamps survive a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 10,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-61",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "escalation_parked_at": "2026-07-01T00:00:00+00:00",
+                    "escalation_fired_at": None,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["escalation_parked_at"] == (
+            "2026-07-01T00:00:00+00:00"
+        )
+        assert migrated["tasks"][0]["escalation_fired_at"] is None
 
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""
@@ -2865,6 +2920,45 @@ class TestApproveTicket:
         assert t.session_id is None
         assert t.stage_base_ref is None
 
+    def test_approve_then_re_park_starts_escalation_latch_fresh(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Q5 regression: approve clears a stale latch; a subsequent re-park
+        starts the escalation window fresh rather than inheriting the old
+        (stale) parked_at/fired_at timestamps (#1015)."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stale_parked_at = datetime(2020, 1, 1, tzinfo=UTC)
+        stale_fired_at = datetime(2020, 1, 1, tzinfo=UTC)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
+        task.escalation_parked_at = stale_parked_at
+        task.escalation_fired_at = stale_fired_at
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0001",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        approve_ticket("GEN-500", "genhealth")
+
+        store = load_dev_queue()
+        approved = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert approved.escalation_parked_at is None
+        assert approved.escalation_fired_at is None
+
+        # Re-park the same row (simulating a fresh BLOCKED_ON_USER episode) —
+        # the latch must start clean, not resurrect the stale 2020 timestamps.
+        transition_task_status(approved, QueueItemStatus.BLOCKED_ON_USER)
+        save_dev_queue(store)
+        store = load_dev_queue()
+        reparked = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert reparked.escalation_parked_at is None
+        assert reparked.escalation_fired_at is None
+
     def test_approve_review_pending_advances_to_finalize(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -3607,6 +3701,33 @@ class TestUnblockTicket:
         assert t.session_id is None
         assert t.stage_base_ref is None
 
+    def test_unblock_clears_escalation_fields(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """unblock_ticket clears escalation_parked_at/fired_at (#1015, Q5)."""
+        from cw.config import save_state
+        from cw.dev_queue import unblock_ticket
+        from cw.models import CwState, ReapReason
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess8003")
+        task.escalation_parked_at = datetime.now(UTC)
+        task.escalation_fired_at = datetime.now(UTC)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess8003",
+            last_result={"status": "salvage_parked"},
+            reap_reason=ReapReason.SALVAGE_PARKED,
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        unblock_ticket("GEN-500", "genhealth")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.escalation_parked_at is None
+        assert t.escalation_fired_at is None
+
     def test_unblock_not_park_marked_raises(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -4126,6 +4247,22 @@ class TestTransitionTaskStatus:
         assert task.pr_url == "http://x"
         assert task.completed_at == ts
 
+    def test_clears_escalation_fields_unconditionally(self) -> None:
+        """Any transition clears escalation_parked_at/fired_at (#1015, Q5)."""
+        for status in QueueItemStatus:
+            task = TicketTask(
+                ticket_id="T-esc",
+                client="genhealth",
+                status=QueueItemStatus.PENDING,
+                escalation_parked_at=datetime.now(UTC),
+                escalation_fired_at=datetime.now(UTC),
+            )
+            transition_task_status(task, status)
+            assert task.escalation_parked_at is None, (
+                f"expected None after transition to {status}"
+            )
+            assert task.escalation_fired_at is None
+
     def test_requeue_clears_disposition(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -4143,6 +4280,23 @@ class TestTransitionTaskStatus:
         assert requeued.status == QueueItemStatus.PENDING
         assert requeued.disposition is None
         assert requeued.completed_at is None
+
+    def test_requeue_clears_escalation_fields(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Requeued task clears escalation_parked_at/fired_at (#1015, Q5)."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(ticket_id="GEN-RQ-ESC")
+        task.escalation_parked_at = datetime.now(UTC)
+        task.escalation_fired_at = datetime.now(UTC)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        requeue_ticket("GEN-RQ-ESC", "genhealth")
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.escalation_parked_at is None
+        assert requeued.escalation_fired_at is None
 
     def test_cancel_clears_disposition(self, tmp_config_dir: Path) -> None:
         """Stamped task cancelled → disposition/pr_url/completed_at cleared."""

@@ -148,7 +148,9 @@ CW_STATE_SCHEMA_VERSION = 13
 # v7: added TicketTask.spawn_error_count, next_eligible_at (GitHub #868).
 # v8: added TicketTask.pr_state (GitHub #929).
 # v9: added TicketTask.signoff (GitHub #990).
-DEV_QUEUE_SCHEMA_VERSION = 9
+# v10: added TicketTask.escalation_parked_at/escalation_fired_at
+#      (GitHub #1015, RFC 0008 capstone).
+DEV_QUEUE_SCHEMA_VERSION = 10
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -281,6 +283,12 @@ class OrchestratorEventType(StrEnum):
     # RFC 0008 W2 liveness producer (#1001): latched transcript-staleness
     # bucket crossings from the reconcile idle-watchdog pass.
     SESSION_LIVENESS_CHANGED = "session.liveness_changed"
+    # RFC 0008 capstone (#1015) — daemon-side gate concierge. CONCIERGE_RECOVERED
+    # is the mechanical-recovery-reactor's audit trail (emitted before every
+    # recipe's mutation); OPERATOR_ESCALATION is the durable-escalation-latch's
+    # one-shot fire when a gate has sat parked past ESCALATION_PARK_MINUTES.
+    CONCIERGE_RECOVERED = "concierge.recovered"
+    OPERATOR_ESCALATION = "operator.escalation"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
@@ -419,6 +427,19 @@ class TicketTask(BaseModel):
     # override -- fall through to lane/global". Set via
     # ``cw dev-queue add --signoff operator``. See GitHub #990.
     signoff: Literal["operator"] | None = None
+    # RFC 0008 capstone (#1015) — durable escalation latch. Stamped by
+    # cw.reconcile.escalation.run_escalation_sweep when this task first enters
+    # the escalation-eligible set (see that module's docstring for the
+    # 6-gate formula); escalation_fired_at is stamped once, when the parked
+    # window exceeds ESCALATION_PARK_MINUTES, gating a single
+    # OPERATOR_ESCALATION emission per parked episode. Both are cleared
+    # unconditionally by transition_task_status on every status transition
+    # (Q5) — the single mutation seam this task's status/disposition ever
+    # goes through, so a fresh parked episode always starts with a clean
+    # latch regardless of which call site (approve/requeue/cancel/unblock/
+    # advance) ended the previous one.
+    escalation_parked_at: datetime | None = None
+    escalation_fired_at: datetime | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -535,6 +556,13 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         OrchestratorEventType.PR_MERGEABLE,
         OrchestratorEventType.PR_MERGED,
         OrchestratorEventType.SESSION_LIVENESS_CHANGED,
+        # RFC 0008 capstone (#1015, Q3): OPERATOR_ESCALATION is the durable
+        # escalation latch's operator-facing signal — forwarded by default.
+        # CONCIERGE_RECOVERED is deliberately EXCLUDED here: it is an
+        # audit-trail record of a *mechanical* (non-destructive) recovery the
+        # operator does not need paged for, recorded via record_event but
+        # never added to this forward-set.
+        OrchestratorEventType.OPERATOR_ESCALATION,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
@@ -708,6 +736,54 @@ class OrchestratorConfig(BaseModel):
     operator_channel_forward: OperatorChannelForward = Field(
         default_factory=OperatorChannelForward
     )
+    # RFC 0008 capstone (#1015) — daemon-side mechanical recovery reactor
+    # opt-in. Default False: the 3 concierge recipes in cw.reconcile.concierge
+    # requeue/restore tasks in ways adjacent to ADR-0006's destructive-action
+    # gate (reap_policy), so nothing fires without an explicit operator
+    # opt-in, mirroring reap_policy's own fail-safe default. See
+    # docs/dispatch-runbook.md "Concierge & Watchdog" and
+    # config/CONFIG_REFERENCE.md (Q1).
+    concierge_enabled: bool = False
+    # Per-recipe enable/disable, merged onto
+    # cw.reconcile.concierge.DEFAULT_CONCIERGE_RECOVERIES (all True) via
+    # cw.reconcile.concierge.resolve_concierge_recipe_enabled — NOT a
+    # full-replace map (Q7). An operator setting one recipe key must not
+    # silently disable the other two. Recognised keys: "false_park_requeue",
+    # "park_marker_poison_clear", "cancelled_row_restore".
+    concierge_recoveries: dict[str, bool] = Field(default_factory=dict)
+
+    @field_validator("concierge_recoveries")
+    @classmethod
+    def _validate_concierge_recoveries_keys(
+        cls, value: dict[str, bool]
+    ) -> dict[str, bool]:
+        """Fail loud on an unrecognized recipe key (Q7's guarantee, part 2).
+
+        Local literal, not an import of
+        cw.reconcile.concierge.DEFAULT_CONCIERGE_RECOVERIES — models.py sits
+        below cw.reconcile in the import graph (reconcile imports from
+        models, not the reverse), so importing it here would be circular.
+        Without this check, a typo'd key (e.g. "flase_park_requeue") would
+        silently no-op via resolve_concierge_recipe_enabled's plain .get()
+        fallback, leaving the intended recipe running with zero error at
+        config-load time — exactly the silent-misconfiguration failure mode
+        operator_channel_forward's own fail-loud stance (see its docstring
+        above) already treats as unacceptable for this kind of operator-facing
+        config surface.
+        """
+        recognized = {
+            "false_park_requeue",
+            "park_marker_poison_clear",
+            "cancelled_row_restore",
+        }
+        unknown = sorted(set(value) - recognized)
+        if unknown:
+            msg = (
+                f"concierge_recoveries has unrecognized recipe key(s): {unknown}. "
+                f"Recognised keys: {sorted(recognized)}."
+            )
+            raise ValueError(msg)
+        return value
 
     @model_validator(mode="before")
     @classmethod
