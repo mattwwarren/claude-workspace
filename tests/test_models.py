@@ -1059,3 +1059,12 @@ class TestConciergeAndEscalationModelSurface:
     def test_orchestrator_config_concierge_recoveries_accepts_overrides(self) -> None:
         cfg = OrchestratorConfig(concierge_recoveries={"false_park_requeue": False})
         assert cfg.concierge_recoveries == {"false_park_requeue": False}
+
+    def test_orchestrator_config_concierge_recoveries_rejects_unknown_key(
+        self,
+    ) -> None:
+        """A typo'd recipe key must fail loud, not silently no-op (Q7)."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="unrecognized recipe key"):
+            OrchestratorConfig(concierge_recoveries={"flase_park_requeue": True})

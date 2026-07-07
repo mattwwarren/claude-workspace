@@ -752,6 +752,39 @@ class OrchestratorConfig(BaseModel):
     # "park_marker_poison_clear", "cancelled_row_restore".
     concierge_recoveries: dict[str, bool] = Field(default_factory=dict)
 
+    @field_validator("concierge_recoveries")
+    @classmethod
+    def _validate_concierge_recoveries_keys(
+        cls, value: dict[str, bool]
+    ) -> dict[str, bool]:
+        """Fail loud on an unrecognized recipe key (Q7's guarantee, part 2).
+
+        Local literal, not an import of
+        cw.reconcile.concierge.DEFAULT_CONCIERGE_RECOVERIES — models.py sits
+        below cw.reconcile in the import graph (reconcile imports from
+        models, not the reverse), so importing it here would be circular.
+        Without this check, a typo'd key (e.g. "flase_park_requeue") would
+        silently no-op via resolve_concierge_recipe_enabled's plain .get()
+        fallback, leaving the intended recipe running with zero error at
+        config-load time — exactly the silent-misconfiguration failure mode
+        operator_channel_forward's own fail-loud stance (see its docstring
+        above) already treats as unacceptable for this kind of operator-facing
+        config surface.
+        """
+        recognized = {
+            "false_park_requeue",
+            "park_marker_poison_clear",
+            "cancelled_row_restore",
+        }
+        unknown = sorted(set(value) - recognized)
+        if unknown:
+            msg = (
+                f"concierge_recoveries has unrecognized recipe key(s): {unknown}. "
+                f"Recognised keys: {sorted(recognized)}."
+            )
+            raise ValueError(msg)
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_ceiling_fields(cls, data: object) -> object:
