@@ -46,6 +46,8 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +56,7 @@ from typing import TYPE_CHECKING
 from cw.config import load_orchestrator_config, load_state, state_dir
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.notify import send_desktop_notification
 from cw.reconcile.concierge import _find_session_for_ticket, _has_park_marker
@@ -74,6 +77,8 @@ _WATCHDOG_LOG_FILENAME = "watchdog.log"
 # Per Q6: a systemd user timer firing every 15 minutes / a launchd
 # StartInterval of 900 seconds.
 _WATCHDOG_TICK_INTERVAL_SECONDS = 900
+
+_CW_COMMAND_NAME = "cw"
 
 
 @dataclass(frozen=True)
@@ -240,7 +245,7 @@ def launchd_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / "com.cw.watchdog.plist"
 
 
-def generate_systemd_service_text() -> str:
+def generate_systemd_service_text(cw_path: str) -> str:
     return (
         "[Unit]\n"
         "Description=cw watchdog — mechanical recovery + escalation"
@@ -248,7 +253,7 @@ def generate_systemd_service_text() -> str:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        "ExecStart=cw watchdog tick\n"
+        f"ExecStart={cw_path} watchdog tick\n"
     )
 
 
@@ -268,7 +273,7 @@ def generate_systemd_timer_text() -> str:
     )
 
 
-def generate_launchd_plist_text() -> str:
+def generate_launchd_plist_text(cw_path: str) -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
@@ -279,7 +284,7 @@ def generate_launchd_plist_text() -> str:
         "    <string>com.cw.watchdog</string>\n"
         "    <key>ProgramArguments</key>\n"
         "    <array>\n"
-        "        <string>cw</string>\n"
+        f"        <string>{cw_path}</string>\n"
         "        <string>watchdog</string>\n"
         "        <string>tick</string>\n"
         "    </array>\n"
@@ -294,21 +299,52 @@ def _is_macos() -> bool:
     return platform.system() == "Darwin"
 
 
+def _resolve_cw_executable_path() -> str:
+    """Absolute path of the running ``cw`` executable, for the unit's ExecStart.
+
+    systemd user services / launchd agents do not inherit the login-shell PATH,
+    so a bare ``cw`` fails 203/EXEC (#1027). Resolution order: (1) prefer
+    ``Path(sys.argv[0]).resolve()`` when it points at an existing file named
+    ``cw``; (2) otherwise fall back to ``shutil.which(_CW_COMMAND_NAME)``. This
+    covers both cases where argv[0] isn't usable as-is — a relative or
+    non-``cw``-named argv[0] (e.g. a ``python -m`` invocation) falls straight
+    through to the ``which()`` lookup. ``sys.executable`` is NOT used — under a
+    uv tool install it is the venv interpreter, not the ``cw`` shim. An
+    ``Environment=PATH=...`` line in the unit file was considered and
+    rejected — it has no equivalent on launchd's ``ProgramArguments`` (no
+    PATH-injection mechanism there), so absolute-path resolution is simpler and
+    gives Linux/macOS parity.
+    """
+    argv0 = Path(sys.argv[0]).resolve()
+    if argv0.is_file() and argv0.name == _CW_COMMAND_NAME:
+        return str(argv0)
+    found = shutil.which(_CW_COMMAND_NAME)
+    if found is not None:
+        return str(Path(found).resolve())
+    msg = (
+        f"Cannot resolve the absolute path of the {_CW_COMMAND_NAME!r} executable"
+        f" (argv[0]={sys.argv[0]!r}, not on PATH). Reinstall with"
+        f" 'uv tool install' or ensure {_CW_COMMAND_NAME!r} is on PATH."
+    )
+    raise CwError(msg)
+
+
 def install() -> list[Path]:
     """Write the platform-appropriate unit file(s); return the paths written.
 
     Does not invoke ``systemctl``/``launchctl`` — the CLI layer prints the
     activation command for the operator to run themselves.
     """
+    cw_path = _resolve_cw_executable_path()
     if _is_macos():
         path = launchd_plist_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(generate_launchd_plist_text())
+        path.write_text(generate_launchd_plist_text(cw_path))
         return [path]
     service_path = systemd_service_path()
     timer_path = systemd_timer_path()
     service_path.parent.mkdir(parents=True, exist_ok=True)
-    service_path.write_text(generate_systemd_service_text())
+    service_path.write_text(generate_systemd_service_text(cw_path))
     timer_path.write_text(generate_systemd_timer_text())
     return [service_path, timer_path]
 
