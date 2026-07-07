@@ -1,5 +1,11 @@
 # Event Inbox Robustness & Compaction — Implementation Plan
 
+> **◐ PARTIALLY SHIPPED (archived plan).** The robustness edges (S6a silent-wedge replay,
+> S6c torn-read locking) landed via **#393** and are live in `events.py`. The **S6b
+> compaction/rotation** half was deferred and is tracked separately by the open **#856**
+> (the inbox is still "never truncated or rotated"). Retained as the historical record. —
+> noted during the 2026-07-07 ticket audit.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Driven by:** RFC 0004 State-integrity finding **S6**. Tracked by **#393 (T7)** (the three inbox edges). This plan exists because finding **S6b (compaction)** has a genuine design fork — compacting a shared append-only log without orphaning any consumer's cursor is not mechanical.

@@ -1,5 +1,12 @@
 # cw Code Cleanup Audit (Issue #6)
 
+> **✅ COMPLETED (historical audit).** The `DELETE` candidates below were removed
+> (`SessionPurpose.EXPLORE`, `HandoffReason`, `SessionOrigin.DELEGATE`; `wrapper.py` in #242).
+> **Exception:** `SessionOrigin.DAEMON` was ultimately **kept** — it became load-bearing for
+> native-daemon (`claude --bg`) spawns, so the original DELETE call no longer applies.
+> Retained as the historical record of the post-orchestrator dead-code sweep. — noted during
+> the 2026-07-07 ticket audit.
+
 Audit of dead code candidates identified after the orchestrator subsystem landed.
 
 ## Candidates

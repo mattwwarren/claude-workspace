@@ -1,5 +1,9 @@
 # Single State Lock — Implementation Plan
 
+> **⛳ SHIPPED (archived plan).** Implemented and released in **v1.1.0** via **#387 / #388**
+> (see **ADR-0005**, now *Accepted — implemented*). Retained as the historical
+> implementation record, not active work. — noted during the 2026-07-07 ticket audit.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Driven by:** ADR 0005 (`docs/adr/0005-single-state-lock.md`), RFC 0004 State-integrity finding **S1**. Tracked by **#387 (T1, foundation — Tasks 1-3)** and **#388 (T2, sweep — Task 4)**.
