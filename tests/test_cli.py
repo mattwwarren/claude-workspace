@@ -2672,7 +2672,7 @@ class TestSignalStop:
             monkeypatch,
             name="blk",
             stage=Stage.IMPL,
-            sentinel_text=_SENTINEL_251_BLOCKED_NO_RETRY,
+            sentinel_text=_SENTINEL_918_IMPL_BLOCKED_NO_RETRY,
         )
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
@@ -3370,6 +3370,40 @@ _SENTINEL_251_BLOCKED_NO_RETRY = (
     '"downgrade_applied": false, "fix_loop_escalated": false},\n'
     '  "friction_highlights": [],\n'
     '  "blocker": {"stage": "stage1_plan", "reason": "plan_unreviewable", '
+    '"details": "MUST_FIX persists after revision", '
+    '"retry_eligible": false, "retry_delay_seconds": null},\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+# Mirrors _SENTINEL_251_BLOCKED_NO_RETRY's shape but at stage_reached=stage2_impl
+# (IMPL), for use only against a task seeded at Stage.IMPL (#1019's stage-mismatch
+# guard). _SENTINEL_251_BLOCKED_NO_RETRY itself stays at stage1_plan -- it is also
+# used against a PLAN-stage task elsewhere and must not be repurposed in place.
+_SENTINEL_918_IMPL_BLOCKED_NO_RETRY = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 2,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage2_impl",\n'
+    '  "scope": {"tier": "small", "files": 0, "lines_estimate": 0, '
+    '"lines_actual": 0, "forbidden_touched": false},\n'
+    '  "plan_source": "linear_existing",\n'
+    '  "branch": null,\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": null,\n'
+    '  "commits": [],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+    '"fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", '
+    '"any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "EXIT_FOR_HUMAN_REVIEW", '
+    '"downgrade_applied": false, "fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "stage2_impl", "reason": "plan_unreviewable", '
     '"details": "MUST_FIX persists after revision", '
     '"retry_eligible": false, "retry_delay_seconds": null},\n'
     '  "next_actions": []\n'
