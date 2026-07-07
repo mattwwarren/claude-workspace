@@ -234,6 +234,20 @@ The main session aggregates these reports per the rule documented in the Headles
 
 ---
 
+## Worker Execution Discipline
+
+Every agent prompt in headless mode MUST ALSO include:
+
+1. Wrap gh/git push-fetch-pull/curl Bash calls in a wall-clock guard:
+   `timeout 120 <cmd>`. An unbounded network call in a headless worker
+   has no human to interrupt it.
+2. WebFetch of external documentation sites is prohibited during
+   headless runs (codifying the #930 precedent). Workers must rely on
+   local repo context, tracker content already fetched, or ask for
+   escalation rather than fetching arbitrary external URLs mid-run.
+
+---
+
 ## Tool-Use Denial Exit
 
 The Claude Code auto-mode classifier can deny a tool call mid-pipeline (typical case: external-system writes like `gh issue comment` under the agent's identity). In interactive mode the human re-authorizes; in headless mode there is no human and no retry path, so an undirected denial produces a silent stall until the Layer 1 backstop times the session out (~30 min, see claude-workspace#176).

@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dispatched workers can hang on interactive gh/git prompts** (#979):
+  `native_daemon.py:_spawn_clean_env` now unconditionally sets
+  `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, `GH_NO_UPDATE_NOTIFIER=1`, and
+  `GIT_TERMINAL_PROMPT=0` on every `claude --bg` spawn, and worker
+  prose (`auto-dev.md`) now requires `timeout 120` on gh/git/curl calls
+  and prohibits WebFetch of external docs in headless runs.
+
 ## [1.15.0] — 2026-07-07
 
 RFC 0008 (orchestrator push channel) lands in full: queue-event producers,
