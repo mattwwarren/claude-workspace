@@ -282,7 +282,11 @@ def _salvage_low_path(
                     task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.RUNNING
                 ):
-                    transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)
+                    transition_task_status(
+                        task,
+                        QueueItemStatus.BLOCKED_ON_USER,
+                        disposition=_NEEDS_SALVAGE_REASON,
+                    )
                     save_dev_queue(store)
                     break
 

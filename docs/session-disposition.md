@@ -207,10 +207,64 @@ signal; branch-absence alone is not (#808 security finding). See also
 
 ---
 
-## 6. Cross-references
+## 6. The disposition-never-null invariant (#976)
+
+Every operator-facing `BLOCKED_ON_USER` park carries a non-null
+`TicketTask.disposition`. Before #976, three reconcile park/reroute paths
+left `disposition=None` on the parked row: the idle watchdog's
+silently-idle park (`idle.py`), and the SIGNAL_ONLY reroute-to-BLOCKED_ON_USER
+path shared by the stalled/idle/phantom sweeps (via `_apply_queue_mutations`
+in `reconcile/_shared.py`). A handful of other sites (`salvage.py`'s
+LOW-path flag, `tasks.py`'s terminal-sibling park, and two config-error
+fallbacks in `dispatch.py`'s `_stage_advance_unchecked`) had the same bare
+`transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)` gap.
+
+Every one of these now passes an explicit `disposition=` kwarg, drawn from
+the existing `ReapReason` enum (`cw.models`) or the private reason constants
+in `cw.reconcile._shared` (`_SILENTLY_IDLE_REASON`, `_STALLED_CAP_PARKED_REASON`,
+`_GH_CHECK_BLOCKED_REASON`, `_NEEDS_SALVAGE_REASON`) — never a new literal
+where one already existed:
+
+| Park/reroute path | Disposition stamped |
+|---|---|
+| idle watchdog silently-idle park | `_SILENTLY_IDLE_REASON` ("silently_idle") |
+| stalled-sweep SIGNAL_ONLY reroute | `ReapReason.WALL_CLOCK_BUDGET` |
+| idle-sweep SIGNAL_ONLY reroute | `ReapReason.IDLE_STALL` |
+| phantom-sweep SIGNAL_ONLY reroute (clean crash) | `ReapReason.PHANTOM_SURFACE` |
+| stalled/phantom gh-check-blocked route | `_GH_CHECK_BLOCKED_REASON` |
+| salvage LOW-path flag | `_NEEDS_SALVAGE_REASON` |
+| terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
+| unknown client / invalid pipeline stage (`dispatch.py`) | `"unknown_client"` / `"invalid_stage_config"` (deliberately excluded from concierge/escalation eligibility — config errors, not recoverable states) |
+
+`cw.reconcile.escalation`'s `_ELIGIBLE_DISPOSITIONS` and
+`cw.reconcile.concierge`'s `_FALSE_PARK_ELIGIBLE_DISPOSITIONS` were updated
+to track these newly-non-null values so a ceiling-refused row in one of
+these classes still surfaces to the operator instead of silently sticking.
+
+### 6a. The liveness veto (#976)
+
+The stalled sweep's wall-clock-budget park (`ReapReason.WALL_CLOCK_BUDGET`)
+is additionally **vetoed** — suppressed entirely, no disposition stamped,
+no queue mutation — when the session's freshly-classified liveness bucket
+(`_classify_liveness_bucket`, `cw.reconcile.liveness`) is `LivenessBucket.LIVE`
+at the moment the wall-clock budget would otherwise fire. This stops the
+sweep from parking a session that is still visibly making progress just
+because its wall-clock budget expired. The veto does not apply to the
+cap-exceeded retry-cap park (`ReapReason.STALLED_RETRY_CAP_PARKED`) — that
+park is unconditional once `task.attempts >= cap`, regardless of liveness.
+
+A vetoed candidate emits `session.park_vetoed` (see
+[`docs/events.md`](events.md)) instead of `session.reap_proposed` /
+`session.needs_attention`, and the session simply continues running —
+the sweep re-evaluates it again next tick.
+
+---
+
+## 7. Cross-references
 
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) — full end-to-end dispatch procedure.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` event.
+- [`docs/events.md`](events.md) — `session.park_vetoed` and the full orchestrator event-bus reference.
 - `src/cw/cli.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
 - `src/cw/reconcile.py:_locate_session_transcript` — transcript path resolver.
 - `src/cw/reconcile.py:_csid_from_transcript` — claude_session_id derivation.

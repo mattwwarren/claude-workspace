@@ -5245,6 +5245,41 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == 1
         assert task.session_id is None
 
+    def test_stage_advance_unchecked_unknown_client_stamps_disposition(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """Unknown client -> BLOCKED_ON_USER + disposition='unknown_client' (#976)."""
+        from cw.dispatch import _UNKNOWN_CLIENT_REASON, _stage_advance_unchecked
+
+        task = self._make_running_task("UNKCLIENT-1")
+
+        _stage_advance_unchecked(task, {})
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == _UNKNOWN_CLIENT_REASON
+
+    def test_stage_advance_unchecked_stage_not_in_pipeline_stamps_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """task.stage not in pipeline.stages -> BLOCKED_ON_USER +
+        disposition='invalid_stage_config' (#976)."""
+        from cw.dispatch import _INVALID_STAGE_REASON, _stage_advance_unchecked
+        from cw.models import StagePipelineConfig
+
+        client_cfg = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            pipeline=StagePipelineConfig(
+                stages=[Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+            ),
+        )
+        task = self._make_running_task("BADSTAGE-1", stage=Stage.HARDEN)
+
+        _stage_advance_unchecked(task, {"test-client": client_cfg})
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == _INVALID_STAGE_REASON
+
     def test_blocked_at_finalize_regress_increments_counter(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:

@@ -34,7 +34,17 @@ _ELIGIBLE_COMBOS: list[tuple[QueueItemStatus, str | None]] = [
     # stalled_retry_cap_parked — a ceiling-refused row here must also
     # escalate, or it's a silent stuck row. Review follow-up, see
     # cw.reconcile.escalation._ELIGIBLE_DISPOSITIONS.
+    #
+    # #976: fixing the null-disposition park bug means idle.py now stamps
+    # "idle_stall" instead of None for its wall-clock-budget park path, so
+    # None here now covers only dispositions this suite doesn't otherwise
+    # exercise (e.g. pre-#976 legacy rows) — the 4 ReapReason values below
+    # cover the reconcile park paths that used to fall through to None.
     (QueueItemStatus.BLOCKED_ON_USER, None),
+    (QueueItemStatus.BLOCKED_ON_USER, "idle_stall"),
+    (QueueItemStatus.BLOCKED_ON_USER, "wall_clock_budget"),
+    (QueueItemStatus.BLOCKED_ON_USER, "phantom_surface"),
+    (QueueItemStatus.BLOCKED_ON_USER, "silently_idle"),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, None),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, "signoff_gate"),
     (QueueItemStatus.FAILED, None),
