@@ -1639,12 +1639,52 @@ def _stage_advance_unchecked(
         _advance_task_pointer(task, stages)
 
 
+# Maps a sentinel's ``AutoDevResult.stage_reached`` (the closed 7-value
+# StageReached literal, see cw.auto_dev_result) to the pipeline Stage it
+# represents completion of. Used by ``_sentinel_stage_matches`` to guard
+# against a late/replayed sentinel from a previous leg being routed against
+# whatever stage the task's row currently holds (#986 incident, GitHub #1019).
+#
+# Stage.HARDEN is deliberately absent: it has no legitimate stage_reached
+# counterpart (RFC 0005 A1, dormant stage) -- every one of the 7 canonical
+# values below maps to PLAN/IMPL/REVIEW/FINALIZE, never HARDEN, so any
+# sentinel arriving against a HARDEN-stage task always mismatches by
+# construction.
+_STAGE_REACHED_TO_STAGE: dict[str, Stage] = {
+    "stage1_pre_flight": Stage.PLAN,
+    "stage1_plan": Stage.PLAN,
+    "stage2_impl": Stage.IMPL,
+    "stage3_review": Stage.REVIEW,
+    "stage4a_merge_gate": Stage.FINALIZE,
+    "stage4b_pr_create": Stage.FINALIZE,
+    "stage5_post_create": Stage.FINALIZE,
+}
+
+
+def _sentinel_stage_matches(
+    task: TicketTask, last_result: dict[str, object] | None
+) -> bool:
+    """True iff the sentinel's ``stage_reached`` agrees with ``task.stage``.
+
+    A missing/``None`` ``stage_reached`` (e.g. a ``BlockedResult``-derived
+    payload, which has no such field) bypasses this guard entirely -- Rule
+    1-6 routing proceeds exactly as before #1019. See
+    ``_STAGE_REACHED_TO_STAGE`` for the HARDEN-always-mismatches rationale.
+    """
+    if not isinstance(last_result, dict):
+        return True
+    stage_reached = last_result.get("stage_reached")
+    if stage_reached is None:
+        return True
+    return _STAGE_REACHED_TO_STAGE.get(stage_reached) == task.stage
+
+
 def apply_staged_decision(
     task: TicketTask,
     status: str | None,
     last_result: dict[str, object] | None,
     clients: dict[str, ClientConfig],
-) -> None:
+) -> bool:
     """Apply the B2 staged advance decision to a RUNNING task.
 
     Thin RUNNING-asserting wrapper over ``_route_staged_decision`` (the shared
@@ -1652,12 +1692,14 @@ def apply_staged_decision(
     RUNNING arm of reconcile's emitted-sentinel router (_apply_sentinel_to_task)
     both call this; the #918 late-sentinel rescue path calls
     ``_route_staged_decision`` directly for a parked task. Precondition:
-    task.status is RUNNING. Mutates task in place.
+    task.status is RUNNING. Mutates task in place. Returns ``_route_staged_
+    decision``'s bool: whether the sentinel was routed (``False`` iff refused
+    by the stage-mismatch guard, #1019).
     """
     if task.status != QueueItemStatus.RUNNING:
         msg = f"apply_staged_decision: expected RUNNING, got {task.status!r}"
         raise AssertionError(msg)
-    _route_staged_decision(task, status, last_result, clients)
+    return _route_staged_decision(task, status, last_result, clients)
 
 
 def _route_scope_gated_approval(
@@ -1733,7 +1775,7 @@ def _route_staged_decision(
     status: str | None,
     last_result: dict[str, object] | None,
     clients: dict[str, ClientConfig],
-) -> None:
+) -> bool:
     """Shared assert-free core of the B2 staged advance decision table.
 
     The single advance authority shared by the consume path
@@ -1742,7 +1784,31 @@ def _route_staged_decision(
     advances regardless of which path observes the completion first (#698) and
     a late-sentinel rescue lands in exactly the state its live counterpart would
     (#918). No status precondition — callers gate as needed. Mutates in place.
+
+    First checks the sentinel's ``stage_reached`` against ``task.stage``
+    (GitHub #1019, the #986 incident): a late/replayed sentinel from a
+    previous leg must not be routed against whatever stage the row currently
+    holds. On mismatch this is a true no-op -- no status transition, no
+    ``save_dev_queue`` by callers that gate on the return value -- and
+    ``SENTINEL_STAGE_MISMATCH`` is emitted for observability. Returns
+    ``False`` on refusal, ``True`` for every other path (routed normally).
     """
+    if not _sentinel_stage_matches(task, last_result):
+        stage_reached = (
+            last_result.get("stage_reached") if isinstance(last_result, dict) else None
+        )
+        record_event(
+            OrchestratorEventType.SENTINEL_STAGE_MISMATCH,
+            {
+                "ticket_id": task.ticket_id,
+                "client": task.client,
+                "session_id": task.session_id,
+                "expected_stage": task.stage,
+                "sentinel_stage_reached": stage_reached,
+            },
+            correlation_id=task.ticket_id,
+        )
+        return False
     disposition = _derive_disposition(status)
     pr_url = _extract_pr_url(last_result)
     if status in SCOPE_GATED_APPROVAL_STATUSES:
@@ -1822,7 +1888,7 @@ def _route_staged_decision(
                         "regress_attempt": task.regress_attempts,
                     },
                 )
-                return
+                return True
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
@@ -1834,6 +1900,7 @@ def _route_staged_decision(
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition="abandoned"
         )
+    return True
 
 
 def _apply_events_to_store(
