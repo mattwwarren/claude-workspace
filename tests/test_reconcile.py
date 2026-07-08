@@ -2249,9 +2249,9 @@ def test_stalled_revert_usage_limit_detected_sets_cause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1030 Resolved #1: wall-clock REVERT_TASK path threads
-    usage_limit_detected onto its ReapCandidate → reap_reason=usage_limit_cutoff
-    when the session's transcript shows a usage-limit refusal."""
+    """#1030: wall-clock REVERT_TASK path threads usage_limit_detected onto
+    its ReapCandidate → reap_reason=usage_limit_cutoff when the session's
+    transcript shows a usage-limit refusal."""
     from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
 
     worktree = tmp_path / "wt-revert-ul"
@@ -2340,9 +2340,9 @@ def test_stalled_cap_park_usage_limit_detected_sets_cause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1030 Resolved #1 / Addendum 3: the cap-park branch is NEW usage-limit
-    logic (unlike the revert path, which mirrors idle.py precedent) — direct
-    coverage required. attempts >= cap + usage-limit transcript →
+    """#1030: the cap-park branch is NEW usage-limit logic (unlike the revert
+    path, which mirrors idle.py precedent) — direct coverage required.
+    attempts >= cap + usage-limit transcript →
     reap_reason=usage_limit_cutoff instead of stalled_retry_cap_parked."""
     from cw.reconcile import (
         _STALLED_CAP_PARKED_REASON,

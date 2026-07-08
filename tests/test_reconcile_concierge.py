@@ -97,13 +97,11 @@ def _flat_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Individual tests override via monkeypatch when they need a specific
     staleness value (recipe 2's per-stage-floor check) or a "still live"
-    transcript (recently active).
+    transcript (recently active — override _transcript_age_seconds to a
+    value below TRANSCRIPT_LIVENESS_WINDOW_SECONDS).
     """
     monkeypatch.setattr(
         "cw.reconcile.concierge._transcript_age_seconds", lambda *_a, **_k: None
-    )
-    monkeypatch.setattr(
-        "cw.reconcile.concierge._transcript_recently_active", lambda *_a, **_k: False
     )
 
 
@@ -302,8 +300,8 @@ class TestRecipeFalseParkRequeue:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
-                "cw.reconcile.concierge._transcript_recently_active",
-                lambda *_a, **_k: True,
+                "cw.reconcile.concierge._transcript_age_seconds",
+                lambda *_a, **_k: 10.0,  # well under TRANSCRIPT_LIVENESS_WINDOW_SECONDS
             )
             recovered = run_concierge_recoveries(
                 now=_NOW, native_live=set(), config=_config()
@@ -359,12 +357,10 @@ class TestDeadOnArrivalBackoff:
     ``false_park_recovery_next_eligible_at``, emits
     ``CONCIERGE_RECOVERY_BACKOFF_ARMED`` before ``CONCIERGE_RECOVERED``).
     False → the act phase resets both fields to their zero-value. The
-    requeue to PENDING always proceeds either way (Addendum 4/5).
+    requeue to PENDING always proceeds either way.
     """
 
-    def _dead_session(
-        self, *, elapsed_seconds: float, monkeypatch: pytest.MonkeyPatch
-    ) -> Session:
+    def _dead_session(self, *, elapsed_seconds: float) -> Session:
         return _make_session(
             surface_ref="surf-dead",
             started_at=_NOW - timedelta(seconds=elapsed_seconds),
@@ -373,13 +369,20 @@ class TestDeadOnArrivalBackoff:
     def test_below_threshold_lifespan_arms_backoff(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """active_lifespan = 100 - 95 = 5s < 120s → dead_on_arrival True."""
+        """active_lifespan = 305 - 300 = 5s < 120s → dead_on_arrival True.
+
+        transcript_age_seconds=300.0 is also >= TRANSCRIPT_LIVENESS_WINDOW_SECONDS
+        (300), satisfying the flatness gate the row must pass before recipe 1
+        even considers it — dead_on_arrival is only ever evaluated on rows
+        already proven flat (GitHub #1030: the two checks now share one
+        transcript-age lookup, so a candidate's age must be realistic for both).
+        """
         monkeypatch.setattr(
             "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 95.0,
+            lambda *_a, **_k: 300.0,
         )
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
-        session = self._dead_session(elapsed_seconds=100.0, monkeypatch=monkeypatch)
+        session = self._dead_session(elapsed_seconds=305.0)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[session]))
 
@@ -399,10 +402,16 @@ class TestDeadOnArrivalBackoff:
     def test_at_or_above_threshold_lifespan_resets_counters(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """active_lifespan = 250 - 130 = 120s, NOT < 120s → dead_on_arrival False."""
+        """active_lifespan = 420 - 300 = 120s, NOT < 120s → dead_on_arrival False.
+
+        transcript_age_seconds=300.0 still satisfies the flatness gate (>=
+        TRANSCRIPT_LIVENESS_WINDOW_SECONDS), so this row still reaches the
+        dead_on_arrival computation — it's the elapsed/age *difference* that
+        crosses the threshold here, not the flatness check.
+        """
         monkeypatch.setattr(
             "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 130.0,
+            lambda *_a, **_k: 300.0,
         )
         task = _make_task(
             disposition="stalled_retry_cap_parked",
@@ -410,7 +419,7 @@ class TestDeadOnArrivalBackoff:
             false_park_recovery_count=3,
             false_park_recovery_next_eligible_at=_NOW - timedelta(seconds=10),
         )
-        session = self._dead_session(elapsed_seconds=250.0, monkeypatch=monkeypatch)
+        session = self._dead_session(elapsed_seconds=420.0)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[session]))
 
@@ -426,7 +435,8 @@ class TestDeadOnArrivalBackoff:
         assert requeued.false_park_recovery_next_eligible_at is None
 
     def test_missing_evidence_no_session_is_false(self, tmp_config_dir: Path) -> None:
-        """Addendum 6 arm 1: session is None → dead_on_arrival False, never armed."""
+        """Missing-evidence arm 1: session is None → dead_on_arrival False,
+        never armed."""
         task = _make_task(disposition=None, attempts=1)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
@@ -444,7 +454,7 @@ class TestDeadOnArrivalBackoff:
     def test_missing_evidence_no_transcript_age_is_false(
         self, tmp_config_dir: Path
     ) -> None:
-        """Addendum 6 arm 2: _transcript_age_seconds(...) is None (the
+        """Missing-evidence arm 2: _transcript_age_seconds(...) is None (the
         _flat_transcript autouse fixture's default) → dead_on_arrival False,
         never armed, and the formula is never evaluated against a None
         operand."""
@@ -474,10 +484,10 @@ class TestDeadOnArrivalBackoff:
 
         monkeypatch.setattr(
             "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 95.0,
+            lambda *_a, **_k: 300.0,
         )
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
-        session = self._dead_session(elapsed_seconds=100.0, monkeypatch=monkeypatch)
+        session = self._dead_session(elapsed_seconds=305.0)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[session]))
 
@@ -508,10 +518,10 @@ class TestDeadOnArrivalBackoff:
 
         monkeypatch.setattr(
             "cw.reconcile.concierge._transcript_age_seconds",
-            lambda *_a, **_k: 130.0,
+            lambda *_a, **_k: 300.0,
         )
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
-        session = self._dead_session(elapsed_seconds=250.0, monkeypatch=monkeypatch)
+        session = self._dead_session(elapsed_seconds=420.0)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[session]))
 
@@ -564,6 +574,61 @@ class TestDeadOnArrivalBackoff:
         )
 
         assert recovered == ["GEN-1"]
+
+    @pytest.mark.parametrize(
+        ("count", "expected_delay"),
+        [
+            (1, 300.0),
+            (2, 600.0),
+            (3, 1200.0),
+            (4, 2400.0),
+            (5, 3600.0),  # 300 * 2**4 = 4800, capped at 3600
+            (10, 3600.0),  # far beyond the cap, still held at 3600
+        ],
+    )
+    def test_backoff_delay_doubles_then_caps(
+        self, count: int, expected_delay: float
+    ) -> None:
+        """Direct unit coverage of the doubling formula and its cap — the
+        act-phase integration tests above only ever exercise count=1's
+        unscaled initial delay, which would not catch an exponent or cap bug
+        at higher counts."""
+        from cw.reconcile.concierge import _resolve_false_park_recovery_backoff
+
+        assert _resolve_false_park_recovery_backoff(count) == expected_delay
+
+    def test_second_consecutive_dead_on_arrival_doubles_next_eligible_at(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: a row already at false_park_recovery_count=1 (armed by
+        a prior cycle) that dies dead-on-arrival AGAIN gets the doubled delay
+        (600s, not another unscaled 300s) — proving the count-dependent
+        formula is actually wired through run_concierge_recoveries, not just
+        correct in isolation."""
+        monkeypatch.setattr(
+            "cw.reconcile.concierge._transcript_age_seconds",
+            lambda *_a, **_k: 300.0,
+        )
+        task = _make_task(
+            disposition="stalled_retry_cap_parked",
+            attempts=1,
+            false_park_recovery_count=1,
+            false_park_recovery_next_eligible_at=_NOW - timedelta(seconds=1),
+        )
+        session = self._dead_session(elapsed_seconds=305.0)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        requeued = load_dev_queue().tasks[0]
+        assert requeued.false_park_recovery_count == 2
+        assert requeued.false_park_recovery_next_eligible_at == _NOW + timedelta(
+            seconds=600
+        )
 
 
 class TestRecipeParkMarkerPoisonClear:

@@ -71,7 +71,6 @@ from cw.reconcile._shared import (
     _STALLED_CAP_PARKED_REASON,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _transcript_age_seconds,
-    _transcript_recently_active,
     ticket_id_for_session,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
@@ -103,15 +102,16 @@ DEFAULT_CONCIERGE_RECOVERIES: dict[str, bool] = {
 # immediately just churns against the account session limit. active_lifespan
 # below this threshold is unambiguous evidence of an instant death; a
 # legitimately stalled-but-working session has an active lifespan in the tens
-# of minutes. Fixed seconds (not a ratio, not the dispatch poll interval) —
-# see the incident plan's Addendum 2.
+# of minutes. Fixed seconds, not a ratio and not the dispatch poll interval —
+# lifespan is an absolute property of the death, not proportional to how long
+# ago it happened or to unrelated dispatch machinery.
 _DEAD_ON_ARRIVAL_LIFESPAN_SECONDS = 120.0
 # Exponential backoff for the false_park_requeue recipe's own next-detect
 # eligibility window, enforced locally in this recipe's detect phase (NOT the
 # dispatch.py spawn-error claim gate — a distinct mechanism for a distinct
-# failure class; see the incident plan's Resolved #3/#5). Scaled up from the
-# sibling spawn-error backoff (2s/300s cap) because a dead-session recovery
-# cycle takes tens of minutes, not seconds (the incident's ~30-35 min cadence).
+# failure class at a distinct call site). Scaled up from the sibling
+# spawn-error backoff (2s/300s cap) because a dead-session recovery cycle
+# takes tens of minutes, not seconds (the incident's ~30-35 min cadence).
 _FALSE_PARK_RECOVERY_BACKOFF_INITIAL_SECONDS = 300
 _FALSE_PARK_RECOVERY_BACKOFF_CAP_SECONDS = 3600
 
@@ -148,11 +148,11 @@ class ConciergeCandidate:
     session_id: str | None = None
     refused_ceiling: bool = False
     # Recipe 1 only (GitHub #1030): True when this cycle's session shows the
-    # dead-on-arrival signature (Addendum 2 formula) — the previous mechanical
-    # recovery produced a session that died within seconds of spawn. Guarded
-    # to False when evidence is missing (no session, or transcript age
-    # unlocatable) — see Addendum 6. Consumed by the act phase to arm/reset
-    # the false_park_recovery_count / next_eligible_at backoff.
+    # dead-on-arrival signature — the previous mechanical recovery produced a
+    # session that died within seconds of spawn. Guarded to False when
+    # evidence is missing (no session, or transcript age unlocatable) so
+    # missing evidence never arms the backoff. Consumed by the act phase to
+    # arm/reset the false_park_recovery_count / next_eligible_at backoff.
     dead_on_arrival: bool = False
 
 
@@ -193,38 +193,49 @@ def _is_session_dead(session: Session | None, native_live: set[str]) -> bool:
     return session.surface_ref not in native_live
 
 
-def _transcript_is_flat(
-    session: Session | None, now: datetime, *, window_seconds: int
+def _transcript_is_flat_for_age(
+    age_seconds: float | None, *, window_seconds: int
 ) -> bool:
-    """True when the session shows no recent transcript activity.
+    """True when *age_seconds* indicates no recent transcript activity.
 
-    Also true (fail-toward-dead) when there is no session to check at all —
-    missing evidence is never grounds for refusing to recover a row whose
-    other evidence (disposition, roster absence) already points to dead.
+    Also true (fail-toward-dead) when *age_seconds* is None — no session, or
+    a transcript that could not be located. Missing evidence is never
+    grounds for refusing to recover a row whose other evidence (disposition,
+    roster absence) already points to dead.
+
+    Takes a precomputed age rather than a ``Session`` (GitHub #1030) so a
+    single transcript lookup can be shared with :func:`_compute_dead_on_arrival`
+    for the same candidate instead of each helper locating the transcript
+    independently.
     """
-    if session is None:
+    if age_seconds is None:
         return True
-    return not _transcript_recently_active(session, now, window_seconds=window_seconds)
+    return age_seconds >= window_seconds
 
 
-def _compute_dead_on_arrival(session: Session | None, now: datetime) -> bool:
+def _compute_dead_on_arrival(
+    session: Session | None, now: datetime, *, transcript_age_seconds: float | None
+) -> bool:
     """True when *session* died within seconds of spawn (GitHub #1030).
 
     ``active_lifespan_seconds = max(0, elapsed_seconds - transcript_age_seconds)``
     is exactly "seconds from spawn to last transcript write"; below
     :data:`_DEAD_ON_ARRIVAL_LIFESPAN_SECONDS` is unambiguous evidence of an
-    instant death (Addendum 2 formula).
+    instant death.
 
-    Guard (Addendum 6): unlike ``_is_session_dead``/``_transcript_is_flat``,
+    Guard: unlike ``_is_session_dead``/``_transcript_is_flat_for_age``,
     missing evidence here is treated as innocent, not guilty — this field
     gates *arming* an exponential backoff (a punitive, less-reversible
     consequence), not a recovery-eligibility veto. Returns False whenever
-    *session* is None or the transcript's age cannot be determined, without
-    ever evaluating the formula against a missing operand.
+    *session* is None or *transcript_age_seconds* is None, without ever
+    evaluating the formula against a missing operand.
+
+    Takes the already-located *transcript_age_seconds* rather than locating
+    it itself, so callers compute it once and share it with
+    :func:`_transcript_is_flat_for_age`.
     """
     if session is None:
         return False
-    transcript_age_seconds = _transcript_age_seconds(session, now)
     if transcript_age_seconds is None:
         return False
     elapsed_seconds = (now - session.started_at).total_seconds()
@@ -312,9 +323,8 @@ def _detect_false_park_candidates(
         if task.disposition not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS:
             continue
         # #1030: a row still inside its dead-on-arrival backoff window is not
-        # even considered this cycle — deferral, not a veto (Addendum 5); the
-        # window re-evaluates every tick and is finite, so it cannot go
-        # permanent.
+        # even considered this cycle — deferral, not a veto; the window
+        # re-evaluates every tick and is finite, so it cannot go permanent.
         if (
             task.false_park_recovery_next_eligible_at is not None
             and now < task.false_park_recovery_next_eligible_at
@@ -325,8 +335,16 @@ def _detect_false_park_candidates(
             continue  # recipe 2's domain — see module comment above.
         if not _is_session_dead(session, native_live):
             continue
-        if not _transcript_is_flat(
-            session, now, window_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS
+        # #1030: locate the transcript once and share the age with both the
+        # flatness check and dead_on_arrival below, instead of each calling
+        # its own _locate_session_transcript independently (this row persists
+        # across many ticks while parked, so the duplicate glob repeated
+        # every cycle).
+        transcript_age_seconds = (
+            _transcript_age_seconds(session, now) if session is not None else None
+        )
+        if not _transcript_is_flat_for_age(
+            transcript_age_seconds, window_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS
         ):
             continue
         candidates.append(
@@ -341,7 +359,9 @@ def _detect_false_park_candidates(
                 },
                 session_id=session.id if session else None,
                 refused_ceiling=task.attempts >= config.global_attempt_ceiling,
-                dead_on_arrival=_compute_dead_on_arrival(session, now),
+                dead_on_arrival=_compute_dead_on_arrival(
+                    session, now, transcript_age_seconds=transcript_age_seconds
+                ),
             )
         )
     return candidates
@@ -369,14 +389,14 @@ def _act_on_false_park_candidates(
     transcript flat) — no daemon is stopped, no worktree touched/removed.
 
     GitHub #1030: the requeue to PENDING always proceeds regardless of
-    ``candidate.dead_on_arrival`` (Addendum 4/5 — backoff is a deferral of
-    the *next* detection cycle, never a veto of this one). When
-    ``dead_on_arrival`` is True, this also arms exponential backoff
-    (increments ``false_park_recovery_count``, stamps
+    ``candidate.dead_on_arrival`` — backoff is a deferral of the *next*
+    detection cycle, never a veto of this one. When ``dead_on_arrival`` is
+    True, this also arms exponential backoff (increments
+    ``false_park_recovery_count``, stamps
     ``false_park_recovery_next_eligible_at``, and emits
     ``CONCIERGE_RECOVERY_BACKOFF_ARMED``) before the unconditional
     ``CONCIERGE_RECOVERED`` emit + requeue. When False (a legitimate stall,
-    including the Addendum 6 missing-evidence cases), both fields are reset.
+    including the missing-evidence cases), both fields are reset.
     """
     if not candidates:
         return []
