@@ -470,3 +470,25 @@ def test_adopted_assumptions_placed_at_plan_body_insertion_point() -> None:
         "immediately AFTER `## Pre-flight Resolution Conformance` if that "
         "section is present, else immediately before `## Ambiguities`"
     ) in content
+
+
+def test_adopted_assumptions_has_fallback_anchor_when_neither_section_exists() -> None:
+    """Standalone-PM-Reviewer-spawn path defines a fallback anchor, never drops it."""
+    section = _step1c_section()
+    assert "if the plan body has **neither** section" in section
+    assert (
+        "insert `## Adopted Assumptions` as the first section immediately "
+        "after the plan's title/summary"
+    ) in section
+    assert "never silently drop it" in section
+
+
+def test_stage_entered_adopted_count_is_literal_substitution_not_shell_var() -> None:
+    """The stage.entered payload uses a literal placeholder, not $ADOPTED_COUNT."""
+    section = _step1c_section()
+    payload_line = next(
+        line for line in section.splitlines() if "adopted_count" in line
+    )
+    assert "$ADOPTED_COUNT" not in payload_line
+    assert r"\"adopted_count\":<N>" in payload_line
+    assert "substitute the computed `len(adopted)` integer directly" in section
