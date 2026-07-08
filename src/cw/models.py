@@ -422,7 +422,9 @@ class TicketTask(BaseModel):
     # sentinel's scope.tier). Distinct from scope_hint (operator hint, escalate-
     # only in _resolve_scope_tier) -- kept separate so a computed tier can never
     # overwrite an operator escalation. Carried into cw-context is intentionally
-    # deferred (see #1050 / follow-up); today it records provenance on the row.
+    # deferred to a follow-up ticket (#1050 introduced this field; wiring it
+    # into cw-context.json is out of scope there); today it records
+    # provenance on the row.
     computed_scope_tier: str | None = None
     # Lane this ticket is assigned to. Defaults to DEFAULT_LANE; set by
     # orchestrate/dispatch in Phase 2 (#558).

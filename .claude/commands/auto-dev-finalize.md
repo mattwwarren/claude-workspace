@@ -22,7 +22,7 @@ Every `AUTO_DEV_RESULT` sentinel emitted from this file requires concrete, non-n
 
 **Resolve `plan_source`:**
 1. `.claude/cw-context.json` → `queue_metadata.plan_source` — populated by dispatch's `_persist_carried_context` write-back (`_route_staged_decision`, `src/cw/dispatch.py`) from the prior stage's own sentinel, so a rescue respawn's fresh claim→spawn re-materializes it here.
-2. Fallback: `.cw/context.json` — infer from the tracker (`github_issue_existing` when the ticket is a GitHub issue, the dispatch default).
+2. Fallback: `.cw/context.json` — infer from the tracker (`github_issue_existing` when the ticket is a GitHub issue, the dispatch default). **If the file is absent, prose-delegate to `auto-dev-intake.md` first to materialize it** (mirroring `auto-dev-plan.md`/`auto-dev-impl.md`'s own Orientation fallback) — a concierge-rescued respawn (`task.attempts > 1`, non-local backend) has its stale `.cw/context.json` deleted before spawn (`dispatch.py:_invalidate_stale_context_json`, #1046), so this step would otherwise silently fall through to step 3 on exactly the rescue path this ticket targets.
 3. Fallback: `"none"`.
 
 Use the resolved value in every sentinel `plan_source` field below.

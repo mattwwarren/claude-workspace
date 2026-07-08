@@ -20,6 +20,7 @@ from cw.auto_dev_result import (
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FINALIZE_REGRESS_CAP,
     PAUSED_FOR_USER_INPUT_STATUSES,
+    PLAN_SOURCE_NONE,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_LARGE,
     SCOPE_TIER_SMALL,
@@ -1555,21 +1556,29 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
         task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
 
 
+def _extract_scope_tier(last_result: dict[str, object] | None) -> str | None:
+    """Pull ``scope.tier`` off a raw sentinel dict, tolerating a missing/non-dict
+    ``scope`` key. Shared by ``_persist_carried_context`` and
+    ``_resolve_scope_tier`` so the two never drift on how they read the field.
+    """
+    scope_val = last_result.get("scope") if last_result is not None else None
+    return scope_val.get("tier") if isinstance(scope_val, dict) else None
+
+
 def _persist_carried_context(
     task: TicketTask, last_result: dict[str, object] | None
 ) -> None:
     """Stamp carried-through context (plan_source, computed scope tier) onto the
     task from a stage-matched sentinel, so a rescue respawn's fresh claim->spawn
     re-materializes it via cw-context.json (#1050). Null/pre-impl values and a
-    stray plan_source='none' never clobber an already-set value.
+    stray plan_source=PLAN_SOURCE_NONE never clobber an already-set value.
     """
     if not isinstance(last_result, dict):
         return
     plan_source = last_result.get("plan_source")
-    if isinstance(plan_source, str) and plan_source not in ("", "none"):
+    if isinstance(plan_source, str) and plan_source not in ("", PLAN_SOURCE_NONE):
         task.plan_source = plan_source
-    scope_val = last_result.get("scope")
-    tier = scope_val.get("tier") if isinstance(scope_val, dict) else None
+    tier = _extract_scope_tier(last_result)
     if isinstance(tier, str) and tier:
         task.computed_scope_tier = tier
 
@@ -1594,8 +1603,7 @@ def _resolve_scope_tier(
     that should flow PLAN->IMPL unattended (#663 dogfood). Returns ``None`` when
     neither source supplies a tier -- the caller then blocks conservatively.
     """
-    scope_val = last_result.get("scope") if last_result is not None else None
-    tier = scope_val.get("tier") if isinstance(scope_val, dict) else None
+    tier = _extract_scope_tier(last_result)
     # Step 0 of the precedence above. Only the exact string "large" escalates;
     # unexpected hint values (e.g. "medium") are treated as not-large.
     if SCOPE_TIER_LARGE in (task.scope_hint, tier):
