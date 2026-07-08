@@ -212,6 +212,63 @@ collision — running the entire ship against the **primary checkout**.
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
+**Push-auth-failure classifier (#1049):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for a push-authentication failure. This covers the project's `ship-it.md` initial `git push -u origin "$BRANCH"` (the only push site the Step 4c subagent's returned text can reflect). Match any of these signatures verbatim:
+
+- `Permission denied (publickey)`
+- `could not read Username`
+- `Host key verification failed`
+- `Authentication failed`
+
+(Step 4c.5's own rebase-retry push is a separate site, checked directly by the main session — see the classifier added there below, which reuses this same signature list.)
+
+If any signature is present, emit the structured `blocked` sentinel below and stop — do NOT proceed to the verify-script gate or Step 4c.5.
+
+**Sentinel template — `push_auth_failed` blocker:**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage4b_pr_create",
+  "scope": {
+    "tier": "<small | large — same value carried through from Stage 2 scope classification>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<value carried from Stage 0/1>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr": null,
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage4b_pr_create",
+    "reason": "push_auth_failed",
+    "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)'>",
+    "exception_type": null,
+    "message": "git push failed authentication (SSH key locked or credentials expired)",
+    "recovery_hint": "Unlock the SSH key (or refresh credentials) and requeue the ticket",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": []
+}
+```
+
+**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result.py:119`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator instead via the sentinel above.
+
+**Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
+
 **Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`):
 
 ```bash
@@ -254,6 +311,8 @@ git rebase origin/main
 # If rebase fails with conflicts here → abort and emit blocker (see below)
 git push --force-with-lease origin HEAD:<branch-name>
 ```
+
+**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output for the same four signatures listed under the Step 4c classifier above (`Permission denied (publickey)`, `could not read Username`, `Host key verification failed`, `Authentication failed`). If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check below.
 
 After the push, re-verify mergeability once:
 
