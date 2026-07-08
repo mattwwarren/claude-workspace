@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -345,6 +345,227 @@ class TestRecipeFalseParkRequeue:
         monkeypatch.setattr(
             "cw.reconcile.concierge.save_dev_queue", real_save_dev_queue
         )
+
+
+class TestDeadOnArrivalBackoff:
+    """GitHub #1030: false_park_requeue churn backoff.
+
+    ``dead_on_arrival`` is computed as:
+        active_lifespan_seconds = max(0, elapsed_seconds - transcript_age_seconds)
+        dead_on_arrival = active_lifespan_seconds < 120.0
+
+    True → the act phase arms exponential backoff (increments
+    ``false_park_recovery_count``, stamps
+    ``false_park_recovery_next_eligible_at``, emits
+    ``CONCIERGE_RECOVERY_BACKOFF_ARMED`` before ``CONCIERGE_RECOVERED``).
+    False → the act phase resets both fields to their zero-value. The
+    requeue to PENDING always proceeds either way (Addendum 4/5).
+    """
+
+    def _dead_session(
+        self, *, elapsed_seconds: float, monkeypatch: pytest.MonkeyPatch
+    ) -> Session:
+        return _make_session(
+            surface_ref="surf-dead",
+            started_at=_NOW - timedelta(seconds=elapsed_seconds),
+        )
+
+    def test_below_threshold_lifespan_arms_backoff(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """active_lifespan = 100 - 95 = 5s < 120s → dead_on_arrival True."""
+        monkeypatch.setattr(
+            "cw.reconcile.concierge._transcript_age_seconds",
+            lambda *_a, **_k: 95.0,
+        )
+        task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
+        session = self._dead_session(elapsed_seconds=100.0, monkeypatch=monkeypatch)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.status == QueueItemStatus.PENDING
+        assert requeued.false_park_recovery_count == 1
+        assert requeued.false_park_recovery_next_eligible_at == _NOW + timedelta(
+            seconds=300
+        )
+
+    def test_at_or_above_threshold_lifespan_resets_counters(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """active_lifespan = 250 - 130 = 120s, NOT < 120s → dead_on_arrival False."""
+        monkeypatch.setattr(
+            "cw.reconcile.concierge._transcript_age_seconds",
+            lambda *_a, **_k: 130.0,
+        )
+        task = _make_task(
+            disposition="stalled_retry_cap_parked",
+            attempts=1,
+            false_park_recovery_count=3,
+            false_park_recovery_next_eligible_at=_NOW - timedelta(seconds=10),
+        )
+        session = self._dead_session(elapsed_seconds=250.0, monkeypatch=monkeypatch)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.status == QueueItemStatus.PENDING
+        assert requeued.false_park_recovery_count == 0
+        assert requeued.false_park_recovery_next_eligible_at is None
+
+    def test_missing_evidence_no_session_is_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Addendum 6 arm 1: session is None → dead_on_arrival False, never armed."""
+        task = _make_task(disposition=None, attempts=1)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.false_park_recovery_count == 0
+        assert requeued.false_park_recovery_next_eligible_at is None
+
+    def test_missing_evidence_no_transcript_age_is_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Addendum 6 arm 2: _transcript_age_seconds(...) is None (the
+        _flat_transcript autouse fixture's default) → dead_on_arrival False,
+        never armed, and the formula is never evaluated against a None
+        operand."""
+        task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
+        session = _make_session(
+            surface_ref="surf-dead", started_at=_NOW - timedelta(seconds=200)
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.false_park_recovery_count == 0
+        assert requeued.false_park_recovery_next_eligible_at is None
+
+    def test_backoff_armed_event_emitted_before_recovered_event(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CONCIERGE_RECOVERY_BACKOFF_ARMED fires before CONCIERGE_RECOVERED,
+        same act-phase pass, for a dead_on_arrival=True candidate."""
+        from cw.events import read_events
+
+        monkeypatch.setattr(
+            "cw.reconcile.concierge._transcript_age_seconds",
+            lambda *_a, **_k: 95.0,
+        )
+        task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
+        session = self._dead_session(elapsed_seconds=100.0, monkeypatch=monkeypatch)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        run_concierge_recoveries(now=_NOW, native_live=set(), config=_config())
+
+        events = read_events(
+            consumer="test-backoff-armed-ordering",
+            event_types=[
+                OrchestratorEventType.CONCIERGE_RECOVERY_BACKOFF_ARMED,
+                OrchestratorEventType.CONCIERGE_RECOVERED,
+            ],
+        )
+        assert [e.type for e in events] == [
+            OrchestratorEventType.CONCIERGE_RECOVERY_BACKOFF_ARMED,
+            OrchestratorEventType.CONCIERGE_RECOVERED,
+        ]
+        armed = events[0]
+        assert armed.payload["ticket_id"] == "GEN-1"
+        assert armed.payload["client"] == "acme"
+        assert armed.payload["recovery_count"] == 1
+        assert armed.payload["next_eligible_at"] is not None
+        assert armed.payload["session_id"] == session.id
+
+    def test_no_backoff_armed_event_when_dead_on_arrival_false(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.events import read_events
+
+        monkeypatch.setattr(
+            "cw.reconcile.concierge._transcript_age_seconds",
+            lambda *_a, **_k: 130.0,
+        )
+        task = _make_task(disposition="stalled_retry_cap_parked", attempts=1)
+        session = self._dead_session(elapsed_seconds=250.0, monkeypatch=monkeypatch)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        run_concierge_recoveries(now=_NOW, native_live=set(), config=_config())
+
+        events = read_events(
+            consumer="test-no-backoff-armed",
+            event_types=[OrchestratorEventType.CONCIERGE_RECOVERY_BACKOFF_ARMED],
+        )
+        assert events == []
+
+    def test_deferral_skip_while_next_eligible_at_in_future(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A row still inside its backoff window is not even considered this
+        cycle — it stays BLOCKED_ON_USER, no candidate is generated."""
+        task = _make_task(
+            disposition="stalled_retry_cap_parked",
+            attempts=1,
+            false_park_recovery_count=1,
+            false_park_recovery_next_eligible_at=_NOW + timedelta(seconds=60),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store.tasks[0].false_park_recovery_count == 1
+
+    def test_deferral_window_elapsed_generates_candidate_again(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Once now >= next_eligible_at, the row is eligible again."""
+        task = _make_task(
+            disposition="stalled_retry_cap_parked",
+            attempts=1,
+            false_park_recovery_count=1,
+            false_park_recovery_next_eligible_at=_NOW - timedelta(seconds=1),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
 
 
 class TestRecipeParkMarkerPoisonClear:
