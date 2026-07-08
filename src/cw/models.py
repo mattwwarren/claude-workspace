@@ -518,6 +518,11 @@ CLAUDE_NATIVE_BACKEND: str = "claude-native"
 LOCAL_BACKEND: str = "local"
 CODEX_BACKEND: str = "codex"
 
+# Relative path of the per-worktree materialized ticket context, shared by
+# dispatch's pre-spawn invalidation (#1046) and local_runner's prompt builder
+# so the two never drift onto different literal paths for the same file.
+CONTEXT_JSON_RELATIVE_PATH: Path = Path(".cw", "context.json")
+
 
 class StageExecutorConfig(BaseModel):
     """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""

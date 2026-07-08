@@ -64,6 +64,7 @@ from cw.exceptions import (
 )
 from cw.executor import resolve_executor, resolve_executor_config
 from cw.models import (
+    CONTEXT_JSON_RELATIVE_PATH,
     LOCAL_BACKEND,
     OCCUPIED_LANE_STATUSES,
     ClientConcurrencyOverride,
@@ -637,7 +638,7 @@ def _invalidate_stale_context_json(
         return
     if resolve_executor_config(task.stage, task, client).backend == LOCAL_BACKEND:
         return
-    stale_context = worktree_path / ".cw" / "context.json"
+    stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
     if stale_context.exists():
         _log.info(
             "dispatch: invalidated stale .cw/context.json for"
