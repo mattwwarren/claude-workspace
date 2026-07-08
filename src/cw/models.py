@@ -299,6 +299,16 @@ class OrchestratorEventType(StrEnum):
     # freshly-classified liveness bucket is still LIVE despite the wall-clock
     # budget having expired. Side-effect-only: no queue or session mutation.
     SESSION_PARK_VETOED = "session.park_vetoed"
+    # GitHub #1030 — concierge recipe 1 (false_park_requeue) churn backoff.
+    # Emitted from _act_on_false_park_candidates when a candidate's session
+    # shows the dead-on-arrival signature (died within seconds of spawn,
+    # never producing real output) — the requeue to PENDING always proceeds
+    # regardless; this event additionally records that
+    # false_park_recovery_count / false_park_recovery_next_eligible_at were
+    # stamped, deferring the *next* false-park detection cycle for this
+    # ticket. NOT a veto (contrast SESSION_PARK_VETOED above, which
+    # accompanies zero mutation) — no queue/session mutation is suppressed.
+    CONCIERGE_RECOVERY_BACKOFF_ARMED = "concierge.recovery_backoff_armed"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
@@ -427,6 +437,15 @@ class TicketTask(BaseModel):
     # Both are cleared atomically on a successful spawn.
     spawn_error_count: int = 0
     next_eligible_at: datetime | None = None
+    # Exponential backoff state for concierge recipe 1's false-park recovery
+    # (GitHub #1030) — a distinct field pair from spawn_error_count/
+    # next_eligible_at above: that pair covers subprocess spawn errors at the
+    # dispatch claim gate; these cover "the previous mechanical recovery
+    # produced a session that died instantly" at concierge's own detect
+    # phase. Both are cleared (reset to 0/None) when a recovery is NOT
+    # dead-on-arrival (a legitimate stall).
+    false_park_recovery_count: int = 0
+    false_park_recovery_next_eligible_at: datetime | None = None
     # Hydrated GitHub PR state (merge/CI/review) persisted by the serve-tick
     # hydration pass (cw.pr_hydrate). None until first hydration or for pre-v8
     # legacy tasks. See GitHub #929.
