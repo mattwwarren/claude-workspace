@@ -314,3 +314,148 @@ def test_harden_documents_marker_moves_with_body_fold() -> None:
     content = _skill("harden-ticket/SKILL.md")
     assert "pre-flight resolutions HTML-comment marker" in content
     assert "moves with them" in content
+
+
+# ---------------------------------------------------------------------------
+# Adopt-assumption fast path for the ambiguity gate (#1032)
+# ---------------------------------------------------------------------------
+
+
+def _step1c_section() -> str:
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("### Step 1c: Ambiguity Verification")
+    end = content.index("### Step 1d:")
+    return content[start:end]
+
+
+def test_mode1_output_has_recommendation_field() -> None:
+    """Mode 1 output format requires a Recommendation sub-bullet with ADOPT/PARK tokens."""
+    content = _agent("product-manager-reviewer.md")
+    assert "Recommendation: ADOPT" in content
+    assert "PARK" in content
+
+
+def test_mode1_recommendation_park_reasons_listed() -> None:
+    """The PARK bar names product/scope intent, public-contract, destructive-action reasons."""
+    content = _agent("product-manager-reviewer.md")
+    window = _after(content, "Recommendation: ADOPT", span=400)
+    assert "public-contract shape" in window
+    assert "destructive-action semantics" in window
+    assert "cannot confidently recommend a side" in window
+
+
+def test_mode1_recommendation_missing_field_documented_as_parked() -> None:
+    """A missing/malformed Recommendation line is documented as defaulting to PARK downstream."""
+    content = _agent("product-manager-reviewer.md")
+    assert "a missing or malformed `Recommendation` line" in content
+    assert "is treated as PARK downstream" in content
+
+
+def test_ambiguity_pre_flight_parenthetical_mentions_recommendation() -> None:
+    """Step 1b's Ambiguity pre-flight parenthetical enumerates `recommendation`."""
+    anchor = (
+        "question, plan's assumption, alternatives, why-it-matters, "
+        "ticket quote, recommendation"
+    )
+    assert anchor in _cmd("auto-dev-plan.md")
+
+
+def test_step1c_has_adopted_assumptions_section() -> None:
+    """Step 1c's headless partition introduces a plan-body Adopted Assumptions section."""
+    assert "## Adopted Assumptions" in _step1c_section()
+
+
+def test_step1c_partition_splits_by_recommendation() -> None:
+    """Step 1c splits ambiguity items into adopted/parked by their Recommendation value."""
+    section = _step1c_section()
+    assert "split its items by each item's `Recommendation:` sub-bullet" in section
+    assert "`adopted`" in section
+    assert "`parked`" in section
+
+
+def test_step1c_partition_missing_recommendation_defaults_to_parked() -> None:
+    """A missing/malformed Recommendation defaults an item to parked, no exceptions."""
+    section = _step1c_section()
+    assert (
+        "a missing `Recommendation:` sub-bullet, or any unparseable/malformed "
+        "value all default-safe to parked"
+    ) in section
+
+
+def test_step1c_all_adopt_does_not_exit() -> None:
+    """An all-adopt scan (parked empty, no premises) auto-continues, not exits."""
+    section = _step1c_section()
+    assert "`parked` empty AND no premises block → AUTO-CONTINUE to Step 1d." in section
+    assert (
+        "functionally `NO_AMBIGUITIES` even though the raw scan returned items"
+        in section
+    )
+
+
+def test_step1c_sentinel_carries_only_parked() -> None:
+    """The comment/sentinel ambiguities field carries only parked items, never the raw list."""
+    section = _step1c_section()
+    assert (
+        "include only the `parked` items in the result payload under "
+        "`ambiguities` — never the raw N-item list"
+    ) in section
+
+
+def test_step1c_original_ambiguities_section_collapsed_after_partition() -> None:
+    """A pre-existing plan-body Ambiguities section is rewritten in place, not left raw."""
+    section = _step1c_section()
+    assert (
+        "rewrite that section's contents in place: literal `NO_AMBIGUITIES` "
+        "when `parked` is empty"
+    ) in section
+    assert (
+        "must never be left displaying the full unpartitioned list alongside "
+        "`## Adopted Assumptions`"
+    ) in section
+
+
+def test_step1c_combined_premises_exit_keys_on_parked_not_raw_ambiguities() -> None:
+    """The combined-exit trigger reads on parked non-empty, not raw AMBIGUITIES presence."""
+    section = _step1c_section()
+    assert (
+        "Premises block present AND `parked` non-empty → EXIT "
+        "`premises_pending_verification`"
+    ) in section
+    assert "If both `AMBIGUITIES` and `PREMISES TO VERIFY` are present" not in section
+
+
+def test_step1c_all_adopt_plus_premises_exits_premises_only() -> None:
+    """All-adopt plus a premises block exits premises-only, no parked/ambiguities pair."""
+    section = _step1c_section()
+    assert (
+        "Premises block present AND `parked` empty → EXIT "
+        "`premises_pending_verification`. Post ONLY the premise list"
+    ) in section
+
+
+def test_step1c_partition_is_headless_only() -> None:
+    """The interactive AskUserQuestion AMBIGUITIES branch carries no partition language."""
+    content = _cmd("auto-dev-plan.md")
+    window = _after(
+        content,
+        "**`AMBIGUITIES — N items`** → present each ambiguity to the user via "
+        "AskUserQuestion",
+        span=400,
+    )
+    for token in ("Recommendation", "adopted", "parked"):
+        assert token not in window
+
+
+def test_step1c_ambiguities_exit_anchor_preserved() -> None:
+    """The ambiguities_pending_resolution EXIT anchor survives the restructure."""
+    assert "EXIT `ambiguities_pending_resolution`" in _step1c_section()
+
+
+def test_adopted_assumptions_placed_at_plan_body_insertion_point() -> None:
+    """Adopted Assumptions is inserted after Conformance if present, else before Ambiguities."""
+    content = _cmd("auto-dev-plan.md")
+    assert (
+        "insert a `## Adopted Assumptions` section into the plan body — "
+        "immediately AFTER `## Pre-flight Resolution Conformance` if that "
+        "section is present, else immediately before `## Ambiguities`"
+    ) in content
