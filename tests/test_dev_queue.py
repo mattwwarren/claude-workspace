@@ -3658,6 +3658,122 @@ class TestRequeueTicket:
         assert t.status == QueueItemStatus.PENDING
         assert t.stage == Stage.REVIEW
 
+    # -- Issue #1018: --from-cancelled requeue escape hatch -----------------
+
+    def test_requeue_from_cancelled_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """CANCELLED row + from_cancelled=True -> PENDING at current stage."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-cancel-1",
+            status=QueueItemStatus.CANCELLED,
+        )
+        task.stage_base_ref = "deadbeef"
+        task.regress_attempts = 2
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", from_cancelled=True)
+
+        assert result["from_stage"] == "impl"
+        assert result["to_stage"] == "impl"
+        assert result["from_cancelled_applied"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        assert t.stage_base_ref is None
+        assert t.regress_attempts == 0
+
+    def test_requeue_from_cancelled_flag_on_approvable_row_not_applied(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_cancelled=True passed defensively on an already-approvable
+        (BLOCKED_ON_USER) row is a harmless no-op for the state gate, but
+        from_cancelled_applied must be False — the CANCELLED branch never
+        fired, so callers must not attribute the requeue to it."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-cancel-5",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", from_cancelled=True)
+
+        assert result["from_cancelled_applied"] is False
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_from_cancelled_without_flag_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """CANCELLED row without from_cancelled=True raises RequeueStateError
+        naming the --from-cancelled escape hatch."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-cancel-2",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="--from-cancelled"):
+            requeue_ticket("GEN-500", "genhealth")
+
+    def test_requeue_from_cancelled_flag_does_not_broaden_running(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_cancelled=True does not admit a RUNNING row (flag is narrow)."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-cancel-3",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER"):
+            requeue_ticket("GEN-500", "genhealth", from_cancelled=True)
+
+    def test_requeue_from_cancelled_regress_backward_rejected(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_cancelled=True + backward --stage on a CANCELLED row still
+        fails: the regress gate is untouched and does not accept CANCELLED."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-cancel-4",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError):
+            requeue_ticket(
+                "GEN-500",
+                "genhealth",
+                stage_override="plan",
+                allow_regress=True,
+                from_cancelled=True,
+            )
+
 
 # ---------------------------------------------------------------------------
 # TestUnblockTicket — unblock_ticket() mutation function
@@ -4082,6 +4198,134 @@ class TestCLIRequeue:
         assert payload["reason"] == "cli_requeue"
         assert payload["regressed"] is False
         assert "regress_attempts" not in payload
+
+    # -- Issue #1018: --from-cancelled requeue escape hatch -----------------
+
+    def test_requeue_from_cancelled_cli_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`--from-cancelled` on a CANCELLED ticket exits 0 and moves PENDING."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6201",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-cancelled",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "impl -> impl" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_from_cancelled_cli_without_flag_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """CANCELLED ticket without --from-cancelled exits 1 and names the
+        escape hatch in the printed error."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6202",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code != 0
+        assert "--from-cancelled" in result.output
+
+    def test_requeue_from_cancelled_emits_reason_event(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--from-cancelled` emits TICKET_REQUEUED with the
+        cli_requeue_from_cancelled provenance reason."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6203",
+            status=QueueItemStatus.CANCELLED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-cancelled",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue_from_cancelled"
+        assert payload["regressed"] is False
+
+    def test_requeue_from_cancelled_flag_on_approvable_row_emits_plain_reason(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--from-cancelled` passed defensively on an already-approvable
+        (BLOCKED_ON_USER) row must NOT emit the cli_requeue_from_cancelled
+        reason — that would falsely claim the row was recovered from
+        CANCELLED when the CANCELLED branch never fired."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6204",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-cancelled",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue"
 
 
 # ---------------------------------------------------------------------------

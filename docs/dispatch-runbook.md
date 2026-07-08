@@ -328,7 +328,39 @@ the newest `*.jsonl` under `~/.claude/projects/<slug>-dev-<T>/`:
 - In between → bounded deadline check; review/plan stages go parent-silent
   for ~20 min during subagent cycles, so a single 20-min gap is not death.
 
+### CANCELLED row recovery (`--from-cancelled`)
+
+`cw spawn close <sid> --confirmed-dead` on a **RUNNING** row transitions that
+row to `CANCELLED` — not `BLOCKED_ON_USER`. `cw dev-queue requeue` normally
+rejects anything but `BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF`, so a
+CANCELLED row is otherwise a requeue dead-end (#1018).
+
+Fix: requeue it explicitly with the escape hatch, which moves it back to
+PENDING at its current stage and clears `session_id`/`stage_base_ref`:
+
+```bash
+cw dev-queue requeue <T> -c <CLIENT> --from-cancelled
+```
+
+§11.1's `cancelled_row_restore` concierge recipe already auto-handles this
+when the worktree has committed work ahead of base and `concierge_enabled:
+true`. This manual CLI flag covers the remaining cases: zero commits ahead
+of base, a missing/pruned worktree, or concierge disabled. See also:
+Attempt-cap reset (below) — a different terminal condition
+(`attempt_cap_blocked` on a parked row), not a CANCELLED row.
+
+**Caveat:** `--from-cancelled` accepts *any* CANCELLED row, regardless of why
+it was cancelled — the row carries no record of provenance by the time it
+reaches this flag. If the ticket may have been deliberately cancelled (e.g.
+via `cw dev-queue cancel` as a duplicate or superseded ticket) rather than
+stranded by `spawn close`, check `cw dev-queue show <T>` / the event history
+before requeuing it.
+
 ### Attempt-cap reset (environmental burn)
+
+See also: CANCELLED row recovery (above) — a different terminal condition
+(a CANCELLED row from `spawn close` on a RUNNING task), not an
+attempt-ceiling park.
 
 **Now partially mechanized** — see §11.1's `false_park_requeue` recipe,
 which auto-requeues the common `stalled_retry_cap_parked` case when
@@ -790,7 +822,8 @@ channel by default) **before** mutating the row — see `docs/events.md`.
 Runs **unconditionally** every reconcile tick (not gated by
 `concierge_enabled`) — a `TicketTask` sitting in the escalation-eligible set
 (disposition ∈ `ambiguities_pending_resolution` / `plan_pending_approval` /
-`review_pending_approval` / `stalled_retry_cap_parked` while
+`review_pending_approval` / `stalled_retry_cap_parked` / `silently_idle` /
+`idle_stall` / `wall_clock_budget` / `phantom_surface` / `None` while
 `BLOCKED_ON_USER`, or any `AWAITING_OPERATOR_SIGNOFF`/`FAILED` row) for more
 than 45 minutes fires one `operator.escalation` event — a single page per
 parked episode, not a repeat-every-tick alarm. See `docs/events.md` for the
