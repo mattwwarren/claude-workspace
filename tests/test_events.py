@@ -2031,6 +2031,22 @@ def test_prune_events_empty_inbox_returns_zero_counts(tmp_events_dir: Path) -> N
     assert result.archive_path is None
 
 
+def test_prune_events_keep_greater_than_total_keeps_all(
+    tmp_events_dir: Path,
+) -> None:
+    """keep >= total event count prunes nothing."""
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    result = prune_events(keep=100)
+
+    assert result.archived_count == 0
+    assert result.deleted_count == 0
+    assert result.kept_count == 3
+    assert result.archive_path is None
+    assert len(read_events()) == 3
+
+
 # ---------------------------------------------------------------------------
 # CLI: cw event prune (issue #856)
 # ---------------------------------------------------------------------------
@@ -2122,3 +2138,19 @@ def test_cli_event_prune_invalid_keep_negative_errors(tmp_events_dir: Path) -> N
     runner = CliRunner()
     result = runner.invoke(main, ["event", "prune", "--keep", "-1"])
     assert result.exit_code != 0
+
+
+def test_cli_event_prune_invalid_before_errors(tmp_events_dir: Path) -> None:
+    """An unparseable --before value is rejected with a CwError."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "prune", "--before", "not-a-timestamp"])
+    assert result.exit_code != 0
+    assert "Cannot parse --before value" in result.output
+
+
+def test_cli_event_prune_before_naive_timestamp(tmp_events_dir: Path) -> None:
+    """A tz-naive --before ISO timestamp is accepted (UTC assumed)."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "prune", "--before", "2000-01-01T00:00:00"])
+    assert result.exit_code == 0, result.output
