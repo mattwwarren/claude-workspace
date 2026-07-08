@@ -1054,11 +1054,18 @@ def requeue_ticket(
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
 
-    Returns dict with from_stage, to_stage, ticket_id, client, regressed, and
-    regress_attempts for event emission. ``regressed`` is True only on a genuine
-    backward regress (``allow_regress`` + backward ``stage_override`` + blocked
-    task); ``regress_attempts`` is the post-mutation attempt count (0 on the
-    forward/same-stage path).
+    Returns dict with from_stage, to_stage, ticket_id, client, regressed,
+    regress_attempts, and from_cancelled_applied for event emission.
+    ``regressed`` is True only on a genuine backward regress (``allow_regress``
+    + backward ``stage_override`` + blocked task); ``regress_attempts`` is the
+    post-mutation attempt count (0 on the forward/same-stage path).
+    ``from_cancelled_applied`` is True only when the CANCELLED-acceptance
+    branch actually admitted the row — i.e. ``from_cancelled=True`` AND the
+    row's status was CANCELLED — not merely when the caller passed
+    ``from_cancelled=True``. Callers must key any "recovered from CANCELLED"
+    provenance signal (e.g. an event ``reason``) off this field, not off the
+    raw ``from_cancelled`` argument, since the flag is harmlessly additive on
+    an already-approvable row.
 
     Args:
         from_cancelled: when True, the forward/same-stage path also accepts a
@@ -1097,6 +1104,7 @@ def requeue_ticket(
             allow_regress=allow_regress,
         )
 
+        from_cancelled_applied = False
         if not regressed:
             # Forward/same-stage path (including inert allow_regress forward
             # targets) requires the ticket to be at a BLOCKED_ON_USER or
@@ -1109,6 +1117,7 @@ def requeue_ticket(
                 raise RequeueStateError(
                     _requeue_state_error_message(ticket_id, task.status)
                 )
+            from_cancelled_applied = cancelled_ok
             transition_task_status(task, QueueItemStatus.PENDING)
             task.session_id = None
             task.stage_base_ref = None
@@ -1125,6 +1134,7 @@ def requeue_ticket(
         "client": client_name,
         "regressed": regressed,
         "regress_attempts": regress_attempts,
+        "from_cancelled_applied": from_cancelled_applied,
     }
 
 

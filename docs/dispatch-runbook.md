@@ -349,6 +349,13 @@ of base, a missing/pruned worktree, or concierge disabled. See also:
 Attempt-cap reset (below) — a different terminal condition
 (`attempt_cap_blocked` on a parked row), not a CANCELLED row.
 
+**Caveat:** `--from-cancelled` accepts *any* CANCELLED row, regardless of why
+it was cancelled — the row carries no record of provenance by the time it
+reaches this flag. If the ticket may have been deliberately cancelled (e.g.
+via `cw dev-queue cancel` as a duplicate or superseded ticket) rather than
+stranded by `spawn close`, check `cw dev-queue show <T>` / the event history
+before requeuing it.
+
 ### Attempt-cap reset (environmental burn)
 
 See also: CANCELLED row recovery (above) — a different terminal condition

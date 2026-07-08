@@ -249,7 +249,10 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
     help=(
         "Allow requeuing a CANCELLED ticket back to PENDING at its current"
         " stage (e.g. after `cw spawn close --confirmed-dead` on a RUNNING"
-        " row). See docs/dispatch-runbook.md."
+        " row). Accepts any CANCELLED row regardless of why it was"
+        " cancelled — check `cw dev-queue show` / event history first if"
+        " the ticket may have been deliberately killed. See"
+        " docs/dispatch-runbook.md."
     ),
 )
 @handle_errors
@@ -278,7 +281,7 @@ def dev_queue_requeue(
     )
     if result["regressed"]:
         reason = "cli_regress"
-    elif from_cancelled:
+    elif result["from_cancelled_applied"]:
         reason = "cli_requeue_from_cancelled"
     else:
         reason = "cli_requeue"
