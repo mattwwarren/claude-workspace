@@ -207,8 +207,6 @@ These are invoked inside a Claude Code session and form the daily operational to
 | Command | When to use |
 |---------|-------------|
 | `/auto-dev-plan` | Stage 1 only: draft plan, run spec + soundness reviewers, post to issue tracker. |
-| `/queue-plan` | Queue an approved plan for async dispatch. |
-| `/queue-debt` | Queue a tech debt item for later cleanup. |
 | `/queue-issues` | Queue multiple issues for dispatch. |
 | `/auto-debt <ticket-id>` | Constrained auto-dev for small-scope tech debt tickets. |
 
@@ -236,7 +234,6 @@ These are invoked inside a Claude Code session and form the daily operational to
 
 | Command | When to use |
 |---------|-------------|
-| `/pull-and-execute` | Pull next queued item → spawn agents → review → mark complete. |
 | `/orchestrate-phase` | Run a single pipeline phase in an orchestrated multi-session setup. |
 | `/graduate-plan` | Promote a plan from draft to approved state. |
 

@@ -26,13 +26,9 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "You are in the IMPLEMENTATION session. "
         "Write code, implement features, and fix bugs. "
         "If you notice quality issues (linting, types, duplication, docs), "
-        "queue them for the debt session via `/queue-debt` but stay focused "
-        "on implementation. "
+        "note them for later cleanup but stay focused on implementation. "
         "Before finishing any unit of work, run quality gates "
-        "(ruff check, mypy, pytest) and fix all issues.\n\n"
-        "Use `/pull-and-execute` to pull queued work items and execute them "
-        "with agent teams. Use `/queue-debt` to defer quality issues."
-        + _AGENT_TEAM_GUIDANCE
+        "(ruff check, mypy, pytest) and fix all issues." + _AGENT_TEAM_GUIDANCE
     ),
     "idea": (
         "You are in the IDEA session. "
@@ -41,9 +37,8 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "Document ideas clearly for the implementation session to pick up.\n\n"
         "CRITICAL: Never clear context when exiting plan mode. "
         "Clearing context drops all delegation work on the floor. "
-        "Always continue in the same context after plan approval.\n\n"
-        "When a plan is ready, use `/queue-plan` to queue it for the impl "
-        "session. Use `/queue-debt` for quality issues." + _AGENT_TEAM_GUIDANCE
+        "Always continue in the same context after plan approval."
+        + _AGENT_TEAM_GUIDANCE
     ),
     "debt": (
         "You are in the TECH DEBT session. "
@@ -51,10 +46,7 @@ PURPOSE_PROMPTS: dict[str, str] = {
         "Do not implement new features or change behavior. "
         "Keep changes minimal and focused on quality. "
         "Before finishing any unit of work, run quality gates "
-        "(ruff check, mypy, pytest) and fix all issues.\n\n"
-        "Use `/pull-and-execute` to pull queued debt items and execute them "
-        "with agent teams. Use `/queue-debt` to add new debt items."
-        + _AGENT_TEAM_GUIDANCE
+        "(ruff check, mypy, pytest) and fix all issues." + _AGENT_TEAM_GUIDANCE
     ),
 }
 

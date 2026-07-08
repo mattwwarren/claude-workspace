@@ -157,19 +157,6 @@ DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
 
-class TaskSpec(BaseModel):
-    """Machine-parseable task specification for agent-to-agent handoffs."""
-
-    description: str
-    purpose: SessionPurpose
-    prompt: str
-    context_files: list[str] = Field(default_factory=list)
-    success_criteria: str | None = None
-    source_session: str | None = None
-    priority: int = 0
-    target_session: str | None = None
-
-
 class LaneConcurrencyOverride(BaseModel):
     """Per-lane overrides from the concurrency override store."""
 
