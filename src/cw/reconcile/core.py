@@ -219,6 +219,10 @@ def reconcile() -> ReconcileReport:
     # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
     _clients = load_clients()
     _merged_tids: list[str] = []
+    # (client, ticket_id) pairs, for consumers that must not match a merged
+    # ticket against a *different* client's same-numbered ticket (#1054) —
+    # ticket_id strings are not globally unique across clients.
+    _merged_client_tids: list[tuple[str, str]] = []
     _gh_blocked_tids: list[str] = []
     _gh_available = True
     for _session in pre_state.sessions:
@@ -246,7 +250,9 @@ def reconcile() -> ReconcileReport:
             continue
         if _merged:
             _merged_tids.append(_ticket_id)
+            _merged_client_tids.append((_session.client, _ticket_id))
     merged_ticket_ids = frozenset(_merged_tids)
+    merged_client_ticket_ids = frozenset(_merged_client_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
 
     # Pre-pass: check PR existence for FINALIZE-stage sessions with pushed branches.
@@ -256,6 +262,7 @@ def reconcile() -> ReconcileReport:
     with sessions_lock():
         locked_report, salvage_git_candidates = _reconcile_locked(
             merged_ticket_ids=merged_ticket_ids,
+            merged_client_ticket_ids=merged_client_ticket_ids,
             gh_blocked_ticket_ids=gh_blocked_ticket_ids,
             finalize_pr_by_branch=finalize_pr_by_branch,
             clients=_clients,
@@ -265,10 +272,10 @@ def reconcile() -> ReconcileReport:
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
     salvaged_ticket_ids = salvage_committed_no_pr_sessions(
-        salvage_git_candidates, merged_ticket_ids=merged_ticket_ids
+        salvage_git_candidates, merged_client_ticket_ids=merged_client_ticket_ids
     )
     rescued_ticket_ids = rescue_finalize_blocked_sessions(
-        merged_ticket_ids=merged_ticket_ids
+        merged_client_ticket_ids=merged_client_ticket_ids
     )
 
     if not completed_ticket_ids and not salvaged_ticket_ids and not rescued_ticket_ids:
@@ -288,6 +295,7 @@ def reconcile() -> ReconcileReport:
 def _reconcile_locked(
     *,
     merged_ticket_ids: frozenset[str] = frozenset(),
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
     finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] | None = None,
     clients: dict[str, ClientConfig] | None = None,
@@ -300,6 +308,11 @@ def _reconcile_locked(
 
     merged_ticket_ids / gh_blocked_ticket_ids come from a lockless pre-pass in
     reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
+    merged_client_ticket_ids is the same merge signal, additionally keyed by
+    client — used only by the FINALIZE-stage / merged-first classification in
+    idle.py's ``_detect_idle_candidates``, which (unlike the pre-existing
+    ``_act_on_idle_candidates`` merged-split below) is new-in-#1054 code that
+    must not match across clients. See GitHub #1054.
     finalize_pr_by_branch comes from a second lockless pre-pass that checks PR
     existence for FINALIZE-stage sessions (GitHub #812, liveness invariant #485).
     clients comes from the same lockless pre-pass's `load_clients()` call
@@ -424,7 +437,7 @@ def _reconcile_locked(
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
-        merged_ticket_ids=merged_ticket_ids,
+        merged_client_ticket_ids=merged_client_ticket_ids,
     )
     _emit_reap_proposed(state, idle_candidates, native_live=native_live, now=now)
     silently_idle_ticket_ids, merged_from_idle, salvage_git_candidates = (

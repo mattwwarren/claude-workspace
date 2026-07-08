@@ -6976,7 +6976,7 @@ def test_classify_idle_threshold_finalize_stage_returns_none(
         config=_auto_config(),
         elapsed=1000.0,
         new_count=3,
-        merged_ticket_ids=frozenset(),
+        merged_client_ticket_ids=frozenset(),
     )
 
     assert candidate is None
@@ -7029,11 +7029,74 @@ def test_classify_idle_threshold_merged_routes_to_revert_task(
         config=_auto_config(),
         elapsed=1000.0,
         new_count=3,
-        merged_ticket_ids=frozenset({"idle-merged-classify-1"}),
+        merged_client_ticket_ids=frozenset({("client-a", "idle-merged-classify-1")}),
     )
 
     assert candidate is not None
     assert candidate.proposed_action == ProposedAction.REVERT_TASK
+
+
+def test_classify_idle_threshold_merged_different_client_not_routed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Merged ticket for a DIFFERENT client must not route this session's
+    same-numbered ticket to REVERT_TASK (cross-client collision guard, #1054).
+
+    ticket_id strings are not globally unique across clients (dev_queue.py
+    keys ticket lookups on (ticket_id, client)); merged_client_ticket_ids must
+    be consulted as a (client, ticket_id) pair, not a bare ticket_id.
+    """
+    from cw.reconcile import ProposedAction
+    from cw.reconcile.idle import _classify_idle_threshold
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    wt_path = tmp_path / "wt-collision-classify"
+    wt_path.mkdir(parents=True)
+    sess = Session(
+        id="idle-collision-1",
+        name="client-b/auto-dev/COLLIDE-1",
+        client="client-b",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=wt_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    task = TicketTask(
+        ticket_id="COLLIDE-1",
+        client="client-b",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-collision-1",
+        stage=Stage.IMPL,
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda _p: "auto-dev/collide-1",
+    )
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
+
+    # client-a's "COLLIDE-1" is merged; client-b's session with the same
+    # ticket_id string must NOT be treated as merged.
+    candidate = _classify_idle_threshold(
+        sess,
+        task=task,
+        ticket_id="COLLIDE-1",
+        config=_auto_config(),
+        elapsed=1000.0,
+        new_count=3,
+        merged_client_ticket_ids=frozenset({("client-a", "COLLIDE-1")}),
+    )
+
+    assert candidate is not None
+    assert candidate.proposed_action == ProposedAction.SALVAGE_GIT
 
 
 def test_classify_idle_threshold_non_finalize_worktree_still_salvage_git(
@@ -7087,7 +7150,7 @@ def test_classify_idle_threshold_non_finalize_worktree_still_salvage_git(
         config=_auto_config(),
         elapsed=1000.0,
         new_count=3,
-        merged_ticket_ids=frozenset(),
+        merged_client_ticket_ids=frozenset(),
     )
 
     assert candidate is not None
@@ -10750,7 +10813,7 @@ class TestSalvageCommittedNoPrSessions:
             ("sess-merged-salvage", ticket_id, "dev/merged-branch", str(worktree), True)
         ]
         completed = salvage_committed_no_pr_sessions(
-            candidates, merged_ticket_ids=frozenset({ticket_id})
+            candidates, merged_client_ticket_ids=frozenset({("client-a", ticket_id)})
         )
 
         assert ticket_id not in completed
@@ -10759,6 +10822,58 @@ class TestSalvageCommittedNoPrSessions:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.RUNNING
+
+    def test_salvage_committed_no_pr_different_client_ticket_not_skipped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """merged_client_ticket_ids for a DIFFERENT client must not skip this
+        session's same-numbered ticket (cross-client collision guard, #1054).
+        """
+        worktree = tmp_path / "wt-collision-salvage"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-COLLIDE-SALVAGE"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-collide-salvage", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-collide-salvage",
+                    )
+                ]
+            )
+        )
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        pr_check = MagicMock(return_value=(False, True))
+        monkeypatch.setattr("cw.reconcile.salvage.pr_exists_for_branch", pr_check)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            (
+                "sess-collide-salvage",
+                ticket_id,
+                "dev/collide-branch",
+                str(worktree),
+                False,  # post_review_clean=False -> LOW path, no gh subprocess
+            )
+        ]
+        # client-b's same-numbered ticket is merged; this session is client-a's.
+        salvage_committed_no_pr_sessions(
+            candidates, merged_client_ticket_ids=frozenset({("client-b", ticket_id)})
+        )
+
+        pr_check.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -16485,7 +16600,9 @@ class TestWorldStateCheckBeforeRevert:
             native_live={"live-ref"},
             config=_auto_config(idle_confirm_observations=2),
             task_by_ticket={"idle-merged-finalize-1": task},
-            merged_ticket_ids=frozenset({"idle-merged-finalize-1"}),
+            merged_client_ticket_ids=frozenset(
+                {("client-a", "idle-merged-finalize-1")}
+            ),
         )
 
         blocked, merged, salvage_git = _act_on_idle_candidates(
@@ -18523,7 +18640,7 @@ class TestFinalizeBlocked:
         )
 
         completed = rescue_finalize_blocked_sessions(
-            merged_ticket_ids=frozenset({ticket_id})
+            merged_client_ticket_ids=frozenset({("client-a", ticket_id)})
         )
 
         assert ticket_id in completed
@@ -18541,6 +18658,71 @@ class TestFinalizeBlocked:
         reloaded = load_state()
         s = next(s for s in reloaded.sessions if s.id == sid)
         assert s.status == SessionStatus.COMPLETED
+
+        events = read_events(
+            consumer=f"test-rescue-merged-{sid}",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        assert events[0].payload.get("skip_merge") is True
+
+    def test_rescue_finalize_blocked_different_client_ticket_not_completed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """merged_client_ticket_ids for a DIFFERENT client must not complete
+        this session's same-numbered ticket (cross-client collision guard,
+        #1054) -- the normal PR-open flow must run instead."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        ticket_id = "FB-COLLIDE-1"
+        branch = f"dev/{ticket_id}"
+        sid = "fb-sess-collide-1"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.reap_reason = ReapReason.FINALIZE_BLOCKED
+        sess.last_result = {"paused_status": _FINALIZE_BLOCKED_REASON, "branch": branch}
+        save_state(CwState(sessions=[sess]))
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        pr_check = MagicMock(return_value=(False, True))
+        monkeypatch.setattr("cw.reconcile.salvage.pr_exists_for_branch", pr_check)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        # No existing PR + not merged-for-this-client -> falls through to
+        # _rescue_open_pr's real gh subprocess call; force it to fail so the
+        # session is tombstoned as rescue_attempted rather than completed.
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.subprocess.run",
+            MagicMock(side_effect=subprocess.CalledProcessError(1, ["gh"])),
+        )
+
+        # client-b's same-numbered ticket is merged; this session is client-a's.
+        rescue_finalize_blocked_sessions(
+            merged_client_ticket_ids=frozenset({("client-b", ticket_id)})
+        )
+
+        # Falls through to the normal PR-existence check rather than the
+        # merged-ticket skip_merge=True completion shortcut.
+        pr_check.assert_called_once()
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == sid)
+        assert s.status == SessionStatus.TIMED_OUT
 
     # ── 1.11 PR already exists → skip create, still merge ─────────────────
 

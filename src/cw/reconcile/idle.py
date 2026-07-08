@@ -65,6 +65,34 @@ if TYPE_CHECKING:
     from cw.models import CwState, Session, TicketTask
 
 
+def _revert_task_candidate(
+    session: Session,
+    *,
+    ticket_id: str | None,
+    elapsed: float,
+    new_count: int,
+    lane: str,
+    worktree_dirty: bool = False,
+) -> ReapCandidate:
+    """Build a REVERT_TASK ReapCandidate.
+
+    Shared by the merged-first check and the retry-cap check in
+    ``_classify_idle_threshold`` -- the two previously hand-duplicated call
+    sites differed only in ``worktree_dirty``. See GitHub #1054.
+    """
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id=ticket_id,
+        elapsed_seconds=elapsed,
+        worktree_dirty=worktree_dirty,
+        new_observation_count=new_count,
+        usage_limit_detected=_shared.detect_usage_limit(session),
+        lane=lane,
+        client=session.client,
+    )
+
+
 def _classify_idle_threshold(
     session: Session,
     *,
@@ -73,7 +101,7 @@ def _classify_idle_threshold(
     config: OrchestratorConfig,
     elapsed: float,
     new_count: int,
-    merged_ticket_ids: frozenset[str] = frozenset(),
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
 ) -> ReapCandidate | None:
     """Classify the final disposition for an idle session past the confirm threshold.
 
@@ -91,16 +119,21 @@ def _classify_idle_threshold(
     # existing merged-REVERT_TASK completion path in _act_on_idle_candidates
     # (splits REVERT_TASK candidates by ticket_id in merged_ticket_ids) rather
     # than reclassifying it as a git-salvage or park candidate.
-    if ticket_id is not None and ticket_id in merged_ticket_ids:
-        return ReapCandidate(
-            session_id=session.id,
-            proposed_action=ProposedAction.REVERT_TASK,
+    #
+    # Why (client, ticket_id) and not a bare ticket_id: ticket_id strings are
+    # not globally unique across clients (dev_queue.py's _find_ticket /
+    # remove_ticket / cancel_ticket all key on the (ticket_id, client) pair,
+    # and GitHub issue numbers restart per repo) -- a bare-string check here
+    # would let one client's merged ticket route a *different* client's
+    # same-numbered, unmerged ticket into completion. See GitHub #1054.
+    merged_key = (session.client, ticket_id) if ticket_id is not None else None
+    if merged_key is not None and merged_key in merged_client_ticket_ids:
+        return _revert_task_candidate(
+            session,
             ticket_id=ticket_id,
-            elapsed_seconds=elapsed,
-            new_observation_count=new_count,
-            usage_limit_detected=_shared.detect_usage_limit(session),
+            elapsed=elapsed,
+            new_count=new_count,
             lane=lane,
-            client=session.client,
         )
     # Git-state salvage path.
     if session.worktree_path is not None:
@@ -140,16 +173,13 @@ def _classify_idle_threshold(
         session.client, session.worktree_path
     )
     if task is not None and task.attempts < cap:
-        return ReapCandidate(
-            session_id=session.id,
-            proposed_action=ProposedAction.REVERT_TASK,
+        return _revert_task_candidate(
+            session,
             ticket_id=ticket_id,
-            elapsed_seconds=elapsed,
-            worktree_dirty=worktree_dirty,
-            new_observation_count=new_count,
-            usage_limit_detected=_shared.detect_usage_limit(session),
+            elapsed=elapsed,
+            new_count=new_count,
             lane=lane,
-            client=session.client,
+            worktree_dirty=worktree_dirty,
         )
     return ReapCandidate(
         session_id=session.id,
@@ -170,7 +200,7 @@ def _detect_idle_confirmed_candidate(
     ticket_id: str | None,
     config: OrchestratorConfig,
     elapsed: float,
-    merged_ticket_ids: frozenset[str],
+    merged_client_ticket_ids: frozenset[tuple[str, str]],
 ) -> ReapCandidate | None:
     """Classify a session that already passed the liveness check.
 
@@ -211,7 +241,7 @@ def _detect_idle_confirmed_candidate(
         config=config,
         elapsed=elapsed,
         new_count=new_count,
-        merged_ticket_ids=merged_ticket_ids,
+        merged_client_ticket_ids=merged_client_ticket_ids,
     )
 
 
@@ -222,7 +252,7 @@ def _detect_idle_candidate_for_session(
     config: OrchestratorConfig,
     task: TicketTask | None,
     ticket_id: str | None,
-    merged_ticket_ids: frozenset[str],
+    merged_client_ticket_ids: frozenset[tuple[str, str]],
 ) -> ReapCandidate | None:
     """Classify a single live DAEMON session for idle disposition, or None.
 
@@ -274,7 +304,7 @@ def _detect_idle_candidate_for_session(
         ticket_id=ticket_id,
         config=config,
         elapsed=elapsed,
-        merged_ticket_ids=merged_ticket_ids,
+        merged_client_ticket_ids=merged_client_ticket_ids,
     )
 
 
@@ -285,7 +315,7 @@ def _detect_idle_candidates(
     native_live: set[str],
     config: OrchestratorConfig,
     task_by_ticket: dict[str, TicketTask],
-    merged_ticket_ids: frozenset[str] = frozenset(),
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[ReapCandidate]:
     """Pure classification phase for silently idle DAEMON sessions.
 
@@ -312,7 +342,7 @@ def _detect_idle_candidates(
             config=config,
             task=task,
             ticket_id=ticket_id,
-            merged_ticket_ids=merged_ticket_ids,
+            merged_client_ticket_ids=merged_client_ticket_ids,
         )
         if candidate is not None:
             candidates.append(candidate)
