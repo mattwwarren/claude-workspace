@@ -158,7 +158,7 @@ def read_process_start_time_ns(pid: int) -> int | None:
     """
     try:
         return int(psutil.Process(pid).create_time() * 1_000_000_000)
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.Error, ValueError):
+    except (psutil.Error, ValueError):
         return None
 
 

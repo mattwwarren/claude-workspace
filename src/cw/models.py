@@ -140,7 +140,11 @@ class LivenessBucket(StrEnum):
 # v11: added Session.local_liveness (GitHub #888).
 # v12: added Session.consecutive_salvage_skips (#974).
 # v13: added Session.liveness_bucket (GitHub #1001, RFC 0008 W2).
-CW_STATE_SCHEMA_VERSION = 13
+# v14: local_liveness.start_time_ns reference point changed from
+#      boot-relative (/proc) to epoch-relative (psutil.create_time); stale
+#      pre-v14 handles are cleared on migration so they don't false-positive
+#      as "dead" against a live process re-read in the new format (GitHub #921).
+CW_STATE_SCHEMA_VERSION = 14
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
@@ -887,11 +891,12 @@ class EventHookRegistry(BaseModel):
 class LocalLivenessHandle(BaseModel):
     """Process-liveness handle for a LocalExecutor aider subprocess (RFC 0005 F3).
 
-    Binds a PID to its ``/proc/<pid>/stat`` start-time (nanoseconds since boot)
-    captured at spawn. The start-time pin lets harvest detection reject a
-    recycled PID: a dead aider PID reassigned to an unrelated process re-reads a
-    different start-time, so the session is treated as dead (harvested) rather
-    than falsely observed alive. Frozen — an immutable snapshot. See GitHub #888.
+    Binds a PID to its process creation-time (nanoseconds, epoch-relative —
+    ``psutil.Process(pid).create_time()``, see GitHub #921) captured at spawn.
+    The start-time pin lets harvest detection reject a recycled PID: a dead
+    aider PID reassigned to an unrelated process re-reads a different
+    start-time, so the session is treated as dead (harvested) rather than
+    falsely observed alive. Frozen — an immutable snapshot. See GitHub #888.
     """
 
     model_config = ConfigDict(frozen=True)
