@@ -15,6 +15,10 @@ REFUSE = "multiple resolution comments detected — re-run /harden-ticket to con
 MARKER = "<!-- auto-dev-preflight-resolutions -->"
 BLOCKER_HEADER = "## Multi-Marker Gate Blocked"
 PENDING_HEADER = "## Pending Verification Scan"
+PREMISES_NONEMPTY_PARKED_EXIT = (
+    "Premises block present AND `parked` non-empty → EXIT "
+    "`premises_pending_verification`"
+)
 
 
 def _cmd(name: str) -> str:
@@ -310,11 +314,7 @@ def test_step1c_premises_exit_uses_pending_header() -> None:
     than raw `PREMISES TO VERIFY` presence alone (see Step 4c partition rewrite).
     """
     content = _cmd("auto-dev-plan.md")
-    window = _after(
-        content,
-        "Premises block present AND `parked` non-empty → EXIT "
-        "`premises_pending_verification`",
-    )
+    window = _after(content, PREMISES_NONEMPTY_PARKED_EXIT)
     assert PENDING_HEADER in window
 
 
@@ -431,10 +431,7 @@ def test_step1c_original_ambiguities_section_collapsed_after_partition() -> None
 def test_step1c_combined_premises_exit_keys_on_parked_not_raw_ambiguities() -> None:
     """The combined-exit trigger keys on parked non-empty, not raw AMBIGUITIES."""
     section = _step1c_section()
-    assert (
-        "Premises block present AND `parked` non-empty → EXIT "
-        "`premises_pending_verification`"
-    ) in section
+    assert PREMISES_NONEMPTY_PARKED_EXIT in section
     assert "If both `AMBIGUITIES` and `PREMISES TO VERIFY` are present" not in section
 
 
