@@ -212,6 +212,61 @@ collision — running the entire ship against the **primary checkout**.
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
+**Push-auth-failure classifier (#1049):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for a push-authentication failure. This applies **regardless of which push site produced it**: the project's `ship-it.md` initial `git push -u origin "$BRANCH"`, or this file's own Step 4c.5 rebase-retry `git push --force-with-lease`. Match any of these signatures verbatim:
+
+- `Permission denied (publickey)`
+- `could not read Username`
+- `Host key verification failed`
+- `Authentication failed`
+
+If any signature is present, emit the structured `blocked` sentinel below and stop — do NOT proceed to the verify-script gate or Step 4c.5.
+
+**Sentinel template — `push_auth_failed` blocker:**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage4_finalize",
+  "scope": {
+    "tier": "<small | large — same value carried through from Stage 2 scope classification>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<value carried from Stage 0/1>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr_info": null,
+  "review": null,
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage4_finalize",
+    "reason": "push_auth_failed",
+    "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)'>",
+    "exception_type": null,
+    "message": "git push failed authentication (SSH key locked or credentials expired)",
+    "recovery_hint": "Unlock the SSH key (or refresh credentials) and requeue the ticket",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": ["manual_intervention"]
+}
+```
+
+**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result.py:119`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator instead via the sentinel above.
+
+**Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
+
 **Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`):
 
 ```bash
