@@ -1116,3 +1116,24 @@ class TestConciergeAndEscalationModelSurface:
 
         with pytest.raises(ValidationError, match="unrecognized recipe key"):
             OrchestratorConfig(concierge_recoveries={"flase_park_requeue": True})
+
+    # -- RFC 0009 gate-recipe automation surface (#1065) ---------------------
+
+    def test_orchestrator_event_type_includes_gate_auto_approved(self) -> None:
+        assert OrchestratorEventType.GATE_AUTO_APPROVED == "gate.auto_approved"
+
+    def test_gate_auto_approved_in_default_forward_set(self) -> None:
+        """GATE_AUTO_APPROVED IS forwarded by default: an auto-approve with no
+        human review is operator-attention-worthy (contrast CONCIERGE_RECOVERED,
+        which is audit-only)."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.GATE_AUTO_APPROVED in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
+    def test_orchestrator_config_gate_recipes_enabled_defaults_false(self) -> None:
+        assert OrchestratorConfig().gate_recipes_enabled is False
+
+    def test_orchestrator_config_gate_recipes_enabled_accepts_true(self) -> None:
+        assert OrchestratorConfig(gate_recipes_enabled=True).gate_recipes_enabled is True
