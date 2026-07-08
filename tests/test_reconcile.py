@@ -3288,6 +3288,71 @@ def test_idle_routes_stage_complete_advance_sentinel(
     assert task.status == QueueItemStatus.PENDING
 
 
+def test_idle_stage_mismatch_does_not_orphan_task_or_complete_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #1031: a stale/replayed ROUTE_EMITTED_SENTINEL must not orphan
+    the task or complete a daemon-live session (extends #1019's phantom-path
+    guard to the alive-idle path).
+
+    Same shape as ``test_idle_routes_stage_complete_advance_sentinel``, except
+    the task's row has already advanced to REVIEW by the time the late/replayed
+    stage_complete/stage2_impl sentinel is discovered (the #986 shape). The
+    staged-advance guard must refuse: task stays exactly as it was, session is
+    NOT completed, and the daemon surface is never stopped -- an unconditional
+    completion here would tear down a surface the daemon still reports alive.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-idle-mismatch"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=400)
+
+    sess = _mk_headless_daemon_session("idle-mismatch", worktree, started_at)
+    sess.last_result = None  # sentinel NOT yet consumed → ROUTE_EMITTED eligible
+    payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
+    payload["ticket_id"] = "idle-mismatch"
+    _write_salvage_transcript(home, worktree, "claude-idle-mismatch", payload)
+    save_state(CwState(sessions=[sess]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-mismatch",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-mismatch",
+                    # Row already advanced past IMPL by the time this stale
+                    # IMPL-leg sentinel is discovered -- the #986 shape.
+                    stage=Stage.REVIEW,
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon):
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"fake-short-id"}, config=_auto_config()
+        )
+
+    assert blocked == []
+    reloaded = next(s for s in load_state().sessions if s.id == "idle-mismatch")
+    assert reloaded.status != SessionStatus.COMPLETED
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-mismatch")
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.RUNNING
+    assert task.disposition is None
+
+    mock_daemon.stop.assert_not_called()
+
+
 def test_reconcile_includes_stalled_reverts_in_report(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -4963,6 +5028,10 @@ def test_confirm_before_reap_sentinel_salvage_not_deferred(
                     status=QueueItemStatus.RUNNING,
                     session_id="nodefer-sent",
                     attempts=0,
+                    # Matches _shipped_salvage_payload()'s stage_reached
+                    # ("stage5_post_create") so the #1019/#1031 stage-match
+                    # guard accepts the route.
+                    stage=Stage.FINALIZE,
                 )
             ]
         )
@@ -15471,6 +15540,10 @@ class TestRouteEmittedSentinel:
                         client="client-a",
                         status=QueueItemStatus.RUNNING,
                         session_id="578-event",
+                        # Matches _shipped_salvage_payload()'s stage_reached
+                        # ("stage5_post_create") so the #1019/#1031
+                        # stage-match guard accepts the route.
+                        stage=Stage.FINALIZE,
                     )
                 ]
             )
@@ -19056,6 +19129,72 @@ def test_local_harvest_dead_process_completes_and_advances(
     assert harvest_events[0].payload.get("crashed") is False
     assert "stdout" not in harvest_events[0].payload
     assert harvest_events[0].payload.get("ticket_id") == "harv-1"
+
+
+def test_local_harvest_stage_mismatch_does_not_orphan_task_or_complete_session(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """GitHub #1031: a stale/replayed local-harvest sentinel must not orphan
+    the task or complete the session (mirrors phantom's #1019 stage-mismatch
+    guard).
+
+    ``synthesize_git_result`` always reports ``stage_reached="stage2_impl"``
+    (IMPL) for a dead-process harvest with commits. If the task's row has
+    already advanced past IMPL (the #986 shape) the staged-advance guard must
+    refuse the route: task stays exactly as it was, session is NOT completed,
+    and no SESSION_COMPLETED event fires.
+    """
+    from cw.reconcile import ProposedAction
+
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-harvest-mismatch", with_commit=True
+    )
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
+    sess = _mk_local_session("harv-mismatch", worktree, liveness)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-mismatch",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-mismatch",
+                    # Row already advanced past IMPL by the time this stale
+                    # dead-process harvest computes its IMPL-leg sentinel.
+                    stage=Stage.REVIEW,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.HARVEST_LOCAL_COMPLETE
+
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    harvested = _act_on_local_harvest_candidates(
+        state, candidates, now=now, task_by_ticket=task_by_ticket
+    )
+    assert harvested == []
+
+    reloaded = next(s for s in load_state().sessions if s.id == "harv-mismatch")
+    assert reloaded.status != SessionStatus.COMPLETED
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "harv-mismatch")
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.RUNNING
+    assert task.disposition is None
+
+    events = read_events(
+        consumer="test-harvest-mismatch",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert not any(e.payload.get("session_id") == "harv-mismatch" for e in events)
 
 
 @pytest.mark.skipif(

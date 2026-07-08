@@ -290,11 +290,54 @@ def _route_idle_by_policy(
     return auto_candidates
 
 
+def _apply_idle_routed_mutations(
+    session_by_id: dict[str, Session],
+    routed_sentinel_candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+) -> list[ReapCandidate]:
+    """Apply ROUTE_EMITTED_SENTINEL mutations for alive-idle workers (#1031).
+
+    Mirrors ``phantom._apply_phantom_routed_mutations``: routes the emitted
+    advance sentinel through the shared staged-advance authority
+    (``_apply_sentinel_to_task`` -> ``apply_staged_decision``), then marks the
+    session COMPLETED/NORMAL -- but only when the route was accepted.
+
+    GitHub #1031 (extends #1019's phantom-path guard): when
+    ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
+    refusal, the #986 incident), the session must NOT be completed here --
+    unlike the phantom sweep, ``_detect_idle_candidates`` only builds these
+    candidates when the surface is still reported alive by the daemon, so an
+    unconditional completion would tear down a live surface, not just orphan
+    a task row. Returns only the candidates that were actually routed, so the
+    caller's downstream event emission fires solely for those.
+    """
+    accepted: list[ReapCandidate] = []
+    for candidate in routed_sentinel_candidates:
+        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
+            continue
+        routed = True
+        if candidate.ticket_id:
+            outcome = _apply_sentinel_to_task(
+                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
+            )
+            routed = outcome.routed
+        if not routed:
+            continue
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
+        session.claude_session_id = candidate.salvage_csid
+        accepted.append(candidate)
+    return accepted
+
+
 def _apply_idle_state_mutations(
     session_by_id: dict[str, Session],
     *,
     now: datetime,
-    routed_sentinel_candidates: list[ReapCandidate],
     counter_candidates: list[ReapCandidate],
     salvage_candidates: list[ReapCandidate],
     merged_revert_candidates: list[ReapCandidate],
@@ -308,23 +351,6 @@ def _apply_idle_state_mutations(
     to save_state even when there are no dispositions). save_state itself is
     left to the caller's combined flush.
     """
-    # ROUTE_EMITTED_SENTINEL queue routing: _apply_sentinel_to_task acquires its
-    # own dev_queue_lock so it runs BEFORE the shared lock block below.  Session
-    # state is mutated here; save_state picks it up in the combined flush below.
-    for candidate in routed_sentinel_candidates:
-        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
-            continue
-        if candidate.ticket_id:
-            _apply_sentinel_to_task(
-                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
-            )
-        session = session_by_id[candidate.session_id]
-        session.status = SessionStatus.COMPLETED
-        session.completed_at = now
-        session.completed_reason = CompletionReason.NORMAL
-        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
-        session.claude_session_id = candidate.salvage_csid
-
     # Counter-only updates: just update the counter and possibly save_state.
     counters_changed = False
     for candidate in counter_candidates:
@@ -554,6 +580,14 @@ def _act_on_idle_candidates(
         if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
     ]
 
+    # Apply ROUTE_EMITTED_SENTINEL mutations up front so a stage-mismatch
+    # refusal (#1031) is filtered out before it can influence has_dispositions
+    # or downstream event emission -- a refused candidate must not complete or
+    # tear down a session the daemon still reports alive.
+    routed_sentinel_candidates = _apply_idle_routed_mutations(
+        session_by_id, routed_sentinel_candidates, now=now
+    )
+
     # Snapshot which park candidates already have a paused_status marker BEFORE
     # mutations run. Used by _emit_idle_events to suppress re-emission of
     # SESSION_NEEDS_ATTENTION and fire_push_notification on re-park ticks.
@@ -570,7 +604,6 @@ def _act_on_idle_candidates(
     counters_changed = _apply_idle_state_mutations(
         session_by_id,
         now=now,
-        routed_sentinel_candidates=routed_sentinel_candidates,
         counter_candidates=counter_candidates,
         salvage_candidates=salvage_candidates,
         merged_revert_candidates=merged_revert_candidates,
